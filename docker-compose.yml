@@ -142,6 +142,20 @@ services:
       timeout: 5s
       retries: 5
 
+  loan-assistant:
+    build: ./services/loan-assistant
+    env_file: .env
+    ports:
+      - "8007:8007"
+    depends_on:
+      origination-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8007/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   gateway:
     build: ./services/gateway
     env_file: .env
@@ -161,6 +175,8 @@ services:
       disclosure-service:
         condition: service_started
       payment-service:
+        condition: service_started
+      loan-assistant:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
