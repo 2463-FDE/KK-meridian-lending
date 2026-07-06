@@ -41,11 +41,16 @@ def redact_dict(data: dict) -> dict:
 
 def _redact_node(node):
     if isinstance(node, dict):
-        for key in node:
+        for key, value in node.items():
             if key.lower() in _SENSITIVE_KEYS:
                 node[key] = "[REDACTED]"
+            elif isinstance(value, str):
+                node[key] = redact_str(value)
             else:
-                _redact_node(node[key])
+                _redact_node(value)
     elif isinstance(node, list):
-        for item in node:
-            _redact_node(item)
+        for i, item in enumerate(node):
+            if isinstance(item, str):
+                node[i] = redact_str(item)
+            else:
+                _redact_node(item)
