@@ -17,6 +17,9 @@ frontend/.next/
 frontend/out/
 frontend/build/
 
+# secrets
+.env
+
 # misc
 .DS_Store
 *.log.bak
