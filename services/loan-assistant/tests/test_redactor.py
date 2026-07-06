@@ -45,3 +45,46 @@ def test_build_prompt_never_includes_ssn_or_pan_from_free_text():
     prompt = _build_prompt(app_data)
     assert SSN not in prompt
     assert PAN not in prompt
+
+
+# Regression: reviewer (Codex) found these leaking through untouched — only the
+# hyphenated SSN and JSON-style cvv:/cvv=/"cvv": forms were masked. A free-text note
+# or OCR field using any of these common variants reached the LLM prompt raw.
+SSN_UNFORMATTED = "123456789"
+SSN_SPACE_SEPARATED = "123 45 6789"
+CVV_VALUE = "123"
+
+
+def test_build_prompt_never_includes_unformatted_ssn():
+    app_data = {"notes": f"applicant SSN {SSN_UNFORMATTED} on file"}
+    prompt = _build_prompt(app_data)
+    assert SSN_UNFORMATTED not in prompt
+
+
+def test_build_prompt_never_includes_space_separated_ssn():
+    app_data = {"notes": f"applicant SSN {SSN_SPACE_SEPARATED} on file"}
+    prompt = _build_prompt(app_data)
+    assert SSN_SPACE_SEPARATED not in prompt
+
+
+def test_build_prompt_never_includes_prose_cvv():
+    app_data = {
+        "notes_short": f"cvv {CVV_VALUE} confirmed",
+        "notes_sentence": f"Borrower gave the CVV is {CVV_VALUE} over the phone.",
+    }
+    prompt = _build_prompt(app_data)
+    assert CVV_VALUE not in prompt
+
+
+def test_redact_str_masks_unformatted_and_space_separated_ssn():
+    from app.redactor import redact_str
+
+    assert SSN_UNFORMATTED not in redact_str(f"SSN {SSN_UNFORMATTED}")
+    assert SSN_SPACE_SEPARATED not in redact_str(f"SSN {SSN_SPACE_SEPARATED}")
+
+
+def test_redact_str_masks_prose_cvv():
+    from app.redactor import redact_str
+
+    assert CVV_VALUE not in redact_str(f"cvv {CVV_VALUE}")
+    assert CVV_VALUE not in redact_str(f"CVV is {CVV_VALUE}")
