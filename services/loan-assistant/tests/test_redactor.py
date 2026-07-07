@@ -88,3 +88,38 @@ def test_redact_str_masks_prose_cvv():
 
     assert CVV_VALUE not in redact_str(f"cvv {CVV_VALUE}")
     assert CVV_VALUE not in redact_str(f"CVV is {CVV_VALUE}")
+
+
+# Regression: reviewer (Codex) found a 15-digit Amex-style PAN and a longer-form CVV
+# prose phrase leaking through untouched — _PAN_RE only matched exactly 16 digits,
+# and _CVV_RE's label was too narrow (only "cvv"/"security code" within 10 chars).
+AMEX_PAN = "340000000000009"  # 15 digits, real Amex test number, Luhn-valid
+LONG_CVV_PHRASE = "the security code provided as 9876"
+CVV_9876 = "9876"
+
+
+def test_build_prompt_never_includes_15_digit_amex_pan():
+    app_data = {"notes": f"card on file: {AMEX_PAN}"}
+    prompt = _build_prompt(app_data)
+    assert AMEX_PAN not in prompt
+
+
+def test_build_prompt_never_includes_cvv_in_longer_prose():
+    app_data = {"notes": f"Borrower gave {LONG_CVV_PHRASE} over the phone."}
+    prompt = _build_prompt(app_data)
+    assert CVV_9876 not in prompt
+
+
+def test_redact_str_masks_amex_pan_and_longer_cvv_prose():
+    from app.redactor import redact_str
+
+    assert AMEX_PAN not in redact_str(f"card {AMEX_PAN}")
+    assert CVV_9876 not in redact_str(LONG_CVV_PHRASE)
+
+
+def test_redact_str_leaves_non_card_long_numbers_alone():
+    """PAN candidates that fail Luhn (not actually card-shaped) aren't mangled."""
+    from app.redactor import redact_str
+
+    not_a_card = "1234567890123"  # 13 digits, fails Luhn
+    assert redact_str(f"account {not_a_card}") == f"account {not_a_card}"

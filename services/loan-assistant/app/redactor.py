@@ -2,14 +2,18 @@
 PCI/PII redactor — strip sensitive fields before any log call or LLM prompt.
 
 Rules:
-  - PAN (16-digit card number): any format → [PAN-REDACTED]
-  - CVV (3-4 digits mentioned near "cvv"/"security code", any phrasing) → [CVV-REDACTED]
+  - PAN (13-19 digit card number, any real card scheme, Luhn-validated): → [PAN-REDACTED]
+  - CVV (3-4 digits mentioned near cvv/cvc/security code/card verification value,
+    any phrasing) → [CVV-REDACTED]
   - SSN (ddd-dd-dddd, ddd dd dddd, or ddddddddd with no separator) → [SSN-REDACTED]
   - Dict keys named pan/cvv/ssn/card_number/card_no: value replaced inline
 
-Fail closed: an ambiguous 9-digit run or a "cvv"/"security code" mention near any
-3-4 digit number is treated as PII and masked, even if it might be something else.
+Fail closed: an ambiguous 9-digit run, or a cvv/cvc/security-code mention near any
+3-4 digit number, is treated as PII and masked, even if it might be something else.
 Leaking real PII to a third-party LLM is worse than over-redacting a false positive.
+PAN length is real-world card range (13-19: Visa/MC/Amex/Diners/etc — not just 16),
+but a bare digit run in that range is only redacted if it also passes Luhn — a random
+15-19 digit number that isn't card-shaped is left alone.
 
 Never log raw output of this module — redaction is best-effort on strings.
 The canonical safe path is redact_dict() on structured data before any I/O.
@@ -18,10 +22,12 @@ The canonical safe path is redact_dict() on structured data before any I/O.
 import re
 import copy
 
-_PAN_RE = re.compile(r"\b(?:\d[ -]?){15}\d\b")
+# Candidate digit runs of 13-19 total digits, optionally separated by a single
+# space or dash after any digit. Luhn-validated in _redact_pan() before masking.
+_PAN_CANDIDATE_RE = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 _SSN_RE = re.compile(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b")
 _CVV_RE = re.compile(
-    r"(?i)\b(?:cvv|security code)\b\D{0,10}(\d{3,4})\b",
+    r"(?i)\b(?:cvv|cvc|card verification value|security code)\b\D{0,20}(\d{3,4})\b",
 )
 
 _SENSITIVE_KEYS = frozenset(
@@ -29,8 +35,27 @@ _SENSITIVE_KEYS = frozenset(
 )
 
 
+def _luhn_valid(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _redact_pan(match: re.Match) -> str:
+    digits = re.sub(r"\D", "", match.group(0))
+    if 13 <= len(digits) <= 19 and _luhn_valid(digits):
+        return "[PAN-REDACTED]"
+    return match.group(0)
+
+
 def redact_str(text: str) -> str:
-    text = _PAN_RE.sub("[PAN-REDACTED]", text)
+    text = _PAN_CANDIDATE_RE.sub(_redact_pan, text)
     text = _SSN_RE.sub("[SSN-REDACTED]", text)
     text = _CVV_RE.sub(lambda m: m.group(0).replace(m.group(1), "[CVV-REDACTED]"), text)
     return text
