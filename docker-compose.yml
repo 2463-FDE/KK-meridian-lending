@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-meridian}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-meridian}
     ports:
       - "5432:5432"
@@ -30,7 +30,9 @@ services:
 
   origination-service:
     build: ./services/origination-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8001:8001"
     depends_on:
@@ -50,7 +52,9 @@ services:
 
   servicing-service:
     build: ./services/servicing-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8002:8002"
     depends_on:
@@ -69,7 +73,9 @@ services:
 
   kyc-service:
     build: ./services/kyc-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8003:8003"
     depends_on:
@@ -87,7 +93,9 @@ services:
 
   decision-service:
     build: ./services/decision-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8004:8004"
     depends_on:
@@ -105,7 +113,9 @@ services:
 
   disclosure-service:
     build: ./services/disclosure-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8005:8005"
     depends_on:
@@ -124,7 +134,9 @@ services:
 
   payment-service:
     build: ./services/payment-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8006:8006"
     depends_on:
@@ -144,7 +156,9 @@ services:
 
   gateway:
     build: ./services/gateway
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8000:8000"
     depends_on:

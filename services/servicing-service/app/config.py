@@ -2,7 +2,7 @@ import os
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://meridian:@postgres:5432/meridian",
+    "postgresql://meridian:postgres@postgres:5432/meridian",
 )
 # processor key from environment only — no hardcoded fallback. Set via secrets manager.
 PROCESSOR_API_KEY = os.getenv("PROCESSOR_API_KEY", "")

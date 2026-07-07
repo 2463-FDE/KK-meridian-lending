@@ -6,7 +6,7 @@ import os
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://meridian:@postgres:5432/meridian",
+    "postgresql://meridian:postgres@postgres:5432/meridian",
 )
 
 SERVICING_URL = os.getenv("SERVICING_URL", "http://servicing-service:8002")
