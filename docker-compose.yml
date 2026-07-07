@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-meridian}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meridian_dev_pw_2024}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-meridian}
     ports:
       - "5432:5432"
