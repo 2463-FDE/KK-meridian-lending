@@ -17,6 +17,9 @@ frontend/.next/
 frontend/out/
 frontend/build/
 
+# RAG eval harness — local, disposable, content-hash-keyed embedding cache
+services/loan-assistant/.embedding_cache.json
+
 # misc
 .DS_Store
 *.log.bak
