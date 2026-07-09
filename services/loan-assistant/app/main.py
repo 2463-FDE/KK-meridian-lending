@@ -8,7 +8,7 @@ import logging
 import os
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 
 from .config import ORIGINATION_URL
 from .llm_client import (
@@ -33,7 +33,10 @@ def health():
 
 
 @app.post("/applications/{app_id}/summary")
-def summarize(app_id: int):
+def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias="X-User-Role")):
+    # The gateway only proxies here for csr/underwriter/admin sessions (see
+    # gateway/app/main.py assistant()) and forwards the resolved role as this
+    # header; pass it through so origination-service will release financials.
     try:
         resp = httpx.get(f"{ORIGINATION_URL}/applications/{app_id}", timeout=_FETCH_TIMEOUT)
     except httpx.HTTPError as exc:
@@ -44,6 +47,21 @@ def summarize(app_id: int):
         raise HTTPException(status_code=404, detail="application not found")
     resp.raise_for_status()
     app_data = resp.json()
+
+    try:
+        fin_resp = httpx.get(
+            f"{ORIGINATION_URL}/applications/{app_id}/financials",
+            headers={"X-User-Role": x_user_role} if x_user_role else {},
+            timeout=_FETCH_TIMEOUT,
+        )
+    except httpx.HTTPError as exc:
+        log.error("origination-service unreachable app_id=%s: %s", app_id, exc)
+        raise HTTPException(status_code=502, detail="origination-service unreachable") from exc
+
+    if fin_resp.status_code == 403:
+        raise HTTPException(status_code=403, detail="staff only")
+    fin_resp.raise_for_status()
+    app_data.update(fin_resp.json())
 
     try:
         summary = summarize_application(app_data)

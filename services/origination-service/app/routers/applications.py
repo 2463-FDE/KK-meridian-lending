@@ -1,5 +1,5 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,7 @@ from ..logging_config import get_logger
 from ..schemas import (
     ApplicationCreated,
     ApplicationDetail,
+    ApplicationFinancials,
     ApplicationIn,
     ApplicationListItem,
     ApplicantOut,
@@ -20,6 +21,10 @@ from ..schemas import (
 
 log = get_logger("applications")
 router = APIRouter(prefix="/applications", tags=["applications"])
+
+# Roles allowed to see underwriting-sensitive fields (income, employment_years).
+# Mirrors the staff role set the gateway already enforces for /assistant/*.
+_STAFF_ROLES = {"csr", "underwriter", "admin"}
 
 
 @router.post("", response_model=ApplicationCreated)
@@ -114,8 +119,7 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
             phone=applicant.phone, address=applicant.address, is_entity=applicant.is_entity,
         ) if applicant else None,
         amount=a.amount, term_months=a.term_months, purpose=a.purpose, status=a.status,
-        income=a.income, employer=a.employer, job_title=a.job_title,
-        employment_years=a.employment_years,
+        employer=a.employer, job_title=a.job_title,
         kyc=KycOut(
             name_verified=bool(kyc_row.name_verified), dob_verified=bool(kyc_row.dob_verified),
             address_verified=bool(kyc_row.address_verified), ssn_verified=bool(kyc_row.ssn_verified),
@@ -127,6 +131,23 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
             total_of_payments=offer.total_of_payments or 0,
         ) if offer else None,
     )
+
+
+@router.get("/{app_id}/financials", response_model=ApplicationFinancials)
+def get_application_financials(
+    app_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    # Staff only: income/employment_years are underwriting inputs, not borrower
+    # status data. The gateway forwards X-User-Role for authenticated sessions
+    # (see gateway/app/main.py _proxy); anonymous /los/* callers send none.
+    if x_user_role not in _STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="staff only")
+    a = session.get(models.Application, app_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="application not found")
+    return ApplicationFinancials(income=a.income, employment_years=a.employment_years)
 
 
 @router.post("/{app_id}/decision", response_model=DecisionOut)

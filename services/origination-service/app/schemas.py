@@ -93,13 +93,19 @@ class ApplicationDetail(BaseModel):
     term_months: int
     purpose: Optional[str] = None
     status: Optional[str] = None
-    income: Optional[float] = None
     employer: Optional[str] = None
     job_title: Optional[str] = None
-    employment_years: Optional[float] = None
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
     offer: Optional[Disclosure] = None
+
+
+# income/employment_years are underwriting inputs, not borrower-facing status data.
+# GET /applications/{id} is reachable anonymously (see gateway /los/* passthrough),
+# so these live on a separate staff-only response instead of ApplicationDetail.
+class ApplicationFinancials(BaseModel):
+    income: Optional[float] = None
+    employment_years: Optional[float] = None
 
 
 class Page(BaseModel, Generic[T]):
