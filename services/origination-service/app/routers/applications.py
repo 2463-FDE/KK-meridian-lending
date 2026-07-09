@@ -114,7 +114,8 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
             phone=applicant.phone, address=applicant.address, is_entity=applicant.is_entity,
         ) if applicant else None,
         amount=a.amount, term_months=a.term_months, purpose=a.purpose, status=a.status,
-        employer=a.employer, job_title=a.job_title,
+        income=a.income, employer=a.employer, job_title=a.job_title,
+        employment_years=a.employment_years,
         kyc=KycOut(
             name_verified=bool(kyc_row.name_verified), dob_verified=bool(kyc_row.dob_verified),
             address_verified=bool(kyc_row.address_verified), ssn_verified=bool(kyc_row.ssn_verified),

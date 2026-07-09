@@ -51,7 +51,16 @@ TIMEOUT_SECONDS = 20.0
 # Only these top-level application fields are eligible for the prompt. Contact
 # identifiers (name, email, phone, address) are deliberately excluded — a risk
 # summary doesn't need them, and they have no business reaching a third-party API.
-_PROMPT_ALLOWED_FIELDS = ("amount", "term_months", "purpose", "employer", "job_title")
+# income/employment_years are required here: the system prompt instructs the model
+# to judge risk_tier from DTI and employment length, so those facts must actually
+# reach it — without them the model was inventing a risk chip from data it never
+# saw (Codex review on PR #2).
+_PROMPT_ALLOWED_FIELDS = (
+    "amount", "term_months", "purpose", "income", "employer", "job_title", "employment_years",
+)
+# risk_tier/flags require these two to be present and non-null — see
+# _has_risk_grounding_data() below.
+_RISK_GROUNDING_FIELDS = ("income", "employment_years")
 
 _SYSTEM = """
 You are a loan officer assistant at Meridian Lending. Given loan application details,
@@ -89,6 +98,16 @@ class LLMCostGuardError(Exception):
 
 class LLMResponseError(Exception):
     pass
+
+
+class LLMInsufficientDataError(Exception):
+    """Raised when the source application is missing the data risk_tier depends on
+    (income, employment_years — both nullable columns). Fails loudly instead of
+    letting the model invent a risk chip from data it never saw."""
+
+
+def _has_risk_grounding_data(app_data: dict) -> bool:
+    return all(app_data.get(field) is not None for field in _RISK_GROUNDING_FIELDS)
 
 
 def _build_prompt(app_data: dict) -> str:
@@ -133,8 +152,15 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
 
     app_data: raw application dict from the LOS (may contain SSN, income, etc.)
     Returns: validated LoanSummary — safe to display, safe to log.
-    Raises: LLMCostGuardError, LLMTimeoutError, LLMResponseError
+    Raises: LLMCostGuardError, LLMTimeoutError, LLMResponseError, LLMInsufficientDataError
     """
+    if not _has_risk_grounding_data(app_data):
+        raise LLMInsufficientDataError(
+            f"app_id={app_data.get('id', 'unknown')} is missing "
+            f"{_RISK_GROUNDING_FIELDS} — refusing to let the model assign a "
+            "risk_tier it has no data to support."
+        )
+
     prompt = _build_prompt(app_data)
 
     estimated = _estimate_tokens(_SYSTEM + prompt)

@@ -9,15 +9,19 @@ data, never from anything the model returns.
 """
 import json
 
-from app.llm_client import _build_prompt, summarize_application
+import pytest
+
+from app.llm_client import LLMInsufficientDataError, _build_prompt, summarize_application
 
 APP_DATA = {
     "id": 42,
     "amount": 15000,
     "term_months": 36,
     "purpose": "debt_consolidation",
+    "income": 85000,
     "employer": "Acme Corp",
     "job_title": "Engineer",
+    "employment_years": 4.5,
     "applicant": {
         "id": 1,
         "name": "Maria Gonzalez",
@@ -42,6 +46,30 @@ def test_build_prompt_includes_underwriting_fields():
     assert "15000" in prompt
     assert "debt_consolidation" in prompt
     assert "Acme Corp" in prompt
+
+
+def test_build_prompt_includes_risk_grounding_data():
+    """Regression (Codex review on PR #2): the system prompt tells the model to
+    judge risk_tier from DTI and employment length, so income and employment_years
+    must actually reach the prompt -- otherwise the model was inventing a risk chip
+    from data it never received."""
+    prompt = _build_prompt(APP_DATA)
+    assert "85000" in prompt
+    assert "4.5" in prompt
+
+
+def test_summarize_application_refuses_without_income(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    incomplete = {**APP_DATA, "income": None}
+    with pytest.raises(LLMInsufficientDataError):
+        summarize_application(incomplete)
+
+
+def test_summarize_application_refuses_without_employment_years(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    incomplete = {**APP_DATA, "employment_years": None}
+    with pytest.raises(LLMInsufficientDataError):
+        summarize_application(incomplete)
 
 
 def test_summarize_application_fills_applicant_name_from_trusted_data(monkeypatch):

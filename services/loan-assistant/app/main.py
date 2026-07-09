@@ -11,7 +11,13 @@ import httpx
 from fastapi import FastAPI, HTTPException
 
 from .config import ORIGINATION_URL
-from .llm_client import LLMCostGuardError, LLMResponseError, LLMTimeoutError, summarize_application
+from .llm_client import (
+    LLMCostGuardError,
+    LLMInsufficientDataError,
+    LLMResponseError,
+    LLMTimeoutError,
+    summarize_application,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("loan-assistant")
@@ -41,6 +47,8 @@ def summarize(app_id: int):
 
     try:
         summary = summarize_application(app_data)
+    except LLMInsufficientDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except LLMCostGuardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LLMTimeoutError as exc:

@@ -93,8 +93,10 @@ class ApplicationDetail(BaseModel):
     term_months: int
     purpose: Optional[str] = None
     status: Optional[str] = None
+    income: Optional[float] = None
     employer: Optional[str] = None
     job_title: Optional[str] = None
+    employment_years: Optional[float] = None
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
     offer: Optional[Disclosure] = None
