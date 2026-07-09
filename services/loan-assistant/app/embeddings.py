@@ -30,7 +30,7 @@ _STOPWORDS = frozenset(
 )
 
 
-def _tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> list[str]:
     return [t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS]
 
 
@@ -60,7 +60,7 @@ class LocalTfidfEmbedder:
         key = _content_hash(text)
         if key in self._cache:
             return self._cache[key]
-        vec = dict(Counter(_tokenize(text)))
+        vec = dict(Counter(tokenize(text)))
         self._cache[key] = vec
         self._save_cache()
         return vec

@@ -12,6 +12,14 @@ results:
       word overlap) than some genuinely-answerable queries score against their
       correct chunk, so grounding is checked against retrieved content, not a
       similarity threshold.
+
+      classify_answerable(query, hits) takes ONLY the query and what retrieve()
+      returned -- never the expected answer. A live user query has no answer key
+      to check against, so grounding_term in EVAL_QUERIES below is documentation
+      of what fact *should* ground each case, not an input to the gate (an earlier
+      version passed it in directly, which meant the gate could only ever prove
+      itself against a fact it already knew -- see the "review found this" note
+      on classify_answerable).
   (b) kb_dump/applications.jsonl carries raw PII and must never enter this corpus,
       confirmed by an offline regex check (never an LLM call, per the quota note)
 
@@ -21,19 +29,19 @@ import json
 import os
 
 from .corpus import load_policy_corpus
-from .embeddings import LocalTfidfEmbedder, apply_idf, build_idf, cosine_similarity
+from .embeddings import LocalTfidfEmbedder, apply_idf, build_idf, cosine_similarity, tokenize
 from .redactor import redact_dict
 
 KB_DUMP_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "kb_dump", "applications.jsonl"
 )
 
-# Fixed eval query set. grounding_term is the specific fact the query needs to be
-# genuinely answerable -- classify_answerable() checks it against what retrieve()
-# ACTUALLY returns (the top-k chunks), not against the whole corpus. expect_answer
-# records what the correct system behavior is: True means a grounded answer should
-# be produced, False means the system should say "no answer" rather than hand a
-# topically-similar-but-fact-free chunk to an answer generator.
+# Fixed eval query set. grounding_term documents the specific fact that *should*
+# ground a True case -- it is NOT passed to classify_answerable(), which never sees
+# the expected answer (see module docstring). expect_answer records the correct
+# system behavior: True means a grounded answer should be produced, False means the
+# system should say "no answer" rather than hand a topically-similar-but-fact-free
+# chunk to an answer generator.
 EVAL_QUERIES = [
     {"query": "what is the minimum age to apply for a loan", "grounding_term": "18", "expect_answer": True},
     {"query": "what happens if my credit score is in the refer band", "grounding_term": "counteroffer", "expect_answer": True},
@@ -48,6 +56,10 @@ TOP_K = 3
 # empty or near-zero-similarity result is never answerable regardless of content.
 MIN_SCORE_FLOOR = 0.05
 
+# Fraction of the query's own content terms that must actually appear in the top
+# hit for it to count as grounded. See classify_answerable() for why this number.
+MIN_QUERY_TERM_COVERAGE = 0.6
+
 
 def retrieve(query: str, chunks: list[dict], embedder: LocalTfidfEmbedder, idf: dict, k: int = TOP_K) -> list[dict]:
     q_vec = apply_idf(embedder.embed(query), idf)
@@ -59,25 +71,44 @@ def retrieve(query: str, chunks: list[dict], embedder: LocalTfidfEmbedder, idf: 
     return scored[:k]
 
 
-def classify_answerable(hits: list[dict], grounding_term: str) -> bool:
-    """Whether the retrieved top-k chunks actually support answering the query --
-    this is the no-answer gate itself, callable by the real assistant path later,
-    not just a test-time assertion against corpus-wide ground truth.
+def classify_answerable(query: str, hits: list[dict]) -> bool:
+    """Whether the retrieved hits actually support answering `query` -- the real
+    no-answer gate, callable on a live query because it takes only the query and
+    what retrieve() returned. It never receives the expected answer: an earlier
+    version took a `grounding_term` parameter and substring-checked it against the
+    concatenated top-k text, which only ever proved the gate could find a fact it
+    was already handed -- at runtime there is no expected answer to pass in, so
+    that version could never actually run against a real user question.
 
-    A single cosine-similarity threshold can't reliably separate "genuinely
-    relevant" from "coincidentally shares a word" on a corpus this small -- e.g.
-    "why was application 6012 denied" scores 0.42 against the general Reg B
-    adverse-action policy section (real overlap on "denied"/"application"), which
-    is *higher* than some genuinely-answerable queries score against their correct
-    chunk. Score alone would either exclude real answers or admit false-confident
-    ones. So grounding requires the specific fact to actually be present in what
-    was retrieved, with the score floor only as a belt-and-suspenders empty-result
-    guard.
+    A single cosine-similarity threshold can't separate "genuinely relevant" from
+    "coincidentally shares a word" on a corpus this small -- e.g. "why was
+    application 6012 denied" scores 0.42 against the general Reg B adverse-action
+    policy section (real overlap on "denied"/"application"), higher than some
+    genuinely-answerable queries score against their correct chunk. Raw word
+    overlap against the whole top-k has the same problem for the same reason.
+
+    What holds up instead: how much of the QUERY's own content vocabulary is
+    covered by the SPECIFIC top hit (never the concatenated top-k -- blending
+    hides a weak top hit behind a stronger one further down the list).
+      - "why was application 6012 denied" tops out on that Reg B chunk but only
+        covers 2 of its 4 content terms ("application", "denied") -- "6012"
+        itself, the one thing that would make this answerable, is absent.
+      - "what beneficial owner documentation ... LLC" tops out on a doc metadata
+        line ("Owner: Lending Ops.") that incidentally shares "owner" -- 1 of 5
+        content terms.
+      - the three genuinely-answerable queries cover 67-100% of their own terms
+        against their top hit.
+    0.6 sits in the gap between those groups; MIN_SCORE_FLOOR stays as a
+    belt-and-suspenders empty/near-zero-result guard.
     """
     if not hits or hits[0]["score"] < MIN_SCORE_FLOOR:
         return False
-    retrieved_text = " ".join(h["text"] for h in hits).lower()
-    return grounding_term.lower() in retrieved_text
+    query_terms = set(tokenize(query))
+    if not query_terms:
+        return False
+    top_hit_terms = set(tokenize(hits[0]["text"]))
+    coverage = len(query_terms & top_hit_terms) / len(query_terms)
+    return coverage >= MIN_QUERY_TERM_COVERAGE
 
 
 def check_kb_dump_pii(path: str = KB_DUMP_PATH) -> dict:
@@ -114,7 +145,7 @@ def run_eval() -> dict:
     query_results = []
     for case in EVAL_QUERIES:
         hits = retrieve(case["query"], chunks, embedder, idf)
-        answerable = classify_answerable(hits, case["grounding_term"])
+        answerable = classify_answerable(case["query"], hits)
         status = "answered" if answerable else "no_answer"
 
         query_results.append(

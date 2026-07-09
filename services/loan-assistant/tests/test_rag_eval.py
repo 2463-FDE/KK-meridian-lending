@@ -5,10 +5,18 @@ Covers the two things the deliverable has to prove:
   (b) retrieval against the policy corpus is accurate, including on the two cases
       where the correct answer is "no answer" -- classified by classify_answerable()
       against what retrieve() actually returns, not by checking corpus-wide ground
-      truth (that was the gap Codex review found on this PR: retrieve() still hands
+      truth (that was the first gap review found on this PR: retrieve() still hands
       back a real, topically-related chunk with a real score for these queries, so
       "correct" has to reflect an actual no-answer gate in the pipeline, not just a
       test-time fact about the corpus).
+
+A second review pass on this PR found that first fix still cheated: classify_answerable
+took the expected answer (grounding_term) as a parameter, so it could only ever be
+proven against a fact it was already handed -- a live user query has no answer key to
+check against. classify_answerable's signature is now (query, hits), with no way to
+receive the expected answer at all; it grounds on how much of the query's own
+vocabulary the specific top hit covers. The tests below exercise that with the
+ground-truth term nowhere in scope, not even withheld by convention.
 """
 from app.embeddings import LocalTfidfEmbedder, build_idf
 from app.corpus import load_policy_corpus
@@ -72,15 +80,32 @@ def test_denial_reason_query_classified_as_no_answer_not_just_missing_id():
 
 def test_classify_answerable_rejects_high_score_hit_missing_the_fact():
     """A hit can score well on generic topical overlap while still not containing
-    the specific fact needed -- classify_answerable must reject it anyway."""
+    the specific fact needed. classify_answerable has no grounding_term parameter
+    to check that fact against -- it never sees "6012" at all -- and must still
+    reject this using only the query and the hit's own text: the hit covers just
+    2 of the query's 4 content terms ("application", "denied"), below the
+    coverage floor."""
     hits = [{"chunk_id": "x", "score": 0.9, "text": "denied applications get an adverse action notice"}]
-    assert classify_answerable(hits, "6012") is False
+    assert classify_answerable("why was application 6012 denied", hits) is False
+
+
+def test_classify_answerable_rejects_low_coverage_topical_hit():
+    """Regression for the beneficial-owner case: a hit can share one incidental
+    word with the query (here "owner", from an unrelated doc metadata line) and
+    still score decently, without the query's topic actually being covered."""
+    hits = [{"chunk_id": "x", "score": 0.39, "text": "Last reviewed: 2024-11. Owner: Lending Ops."}]
+    assert classify_answerable("what beneficial owner documentation do we require for an LLC", hits) is False
 
 
 def test_classify_answerable_accepts_a_grounded_hit():
-    hits = [{"chunk_id": "x", "score": 0.5, "text": "minimum age: 18"}]
-    assert classify_answerable(hits, "18") is True
+    hits = [{"chunk_id": "x", "score": 0.5, "text": "Minimum age: 18. Loan amount: $1,000-$50,000."}]
+    assert classify_answerable("what is the minimum age to apply for a loan", hits) is True
 
 
 def test_classify_answerable_rejects_empty_hits():
-    assert classify_answerable([], "18") is False
+    assert classify_answerable("what is the minimum age to apply for a loan", []) is False
+
+
+def test_classify_answerable_rejects_below_score_floor():
+    hits = [{"chunk_id": "x", "score": 0.01, "text": "Minimum age: 18. Loan amount: $1,000-$50,000."}]
+    assert classify_answerable("what is the minimum age to apply for a loan", hits) is False
