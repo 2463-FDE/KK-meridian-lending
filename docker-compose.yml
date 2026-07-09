@@ -96,12 +96,6 @@ services:
     env_file:
       - path: .env
         required: false
-    environment:
-      # Compose-level default so local `docker compose up` with zero .env still
-      # explicitly opts into dev-stub behavior. config.py's own default is closed
-      # (unset ENVIRONMENT = no stub) — this line is what makes local dev the
-      # opt-in case, not the fallback case.
-      ENVIRONMENT: ${ENVIRONMENT:-development}
     ports:
       - "8004:8004"
     depends_on:
