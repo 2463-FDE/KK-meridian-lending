@@ -26,6 +26,16 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 # Mirrors the staff role set the gateway already enforces for /assistant/*.
 _STAFF_ROLES = {"csr", "underwriter", "admin"}
 
+# NOTE: the gateway's /los/{path:path} route (gateway/app/main.py) proxies to this
+# router with NO auth check — an applicant can check their own status without an
+# account, so anyone who guesses an app_id can hit any GET route here anonymously.
+# Before adding a new field to ApplicationDetail, ApplicationListItem, or any other
+# response model returned by a route in this file, ask:
+#   1. Would this be sensitive if read by someone who only knows the app_id?
+#      (income, SSN, DOB, credit score, decision reasoning, etc. -> yes)
+#   2. If yes, put it on a separate endpoint gated by _STAFF_ROLES (see
+#      get_application_financials below), not on the public response.
+
 
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
