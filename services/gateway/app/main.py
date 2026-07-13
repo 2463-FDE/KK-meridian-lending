@@ -89,6 +89,7 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None):
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "content-length", "authorization")
+        and not k.lower().startswith("x-user-")
     }
     if user:
         headers["X-User-Id"] = str(user.get("id", ""))
