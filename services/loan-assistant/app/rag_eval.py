@@ -48,6 +48,11 @@ EVAL_QUERIES = [
     {"query": "what is the late fee amount", "grounding_term": "$35", "expect_answer": True},
     {"query": "why was application 6012 denied", "grounding_term": "6012", "expect_answer": False},
     {"query": "what beneficial owner documentation do we require for an LLC", "grounding_term": "beneficial owner", "expect_answer": False},
+    # Paraphrases that lean harder on Reg B's own vocabulary than the base denial
+    # query does -- high term coverage against the adverse-action section without
+    # ever mentioning 6012 itself. Regression for the ID-token check above.
+    {"query": "what specific principal reason was given for application 6012", "grounding_term": "6012", "expect_answer": False},
+    {"query": "what does the adverse action notice say about application 6012", "grounding_term": "6012", "expect_answer": False},
 ]
 
 TOP_K = 3
@@ -100,6 +105,19 @@ def classify_answerable(query: str, hits: list[dict]) -> bool:
         against their top hit.
     0.6 sits in the gap between those groups; MIN_SCORE_FLOOR stays as a
     belt-and-suspenders empty/near-zero-result guard.
+
+    Coverage alone still isn't enough (Codex review on this PR): a denial
+    paraphrase that leans harder on Reg B's own vocabulary --
+    "what specific principal reason was given for application 6012" -- shares
+    "specific"/"principal"/"reason"/"application" with the adverse-action
+    section, clearing 0.6 coverage even though "6012" -- the one term that
+    actually identifies which application, the fact that would make this
+    answerable -- is still absent. Coverage measures topical overlap, not
+    whether the specific entity being asked about was ever addressed. So any
+    numeric/ID token in the query (an application number, an account number)
+    must appear verbatim in the top hit independent of overall coverage --
+    missing it forces no_answer regardless of how policy-adjacent the rest of
+    the query reads.
     """
     if not hits or hits[0]["score"] < MIN_SCORE_FLOOR:
         return False
@@ -107,6 +125,9 @@ def classify_answerable(query: str, hits: list[dict]) -> bool:
     if not query_terms:
         return False
     top_hit_terms = set(tokenize(hits[0]["text"]))
+    id_terms = {t for t in query_terms if any(ch.isdigit() for ch in t)}
+    if id_terms and not id_terms.issubset(top_hit_terms):
+        return False
     coverage = len(query_terms & top_hit_terms) / len(query_terms)
     return coverage >= MIN_QUERY_TERM_COVERAGE
 

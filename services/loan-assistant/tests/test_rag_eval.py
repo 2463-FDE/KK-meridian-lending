@@ -89,6 +89,24 @@ def test_classify_answerable_rejects_high_score_hit_missing_the_fact():
     assert classify_answerable("why was application 6012 denied", hits) is False
 
 
+def test_classify_answerable_rejects_high_coverage_hit_missing_the_id():
+    """Regression (Codex review on this PR): a denial paraphrase that leans harder
+    on Reg B's own vocabulary than the base "why was application 6012 denied" case
+    clears the 0.6 term-coverage floor on "specific"/"principal"/"reason"/
+    "application" alone -- coverage here is 4/5 -- while "6012", the one term that
+    actually identifies which application, is still absent from the hit. Term
+    overlap alone would wave this through as answerable; the ID-token check must
+    still reject it."""
+    hits = [{
+        "chunk_id": "x", "score": 0.6,
+        "text": "Adverse action notices must state the specific principal reason "
+                "for denying an application, per Regulation B.",
+    }]
+    assert classify_answerable(
+        "what specific principal reason was given for application 6012", hits
+    ) is False
+
+
 def test_classify_answerable_rejects_low_coverage_topical_hit():
     """Regression for the beneficial-owner case: a hit can share one incidental
     word with the query (here "owner", from an unrelated doc metadata line) and
