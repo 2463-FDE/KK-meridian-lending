@@ -100,6 +100,14 @@ class ApplicationDetail(BaseModel):
     offer: Optional[Disclosure] = None
 
 
+# income/employment_years are underwriting inputs, not borrower-facing status data.
+# GET /applications/{id} is reachable anonymously (see gateway /los/* passthrough),
+# so these live on a separate staff-only response instead of ApplicationDetail.
+class ApplicationFinancials(BaseModel):
+    income: Optional[float] = None
+    employment_years: Optional[float] = None
+
+
 class Page(BaseModel, Generic[T]):
     items: list[T]
     total: int

@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-meridian}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meridian_dev_pw_2024}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-meridian}
     ports:
       - "5432:5432"
@@ -30,7 +30,9 @@ services:
 
   origination-service:
     build: ./services/origination-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8001:8001"
     depends_on:
@@ -50,7 +52,9 @@ services:
 
   servicing-service:
     build: ./services/servicing-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8002:8002"
     depends_on:
@@ -69,7 +73,9 @@ services:
 
   kyc-service:
     build: ./services/kyc-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8003:8003"
     depends_on:
@@ -87,7 +93,15 @@ services:
 
   decision-service:
     build: ./services/decision-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # .env is optional (above) for a clean-checkout `docker compose up`; without it
+      # ENVIRONMENT is otherwise unset and decisioning fails closed on every request
+      # (see app/config.py). Default the local compose path to dev so it boots ready
+      # to use; an .env that sets ENVIRONMENT still wins.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
     ports:
       - "8004:8004"
     depends_on:
@@ -105,7 +119,9 @@ services:
 
   disclosure-service:
     build: ./services/disclosure-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8005:8005"
     depends_on:
@@ -124,7 +140,9 @@ services:
 
   payment-service:
     build: ./services/payment-service
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8006:8006"
     depends_on:
@@ -142,9 +160,29 @@ services:
       timeout: 5s
       retries: 5
 
+  loan-assistant:
+    build: ./services/loan-assistant
+    env_file:
+      - path: .env
+        required: false
+    # No host port published — reachable only from other containers on the compose
+    # network (gateway proxies /assistant/* to it internally). Publishing it would
+    # let anyone on the host bypass the gateway's role check and trigger billed LLM
+    # calls directly.
+    depends_on:
+      origination-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8007/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   gateway:
     build: ./services/gateway
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8000:8000"
     depends_on:
@@ -161,6 +199,8 @@ services:
       disclosure-service:
         condition: service_started
       payment-service:
+        condition: service_started
+      loan-assistant:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]

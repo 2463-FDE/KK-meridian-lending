@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import LoanSummaryCard from "../../../components/LoanSummaryCard";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
@@ -285,6 +286,10 @@ export default function UnderwritingDetailPage() {
           <KycRow label="SSN" ok={app?.kyc?.ssn_verified} />
         </div>
       </div>
+
+      {/* AI Summary */}
+      <h2>AI Summary</h2>
+      {appId ? <LoanSummaryCard appId={appId} /> : null}
 
       {/* Action feedback (shared by all panels) */}
       {actionMsg ? <div className="alert alert-success">{actionMsg}</div> : null}

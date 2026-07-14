@@ -13,7 +13,7 @@ timestamp. There is no append-only audit trail. (D4, D9, D10)
 """
 import time
 import httpx
-from .config import EXPERIAN_KEY, EXPERIAN_BASE_URL
+from .config import EXPERIAN_KEY, EXPERIAN_BASE_URL, ALLOW_CREDIT_STUB, ENVIRONMENT
 from .logging_config import get_logger
 from . import db
 
@@ -24,8 +24,25 @@ log = get_logger("decision")
 GENERIC_REASONS = ["purchasing history", "insufficient credit profile"]
 
 
+class CreditBureauUnavailableError(RuntimeError):
+    """Bureau not configured/reachable and stubbing isn't allowed in this environment."""
+
+
+def _stub_score(ssn: str) -> int:
+    return 680 if ssn and ssn[-1] in "02468" else 612
+
+
 def _pull_credit(ssn: str) -> int:
     """Synchronous bureau call. Blocks the request thread. No real timeout budget."""
+    if not EXPERIAN_KEY:
+        if not ALLOW_CREDIT_STUB:
+            raise CreditBureauUnavailableError(
+                f"EXPERIAN_KEY is not set (ENVIRONMENT={ENVIRONMENT!r}) — refusing to "
+                "decide from a fake credit score outside development/test."
+            )
+        log.warning("EXPERIAN_KEY not set — using deterministic dev stub score")
+        return _stub_score(ssn)
+
     try:
         # structured like a real call; in dev there's no live bureau so we fall back.
         resp = httpx.get(
@@ -36,8 +53,10 @@ def _pull_credit(ssn: str) -> int:
         )
         return resp.json().get("score", 680)
     except Exception:
+        if not ALLOW_CREDIT_STUB:
+            raise
         # deterministic stub so the demo runs without a live bureau
-        return 680 if ssn and ssn[-1] in "02468" else 612
+        return _stub_score(ssn)
 
 
 def _run_model(bureau_score: int, application: dict) -> dict:
