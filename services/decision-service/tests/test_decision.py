@@ -1,14 +1,11 @@
-"""Decisioning tests for the rules scorecard (these PASS).
+"""Decisioning tests for the rules scorecard and the Week 3 AI-scorer wrapper +
+reason-code mapping.
 
-Both tests use the deterministic stub bureau path: there is no live Experian in the test
-environment, so `_pull_credit` falls back to its deterministic stub (680 for an SSN ending
-in an even digit, 612 otherwise). Persistence is best-effort and swallowed when no DB is
-present, so these tests exercise the scorecard outcome without a database.
-
-NOTE (intentional debt, left UNTESTED): there is deliberately NO test asserting that a
-decision audit trail / reason-code accuracy exists. The `decisions` table stores OUTCOME
-ONLY (no reason, no model drivers, no inputs, no timestamp), and the adverse-action reason
-is a generic nearest-checkbox string — that debt (D4, D10, twists #1/#2) stays untested.
+Both `decide()` tests use the deterministic stub bureau AND model paths: there is no
+live Experian or licensed AI scorer in the test environment, so both calls fall back to
+their deterministic stubs. Persistence (both `decisions` and `decision_events`) is
+best-effort and swallowed when no DB is present, so these tests exercise the scoring
+chain's outcome without a database.
 """
 import importlib
 
@@ -72,3 +69,64 @@ def test_unset_environment_and_key_defaults_closed_not_open(monkeypatch):
         monkeypatch.setenv("ENVIRONMENT", "test")
         importlib.reload(config)
         importlib.reload(decision)
+
+
+# --- Week 3: the licensed AI scorer has the same fail-closed contract as the bureau
+# call above -- a missing/unreachable licensed model must not silently score from
+# fake data outside dev/test either.
+
+def test_missing_model_key_stubs_in_dev(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "")
+    monkeypatch.setattr(decision, "ALLOW_MODEL_STUB", True)
+    score, model_version = decision._call_ai_scorer(680, {"income": 100000})
+    assert score == decision._stub_model_score(680, 100000)
+    # A stubbed score must never be recorded as if the real vendor produced it.
+    assert model_version.endswith("-stub")
+
+
+def test_missing_model_key_fails_closed_outside_dev(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "")
+    monkeypatch.setattr(decision, "ALLOW_MODEL_STUB", False)
+    # Reference decision.ModelUnavailableError (not a static top-of-file import):
+    # test_unset_environment_and_key_defaults_closed_not_open above reloads the
+    # `decision` module, which mints a new class object for every exception type
+    # it defines -- a statically-imported reference would no longer match instances
+    # raised after that reload.
+    with pytest.raises(decision.ModelUnavailableError):
+        decision._call_ai_scorer(680, {"income": 100000})
+
+
+# --- Week 3: adverse-action reasons map to whichever input actually drove the score
+# down, instead of a fixed "purchasing history" string regardless of applicant.
+
+def test_reason_codes_reflect_low_bureau_score():
+    # Poor bureau score, healthy income -> bureau is the larger shortfall.
+    reasons = decision._reason_codes(bureau_score=500, income=60000)
+    assert reasons == [decision.REASON_LOW_BUREAU_SCORE]
+
+
+def test_reason_codes_reflect_insufficient_income():
+    # Excellent bureau score, zero income -> income is the larger shortfall.
+    reasons = decision._reason_codes(bureau_score=800, income=0)
+    assert reasons == [decision.REASON_INSUFFICIENT_INCOME]
+
+
+def test_reason_codes_empty_when_both_healthy():
+    reasons = decision._reason_codes(bureau_score=800, income=100000)
+    assert reasons == []
+
+
+def test_decide_returns_empty_reason_codes_on_approve():
+    result = decide({"app_id": 3, "ssn": "123456782", "income": 100000})
+    assert result["decision"] == "approve"
+    assert result["reason_codes"] == []
+    assert result["adverse_action_reason"] is None
+
+
+def test_decide_returns_specific_reason_code_on_deny():
+    result = decide({"app_id": 4, "ssn": "123456781", "income": 0})
+    assert result["decision"] == "deny"
+    assert result["reason_codes"]
+    assert result["adverse_action_reason"] == result["reason_codes"][0]
+    # Not the old generic nearest-checkbox string.
+    assert result["adverse_action_reason"] != "purchasing history"

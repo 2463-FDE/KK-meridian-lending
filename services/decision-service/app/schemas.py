@@ -23,3 +23,4 @@ class DecisionOut(BaseModel):
     outcome: str
     score: float
     reason: Optional[str] = None
+    reason_codes: list[str] = Field(default_factory=list)
