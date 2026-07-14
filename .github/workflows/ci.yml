@@ -6,11 +6,24 @@ on:
   pull_request:
 
 jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            | tar -xz gitleaks
+      - name: Scan for leaked secrets
+        run: ./gitleaks detect --source . --redact -v
+
   backend:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service]
+        service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service, loan-assistant]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,6 +57,6 @@ jobs:
           npm ci || npm install
           npm run build
 
-  # GAP: no secret scanning (gitleaks/trufflehog), no dependency audit, no SAST,
-  # no check that .env is untracked. A live bureau key + AWS key sail through CI.
-  # GAP: backend tests are continue-on-error, so failing money-math tests are green.
+  # GAP: no dependency audit, no SAST. Secret scanning added (RF-22).
+  # GAP: backend tests are still continue-on-error for the known money-math test
+  # failures (RF-13) — drop that once RF-13 lands (see kal_docs/10_WEEK_PLAN.md Week 10).

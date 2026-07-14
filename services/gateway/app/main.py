@@ -23,6 +23,7 @@ from .config import (
     DECISION_URL,
     DISCLOSURE_URL,
     KYC_URL,
+    LOAN_ASSISTANT_URL,
     ORIGINATION_URL,
     PAYMENT_URL,
     SERVICING_URL,
@@ -88,6 +89,7 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None):
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "content-length", "authorization")
+        and not k.lower().startswith("x-user-")
     }
     if user:
         headers["X-User-Id"] = str(user.get("id", ""))
@@ -155,3 +157,12 @@ async def payments(path: str, request: Request, authorization: str | None = Head
     # the gateway still does NOT enforce a specific role — same gap as /lss.
     user = _require_user(authorization)
     return await _proxy(PAYMENT_URL, f"/{path}", request, user)
+
+
+@app.api_route("/assistant/{path:path}", methods=["GET", "POST"])
+async def assistant(path: str, request: Request, authorization: str | None = Header(None)):
+    # AI summary returns risk tier + internal flags — staff only, not the borrower.
+    user = _require_user(authorization)
+    if user.get("role") not in ("csr", "underwriter", "admin"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return await _proxy(LOAN_ASSISTANT_URL, f"/{path}", request, user)

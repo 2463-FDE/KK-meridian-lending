@@ -13,6 +13,7 @@ KYC_URL = os.getenv("KYC_URL", "http://kyc-service:8003")
 DECISION_URL = os.getenv("DECISION_URL", "http://decision-service:8004")
 DISCLOSURE_URL = os.getenv("DISCLOSURE_URL", "http://disclosure-service:8005")
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://payment-service:8006")
+LOAN_ASSISTANT_URL = os.getenv("LOAN_ASSISTANT_URL", "http://loan-assistant:8007")
 
 # 8-hour sessions. (No refresh, no rotation, no CSRF token — Halcyon "v1 auth".)
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "28800"))

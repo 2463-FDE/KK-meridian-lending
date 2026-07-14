@@ -1,0 +1,10 @@
+# Known findings in template/fixture history predating the secrets-hardening work
+# (author dev@halcyonsoftware.example -- the seeded course-exercise "brownfield legacy"
+# commits, not this team's production history). Current-file hardcoded fallbacks were
+# already removed; these fingerprints are the old commits still holding the fixture
+# values. New leaks are not exempted by this file -- only these five.
+4c464b8b33fcc079cc208a67437bdbc9f266ed39:services/decision-service/app/config.py:generic-api-key:14
+7baadb282dbc7580771ead8cd38b11040274eb42:services/origination-service/app/config.py:generic-api-key:13
+56ccc6f843d0f83541892ac411b9989f42a53d3d:services/ai-orchestrator/app/bedrock_client.py:generic-api-key:15
+e8bb2fa73cddd3a3a14d64e20736d61b1c90cb7a:.env:generic-api-key:17
+e8bb2fa73cddd3a3a14d64e20736d61b1c90cb7a:.env:generic-api-key:29
