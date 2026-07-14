@@ -13,11 +13,11 @@ CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "")
 
 # Whether a missing/failed bureau call may fall back to a deterministic stub score.
 # Defaults closed (no stub): an UNSET ENVIRONMENT must not silently enable it. Since
-# `.env` is now optional for docker compose (a clean checkout boots without one),
-# an unset ENVIRONMENT is a real, reachable case in a real deploy that forgot to
-# configure it — not just a hypothetical. Local dev opts in explicitly via
-# ENVIRONMENT=development in docker-compose.yml's compose-level default, not by
-# relying on this default ever being permissive.
+# `.env` is optional for docker compose (env_file required: false — a clean checkout
+# boots without one), an unset ENVIRONMENT is a real, reachable case in a real deploy
+# that forgot to configure it, not just a hypothetical. Local dev opts in explicitly
+# via ENVIRONMENT=development in docker-compose.yml's compose-level default (see
+# docker-compose.yml), and a deploy that skips that setup fails closed.
 ENVIRONMENT = os.getenv("ENVIRONMENT", "").lower()
 ALLOW_CREDIT_STUB = ENVIRONMENT in ("development", "dev", "test", "local")
 
