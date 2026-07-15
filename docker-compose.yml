@@ -165,10 +165,16 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # corpus.py's local-checkout-relative default doesn't resolve inside this
+      # image's shallower /app/app layout -- point it at the mount below instead.
+      POLICIES_DIR: /app/policies
     # No host port published — reachable only from other containers on the compose
     # network (gateway proxies /assistant/* to it internally). Publishing it would
     # let anyone on the host bypass the gateway's role check and trigger billed LLM
     # calls directly.
+    volumes:
+      - ./policies:/app/policies:ro
     depends_on:
       origination-service:
         condition: service_started

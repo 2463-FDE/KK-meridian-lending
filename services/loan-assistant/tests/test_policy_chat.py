@@ -1,0 +1,85 @@
+"""Tests for the policy Q&A chat -- the answer-generation feature built on top
+of Week 2's retrieve()/classify_answerable() gate (rag_eval.py), the feature
+that gate's own eval harness deliberately deferred building (adr/0005).
+
+Core guarantee under test: a question classify_answerable() marks ungrounded
+must never reach the LLM at all -- no hallucination risk, matching the same
+gate rag_eval.py's eval set already proves against a fixed query list.
+"""
+import json
+
+from app import llm_client, policy_chat
+from app.policy_chat import answer_policy_question
+
+
+def test_not_answerable_question_never_calls_llm(monkeypatch):
+    # Same case rag_eval.EVAL_QUERIES already documents as expect_answer=False.
+    def _boom(client, prompt, system=None):
+        raise AssertionError("LLM must not be called for an ungrounded question")
+
+    monkeypatch.setattr(llm_client, "_call_api", _boom)
+
+    result = answer_policy_question("why was application 6012 denied")
+
+    assert result.answerable is False
+    assert result.source_chunk_id is None
+    assert "record" in result.answer.lower()
+
+
+def test_answerable_question_returns_grounded_answer(monkeypatch):
+    canned = json.dumps({"answerable": True, "answer": "The late fee is $35."})
+    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+
+    result = answer_policy_question("what is the late fee amount")
+
+    assert result.answerable is True
+    assert result.answer == "The late fee is $35."
+    assert result.source_chunk_id is not None
+    # Real retrieved excerpt, not just its id -- lets a reader verify the
+    # answer against actual policy text instead of trusting it on faith.
+    assert result.source_text
+    assert "35" in result.source_text
+
+
+def test_not_answerable_question_has_no_source_text(monkeypatch):
+    def _boom(client, prompt, system=None):
+        raise AssertionError("LLM must not be called for an ungrounded question")
+
+    monkeypatch.setattr(llm_client, "_call_api", _boom)
+
+    result = answer_policy_question("why was application 6012 denied")
+
+    assert result.source_text is None
+
+
+def test_answer_handles_markdown_fenced_response(monkeypatch):
+    fenced = "```json\n" + json.dumps({"answerable": True, "answer": "18 years old."}) + "\n```"
+    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: fenced)
+    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+
+    result = answer_policy_question("what is the minimum age to apply for a loan")
+
+    assert result.answerable is True
+    assert result.answer == "18 years old."
+
+
+def test_question_is_redacted_before_use(monkeypatch):
+    # Isolate the redaction property from retrieval-gate behavior: force the
+    # answerable path regardless of how the SSN-bearing text tokenizes, since
+    # that's classify_answerable()'s concern, not this test's.
+    monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
+
+    captured = {}
+
+    def _capture(client, prompt, system=None):
+        captured["prompt"] = prompt
+        return json.dumps({"answerable": True, "answer": "18 years old."})
+
+    monkeypatch.setattr(llm_client, "_call_api", _capture)
+    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+
+    ssn_question = "what is the minimum age to apply for a loan, my ssn is 412-55-9981"
+    answer_policy_question(ssn_question)
+
+    assert "412-55-9981" not in captured["prompt"]

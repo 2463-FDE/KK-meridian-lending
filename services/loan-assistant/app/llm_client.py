@@ -25,6 +25,7 @@ Never increase MAX_INPUT_TOKENS without a cost-review sign-off.
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Literal
 
@@ -38,8 +39,15 @@ from tenacity import (
     wait_exponential,
 )
 
+from . import config
 from .redactor import redact_dict, redact_str
 from .schemas import LoanSummary
+
+try:
+    from langsmith.wrappers import wrap_anthropic
+except ImportError:  # pragma: no cover -- langsmith is a real dependency now,
+    # but tracing must never be a hard requirement to serve a real request.
+    wrap_anthropic = None
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +114,53 @@ class LLMInsufficientDataError(Exception):
     letting the model invent a risk chip from data it never saw."""
 
 
+class LLMConfigError(Exception):
+    """LLM_PROVIDER is misconfigured -- fail loudly rather than call the wrong
+    vendor or call Bedrock with no model id."""
+
+
+def _make_client() -> "anthropic.Anthropic | anthropic.AnthropicBedrock":
+    """Build the LLM client for the configured provider. Both client classes
+    expose the same .messages.create(...) interface, so nothing else in this
+    module needs to know which one it got."""
+    if config.LLM_PROVIDER == "bedrock":
+        # AnthropicBedrock() with no arguments reads AWS_BEARER_TOKEN_BEDROCK
+        # (or the standard AWS credential chain) and AWS_REGION from the
+        # environment automatically -- confirmed against the installed SDK
+        # (anthropic/lib/bedrock/_client.py), no extra credential code needed.
+        client = anthropic.AnthropicBedrock()
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise EnvironmentError("ANTHROPIC_API_KEY not set")
+        client = anthropic.Anthropic(api_key=api_key)
+
+    # wrap_anthropic() patches .messages.create in place and returns the same
+    # object -- confirmed against the installed SDK -- and its patched call is
+    # a no-op passthrough unless LANGSMITH_TRACING/LANGSMITH_API_KEY are set in
+    # the environment, so this is safe to always attempt. Tracing is
+    # observability, not a compliance guardrail (unlike EXPERIAN_KEY/
+    # AI_MODEL_API_KEY in decision-service) -- a missing package or bad
+    # LangSmith config must never block a real call, so this fails open.
+    if wrap_anthropic is not None:
+        try:
+            client = wrap_anthropic(client)
+        except Exception as exc:
+            log.warning("could not wrap client for LangSmith tracing: %s", exc)
+    return client
+
+
+def _model_id() -> str:
+    if config.LLM_PROVIDER == "bedrock":
+        if not config.BEDROCK_MODEL_ID:
+            raise LLMConfigError(
+                "LLM_PROVIDER=bedrock but BEDROCK_MODEL_ID is not set -- set it "
+                "to a Claude model id your AWS account has Bedrock access to."
+            )
+        return config.BEDROCK_MODEL_ID
+    return MODEL
+
+
 def _has_risk_grounding_data(app_data: dict) -> bool:
     return all(app_data.get(field) is not None for field in _RISK_GROUNDING_FIELDS)
 
@@ -126,18 +181,36 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```$", re.DOTALL)
+
+
+def _strip_markdown_fences(raw: str) -> str:
+    """Some models wrap structured output in a ```json fence despite the prompt
+    explicitly saying not to (confirmed live: a real Bedrock Claude response did
+    exactly this) -- strip it defensively rather than relying solely on prompt
+    compliance, same defense-in-depth principle as the redactor running even
+    though only allowlisted fields reach the prompt in the first place."""
+    text = raw.strip()
+    match = _FENCE_RE.match(text)
+    return match.group(1) if match else text
+
+
 @retry(
     retry=retry_if_exception_type((anthropic.APIStatusError, httpx.NetworkError)),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
     reraise=True,
 )
-def _call_api(client: anthropic.Anthropic, prompt: str) -> str:
+def _call_api(
+    client: "anthropic.Anthropic | anthropic.AnthropicBedrock",
+    prompt: str,
+    system: str = _SYSTEM,
+) -> str:
     try:
         msg = client.messages.create(
-            model=MODEL,
+            model=_model_id(),
             max_tokens=MAX_OUTPUT_TOKENS,
-            system=_SYSTEM,
+            system=system,
             messages=[{"role": "user", "content": prompt}],
             timeout=TIMEOUT_SECONDS,
         )
@@ -176,11 +249,7 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         estimated,
     )
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise EnvironmentError("ANTHROPIC_API_KEY not set")
-
-    client = anthropic.Anthropic(api_key=api_key)
+    client = _make_client()
 
     t0 = time.monotonic()
     raw = _call_api(client, prompt)
@@ -193,7 +262,7 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     )
 
     try:
-        data = json.loads(raw)
+        data = json.loads(_strip_markdown_fences(raw))
         llm_output = _LLMOutput(**data)
     except Exception as exc:
         safe_raw = redact_str(raw)

@@ -9,9 +9,18 @@ data, never from anything the model returns.
 """
 import json
 
+import anthropic
 import pytest
 
-from app.llm_client import LLMInsufficientDataError, _build_prompt, summarize_application
+from app import config, llm_client
+from app.llm_client import (
+    LLMConfigError,
+    LLMInsufficientDataError,
+    _build_prompt,
+    _make_client,
+    _model_id,
+    summarize_application,
+)
 
 APP_DATA = {
     "id": 42,
@@ -114,3 +123,124 @@ def test_summarize_application_ignores_any_name_the_model_tries_to_return(monkey
     result = summarize_application(APP_DATA)
 
     assert result.applicant_name == "Maria Gonzalez"
+
+
+# --- LLM_PROVIDER: config-driven switch between the direct Anthropic API and
+# AWS Bedrock (anthropic.AnthropicBedrock). Client construction is a pure config
+# object in both cases -- no network call -- so these need no live API/AWS access,
+# same reasoning the tests above already rely on for a fake ANTHROPIC_API_KEY.
+
+def test_make_client_defaults_to_anthropic(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    client = _make_client()
+    assert isinstance(client, anthropic.Anthropic)
+    assert not isinstance(client, anthropic.AnthropicBedrock)
+
+
+def test_make_client_uses_bedrock_when_configured(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-bedrock-token-not-real")
+    client = _make_client()
+    assert isinstance(client, anthropic.AnthropicBedrock)
+
+
+# --- LangSmith tracing: wrap_anthropic() patches the client in place and
+# returns the same object (confirmed against the installed SDK), and its
+# patched call is a no-op unless LANGSMITH_TRACING/LANGSMITH_API_KEY are set --
+# safe to always attempt. Must fail open: tracing is observability, not a
+# compliance guardrail, so a broken wrap must never block a real call.
+
+def test_make_client_wraps_for_tracing_when_available(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+
+    calls = []
+
+    def _spy_wrap(client):
+        calls.append(client)
+        return client
+
+    monkeypatch.setattr(llm_client, "wrap_anthropic", _spy_wrap)
+    client = _make_client()
+
+    assert len(calls) == 1
+    assert calls[0] is client
+    assert isinstance(client, anthropic.Anthropic)
+
+
+def test_make_client_falls_back_when_wrapping_fails(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+
+    def _broken_wrap(client):
+        raise RuntimeError("simulated LangSmith misconfiguration")
+
+    monkeypatch.setattr(llm_client, "wrap_anthropic", _broken_wrap)
+
+    # Must not raise -- a broken trace wrapper must never block a real call.
+    client = _make_client()
+    assert isinstance(client, anthropic.Anthropic)
+
+
+def test_model_id_defaults_to_direct_api_model(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    assert _model_id() == llm_client.MODEL
+
+
+def test_model_id_requires_bedrock_model_id_when_using_bedrock(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    monkeypatch.setattr(config, "BEDROCK_MODEL_ID", "")
+    with pytest.raises(LLMConfigError):
+        _model_id()
+
+
+def test_model_id_uses_configured_bedrock_model_id(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    monkeypatch.setattr(config, "BEDROCK_MODEL_ID", "anthropic.claude-sonnet-test-v1:0")
+    assert _model_id() == "anthropic.claude-sonnet-test-v1:0"
+
+
+# --- Regression: a real Bedrock Claude response (live-verified) wrapped its JSON
+# in a markdown code fence despite the prompt saying not to. json.loads() choked
+# on the fence. Strip it defensively rather than relying solely on prompt
+# compliance -- providers/models don't always follow that instruction.
+
+def test_summarize_application_strips_markdown_json_fence(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+
+    fenced = (
+        "```json\n"
+        + json.dumps(
+            {
+                "loan_amount": 15000,
+                "term_months": 36,
+                "purpose": "debt_consolidation",
+                "risk_tier": "low",
+                "summary": "Stable income, short-term consolidation loan.",
+                "flags": [],
+            }
+        )
+        + "\n```"
+    )
+    monkeypatch.setattr("app.llm_client._call_api", lambda client, prompt: fenced)
+
+    result = summarize_application(APP_DATA)
+
+    assert result.risk_tier == "low"
+    assert result.applicant_name == "Maria Gonzalez"
+
+
+def test_strip_markdown_fences_leaves_plain_json_unchanged():
+    plain = '{"a": 1}'
+    assert llm_client._strip_markdown_fences(plain) == plain
+
+
+def test_strip_markdown_fences_strips_json_fence():
+    fenced = '```json\n{"a": 1}\n```'
+    assert llm_client._strip_markdown_fences(fenced) == '{"a": 1}'
+
+
+def test_strip_markdown_fences_strips_bare_fence():
+    fenced = '```\n{"a": 1}\n```'
+    assert llm_client._strip_markdown_fences(fenced) == '{"a": 1}'
