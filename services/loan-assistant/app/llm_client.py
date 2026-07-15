@@ -119,10 +119,28 @@ class LLMConfigError(Exception):
     vendor or call Bedrock with no model id."""
 
 
+_VALID_LLM_PROVIDERS = {"anthropic", "bedrock"}
+
+
+def _check_provider() -> None:
+    """Fail closed on an unrecognized LLM_PROVIDER rather than silently
+    guessing. Review finding: the previous `if == "bedrock" else <direct API>`
+    shape treated *any* other value -- including a typo like "berock" -- as
+    "anthropic", which could silently send prompts to the wrong vendor (or
+    just produce a confusing "ANTHROPIC_API_KEY not set" error) instead of a
+    clear, immediate configuration error naming the actual problem."""
+    if config.LLM_PROVIDER not in _VALID_LLM_PROVIDERS:
+        raise LLMConfigError(
+            f"LLM_PROVIDER={config.LLM_PROVIDER!r} is not a recognized provider "
+            f"-- expected one of {sorted(_VALID_LLM_PROVIDERS)}."
+        )
+
+
 def _make_client() -> "anthropic.Anthropic | anthropic.AnthropicBedrock":
     """Build the LLM client for the configured provider. Both client classes
     expose the same .messages.create(...) interface, so nothing else in this
     module needs to know which one it got."""
+    _check_provider()
     if config.LLM_PROVIDER == "bedrock":
         # AnthropicBedrock() with no arguments reads AWS_BEARER_TOKEN_BEDROCK
         # (or the standard AWS credential chain) and AWS_REGION from the
@@ -151,6 +169,7 @@ def _make_client() -> "anthropic.Anthropic | anthropic.AnthropicBedrock":
 
 
 def _model_id() -> str:
+    _check_provider()
     if config.LLM_PROVIDER == "bedrock":
         if not config.BEDROCK_MODEL_ID:
             raise LLMConfigError(

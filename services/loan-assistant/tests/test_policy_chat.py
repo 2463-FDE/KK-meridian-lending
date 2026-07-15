@@ -8,8 +8,10 @@ gate rag_eval.py's eval set already proves against a fixed query list.
 """
 import json
 
+import pytest
+
 from app import llm_client, policy_chat
-from app.policy_chat import answer_policy_question
+from app.policy_chat import PolicyChatResponseError, answer_policy_question
 
 
 def test_not_answerable_question_never_calls_llm(monkeypatch):
@@ -83,3 +85,57 @@ def test_question_is_redacted_before_use(monkeypatch):
     answer_policy_question(ssn_question)
 
     assert "412-55-9981" not in captured["prompt"]
+
+
+# --- Review finding: bool(data.get("answerable", True)) trusted sloppy model
+# output two ways -- Python's bare bool("false") is True (any non-empty string
+# is truthy), and a missing key silently defaulted to answerable=True. Now
+# parsed through a strict Pydantic model instead.
+
+def test_string_false_is_parsed_as_real_false(monkeypatch):
+    # The bug this guards against: Python's builtin bool("false") is True.
+    assert bool("false") is True  # sanity-check the bug still exists in Python itself
+    canned = json.dumps({"answerable": "false", "answer": "Not covered by this excerpt."})
+    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
+
+    result = answer_policy_question("what is the late fee amount")
+
+    assert result.answerable is False
+    assert result.source_chunk_id is None
+    assert result.source_text is None
+
+
+def test_missing_answerable_field_fails_closed(monkeypatch):
+    # No "answerable" key at all -- must be rejected, not defaulted to True.
+    canned = json.dumps({"answer": "Some answer with no answerable flag."})
+    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
+
+    with pytest.raises(PolicyChatResponseError):
+        answer_policy_question("what is the late fee amount")
+
+
+def test_empty_answer_string_is_rejected(monkeypatch):
+    canned = json.dumps({"answerable": True, "answer": ""})
+    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
+
+    with pytest.raises(PolicyChatResponseError):
+        answer_policy_question("what is the late fee amount")
+
+
+def test_non_dict_json_response_is_rejected(monkeypatch):
+    # A valid JSON value that isn't an object at all (e.g. the model returned
+    # a bare string or array) must fail closed, not crash with an unhandled
+    # TypeError from ** on a non-mapping.
+    canned = json.dumps(["not", "an", "object"])
+    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
+
+    with pytest.raises(PolicyChatResponseError):
+        answer_policy_question("what is the late fee amount")

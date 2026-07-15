@@ -32,9 +32,16 @@ def transaction(statements):
     for decision.py's `decisions` + `decision_events` writes, which must land or
     fail together (review finding: writing them separately let a decision commit
     with no matching audit row when the second insert failed silently).
+
+    Opens its own dedicated connection rather than reusing get_conn()'s shared,
+    process-global connection -- review finding: toggling autocommit on that
+    shared connection meant two concurrent requests (FastAPI sync routes run in
+    a threadpool) could share one transaction's state, so one request's
+    rollback could silently erase another request's not-yet-committed insert.
+    A connection per transaction call makes that impossible: no two callers
+    ever share transaction state, regardless of timing.
     """
-    conn = get_conn()
-    conn.autocommit = False
+    conn = psycopg2.connect(DATABASE_URL)
     try:
         results = []
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -47,4 +54,4 @@ def transaction(statements):
         conn.rollback()
         raise
     finally:
-        conn.autocommit = True
+        conn.close()

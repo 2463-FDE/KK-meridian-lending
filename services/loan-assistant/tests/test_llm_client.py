@@ -183,6 +183,22 @@ def test_make_client_falls_back_when_wrapping_fails(monkeypatch):
     assert isinstance(client, anthropic.Anthropic)
 
 
+# --- Review finding: an unrecognized LLM_PROVIDER (e.g. a typo like "berock")
+# silently fell into the direct-Anthropic branch instead of failing loudly --
+# fail closed on anything that isn't an exact, known provider name.
+
+def test_make_client_rejects_unrecognized_provider(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "berock")  # typo for "bedrock"
+    with pytest.raises(LLMConfigError):
+        _make_client()
+
+
+def test_model_id_rejects_unrecognized_provider(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "berock")
+    with pytest.raises(LLMConfigError):
+        _model_id()
+
+
 def test_model_id_defaults_to_direct_api_model(monkeypatch):
     monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
     assert _model_id() == llm_client.MODEL

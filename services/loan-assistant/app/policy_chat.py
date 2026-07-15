@@ -17,6 +17,8 @@ llm_client._call_api(client, prompt, system=...).
 import json
 import logging
 
+from pydantic import BaseModel, Field, ValidationError
+
 from . import llm_client
 from .corpus import load_policy_corpus
 from .embeddings import LocalTfidfEmbedder, build_idf
@@ -69,6 +71,21 @@ class PolicyChatResponseError(Exception):
     pass
 
 
+class _ModelJsonResponse(BaseModel):
+    """Strict schema for the model's raw JSON reply -- review finding:
+    `bool(data.get("answerable", True))` trusted sloppy model output two ways:
+    Python's bare `bool("false")` is True (any non-empty string is truthy), and
+    a missing key silently defaulted to answerable. Routing through this model
+    instead means a non-bool answerable value must be an actual parseable
+    boolean (Pydantic's lax bool coercion correctly reads "false"/"true" as
+    real booleans, unlike the builtin), the field must be present at all, and
+    answer must be a real, non-empty string -- anything else is a validation
+    error, not a silent guess."""
+
+    answerable: bool
+    answer: str = Field(min_length=1)
+
+
 def _build_prompt(question: str, context_text: str) -> str:
     return (
         f"Policy excerpt:\n{context_text}\n\n"
@@ -96,16 +113,17 @@ def answer_policy_question(question: str) -> PolicyAnswer:
     raw = llm_client._call_api(client, prompt, system=_SYSTEM)
 
     try:
-        data = json.loads(llm_client._strip_markdown_fences(raw))
-    except Exception as exc:
+        raw_data = json.loads(llm_client._strip_markdown_fences(raw))
+        parsed = _ModelJsonResponse(**raw_data)
+    except (json.JSONDecodeError, ValidationError, TypeError) as exc:
         safe_raw = redact_str(raw)
         log.error("policy_chat parse error response=%s", safe_raw)
         raise PolicyChatResponseError(f"Could not parse policy-chat response: {exc}") from exc
 
-    is_answerable = bool(data.get("answerable", True))
+    is_answerable = parsed.answerable
     return PolicyAnswer(
         answerable=is_answerable,
-        answer=data.get("answer", _NOT_RECORDED_ANSWER),
+        answer=parsed.answer,
         source_chunk_id=top_hit["chunk_id"] if is_answerable else None,
         # The real retrieved excerpt, not just its id -- lets a reader verify
         # the answer against the actual policy text instead of trusting it on
