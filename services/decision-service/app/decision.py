@@ -54,6 +54,15 @@ class ModelUnavailableError(RuntimeError):
     """Licensed AI scorer not configured/reachable and stubbing isn't allowed here."""
 
 
+class DecisionPersistenceError(RuntimeError):
+    """Could not durably record the decision + its audit event (decision_events).
+
+    Raised instead of swallowed: a decision that can't be proven to have happened
+    is exactly the gap the append-only audit trail exists to close, so returning
+    a decision to the caller anyway would defeat the point of recording one at all.
+    """
+
+
 def _stub_score(ssn: str) -> int:
     return 680 if ssn and ssn[-1] in "02468" else 612
 
@@ -91,11 +100,20 @@ def _stub_model_score(bureau_score: int, income: float) -> int:
     return int(bureau_score * 0.9 + (income / 1000))
 
 
-def _call_ai_scorer(bureau_score: int, application: dict) -> tuple[int, str]:
+def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
     """Call the newly licensed AI credit-scoring model. Same fail-closed contract as
     _pull_credit: a missing/unreachable licensed model must not silently score from
-    fake data outside dev/test. Returns (score, model_version_actually_used) so a
-    stubbed score is never recorded as if the real vendor produced it."""
+    fake data outside dev/test.
+
+    Returns {"score", "model_version", "reason_codes"}. reason_codes must come from
+    the vendor itself when a real call succeeds, not from _reason_codes()'s legacy
+    bureau/income shortfall formula — the licensed model also sees requested_amount
+    and term_months and may weight them, so a locally-guessed reason could name a
+    driver that isn't actually why the real model scored this applicant the way it
+    did (review finding). A real response that omits reason_codes fails closed
+    (ModelUnavailableError) rather than falling back to that guess. The deterministic
+    dev/test stub is the one case _reason_codes() is authoritative for, since the
+    stub's score IS computed by that exact bureau/income formula (_stub_model_score)."""
     income = application.get("income", 0)
 
     if not AI_MODEL_API_KEY:
@@ -105,7 +123,11 @@ def _call_ai_scorer(bureau_score: int, application: dict) -> tuple[int, str]:
                 "to score from a fake model outside development/test."
             )
         log.warning("AI_MODEL_API_KEY not set — using deterministic dev stub score")
-        return _stub_model_score(bureau_score, income), f"{AI_MODEL_VERSION}-stub"
+        return {
+            "score": _stub_model_score(bureau_score, income),
+            "model_version": f"{AI_MODEL_VERSION}-stub",
+            "reason_codes": _reason_codes(bureau_score, income),
+        }
 
     try:
         # structured like a real call; in dev/test there's no live vendor endpoint.
@@ -121,11 +143,34 @@ def _call_ai_scorer(bureau_score: int, application: dict) -> tuple[int, str]:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json()["score"], AI_MODEL_VERSION
+        body = resp.json()
+        reason_codes = body.get("reason_codes")
+        if reason_codes is None:
+            # The vendor scored the applicant but didn't tell us why. Guessing from
+            # the legacy bureau/income formula risks handing a denied applicant a
+            # legally-required reason that wasn't the model's actual driver — fail
+            # closed instead, same as an unreachable model.
+            raise ModelUnavailableError(
+                "AI scorer response omitted reason_codes — refusing to guess an "
+                "adverse-action reason from a formula the licensed model may not "
+                "actually be using (it also weighs requested_amount/term_months, "
+                "unlike the legacy bureau/income-only heuristic)."
+            )
+        return {
+            "score": body["score"],
+            "model_version": AI_MODEL_VERSION,
+            "reason_codes": reason_codes,
+        }
+    except ModelUnavailableError:
+        raise
     except Exception:
         if not ALLOW_MODEL_STUB:
             raise
-        return _stub_model_score(bureau_score, income), f"{AI_MODEL_VERSION}-stub"
+        return {
+            "score": _stub_model_score(bureau_score, income),
+            "model_version": f"{AI_MODEL_VERSION}-stub",
+            "reason_codes": _reason_codes(bureau_score, income),
+        }
 
 
 def _reason_codes(bureau_score: int, income: float) -> list[str]:
@@ -143,11 +188,14 @@ def _reason_codes(bureau_score: int, income: float) -> list[str]:
 
 
 def _run_model(bureau_score: int, application: dict) -> dict:
-    """Score via the licensed AI scorer (or its dev/test stub), decide, and map
-    adverse-action reasons to whichever input actually drove the score down."""
+    """Score via the licensed AI scorer (or its dev/test stub), decide, and report
+    the adverse-action reasons the scorer itself said actually drove the score down
+    (see _call_ai_scorer — never re-derived locally for a real vendor response)."""
     time.sleep(0.05)  # stand-in for a slow scorecard pass on the request thread
     income = application.get("income", 0)
-    model_score, model_version = _call_ai_scorer(bureau_score, application)
+    scored = _call_ai_scorer(bureau_score, application)
+    model_score = scored["score"]
+    model_version = scored["model_version"]
     top_features = {
         "bureau_score": bureau_score,
         "income": income,
@@ -165,7 +213,7 @@ def _run_model(bureau_score: int, application: dict) -> dict:
         }
 
     decision_outcome = "deny" if model_score < 600 else "refer"
-    reason_codes = _reason_codes(bureau_score, income) or [REASON_INSUFFICIENT_INCOME]
+    reason_codes = scored["reason_codes"] or [REASON_INSUFFICIENT_INCOME]
     return {
         "score": model_score,
         "decision": decision_outcome,
@@ -177,42 +225,49 @@ def _run_model(bureau_score: int, application: dict) -> dict:
 
 def decide(application: dict) -> dict:
     """Full synchronous decisioning chain. Persists the legacy outcome-only
-    `decisions` row plus an append-only `decision_events` row (inputs, model
-    score/version, top features, reason codes) for every decision."""
+    `decisions` row and the append-only `decision_events` row (inputs, model
+    score/version, top features, reason codes) as ONE transaction — both land or
+    neither does, so a decision is never returned to the caller without the audit
+    row that proves it happened (review finding: the two used to be written
+    separately with each failure only logged, letting a decision commit with no
+    matching audit event when the second insert failed silently)."""
     bureau_score = _pull_credit(application.get("ssn", ""))
     result = _run_model(bureau_score, application)
     app_id = application.get("app_id")
 
     try:
-        db.query(
-            "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
-            "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
-            (app_id, result["decision"]),
-        )
-    except Exception as e:  # noqa
-        log.warning("could not persist decision: %s", e)
-
-    try:
-        db.query(
-            "INSERT INTO decision_events "
-            "(app_id, requested_amount, term_months, annual_income, bureau_score, "
-            " model_score, model_version, top_features, decision, reason_codes) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        db.transaction([
             (
-                app_id,
-                application.get("requested_amount"),
-                application.get("term_months"),
-                application.get("income"),
-                bureau_score,
-                result["score"],
-                result["model_version"],
-                json.dumps(result["top_features"]),
-                result["decision"],
-                json.dumps(result["reason_codes"]),
+                "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
+                "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
+                (app_id, result["decision"]),
             ),
-        )
-    except Exception as e:  # noqa
-        log.warning("could not persist decision_event: %s", e)
+            (
+                "INSERT INTO decision_events "
+                "(app_id, requested_amount, term_months, annual_income, bureau_score, "
+                " model_score, model_version, top_features, decision, reason_codes) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    app_id,
+                    application.get("requested_amount"),
+                    application.get("term_months"),
+                    application.get("income"),
+                    bureau_score,
+                    result["score"],
+                    result["model_version"],
+                    json.dumps(result["top_features"]),
+                    result["decision"],
+                    json.dumps(result["reason_codes"]),
+                ),
+            ),
+        ])
+    except Exception as e:
+        log.error("could not persist decision + decision_event: %s", e)
+        raise DecisionPersistenceError(
+            f"app_id={app_id}: decision computed ({result['decision']}, score="
+            f"{result['score']}) but could not be durably recorded — refusing to "
+            "report an outcome with no matching audit trail."
+        ) from e
 
     log.info(
         "GET /decision app_id=%s model_score=%s decision=%s reason_codes=%s",

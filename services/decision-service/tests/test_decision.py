@@ -3,9 +3,15 @@ reason-code mapping.
 
 Both `decide()` tests use the deterministic stub bureau AND model paths: there is no
 live Experian or licensed AI scorer in the test environment, so both calls fall back to
-their deterministic stubs. Persistence (both `decisions` and `decision_events`) is
-best-effort and swallowed when no DB is present, so these tests exercise the scoring
-chain's outcome without a database.
+their deterministic stubs.
+
+Persistence used to be best-effort and swallowed when no DB was present -- that was
+itself the review finding this PR fixes (a decision could be returned with no
+matching audit row). `decide()` now requires its `decisions` + `decision_events`
+transaction to succeed. The `_stub_persistence` fixture below stubs `db.transaction`
+to succeed by default so the scoring-chain tests below don't need a live Postgres;
+`test_decide_raises_when_audit_persistence_fails` overrides that stub to prove
+`decide()` actually fails closed when persistence breaks.
 """
 import importlib
 
@@ -13,6 +19,11 @@ import pytest
 
 from app import config, decision
 from app.decision import CreditBureauUnavailableError, decide
+
+
+@pytest.fixture(autouse=True)
+def _stub_persistence(monkeypatch):
+    monkeypatch.setattr(decision.db, "transaction", lambda statements: [[], []])
 
 
 def test_clear_approve():
@@ -78,10 +89,12 @@ def test_unset_environment_and_key_defaults_closed_not_open(monkeypatch):
 def test_missing_model_key_stubs_in_dev(monkeypatch):
     monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "")
     monkeypatch.setattr(decision, "ALLOW_MODEL_STUB", True)
-    score, model_version = decision._call_ai_scorer(680, {"income": 100000})
-    assert score == decision._stub_model_score(680, 100000)
+    scored = decision._call_ai_scorer(680, {"income": 100000})
+    assert scored["score"] == decision._stub_model_score(680, 100000)
     # A stubbed score must never be recorded as if the real vendor produced it.
-    assert model_version.endswith("-stub")
+    assert scored["model_version"].endswith("-stub")
+    # The stub IS the bureau/income formula, so the heuristic is authoritative here.
+    assert scored["reason_codes"] == decision._reason_codes(680, 100000)
 
 
 def test_missing_model_key_fails_closed_outside_dev(monkeypatch):
@@ -94,6 +107,42 @@ def test_missing_model_key_fails_closed_outside_dev(monkeypatch):
     # raised after that reload.
     with pytest.raises(decision.ModelUnavailableError):
         decision._call_ai_scorer(680, {"income": 100000})
+
+
+# Review finding: a real vendor response's score alone isn't enough -- the licensed
+# model also sees requested_amount/term_months, which the legacy bureau/income
+# reason-code formula knows nothing about. A response missing reason_codes must
+# fail closed rather than let _run_model() guess from that formula.
+def test_real_scorer_response_missing_reason_codes_fails_closed(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"score": 550}  # no reason_codes key at all
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(decision.ModelUnavailableError):
+        decision._call_ai_scorer(680, {"income": 30000})
+
+
+def test_real_scorer_response_with_reason_codes_is_used_verbatim(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"score": 550, "reason_codes": ["high_debt_to_income"]}
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    scored = decision._call_ai_scorer(680, {"income": 30000})
+    assert scored["score"] == 550
+    assert scored["reason_codes"] == ["high_debt_to_income"]
+    assert not scored["model_version"].endswith("-stub")
 
 
 # --- Week 3: adverse-action reasons map to whichever input actually drove the score
@@ -130,3 +179,33 @@ def test_decide_returns_specific_reason_code_on_deny():
     assert result["adverse_action_reason"] == result["reason_codes"][0]
     # Not the old generic nearest-checkbox string.
     assert result["adverse_action_reason"] != "purchasing history"
+
+
+# --- Review finding: decisions + decision_events must commit or fail together --
+# a decision was previously returned to the caller even when its audit row failed
+# to write, since each insert was wrapped in its own try/except that only logged.
+
+def test_decide_raises_when_audit_persistence_fails(monkeypatch):
+    def _boom(statements):
+        raise RuntimeError("simulated DB failure")
+
+    monkeypatch.setattr(decision.db, "transaction", _boom)
+    with pytest.raises(decision.DecisionPersistenceError):
+        decide({"app_id": 5, "ssn": "123456782", "income": 100000})
+
+
+def test_decide_persists_decision_and_event_in_one_transaction_call(monkeypatch):
+    """Both rows must go through the SAME db.transaction() call (one atomic
+    commit/rollback), not two separate db.query() calls that could partially
+    succeed."""
+    calls = []
+    monkeypatch.setattr(
+        decision.db, "transaction",
+        lambda statements: calls.append(statements) or [[], []],
+    )
+    decide({"app_id": 6, "ssn": "123456782", "income": 100000})
+    assert len(calls) == 1
+    statements = calls[0]
+    assert len(statements) == 2
+    assert "INSERT INTO decisions" in statements[0][0]
+    assert "INSERT INTO decision_events" in statements[1][0]

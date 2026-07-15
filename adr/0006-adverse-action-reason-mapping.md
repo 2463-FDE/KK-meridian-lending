@@ -93,9 +93,35 @@ future-roadmap work, not in scope for this week's deliverable.
   needs to grow with it — it is not a generic feature-attribution framework.
 - **Con:** the synchronous chain is now longer and slower under load, not shorter.
   This ADR documents that risk; it does not fix it.
-- **Con:** `decision_events` and `decisions` are two separate writes with no
-  transactional link between them (this project has no cross-table transaction
-  wrapping anywhere yet) — a partial failure could leave one written and not the
-  other. Both inserts are independently best-effort/logged-on-failure, matching the
-  existing `decisions` insert's own resilience posture; a true fix needs a single
-  transaction, deferred alongside the async rework above.
+- **Con:** ~~`decision_events` and `decisions` are two separate writes with no
+  transactional link between them...~~ **Fixed (review, same PR):** both inserts
+  now go through one `db.transaction()` call (`app/db.py`) — they commit or roll
+  back together, and `decide()` raises `DecisionPersistenceError` instead of
+  swallowing a persistence failure, so a decision is never returned to the caller
+  without the audit row that proves it happened. See `app/decision.py::decide()`
+  and `tests/test_decision.py::test_decide_persists_decision_and_event_in_one_transaction_call`.
+
+## Addendum (review fixes, same PR)
+
+Three findings from review, all fixed before merge:
+
+1. **Non-transactional dual write (above).** Fixed — one `db.transaction()` call,
+   fail-closed on error.
+2. **Reason codes could misattribute a real vendor score's driver.** `_reason_codes()`'s
+   bureau/income shortfall formula is only true of the *stub* score, which is
+   literally computed from that formula (`_stub_model_score`). A real licensed-model
+   response also weighs `requested_amount`/`term_months`, which that formula knows
+   nothing about — reporting a locally-guessed reason for a real vendor score risked
+   naming a driver that wasn't actually why the model scored the applicant that way.
+   Fixed: `_call_ai_scorer()` now requires `reason_codes` in a real vendor response
+   and raises `ModelUnavailableError` (fails closed) if the vendor omits them, rather
+   than falling back to the local heuristic. The heuristic remains authoritative only
+   for the deterministic dev/test stub path, where it's known to be exactly correct.
+3. **`decision_events` only existed in `db/init/`.** A persistent-volume deployment
+   created before this PR would never pick up the new table (`db/init/*.sql` only
+   runs on a *fresh* volume's first boot) — every `/decisions` call would then fail
+   the transaction above. Fixed: added `db/migrations/0004_add_decision_events.sql`
+   (mirrors `db/init/004_decision_events.sql`, hand-applied per this repo's existing
+   migration convention), and `/health` now calls `_decision_events_ready()` to
+   verify the table actually exists before reporting healthy, the same pattern
+   already used for the `EXPERIAN_KEY`/`AI_MODEL_API_KEY` readiness checks above.

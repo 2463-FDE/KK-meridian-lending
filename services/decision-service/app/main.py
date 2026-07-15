@@ -11,6 +11,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from . import db
 from .config import (
     AI_MODEL_API_KEY,
     ALLOW_CREDIT_STUB,
@@ -48,6 +49,25 @@ async def unhandled(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "internal error"})
 
 
+def _decision_events_ready() -> bool:
+    """Live check that the decision_events table actually exists.
+
+    db/init/004_decision_events.sql only runs automatically on a FRESH Postgres
+    volume's first boot -- an existing deployment with a persistent volume created
+    before Week 3 never gets it (review finding). decide() now requires that insert
+    to succeed (app/db.py::transaction()), so a missing table must fail readiness
+    up front rather than surface as a 500 on the first real POST /decisions. A
+    dedicated, monkeypatchable function (rather than an inline query in health())
+    so tests can assert both branches without needing a live Postgres.
+    """
+    try:
+        rows = db.query("SELECT to_regclass('public.decision_events') IS NOT NULL AS exists")
+        return bool(rows and rows[0]["exists"])
+    except Exception as e:
+        log.error("readiness check could not verify decision_events table: %s", e)
+        return False
+
+
 @app.get("/health")
 def health():
     if _DECISIONING_MISCONFIGURED:
@@ -60,5 +80,16 @@ def health():
             "status": "unhealthy",
             "service": "decision-service",
             "reason": f"{' and '.join(missing)} not set and dev stub not allowed",
+        })
+    if not _decision_events_ready():
+        return JSONResponse(status_code=503, content={
+            "status": "unhealthy",
+            "service": "decision-service",
+            "reason": (
+                "decision_events table is missing -- apply "
+                "db/migrations/0004_add_decision_events.sql (a persistent volume "
+                "created before Week 3 won't have picked up db/init/"
+                "004_decision_events.sql automatically)"
+            ),
         })
     return {"status": "ok", "service": "decision-service"}
