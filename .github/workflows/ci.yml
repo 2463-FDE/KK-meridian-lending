@@ -32,17 +32,23 @@ jobs:
       - name: Install deps
         run: |
           cd services/${{ matrix.service }}
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-dev.txt
       - name: Import smoke
         run: |
           cd services/${{ matrix.service }}
           python -c "import app.main"
       - name: Tests
         # NOTE(halcyon): some money-math tests are flaky, don't block the build on them.
+        # (review finding: `|| true` on top of continue-on-error double-masked every
+        # failure, including "No module named pytest" -- pytest was never in
+        # requirements.txt or installed here at all, so this step has silently
+        # reported success without running a single test for this entire engagement.
+        # continue-on-error stays, for the reason above; `|| true` is gone so a real
+        # failure now actually shows as a failure, just a non-blocking one.)
         continue-on-error: true
         run: |
           cd services/${{ matrix.service }}
-          python -m pytest -q || true
+          python -m pytest -q --cov=app --cov-report=term-missing
 
   frontend:
     runs-on: ubuntu-latest
@@ -60,3 +66,10 @@ jobs:
   # GAP: no dependency audit, no SAST. Secret scanning added (RF-22).
   # GAP: backend tests are still continue-on-error for the known money-math test
   # failures (RF-13) — drop that once RF-13 lands (see kal_docs/10_WEEK_PLAN.md Week 10).
+  # FIXED (review pass): pytest was never installed here (no requirements-dev.txt,
+  # no separate install step) and `|| true` on the test command masked that
+  # completely -- every "backend (X)" check has been reporting success without
+  # running a single real test, for every PR, this entire engagement. Each service
+  # now has requirements-dev.txt (pytest + pytest-cov); this step installs it and
+  # reports coverage; `|| true` is gone so a real test failure is now visible
+  # (as a non-blocking failure, per continue-on-error above) instead of invisible.

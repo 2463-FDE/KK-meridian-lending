@@ -11,6 +11,8 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 
 # next.js
 frontend/.next/
