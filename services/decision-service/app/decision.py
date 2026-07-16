@@ -18,6 +18,7 @@ import json
 import time
 
 import httpx
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import (
     AI_MODEL_API_KEY,
@@ -61,6 +62,30 @@ class DecisionPersistenceError(RuntimeError):
     is exactly the gap the append-only audit trail exists to close, so returning
     a decision to the caller anyway would defeat the point of recording one at all.
     """
+
+
+class _ScorerResponse(BaseModel):
+    """Strict schema for a real vendor scorer response.
+
+    Review finding: the old check only confirmed score/reason_codes were present
+    (not None) -- never that they were the right *type*. A vendor drift like
+    reason_codes: "high_debt_to_income" (a string, not a list) is truthy, so it
+    sailed through: persisted to decision_events as-is, adverse_action_reason
+    became the string's first character ("h"), and the router's
+    DecisionOut(reason_codes=...) then failed response validation -- after the
+    decision_events row had already committed. Validating the full shape here,
+    before _run_model() touches the payload and before any DB write, means a
+    malformed vendor response fails closed with ModelUnavailableError instead of
+    committing a malformed audit event first.
+
+    score is bounded to a generous 0-1000 range (loose enough to cover a
+    licensed model's own scale, which needn't match a traditional 300-850 bureau
+    score) purely to catch garbage -- negative values, NaN/Infinity, or an
+    obviously wrong magnitude -- not to encode a real business threshold.
+    """
+
+    score: float = Field(ge=0, le=1000, allow_inf_nan=False)
+    reason_codes: list[str]
 
 
 def _stub_score(ssn: str) -> int:
@@ -144,29 +169,28 @@ def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
         )
         resp.raise_for_status()
         body = resp.json()
-        score = body.get("score")
-        reason_codes = body.get("reason_codes")
-        if score is None or reason_codes is None:
-            # The vendor responded but left out a field we require. Guessing a
-            # score of 0, or guessing a reason from the legacy bureau/income
-            # formula, risks a fabricated score or a legally-required reason
-            # that wasn't the model's actual driver — fail closed instead, same
-            # as an unreachable model. (Review finding: this used to be
-            # body["score"] directly, so a response missing *score* specifically
-            # raised a raw KeyError here instead of this same clean error --
-            # asymmetric with the reason_codes check right below it.)
-            missing = [name for name, val in (("score", score), ("reason_codes", reason_codes)) if val is None]
+        try:
+            validated = _ScorerResponse.model_validate(body)
+        except ValidationError as e:
+            # The vendor responded but the payload doesn't match the required
+            # shape — missing field, wrong type (e.g. reason_codes as a bare
+            # string instead of a list), or a score outside a sane range.
+            # Guessing a score, or guessing a reason from the legacy
+            # bureau/income formula, risks a fabricated score or a
+            # legally-required reason that wasn't the model's actual driver —
+            # fail closed instead, same as an unreachable model, and before
+            # anything reaches the database.
             raise ModelUnavailableError(
-                f"AI scorer response missing required field(s) {missing} — refusing "
-                "to guess a score or an adverse-action reason from a formula the "
+                f"AI scorer response failed validation: {e} — refusing to guess "
+                "a score or an adverse-action reason from a formula the "
                 "licensed model may not actually be using (it also weighs "
                 "requested_amount/term_months, unlike the legacy bureau/income-only "
                 "heuristic)."
-            )
+            ) from e
         return {
-            "score": score,
+            "score": validated.score,
             "model_version": AI_MODEL_VERSION,
-            "reason_codes": reason_codes,
+            "reason_codes": validated.reason_codes,
         }
     except ModelUnavailableError:
         raise

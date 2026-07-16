@@ -165,6 +165,62 @@ def test_real_scorer_response_missing_score_fails_closed_cleanly(monkeypatch):
         decision._call_ai_scorer(680, {"income": 30000})
 
 
+# --- Review finding: score/reason_codes were presence-checked but never
+# type-checked. A vendor drift like reason_codes: "high_debt_to_income" (a
+# string, not a list) is truthy, so it sailed straight through the old check --
+# persisted to decision_events as-is, adverse_action_reason became the string's
+# first character, and DecisionOut(reason_codes=...) then failed response
+# validation *after* the DB transaction had already committed. These prove the
+# fix rejects each malformed shape before anything reaches the database.
+
+def test_real_scorer_response_with_string_reason_codes_fails_closed(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            # A string, not a list -- truthy, so the old presence-only check let
+            # this straight through.
+            return {"score": 550, "reason_codes": "high_debt_to_income"}
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(decision.ModelUnavailableError):
+        decision._call_ai_scorer(680, {"income": 30000})
+
+
+def test_real_scorer_response_with_non_numeric_score_fails_closed(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"score": "not-a-number", "reason_codes": ["high_debt_to_income"]}
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(decision.ModelUnavailableError):
+        decision._call_ai_scorer(680, {"income": 30000})
+
+
+def test_real_scorer_response_with_out_of_range_score_fails_closed(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            # Negative score -- clearly garbage, not a real vendor scale.
+            return {"score": -50, "reason_codes": ["high_debt_to_income"]}
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(decision.ModelUnavailableError):
+        decision._call_ai_scorer(680, {"income": 30000})
+
+
 # --- Week 3: adverse-action reasons map to whichever input actually drove the score
 # down, instead of a fixed "purchasing history" string regardless of applicant.
 
