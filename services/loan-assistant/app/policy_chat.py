@@ -12,7 +12,7 @@ Reuses llm_client's guardrails (provider-agnostic client construction, retry/
 timeout wiring, markdown-fence stripping) rather than duplicating them -- this
 prompt is a different shape (grounding excerpt + question, not application
 data), so it gets its own system prompt, passed into the now-generalized
-llm_client._call_api(client, prompt, system=...).
+llm_client.call_api(client, prompt, system=...).
 """
 import json
 import logging
@@ -109,11 +109,11 @@ def answer_policy_question(question: str) -> PolicyAnswer:
 
     top_hit = hits[0]
     prompt = _build_prompt(safe_question, top_hit["text"])
-    client = llm_client._make_client()
-    raw = llm_client._call_api(client, prompt, system=_SYSTEM)
+    client = llm_client.make_client()
+    raw = llm_client.call_api(client, prompt, system=_SYSTEM)
 
     try:
-        raw_data = json.loads(llm_client._strip_markdown_fences(raw))
+        raw_data = json.loads(llm_client.strip_markdown_fences(raw))
         parsed = _ModelJsonResponse(**raw_data)
     except (json.JSONDecodeError, ValidationError, TypeError) as exc:
         safe_raw = redact_str(raw)

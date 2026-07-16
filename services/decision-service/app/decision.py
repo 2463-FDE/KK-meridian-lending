@@ -144,20 +144,27 @@ def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
         )
         resp.raise_for_status()
         body = resp.json()
+        score = body.get("score")
         reason_codes = body.get("reason_codes")
-        if reason_codes is None:
-            # The vendor scored the applicant but didn't tell us why. Guessing from
-            # the legacy bureau/income formula risks handing a denied applicant a
-            # legally-required reason that wasn't the model's actual driver — fail
-            # closed instead, same as an unreachable model.
+        if score is None or reason_codes is None:
+            # The vendor responded but left out a field we require. Guessing a
+            # score of 0, or guessing a reason from the legacy bureau/income
+            # formula, risks a fabricated score or a legally-required reason
+            # that wasn't the model's actual driver — fail closed instead, same
+            # as an unreachable model. (Review finding: this used to be
+            # body["score"] directly, so a response missing *score* specifically
+            # raised a raw KeyError here instead of this same clean error --
+            # asymmetric with the reason_codes check right below it.)
+            missing = [name for name, val in (("score", score), ("reason_codes", reason_codes)) if val is None]
             raise ModelUnavailableError(
-                "AI scorer response omitted reason_codes — refusing to guess an "
-                "adverse-action reason from a formula the licensed model may not "
-                "actually be using (it also weighs requested_amount/term_months, "
-                "unlike the legacy bureau/income-only heuristic)."
+                f"AI scorer response missing required field(s) {missing} — refusing "
+                "to guess a score or an adverse-action reason from a formula the "
+                "licensed model may not actually be using (it also weighs "
+                "requested_amount/term_months, unlike the legacy bureau/income-only "
+                "heuristic)."
             )
         return {
-            "score": body["score"],
+            "score": score,
             "model_version": AI_MODEL_VERSION,
             "reason_codes": reason_codes,
         }

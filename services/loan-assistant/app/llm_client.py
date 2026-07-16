@@ -136,7 +136,7 @@ def _check_provider() -> None:
         )
 
 
-def _make_client() -> "anthropic.Anthropic | anthropic.AnthropicBedrock":
+def make_client() -> "anthropic.Anthropic | anthropic.AnthropicBedrock":
     """Build the LLM client for the configured provider. Both client classes
     expose the same .messages.create(...) interface, so nothing else in this
     module needs to know which one it got."""
@@ -200,18 +200,31 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```$", re.DOTALL)
+_OPEN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?")
+_CLOSE_FENCE_RE = re.compile(r"\n?```\s*$")
 
 
-def _strip_markdown_fences(raw: str) -> str:
+def strip_markdown_fences(raw: str) -> str:
     """Some models wrap structured output in a ```json fence despite the prompt
     explicitly saying not to (confirmed live: a real Bedrock Claude response did
     exactly this) -- strip it defensively rather than relying solely on prompt
     compliance, same defense-in-depth principle as the redactor running even
-    though only allowlisted fields reach the prompt in the first place."""
+    though only allowlisted fields reach the prompt in the first place.
+
+    Review finding on the first version: it matched the open fence, a mandatory
+    newline, content, another mandatory newline, then the close fence as ONE
+    rigid pattern -- a real response with no newline immediately before the
+    closing ``` (a perfectly normal way to fence JSON) silently failed to match
+    at all, leaving the fence in place for json.loads() to then choke on. Fixed
+    by stripping the open and close markers independently, each with an
+    optional trailing/leading newline, so the exact newline placement around
+    the closing fence no longer matters."""
     text = raw.strip()
-    match = _FENCE_RE.match(text)
-    return match.group(1) if match else text
+    if not text.startswith("```"):
+        return text
+    text = _OPEN_FENCE_RE.sub("", text, count=1)
+    text = _CLOSE_FENCE_RE.sub("", text, count=1)
+    return text.strip()
 
 
 @retry(
@@ -220,7 +233,7 @@ def _strip_markdown_fences(raw: str) -> str:
     wait=wait_exponential(multiplier=1, min=1, max=8),
     reraise=True,
 )
-def _call_api(
+def call_api(
     client: "anthropic.Anthropic | anthropic.AnthropicBedrock",
     prompt: str,
     system: str = _SYSTEM,
@@ -268,10 +281,10 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         estimated,
     )
 
-    client = _make_client()
+    client = make_client()
 
     t0 = time.monotonic()
-    raw = _call_api(client, prompt)
+    raw = call_api(client, prompt)
     elapsed = time.monotonic() - t0
 
     log.info(
@@ -281,7 +294,7 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     )
 
     try:
-        data = json.loads(_strip_markdown_fences(raw))
+        data = json.loads(strip_markdown_fences(raw))
         llm_output = _LLMOutput(**data)
     except Exception as exc:
         safe_raw = redact_str(raw)

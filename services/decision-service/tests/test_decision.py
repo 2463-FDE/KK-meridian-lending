@@ -145,6 +145,26 @@ def test_real_scorer_response_with_reason_codes_is_used_verbatim(monkeypatch):
     assert not scored["model_version"].endswith("-stub")
 
 
+def test_real_scorer_response_missing_score_fails_closed_cleanly(monkeypatch):
+    """Review finding: the first version of this check used body["score"]
+    (bracket access), so a response missing *score* specifically raised a raw
+    KeyError instead of the same clean ModelUnavailableError the missing-
+    reason_codes case already got -- asymmetric handling of two required
+    fields checked one line apart."""
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"reason_codes": ["some_reason"]}  # no score key at all
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(decision.ModelUnavailableError):
+        decision._call_ai_scorer(680, {"income": 30000})
+
+
 # --- Week 3: adverse-action reasons map to whichever input actually drove the score
 # down, instead of a fixed "purchasing history" string regardless of applicant.
 

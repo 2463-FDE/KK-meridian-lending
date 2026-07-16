@@ -19,7 +19,7 @@ def test_not_answerable_question_never_calls_llm(monkeypatch):
     def _boom(client, prompt, system=None):
         raise AssertionError("LLM must not be called for an ungrounded question")
 
-    monkeypatch.setattr(llm_client, "_call_api", _boom)
+    monkeypatch.setattr(llm_client, "call_api", _boom)
 
     result = answer_policy_question("why was application 6012 denied")
 
@@ -30,8 +30,8 @@ def test_not_answerable_question_never_calls_llm(monkeypatch):
 
 def test_answerable_question_returns_grounded_answer(monkeypatch):
     canned = json.dumps({"answerable": True, "answer": "The late fee is $35."})
-    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
-    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
 
     result = answer_policy_question("what is the late fee amount")
 
@@ -48,7 +48,7 @@ def test_not_answerable_question_has_no_source_text(monkeypatch):
     def _boom(client, prompt, system=None):
         raise AssertionError("LLM must not be called for an ungrounded question")
 
-    monkeypatch.setattr(llm_client, "_call_api", _boom)
+    monkeypatch.setattr(llm_client, "call_api", _boom)
 
     result = answer_policy_question("why was application 6012 denied")
 
@@ -57,8 +57,8 @@ def test_not_answerable_question_has_no_source_text(monkeypatch):
 
 def test_answer_handles_markdown_fenced_response(monkeypatch):
     fenced = "```json\n" + json.dumps({"answerable": True, "answer": "18 years old."}) + "\n```"
-    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: fenced)
-    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt, system=None: fenced)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
 
     result = answer_policy_question("what is the minimum age to apply for a loan")
 
@@ -78,8 +78,8 @@ def test_question_is_redacted_before_use(monkeypatch):
         captured["prompt"] = prompt
         return json.dumps({"answerable": True, "answer": "18 years old."})
 
-    monkeypatch.setattr(llm_client, "_call_api", _capture)
-    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", _capture)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
 
     ssn_question = "what is the minimum age to apply for a loan, my ssn is 412-55-9981"
     answer_policy_question(ssn_question)
@@ -96,8 +96,8 @@ def test_string_false_is_parsed_as_real_false(monkeypatch):
     # The bug this guards against: Python's builtin bool("false") is True.
     assert bool("false") is True  # sanity-check the bug still exists in Python itself
     canned = json.dumps({"answerable": "false", "answer": "Not covered by this excerpt."})
-    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
-    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
     monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
 
     result = answer_policy_question("what is the late fee amount")
@@ -110,8 +110,8 @@ def test_string_false_is_parsed_as_real_false(monkeypatch):
 def test_missing_answerable_field_fails_closed(monkeypatch):
     # No "answerable" key at all -- must be rejected, not defaulted to True.
     canned = json.dumps({"answer": "Some answer with no answerable flag."})
-    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
-    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
     monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
 
     with pytest.raises(PolicyChatResponseError):
@@ -120,8 +120,8 @@ def test_missing_answerable_field_fails_closed(monkeypatch):
 
 def test_empty_answer_string_is_rejected(monkeypatch):
     canned = json.dumps({"answerable": True, "answer": ""})
-    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
-    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
     monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
 
     with pytest.raises(PolicyChatResponseError):
@@ -133,8 +133,8 @@ def test_non_dict_json_response_is_rejected(monkeypatch):
     # a bare string or array) must fail closed, not crash with an unhandled
     # TypeError from ** on a non-mapping.
     canned = json.dumps(["not", "an", "object"])
-    monkeypatch.setattr(llm_client, "_call_api", lambda client, prompt, system=None: canned)
-    monkeypatch.setattr(llm_client, "_make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt, system=None: canned)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
     monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
 
     with pytest.raises(PolicyChatResponseError):

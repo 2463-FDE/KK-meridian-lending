@@ -102,7 +102,7 @@ def policy_chat(body: PolicyChatIn):
     # here, this doesn't touch per-applicant financials the way /summary does.
     #
     # Same llm_client exception -> HTTP status mapping as summarize() above --
-    # answer_policy_question() calls the same guardrailed _call_api(), so it can
+    # answer_policy_question() calls the same guardrailed call_api(), so it can
     # raise the same LLMTimeoutError on a slow/failed Bedrock or Anthropic call.
     try:
         return answer_policy_question(body.question)

@@ -8,7 +8,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # Which backend calls Claude. "anthropic" (default) = direct Anthropic API,
 # reads ANTHROPIC_API_KEY. "bedrock" = AWS Bedrock, reads standard AWS env vars
 # (AWS_BEARER_TOKEN_BEDROCK or the normal AWS credential chain, AWS_REGION) --
-# see llm_client.py::_make_client(). Config-driven so one vendor is never
+# see llm_client.py::make_client(). Config-driven so one vendor is never
 # hardcoded, same principle as the CreditBureauClient abstraction planned for
 # decision-service (RF-21).
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")

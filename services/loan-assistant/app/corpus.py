@@ -41,22 +41,30 @@ def _chunk(text: str, doc_id: str, max_chars: int = 500) -> list[dict]:
     about a section by its heading name ("Eligibility", "Credit decisioning")
     retrieved that bare heading as the top hit instead of the actual bullet list
     right after it, since the content paragraph never repeats the heading word.
+
+    Review finding on the first version of this fix: it tracked a single
+    `pending_header` scalar, so two consecutive headers (e.g. an "## H2"
+    immediately followed by an "### H3" before any body text) silently dropped
+    the first one -- it was overwritten, never appended anywhere, with no error.
+    Fixed by accumulating a list of pending headers instead of one scalar, so
+    any run of consecutive headers merges together with whatever content
+    eventually follows (or with each other, if a header sits at end of file).
     """
     raw_paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     paragraphs: list[str] = []
-    pending_header: str | None = None
+    pending_headers: list[str] = []
     for para in raw_paragraphs:
         if _HEADER_RE.match(para) and "\n" not in para:
-            pending_header = para
+            pending_headers.append(para)
             continue
-        if pending_header:
-            para = f"{pending_header}\n{para}"
-            pending_header = None
+        if pending_headers:
+            para = "\n".join(pending_headers + [para])
+            pending_headers = []
         paragraphs.append(para)
-    if pending_header:
-        # A header with nothing after it (end of file) -- keep it rather than
-        # silently dropping it.
-        paragraphs.append(pending_header)
+    if pending_headers:
+        # Trailing header(s) with nothing after them (end of file) -- keep
+        # them rather than silently dropping them.
+        paragraphs.append("\n".join(pending_headers))
 
     chunks = []
     for i, para in enumerate(paragraphs):

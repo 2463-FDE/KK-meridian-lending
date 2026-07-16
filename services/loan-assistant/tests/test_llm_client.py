@@ -17,7 +17,7 @@ from app.llm_client import (
     LLMConfigError,
     LLMInsufficientDataError,
     _build_prompt,
-    _make_client,
+    make_client,
     _model_id,
     summarize_application,
 )
@@ -94,7 +94,7 @@ def test_summarize_application_fills_applicant_name_from_trusted_data(monkeypatc
             "flags": [],
         }
     )
-    monkeypatch.setattr("app.llm_client._call_api", lambda client, prompt: llm_json)
+    monkeypatch.setattr("app.llm_client.call_api", lambda client, prompt: llm_json)
 
     result = summarize_application(APP_DATA)
 
@@ -118,7 +118,7 @@ def test_summarize_application_ignores_any_name_the_model_tries_to_return(monkey
             "flags": [],
         }
     )
-    monkeypatch.setattr("app.llm_client._call_api", lambda client, prompt: llm_json)
+    monkeypatch.setattr("app.llm_client.call_api", lambda client, prompt: llm_json)
 
     result = summarize_application(APP_DATA)
 
@@ -133,7 +133,7 @@ def test_summarize_application_ignores_any_name_the_model_tries_to_return(monkey
 def test_make_client_defaults_to_anthropic(monkeypatch):
     monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
-    client = _make_client()
+    client = make_client()
     assert isinstance(client, anthropic.Anthropic)
     assert not isinstance(client, anthropic.AnthropicBedrock)
 
@@ -141,7 +141,7 @@ def test_make_client_defaults_to_anthropic(monkeypatch):
 def test_make_client_uses_bedrock_when_configured(monkeypatch):
     monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-bedrock-token-not-real")
-    client = _make_client()
+    client = make_client()
     assert isinstance(client, anthropic.AnthropicBedrock)
 
 
@@ -162,7 +162,7 @@ def test_make_client_wraps_for_tracing_when_available(monkeypatch):
         return client
 
     monkeypatch.setattr(llm_client, "wrap_anthropic", _spy_wrap)
-    client = _make_client()
+    client = make_client()
 
     assert len(calls) == 1
     assert calls[0] is client
@@ -179,7 +179,7 @@ def test_make_client_falls_back_when_wrapping_fails(monkeypatch):
     monkeypatch.setattr(llm_client, "wrap_anthropic", _broken_wrap)
 
     # Must not raise -- a broken trace wrapper must never block a real call.
-    client = _make_client()
+    client = make_client()
     assert isinstance(client, anthropic.Anthropic)
 
 
@@ -190,7 +190,7 @@ def test_make_client_falls_back_when_wrapping_fails(monkeypatch):
 def test_make_client_rejects_unrecognized_provider(monkeypatch):
     monkeypatch.setattr(config, "LLM_PROVIDER", "berock")  # typo for "bedrock"
     with pytest.raises(LLMConfigError):
-        _make_client()
+        make_client()
 
 
 def test_model_id_rejects_unrecognized_provider(monkeypatch):
@@ -239,7 +239,7 @@ def test_summarize_application_strips_markdown_json_fence(monkeypatch):
         )
         + "\n```"
     )
-    monkeypatch.setattr("app.llm_client._call_api", lambda client, prompt: fenced)
+    monkeypatch.setattr("app.llm_client.call_api", lambda client, prompt: fenced)
 
     result = summarize_application(APP_DATA)
 
@@ -249,14 +249,14 @@ def test_summarize_application_strips_markdown_json_fence(monkeypatch):
 
 def test_strip_markdown_fences_leaves_plain_json_unchanged():
     plain = '{"a": 1}'
-    assert llm_client._strip_markdown_fences(plain) == plain
+    assert llm_client.strip_markdown_fences(plain) == plain
 
 
 def test_strip_markdown_fences_strips_json_fence():
     fenced = '```json\n{"a": 1}\n```'
-    assert llm_client._strip_markdown_fences(fenced) == '{"a": 1}'
+    assert llm_client.strip_markdown_fences(fenced) == '{"a": 1}'
 
 
 def test_strip_markdown_fences_strips_bare_fence():
     fenced = '```\n{"a": 1}\n```'
-    assert llm_client._strip_markdown_fences(fenced) == '{"a": 1}'
+    assert llm_client.strip_markdown_fences(fenced) == '{"a": 1}'
