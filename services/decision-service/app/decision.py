@@ -244,7 +244,22 @@ def _run_model(bureau_score: int, application: dict) -> dict:
         }
 
     decision_outcome = "deny" if model_score < 600 else "refer"
-    reason_codes = scored["reason_codes"] or [REASON_INSUFFICIENT_INCOME]
+    reason_codes = scored["reason_codes"]
+    if not reason_codes:
+        if model_version.endswith("-stub"):
+            # The dev/test stub score IS computed by the bureau/income formula
+            # (_stub_model_score), so _reason_codes() is authoritative here.
+            reason_codes = _reason_codes(bureau_score, income)
+        else:
+            # Real vendor call succeeded with a sub-660 score but no reason_codes.
+            # Filling in a locally-guessed reason (e.g. REASON_INSUFFICIENT_INCOME)
+            # would persist an adverse-action reason the licensed model never
+            # actually gave -- an audit/compliance failure. Fail closed instead.
+            raise ModelUnavailableError(
+                f"AI scorer returned score={model_score} (<660) with empty "
+                "reason_codes -- refusing to fabricate an adverse-action reason "
+                "the licensed model never gave."
+            )
     return {
         "score": model_score,
         "decision": decision_outcome,

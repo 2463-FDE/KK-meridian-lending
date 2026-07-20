@@ -9,9 +9,31 @@ the same file.
 from fastapi.testclient import TestClient
 
 from app import main
-from app.llm_client import LLMResponseError, LLMTimeoutError
+from app.llm_client import LLMCostGuardError, LLMResponseError, LLMTimeoutError
 
 client = TestClient(main.app, raise_server_exceptions=False)
+
+
+# Review finding: an arbitrary-length question skipped the MAX_INPUT_TOKENS guard
+# summarize_application() enforces, risking oversized paid LLM calls. PolicyChatIn
+# now caps question length at the schema layer (422)...
+def test_policy_chat_rejects_question_over_schema_max_length():
+    resp = client.post("/policy-chat", json={"question": "x" * 4001})
+
+    assert resp.status_code == 422
+
+
+# ...and answer_policy_question() itself enforces the real token-budget guard
+# (against system prompt + retrieved excerpt), mapped to 400 same as /summary.
+def test_policy_chat_maps_llm_cost_guard_error_to_400(monkeypatch):
+    def _boom(question):
+        raise LLMCostGuardError("Estimated input tokens (5000) exceeds guard (2000).")
+
+    monkeypatch.setattr(main, "answer_policy_question", _boom)
+
+    resp = client.post("/policy-chat", json={"question": "what is the late fee amount"})
+
+    assert resp.status_code == 400
 
 
 def test_policy_chat_maps_llm_timeout_to_504(monkeypatch):

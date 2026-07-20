@@ -109,6 +109,17 @@ def answer_policy_question(question: str) -> PolicyAnswer:
 
     top_hit = hits[0]
     prompt = _build_prompt(safe_question, top_hit["text"])
+
+    # Same cost guard summarize_application() runs -- an arbitrary-length question
+    # (up to PolicyChatIn's 4000-char schema cap) was reaching the LLM unchecked,
+    # letting a large-but-schema-valid question trigger an oversized paid call.
+    estimated = llm_client._estimate_tokens(_SYSTEM + prompt)
+    if estimated > llm_client.MAX_INPUT_TOKENS:
+        raise llm_client.LLMCostGuardError(
+            f"Estimated input tokens ({estimated}) exceeds guard "
+            f"({llm_client.MAX_INPUT_TOKENS}). Ask a shorter question."
+        )
+
     client = llm_client.make_client()
     raw = llm_client.call_api(client, prompt, system=_SYSTEM)
 

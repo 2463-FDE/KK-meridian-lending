@@ -10,7 +10,7 @@ import os
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import ORIGINATION_URL
 from .llm_client import (
@@ -92,7 +92,11 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
 
 
 class PolicyChatIn(BaseModel):
-    question: str
+    # Coarse pre-filter (422) before the request even reaches answer_policy_question() --
+    # the real cost guard is the MAX_INPUT_TOKENS check run there against the actual
+    # system prompt + retrieved excerpt, this just rejects obviously-abusive payloads
+    # (e.g. a multi-MB "question") for free at the schema layer.
+    question: str = Field(min_length=1, max_length=4000)
 
 
 @app.post("/policy-chat", response_model=PolicyAnswer)
@@ -106,6 +110,8 @@ def policy_chat(body: PolicyChatIn):
     # raise the same LLMTimeoutError on a slow/failed Bedrock or Anthropic call.
     try:
         return answer_policy_question(body.question)
+    except LLMCostGuardError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LLMTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except LLMResponseError as exc:

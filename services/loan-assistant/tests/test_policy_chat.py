@@ -11,6 +11,7 @@ import json
 import pytest
 
 from app import llm_client, policy_chat
+from app.llm_client import LLMCostGuardError
 from app.policy_chat import PolicyChatResponseError, answer_policy_question
 
 
@@ -126,6 +127,21 @@ def test_empty_answer_string_is_rejected(monkeypatch):
 
     with pytest.raises(PolicyChatResponseError):
         answer_policy_question("what is the late fee amount")
+
+
+# Review finding: policy_chat.py sent an arbitrary-length question straight to
+# the LLM, skipping the MAX_INPUT_TOKENS guard summarize_application() enforces --
+# a large-but-schema-valid question could trigger an oversized paid request.
+def test_oversized_question_fails_cost_guard_before_calling_llm(monkeypatch):
+    def _boom(client, prompt, system=None):
+        raise AssertionError("LLM must not be called once the cost guard trips")
+
+    monkeypatch.setattr(llm_client, "call_api", _boom)
+    monkeypatch.setattr(policy_chat, "classify_answerable", lambda query, hits: True)
+    monkeypatch.setattr(llm_client, "MAX_INPUT_TOKENS", 50)
+
+    with pytest.raises(LLMCostGuardError):
+        answer_policy_question("what is the minimum age to apply for a loan " * 20)
 
 
 def test_non_dict_json_response_is_rejected(monkeypatch):

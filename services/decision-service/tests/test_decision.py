@@ -128,6 +128,27 @@ def test_real_scorer_response_missing_reason_codes_fails_closed(monkeypatch):
         decision._call_ai_scorer(680, {"income": 30000})
 
 
+# Review finding: _ScorerResponse's reason_codes: list[str] accepts an EMPTY list
+# (no min_length), so a real vendor response scoring below 660 with reason_codes=[]
+# used to fall through _run_model()'s `or [REASON_INSUFFICIENT_INCOME]` fallback --
+# persisting a denial reason the licensed model never actually produced. That
+# fallback must now be reserved for the deterministic stub path only; a real
+# scorer response with empty reason_codes below 660 must fail closed instead.
+def test_real_scorer_response_with_empty_reason_codes_fails_closed(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"score": 550, "reason_codes": []}
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(decision.ModelUnavailableError):
+        decision._run_model(680, {"income": 30000})
+
+
 def test_real_scorer_response_with_reason_codes_is_used_verbatim(monkeypatch):
     monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
 
