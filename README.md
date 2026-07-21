@@ -1,6 +1,11 @@
 # Meridian Lending Platform
 
-> **SOC 2 Type II / SOX-controlled. Cardholder data is encrypted and we are PCI-DSS compliant. Every credit decision is audited.**
+> **NOT PCI-DSS compliant.** `payment-service` stores the full PAN and CVV in plaintext
+> (`payments.pan`/`payments.cvv`, unencrypted `TEXT` columns) and logs both at INFO —
+> CVV/SAD storage is an absolute PCI-DSS prohibition regardless of encryption. This is
+> inherited vendor debt (see `adr/0003`), not remediated. Credit decisions are audited
+> (Week 3's append-only `decision_events`); the rest of the compliance banner below is
+> the original vendor's unverified claim, not a verified status.
 
 The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
 Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,
@@ -85,8 +90,20 @@ and a borrower login `maria`.
 
 ## Compliance
 
-We are PCI-DSS compliant (cardholder data encrypted), SOX-controlled with full audit
-trails on financial actions, and follow ECOA/Reg B for all adverse-action notices.
+**Not PCI-DSS compliant** — `payment-service` persists the full PAN and CVV unencrypted
+(`db/init/001_schema.sql`, `payments` table) and logs them at INFO
+(`services/payment-service/app/logging_config.py`). Storing CVV/SAD post-authorization is
+a flat PCI-DSS violation independent of encryption; this predates the current engagement
+(vendor debt, see `adr/0003`) and has not been remediated. Treat any prior claim of PCI-DSS
+compliance for this codebase as false.
+
+Credit decisions ARE audited: every `/decisions` call persists an append-only
+`decision_events` row (inputs, model score/version, reason codes — Week 3) alongside the
+legacy outcome-only `decisions` table. ECOA/Reg B adverse-action reasons come from the
+scorer itself, not a fixed string (see `services/decision-service/app/decision.py`).
+SOX-controls and ECOA/Reg B process claims beyond the decision audit trail above are
+unverified — do not represent them as confirmed without a real compliance review.
+
 Compliance contact: Dana (VP Lending Ops). For SOX/reconciliation questions: Sam
 (Controller). For fair-lending/BSA: Priya (Compliance Officer).
 

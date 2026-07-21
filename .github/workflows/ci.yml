@@ -92,7 +92,47 @@ jobs:
           npm ci || npm install
           npm run build
 
-  # GAP: no dependency audit, no SAST. Secret scanning added (RF-22).
+  # Dependency vulnerability scan -- no SAST/dependency audit existed at all before this.
+  # Non-blocking for now: this repo has never been scanned, so the first run's findings
+  # need triage (upgrade vs. accept-risk vs. false positive) before it's safe to gate the
+  # build on. Drop continue-on-error once that triage lands. Covers all eight backend
+  # services regardless of the money-math split above -- a vulnerable dependency is
+  # unrelated to RF-13's float-money test failures.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service, loan-assistant]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pip-audit (non-blocking -- first run, findings not yet triaged)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          cd services/${{ matrix.service }}
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt
+
+  dependency-audit-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm audit (non-blocking -- first run, findings not yet triaged)
+        continue-on-error: true
+        run: |
+          cd frontend
+          npm ci || npm install
+          npm audit --audit-level=high
+
+  # GAP: dependency-audit/dependency-audit-frontend above are still continue-on-error --
+  # this repo has never had a dependency scan before, so findings need a first triage
+  # pass (upgrade vs. accept-risk vs. false positive) before it's safe to gate on. No
+  # SAST tool yet either.
   # GAP: disclosure-service/servicing-service tests are still continue-on-error for
   # the known money-math test failures (RF-13) — drop that job's exemption once RF-13
   # lands (see kal_docs/10_WEEK_PLAN.md Week 10). The other six services are blocking

@@ -18,12 +18,17 @@ htmlcov/
 frontend/.next/
 frontend/out/
 frontend/build/
+frontend/tsconfig.tsbuildinfo
 
 # RAG eval harness — local, disposable, content-hash-keyed embedding cache
 services/loan-assistant/.embedding_cache.json
 
 # secrets
 .env
+
+# local machine TLS-inspection root CA bundle (corporate AV/proxy, etc.) --
+# never portable across machines/CI, must never be committed
+certs/
 
 # misc
 .DS_Store

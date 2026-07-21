@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost, getUser } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
@@ -45,6 +46,14 @@ function errMsg(err: unknown, fallback: string): string {
 }
 
 export default function LoanDetailPage() {
+  return (
+    <RequireRole allow={["csr", "underwriter", "admin"]}>
+      <LoanDetailContent />
+    </RequireRole>
+  );
+}
+
+function LoanDetailContent() {
   const params = useParams<{ loanId: string }>();
   const loanId = params?.loanId;
 

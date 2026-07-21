@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import RequireRole from "../../components/RequireRole";
 import StatusChip from "../../components/StatusChip";
 import { apiGet } from "../../lib/api";
 import { usd, shortDate } from "../../lib/format";
@@ -42,6 +43,14 @@ function errMsg(err: unknown, fallback: string): string {
 }
 
 export default function AdminOverviewPage() {
+  return (
+    <RequireRole allow={["admin"]}>
+      <AdminOverviewContent />
+    </RequireRole>
+  );
+}
+
+function AdminOverviewContent() {
   const [apps, setApps] = useState<Paged<AppRow> | null>(null);
   const [loans, setLoans] = useState<Paged<LoanRow> | null>(null);
   const [loading, setLoading] = useState(true);

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import RequireRole from "../../components/RequireRole";
 import StatusChip from "../../components/StatusChip";
 import { apiGet, getUser, type SessionUser } from "../../lib/api";
 import { usd, pct, shortDate } from "../../lib/format";
@@ -39,6 +40,14 @@ function norm(s: string | null | undefined): string {
 }
 
 export default function MyLoanPage() {
+  return (
+    <RequireRole allow={["borrower"]}>
+      <MyLoanContent />
+    </RequireRole>
+  );
+}
+
+function MyLoanContent() {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [items, setItems] = useState<LoanRow[]>([]);
   const [loading, setLoading] = useState(true);

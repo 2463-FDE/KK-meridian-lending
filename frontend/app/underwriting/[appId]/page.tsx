@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import LoanSummaryCard from "../../../components/LoanSummaryCard";
+import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
@@ -74,6 +75,14 @@ function prettyPurpose(p?: string): string {
 }
 
 export default function UnderwritingDetailPage() {
+  return (
+    <RequireRole allow={["underwriter", "admin"]}>
+      <UnderwritingDetailContent />
+    </RequireRole>
+  );
+}
+
+function UnderwritingDetailContent() {
   const params = useParams<{ appId: string }>();
   const appId = params?.appId;
 

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import RequireRole from "../../components/RequireRole";
 import StatusChip from "../../components/StatusChip";
 import { apiGet } from "../../lib/api";
 import { usd, shortDate } from "../../lib/format";
@@ -39,6 +40,14 @@ function prettyPurpose(p: string): string {
 }
 
 export default function UnderwritingPage() {
+  return (
+    <RequireRole allow={["underwriter", "admin"]}>
+      <UnderwritingContent />
+    </RequireRole>
+  );
+}
+
+function UnderwritingContent() {
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);

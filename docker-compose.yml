@@ -175,6 +175,12 @@ services:
     # calls directly.
     volumes:
       - ./policies:/app/policies:ro
+      # Local-machine TLS-inspection CA bundle (some corporate AV/proxy setups
+      # re-sign outbound HTTPS with their own root, which httpx/anthropic don't
+      # trust by default). ./certs is gitignored and empty unless a dev has
+      # actually hit this -- SSL_CERT_FILE in .env is what opts a given machine in,
+      # this mount is harmless no-op for everyone else.
+      - ./certs:/app/certs:ro
     depends_on:
       origination-service:
         condition: service_started
