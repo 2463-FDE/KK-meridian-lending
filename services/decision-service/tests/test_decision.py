@@ -166,6 +166,38 @@ def test_real_scorer_response_with_reason_codes_is_used_verbatim(monkeypatch):
     assert not scored["model_version"].endswith("-stub")
 
 
+# Review finding: _run_model() computed top_features from the bureau/income
+# "contribution" formula unconditionally, even for a real vendor response --
+# but that formula IS the stub's own scoring math (_stub_model_score), never
+# something the real vendor returns. Persisting it for a real response would
+# claim bureau/income drove a decision the licensed model may have made on
+# requested_amount/term_months instead. Real responses must persist top_features
+# as null, not a fabricated attribution; the stub path is unaffected.
+def test_real_scorer_response_persists_null_top_features(monkeypatch):
+    monkeypatch.setattr(decision, "AI_MODEL_API_KEY", "present-for-this-test")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"score": 550, "reason_codes": ["high_debt_to_income"]}
+
+    monkeypatch.setattr(decision.httpx, "post", lambda *a, **k: _FakeResponse())
+    result = decision._run_model(680, {"income": 30000})
+    assert result["top_features"] is None
+
+
+def test_stub_scorer_response_still_persists_bureau_income_top_features():
+    result = decision._run_model(612, {"income": 0})
+    assert result["top_features"] == {
+        "bureau_score": 612,
+        "income": 0,
+        "bureau_contribution": round(612 * 0.9, 2),
+        "income_contribution": 0.0,
+    }
+
+
 def test_real_scorer_response_missing_score_fails_closed_cleanly(monkeypatch):
     """Review finding: the first version of this check used body["score"]
     (bracket access), so a response missing *score* specifically raised a raw

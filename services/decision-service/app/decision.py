@@ -227,12 +227,25 @@ def _run_model(bureau_score: int, application: dict) -> dict:
     scored = _call_ai_scorer(bureau_score, application)
     model_score = scored["score"]
     model_version = scored["model_version"]
-    top_features = {
-        "bureau_score": bureau_score,
-        "income": income,
-        "bureau_contribution": round(bureau_score * 0.9, 2),
-        "income_contribution": round(income / 1000, 2),
-    }
+    is_stub = model_version.endswith("-stub")
+
+    # The bureau/income "contribution" formula is the *stub's own scoring math*
+    # (_stub_model_score) -- authoritative for the stub, but never returned by
+    # the real vendor (_ScorerResponse only has score/reason_codes, no feature
+    # attributions). Persisting it for a real response would claim bureau/income
+    # drove a decision the licensed model may have made on requested_amount/
+    # term_months instead -- fabricated audit data, same failure mode as the
+    # reason_codes gap below. Record null rather than guess.
+    top_features = (
+        {
+            "bureau_score": bureau_score,
+            "income": income,
+            "bureau_contribution": round(bureau_score * 0.9, 2),
+            "income_contribution": round(income / 1000, 2),
+        }
+        if is_stub
+        else None
+    )
 
     if model_score >= 660:
         return {
@@ -246,7 +259,7 @@ def _run_model(bureau_score: int, application: dict) -> dict:
     decision_outcome = "deny" if model_score < 600 else "refer"
     reason_codes = scored["reason_codes"]
     if not reason_codes:
-        if model_version.endswith("-stub"):
+        if is_stub:
             # The dev/test stub score IS computed by the bureau/income formula
             # (_stub_model_score), so _reason_codes() is authoritative here.
             reason_codes = _reason_codes(bureau_score, income)
