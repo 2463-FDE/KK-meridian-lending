@@ -1,12 +1,13 @@
-"""Characterization tests for the gateway's auth endpoints and proxy authz gates.
+"""Tests for the gateway's auth endpoints and proxy authz gates.
 
-Pins CURRENT behavior (as of this session) before any Week 4+ change touches this
-service -- gateway had only test_proxy_security.py before (one spoofed-header
-regression test), nothing covering /auth/* or the differing authz gates across
-/los, /lss, /payments, /assistant. Not a redesign: /lss and /payments intentionally
-require authentication but NOT a specific role (debt D8, documented in
-app/main.py's module docstring, fixed in Week 6) -- these tests pin that gap as it
-exists today, they don't close it.
+gateway had only test_proxy_security.py before (one spoofed-header regression
+test), nothing covering /auth/* or the authz gates across /los, /lss, /payments,
+/assistant. Review finding: /lss and /payments used to accept ANY authenticated
+caller with no role/ownership check at all -- a borrower session could list the
+whole loan portfolio, read another borrower's balance/payment history, or call
+money-moving actions (adjust-balance, waive-fee) on any loan. These tests cover
+the fix: staff-only for portfolio-wide/money-moving actions, owner-or-staff for
+a specific loan's read actions and charging a payment, 403/404 otherwise.
 """
 import json
 
@@ -18,6 +19,9 @@ from app import auth, main
 from app.main import app
 
 client = TestClient(app)
+
+_BORROWER = {"id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez", "applicant_id": 1}
+_BORROWER_NO_APPLICANT = {"id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez", "applicant_id": None}
 
 
 class _FakeResponse:
@@ -144,25 +148,231 @@ def test_lss_requires_authentication(monkeypatch):
     assert resp.status_code == 401
 
 
-def test_lss_accepts_any_authenticated_role(monkeypatch):
-    # Characterizes the CURRENT gap (debt D8): /lss requires auth but does not
-    # check role at all -- a borrower session reaches servicing same as staff.
+# --- GET /lss/loans (full portfolio list) -- staff-only; borrower gets a
+# separately-built, ownership-scoped list instead of the raw proxy. ----------
+
+def test_lss_loans_list_staff_proxies_full_portfolio(monkeypatch):
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(auth, "get_session", lambda token: {
-        "id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez",
+        "id": 2, "username": "underwriter", "role": "underwriter", "name": "Sam", "applicant_id": None,
     })
 
-    resp = client.get("/lss/loans/1", headers={"Authorization": "Bearer faketoken123"})
+    resp = client.get("/lss/loans", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+    # Proxied to servicing-service, not gateway-built.
+    assert "loans" in _FakeAsyncClient.last_url
+
+
+def test_lss_loans_list_borrower_gets_own_scoped_results(monkeypatch):
+    class _FakeDb:
+        def query(self, sql, params=None):
+            assert params == (1,)
+            return [{
+                "id": 5, "applicant_name": "Maria Gonzalez", "principal": 10000.0,
+                "apr": 12.5, "term_months": 36, "status": "current",
+                "balance": 9000.0, "past_due": 0.0, "opened_at": None,
+            }]
+
+    monkeypatch.setattr(main, "db", _FakeDb())
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.get("/lss/loans", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["id"] == 5
+
+
+def test_lss_loans_list_borrower_without_applicant_id_is_forbidden(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER_NO_APPLICANT)
+
+    resp = client.get("/lss/loans", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
+# --- GET /lss/loans/{id}(/schedule|/payments) -- owner-or-staff -------------
+
+def test_lss_loan_detail_owner_borrower_is_allowed(monkeypatch):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.get("/lss/loans/5", headers={"Authorization": "Bearer faketoken123"})
 
     assert resp.status_code == 200
 
 
+def test_lss_loan_detail_non_owner_borrower_is_forbidden(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: False)
+
+    resp = client.get("/lss/loans/999", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("role", ["csr", "underwriter", "admin"])
+def test_lss_loan_detail_staff_bypasses_ownership_check(monkeypatch, role):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": role, "name": "X", "applicant_id": None,
+    })
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: False)  # must not matter
+
+    resp = client.get("/lss/loans/999", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("suffix", ["schedule", "payments"])
+def test_lss_loan_subresource_owner_or_staff(monkeypatch, suffix):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.get(f"/lss/loans/5/{suffix}", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+
+
+# --- /lss/accounts/{id}/* -- balance is owner-or-staff (read-only); the
+# money-moving actions are staff-only regardless of ownership. --------------
+
+def test_lss_account_balance_owner_borrower_is_allowed(monkeypatch):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.get("/lss/accounts/5/balance", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+
+
+def test_lss_account_balance_non_owner_borrower_is_forbidden(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: False)
+
+    resp = client.get("/lss/accounts/999/balance", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("action", ["adjust-balance", "waive-fee", "late-fee"])
+def test_lss_account_money_moving_action_rejects_owning_borrower(monkeypatch, action):
+    # Review finding: this used to be reachable by ANY authenticated user,
+    # including the loan's own borrower. Owning the loan is not enough for a
+    # money-moving action -- these are staff-only, full stop.
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.post(
+        f"/lss/accounts/5/{action}", json={"new_balance": 0, "amount": 0},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("action", ["adjust-balance", "waive-fee", "late-fee"])
+def test_lss_account_money_moving_action_allows_staff(monkeypatch, action):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "admin", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        f"/lss/accounts/5/{action}", json={"new_balance": 0, "amount": 0},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 200
+
+
+def test_lss_reconciliation_is_staff_only(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.get("/lss/reconciliation/peek", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
+def test_lss_unrecognized_subpath_fails_closed_not_found(monkeypatch):
+    # No authz rule accounts for this shape -- must 404, never silently proxy.
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "admin", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.get("/lss/accounts/5/apply-payment", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 404
+
+
+# --- POST /payments -- staff can charge any loan; a borrower only their own. -
+
 def test_payments_requires_authentication(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: None)
 
-    resp = client.post("/payments/charge", json={})
+    resp = client.post("/payments", json={"loan_id": 1, "amount": 10})
 
     assert resp.status_code == 401
+
+
+def test_payments_staff_can_charge_any_loan(monkeypatch):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "csr", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": 50},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 200
+    # Pre-existing bug fixed in passing: this used to proxy to payment-service's
+    # bare "/" (404 for everyone) instead of its actual POST /payments route.
+    assert _FakeAsyncClient.last_url.endswith("/payments")
+
+
+def test_payments_borrower_can_charge_own_loan(monkeypatch):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.post(
+        "/payments", json={"loan_id": 5, "amount": 50},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 200
+    assert _FakeAsyncClient.last_url.endswith("/payments")
+
+
+def test_payments_borrower_cannot_charge_other_loan(monkeypatch):
+    # This is the exact break the review flagged: a borrower must not be able
+    # to trigger a charge applied to someone else's loan.
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: False)
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": 50},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 403
+
+
+def test_payments_unrecognized_subpath_fails_closed_not_found(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "admin", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.get("/payments/some-other-path", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 404
 
 
 def test_assistant_requires_authentication(monkeypatch):

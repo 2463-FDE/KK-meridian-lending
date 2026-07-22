@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import RequireRole from "../../components/RequireRole";
 import StatusChip from "../../components/StatusChip";
-import { apiGet, getUser, type SessionUser } from "../../lib/api";
+import { apiGet } from "../../lib/api";
 import { usd, pct, shortDate } from "../../lib/format";
 
 interface LoanRow {
@@ -35,10 +35,6 @@ function errMsg(err: unknown, fallback: string): string {
   return fallback;
 }
 
-function norm(s: string | null | undefined): string {
-  return (s || "").trim().toLowerCase();
-}
-
 export default function MyLoanPage() {
   return (
     <RequireRole allow={["borrower"]}>
@@ -48,7 +44,6 @@ export default function MyLoanPage() {
 }
 
 function MyLoanContent() {
-  const [user, setUser] = useState<SessionUser | null>(null);
   const [items, setItems] = useState<LoanRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -57,9 +52,9 @@ function MyLoanContent() {
     setLoading(true);
     setError(null);
     try {
-      // The gateway returns the ENTIRE portfolio; there is no borrower-scoped
-      // endpoint. We scope to the logged-in borrower CLIENT-SIDE only (debt D8,
-      // fixed in W6) — the API still hands every caller all loans.
+      // Server-scoped to this borrower's own loans (gateway/app/main.py's
+      // _borrower_loans) -- no client-side ownership filtering needed or
+      // trusted here; if ownership can't be established the gateway 403s.
       const res = (await apiGet(`/lss/loans?limit=200&offset=0`)) as LoansResponse;
       setItems(res.items ?? []);
     } catch (err) {
@@ -71,21 +66,8 @@ function MyLoanContent() {
   }, []);
 
   useEffect(() => {
-    setUser(getUser());
     load();
   }, [load]);
-
-  // Client-side name match against the session user (display name or username).
-  const names = [norm(user?.name), norm(user?.username)].filter(Boolean);
-  const matched = items.filter((l) => {
-    const candidate = norm(l.applicant_name || l.borrower);
-    return names.some((n) => n && (candidate === n || candidate.includes(n)));
-  });
-
-  // If we can't match the borrower to any loan, fall back to showing all so the
-  // demo is still usable. This fallback is purely a UI convenience.
-  const usingFallback = matched.length === 0 && items.length > 0;
-  const visible = matched.length > 0 ? matched : items;
 
   return (
     <main className="wrap">
@@ -120,15 +102,8 @@ function MyLoanContent() {
         </div>
       ) : (
         <>
-          {usingFallback ? (
-            <div className="alert alert-info" style={{ marginTop: 16 }}>
-              Demo: couldn&apos;t match your account to a specific borrower, so
-              all loans are shown.
-            </div>
-          ) : null}
-
           <div className="grid grid-2" style={{ marginTop: 20 }}>
-            {visible.map((l) => (
+            {items.map((l) => (
               <div className="card" key={String(l.id)}>
                 <div className="spread" style={{ marginBottom: 12 }}>
                   <div>

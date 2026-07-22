@@ -25,6 +25,7 @@ services/loan-assistant/.embedding_cache.json
 
 # secrets
 .env
+.env.loan-assistant.local
 
 # local machine TLS-inspection root CA bundle (corporate AV/proxy, etc.) --
 # never portable across machines/CI, must never be committed

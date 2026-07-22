@@ -46,8 +46,14 @@ function errMsg(err: unknown, fallback: string): string {
 }
 
 export default function LoanDetailPage() {
+  // Shared page: staff reach it from /servicing's portfolio list, borrowers
+  // reach it from /my-loan's "View account & make a payment" link -- so
+  // "borrower" must be allowed here too. Ownership is enforced server-side
+  // (gateway/app/main.py's owner-or-staff checks on /lss/loans/{id} and
+  // POST /payments); the "Servicing rep actions" panel below stays hidden
+  // from non-staff via canRepActions regardless.
   return (
-    <RequireRole allow={["csr", "underwriter", "admin"]}>
+    <RequireRole allow={["borrower", "csr", "underwriter", "admin"]}>
       <LoanDetailContent />
     </RequireRole>
   );
@@ -72,10 +78,11 @@ function LoanDetailContent() {
   const [newBalance, setNewBalance] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
 
-  // UI-only affordance: only CSR/admin SEE the money-moving rep actions
-  // (adjust balance / waive fee). The gateway/API still accept ANY
-  // authenticated caller — server-side authz is intentionally absent
-  // (debt D8, fixed in W6). Hiding the buttons changes nothing server-side.
+  // Only CSR/admin SEE the money-moving rep actions (adjust balance / waive
+  // fee). This is now backed by a real server-side gate too (gateway/app/
+  // main.py's /lss/accounts/{id}/adjust-balance|waive-fee are staff-only,
+  // regardless of loan ownership) -- hiding the buttons here is a UX
+  // nicety on top of that, not the only thing stopping a non-staff caller.
   const [canRepActions, setCanRepActions] = useState(false);
   useEffect(() => {
     const role = getUser()?.role;
@@ -163,7 +170,7 @@ function LoanDetailContent() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // weak authz: any authenticated user can do this
+      // Gateway now enforces staff-only here regardless of who calls it.
       await apiPost(`/lss/accounts/${loanId}/adjust-balance`, {
         new_balance: parseFloat(newBalance || "0"),
       });
@@ -181,7 +188,7 @@ function LoanDetailContent() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // weak authz: any authenticated user can do this
+      // Gateway now enforces staff-only here regardless of who calls it.
       await apiPost(`/lss/accounts/${loanId}/waive-fee`, {
         amount: parseFloat(waiveAmount || "0"),
       });
@@ -383,10 +390,8 @@ function LoanDetailContent() {
         </p>
       </div>
 
-      {/* Rep actions — UI-only affordance, shown only to CSR/admin. */}
-      {/* UI-only affordance. The gateway/API still accept ANY authenticated */}
-      {/* caller — server-side authz is intentionally absent (debt D8, fixed */}
-      {/* in W6). The endpoints below remain callable by every role. */}
+      {/* Rep actions — shown only to CSR/admin, and the gateway backs that up: */}
+      {/* /lss/accounts/{id}/adjust-balance|waive-fee are staff-only server-side. */}
       {canRepActions ? (
         <>
           <h2>Servicing rep actions</h2>

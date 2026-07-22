@@ -165,6 +165,13 @@ services:
     env_file:
       - path: .env
         required: false
+      # SSL_CERT_FILE/REQUESTS_CA_BUNDLE for local TLS-inspection workarounds --
+      # split into their OWN file, loaded only here, deliberately NOT in the
+      # shared .env every service's env_file already includes above. Setting
+      # them in the shared file broke every other service's outbound httpx
+      # calls (FileNotFoundError -- only this service has ./certs mounted).
+      - path: .env.loan-assistant.local
+        required: false
     environment:
       # corpus.py's local-checkout-relative default doesn't resolve inside this
       # image's shallower /app/app layout -- point it at the mount below instead.
@@ -178,8 +185,8 @@ services:
       # Local-machine TLS-inspection CA bundle (some corporate AV/proxy setups
       # re-sign outbound HTTPS with their own root, which httpx/anthropic don't
       # trust by default). ./certs is gitignored and empty unless a dev has
-      # actually hit this -- SSL_CERT_FILE in .env is what opts a given machine in,
-      # this mount is harmless no-op for everyone else.
+      # actually hit this -- SSL_CERT_FILE in .env.loan-assistant.local is what
+      # opts a given machine in, this mount is harmless no-op for everyone else.
       - ./certs:/app/certs:ro
     depends_on:
       origination-service:
