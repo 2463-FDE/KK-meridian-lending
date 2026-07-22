@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE TABLE IF NOT EXISTS offers (
     id          SERIAL PRIMARY KEY,
     app_id      INTEGER REFERENCES applications(id),
+    decision_id INTEGER REFERENCES decisions(app_id),  -- W4: which decision this offer came from
+    fee_pct_used NUMERIC(5,4),          -- W4: snapshot of ORIGINATION_FEE_PCT used at creation time
     apr         NUMERIC(7,3),           -- D12: was DOUBLE PRECISION
     finance_charge NUMERIC(14,2),       -- D12: was DOUBLE PRECISION
     monthly_payment NUMERIC(14,2),      -- D12: was DOUBLE PRECISION

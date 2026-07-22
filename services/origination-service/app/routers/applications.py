@@ -182,12 +182,34 @@ def run_decision(app_id: int):
         "monthly_debt": 0,            # not captured in the LOS today
         "credit_score": None,         # pulled downstream by decision-service
     })
+    outcome = resp["outcome"]
+    if outcome == "approve":
+        _auto_generate_offer(app_id, r)
     return DecisionOut(
         app_id=app_id,
-        decision=resp["outcome"],
+        decision=outcome,
         score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
         adverse_action_reason=resp.get("reason"),
     )
+
+
+def _auto_generate_offer(app_id: int, r: dict) -> None:
+    """W4: auto-build the offer + TILA disclosure right after approval, instead of
+    leaving it as a separate manual step. Best-effort -- a disclosure-service hiccup
+    must not fail the decision that already happened (same resilience pattern as the
+    KYC call in submit_application above); the loan officer can still build it
+    manually via POST /los/offer if this fails.
+    """
+    try:
+        clients.post(clients.DISCLOSURE_URL, "/offers", {
+            "application_id": app_id,
+            "decision_id": app_id,  # decisions.app_id is that table's PK
+            "principal": float(r.get("amount")),
+            "term_months": r.get("term_months"),
+            "annual_rate": 7.99,  # no per-applicant rate exists elsewhere -- same default make_offer() uses
+        })
+    except Exception as e:  # noqa
+        log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
 
 
 @router.post("/{app_id}/accept")

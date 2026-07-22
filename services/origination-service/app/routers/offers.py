@@ -38,6 +38,7 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
 def make_offer(body: OfferIn):
     resp = clients.post(clients.DISCLOSURE_URL, "/offers", {
         "application_id": body.app_id,
+        "decision_id": body.app_id,  # decisions.app_id is that table's PK -- 1 decision per app
         "principal": body.principal,
         "term_months": body.term_months,
         "annual_rate": body.annual_rate_pct,

@@ -72,6 +72,8 @@ class Offer(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     app_id: Mapped[int | None] = mapped_column(ForeignKey("applications.id"), nullable=True)
+    decision_id: Mapped[int | None] = mapped_column(ForeignKey("decisions.app_id"), nullable=True)
+    fee_pct_used: Mapped[float | None] = mapped_column(Numeric(5, 4, asdecimal=False), nullable=True)
     apr: Mapped[float | None] = mapped_column(Numeric(7, 3, asdecimal=False), nullable=True)
     finance_charge: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     monthly_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)

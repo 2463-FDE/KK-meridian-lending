@@ -19,12 +19,17 @@ router = APIRouter(tags=["offers"])
 def create_offer(body: OfferIn):
     o = offer_mod.build_offer(body.principal, body.annual_rate, body.term_months)
     rows = schedule.amortization(body.principal, body.annual_rate, body.term_months)
+    # W4: snapshot the fee rule version in effect right now, on this row, so a later
+    # change to ORIGINATION_FEE_PCT can never retroactively change what this offer
+    # is proven to have used.
+    fee_pct_used = float(offer_mod.ORIGINATION_FEE_PCT)
     # persist via raw psycopg2 (matches origination's write path) — float money columns
     inserted = db.query(
-        "INSERT INTO offers (app_id, apr, finance_charge, monthly_payment, "
-        "amount_financed, total_of_payments) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (body.application_id, o["apr"], o["finance_charge"], o["monthly_payment"],
-         o["amount_financed"], o["total_of_payments"]),
+        "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
+        "monthly_payment, amount_financed, total_of_payments) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (body.application_id, body.decision_id, fee_pct_used, o["apr"], o["finance_charge"],
+         o["monthly_payment"], o["amount_financed"], o["total_of_payments"]),
     )
     offer_id = inserted[0]["id"]
     disclosure = Disclosure(
@@ -34,6 +39,7 @@ def create_offer(body: OfferIn):
     )
     return OfferResponse(
         offer_id=offer_id, application_id=body.application_id,
+        decision_id=body.decision_id, fee_pct_used=fee_pct_used,
         apr=o["apr"], finance_charge=o["finance_charge"],
         monthly_payment=o["monthly_payment"], total_of_payments=o["total_of_payments"],
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],

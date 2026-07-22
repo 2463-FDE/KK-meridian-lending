@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 class OfferIn(BaseModel):
     application_id: int
+    decision_id: int | None = None  # W4: which decision this offer follows, if any
     principal: float = Field(gt=0, le=50000)
     term_months: int = Field(default=48, ge=12, le=60)
     annual_rate: float = Field(default=7.99, gt=0, le=35)
@@ -35,6 +36,8 @@ class OfferOut(BaseModel):
 class OfferResponse(BaseModel):
     offer_id: int
     application_id: int
+    decision_id: int | None = None
+    fee_pct_used: float | None = None
     apr: float
     finance_charge: float
     monthly_payment: float
