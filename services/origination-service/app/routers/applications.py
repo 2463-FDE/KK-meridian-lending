@@ -176,9 +176,9 @@ def run_decision(app_id: int):
         "applicant_id": r.get("applicant_id"),
         "name": r.get("name"),
         "ssn": r.get("ssn") or "",
-        "requested_amount": r.get("amount"),
+        "requested_amount": float(r.get("amount")),
         "term_months": r.get("term_months"),
-        "annual_income": r.get("income") or 0,
+        "annual_income": float(r.get("income") or 0),
         "monthly_debt": 0,            # not captured in the LOS today
         "credit_score": None,         # pulled downstream by decision-service
     })

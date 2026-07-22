@@ -69,6 +69,46 @@ def test_post_payment_success(fake_db):
     assert body["applied_amount"] == 250.0
 
 
+def test_post_payment_quantizes_malformed_float_amount_to_cents(fake_db):
+    # D12 fix: payment-service does no repeated arithmetic (no accumulation
+    # loop like disclosure-service/servicing-service had), but it never
+    # validated the incoming amount either -- a malformed float from a client
+    # used to get stored and forwarded verbatim, uncorrected.
+    resp = client.post("/payments", json={
+        "loan_id": 42, "pan": "4111111111111111", "cvv": "123",
+        "amount": 19.999999999999996,
+    })
+
+    assert resp.status_code == 200
+    assert resp.json()["applied_amount"] == 20.0
+    _, params = fake_db.calls[0]
+    assert params[3] == 20.0  # the amount actually persisted to the payments row
+
+
+def test_post_payment_log_line_redacts_pan_cvv_ssn(fake_db, caplog):
+    # D5 fix: the log line used to write full PAN/CVV/SSN at INFO with zero
+    # redaction (services/payment-service/app/payments.py). Storage in the
+    # payments table is a separate, still-open half of D5 -- this only proves
+    # the logging half is fixed.
+    import logging
+    caplog.set_level(logging.INFO, logger="payment")
+
+    client.post("/payments", json={
+        "loan_id": 42, "pan": "4111111111111111", "cvv": "123",
+        "ssn": "412-55-9981", "amount": 10.0,
+    })
+
+    charge_lines = [r.message for r in caplog.records if "charge req=" in r.message]
+    assert charge_lines, "expected a charge log line"
+    logged = charge_lines[0]
+    assert "4111111111111111" not in logged
+    assert "123" not in logged
+    assert "412-55-9981" not in logged
+    # redact_dict() redacts by key name (pan/cvv/ssn), not the pattern-based
+    # markers redact_str() uses on free text where the key isn't already known.
+    assert logged.count("[REDACTED]") == 3
+
+
 def test_post_payment_persists_full_pan_and_cvv_unmasked(fake_db):
     # Characterizes the documented PCI debt (D5/adr/0003): the stored row gets
     # the full PAN and CVV, not a masked/tokenized value. _mask_pan is

@@ -1,36 +1,40 @@
 """Amortization schedule generation (for the disclosure / payment schedule display).
 
-Standard fixed-payment amortization. Uses float math (consistent with the rest of the
-platform); fine for a display schedule, but the same float drift that affects apr.py
-applies here too.
+Standard fixed-payment amortization. Decimal throughout the accumulation loop
+(via apr.monthly_payment_decimal()), matching the same fix applied to apr.py --
+this used to accumulate in float across up to 60 rows, the same drift that
+affected the disclosed APR.
 """
 import datetime
+from decimal import Decimal
+
 from . import apr
 
 
 def amortization(principal: float, annual_rate_pct: float, term_months: int,
                  start: datetime.date | None = None) -> list[dict]:
     start = start or datetime.date.today()
-    pmt = apr.monthly_payment(principal, annual_rate_pct, term_months)
-    monthly_rate = (annual_rate_pct / 100.0) / 12.0
-    balance = principal
+    p = Decimal(str(principal))
+    pmt = apr.monthly_payment_decimal(principal, annual_rate_pct, term_months)
+    monthly_rate = Decimal(str(annual_rate_pct)) / 100 / 12
+    balance = p
     rows: list[dict] = []
     for n in range(1, term_months + 1):
         interest = balance * monthly_rate
         principal_part = pmt - interest
         balance = balance - principal_part
         if n == term_months:
-            # absorb residual float drift into the final payment
+            # absorb residual Decimal remainder into the final payment
             principal_part += balance
-            balance = 0.0
+            balance = Decimal("0")
         due = _add_months(start, n)
         rows.append({
             "n": n,
             "due_date": due.isoformat(),
-            "payment": round(pmt, 2),
-            "principal": round(principal_part, 2),
-            "interest": round(interest, 2),
-            "balance": round(max(balance, 0.0), 2),
+            "payment": float(round(pmt, 2)),
+            "principal": float(round(principal_part, 2)),
+            "interest": float(round(interest, 2)),
+            "balance": float(round(max(balance, Decimal("0")), 2)),
         })
     return rows
 

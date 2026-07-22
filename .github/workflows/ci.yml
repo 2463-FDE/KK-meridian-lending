@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [gateway, origination-service, kyc-service, decision-service, payment-service, loan-assistant]
+        service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service, loan-assistant]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,43 +38,15 @@ jobs:
           cd services/${{ matrix.service }}
           python -c "import app.main"
       - name: Tests
-        # Blocking: `|| true` on top of continue-on-error used to double-mask every
-        # failure, including "No module named pytest" -- pytest was never in
-        # requirements.txt or installed here at all, so this step silently reported
-        # success without running a single test for this entire engagement. These six
-        # services have no known-failing tests (verified locally); a real failure here
-        # now actually fails the build instead of being swallowed.
-        run: |
-          cd services/${{ matrix.service }}
-          python -m pytest -q --cov=app --cov-report=term-missing
-
-  # Split out from `backend` above: these two services have tests that FAIL BY DESIGN,
-  # encoding known float-money defects not yet fixed (RF-13, see docs/runbook.md +
-  # kal_docs/10_WEEK_PLAN.md) -- disclosure-service/tests/test_apr.py and
-  # servicing-service/tests/test_money.py. continue-on-error stays *only* here so those
-  # known failures don't block the build, without silently exempting the other six
-  # services (review finding: the single shared matrix let every service ride on the
-  # two money-math services' known-broken exemption).
-  backend-known-flaky:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: [disclosure-service, servicing-service]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install deps
-        run: |
-          cd services/${{ matrix.service }}
-          pip install -r requirements.txt -r requirements-dev.txt
-      - name: Import smoke
-        run: |
-          cd services/${{ matrix.service }}
-          python -c "import app.main"
-      - name: Tests (non-blocking -- RF-13 money-math, drop continue-on-error once fixed)
-        continue-on-error: true
+        # Blocking, all eight services: `|| true` on top of continue-on-error used to
+        # double-mask every failure, including "No module named pytest" -- pytest was
+        # never in requirements.txt or installed here at all, so this step silently
+        # reported success without running a single test for this entire engagement.
+        # The backend-known-flaky split (disclosure-service, then servicing-service)
+        # is gone now too -- both had a real float-money bug (D12/D6), both fixed with
+        # a real Decimal migration (see apr.py/offer.py/schedule.py and
+        # balance.py/delinquency.py/schedule.py), both tests genuinely pass now. No
+        # service in this repo has a known-failing test anymore.
         run: |
           cd services/${{ matrix.service }}
           python -m pytest -q --cov=app --cov-report=term-missing
@@ -133,11 +105,10 @@ jobs:
   # this repo has never had a dependency scan before, so findings need a first triage
   # pass (upgrade vs. accept-risk vs. false positive) before it's safe to gate on. No
   # SAST tool yet either.
-  # GAP: disclosure-service/servicing-service tests are still continue-on-error for
-  # the known money-math test failures (RF-13) — drop that job's exemption once RF-13
-  # lands (see kal_docs/10_WEEK_PLAN.md Week 10). The other six services are blocking
-  # (review finding: they used to ride on the same shared continue-on-error exemption
-  # with no actual known-failing tests of their own).
+  # FIXED: the backend-known-flaky split (disclosure-service, then servicing-service)
+  # is gone -- both services' float-money bugs (D12/D6) got a real Decimal migration
+  # (apr.py/offer.py/schedule.py; balance.py/delinquency.py/schedule.py), both known-
+  # failing tests genuinely pass now, and all eight services run in one blocking job.
   # FIXED (review pass): pytest was never installed here (no requirements-dev.txt,
   # no separate install step) and `|| true` on the test command masked that
   # completely -- every "backend (X)" check has been reporting success without

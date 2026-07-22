@@ -12,11 +12,11 @@ CREATE TABLE IF NOT EXISTS decision_events (
     id                SERIAL PRIMARY KEY,
     app_id            INTEGER NOT NULL REFERENCES applications(id),
     occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    requested_amount  DOUBLE PRECISION,
+    requested_amount  NUMERIC(14,2),   -- D12: was DOUBLE PRECISION
     term_months       INTEGER,
-    annual_income     DOUBLE PRECISION,
+    annual_income     NUMERIC(14,2),   -- D12: was DOUBLE PRECISION
     bureau_score      INTEGER,
-    model_score       DOUBLE PRECISION,
+    model_score       DOUBLE PRECISION,  -- a scoring value, not money -- left as-is
     model_version     TEXT NOT NULL,
     top_features      JSONB,
     decision          TEXT NOT NULL,

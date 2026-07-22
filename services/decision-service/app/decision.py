@@ -3,19 +3,31 @@
 This logic was lifted verbatim out of the origination service into its own
 decision-service — the behaviour (and the debt) is unchanged by the split.
 
-The credit pull, the bureau call, and the model run are a SYNCHRONOUS chain executed
-inline on the request thread (load note: timeouts past ~20 concurrent apps; tracked
-for a future async rework, not fixed this week — see adr/0006).
-
 Week 3: the AI scorer call now has the same fail-closed contract as the bureau call
 (ModelUnavailableError), adverse-action reasons are mapped to whichever input actually
 drove the score down instead of a fixed nearest-checkbox string, and every decision
 persists an append-only `decision_events` row (inputs, model score/version, top
 features, reason codes) — the dispute-proof record Reg B requires and the legacy
 outcome-only `decisions` table never had.
+
+Async rework (adr/0006): the credit pull, the bureau call, and the model run used to
+be a synchronous chain executed inline on the request thread -- decision-service's
+own thread pool (FastAPI's default for sync `def` routes) exhausted above ~20
+concurrent applications, since each one held a worker thread for the full duration
+of two blocking, up-to-30s vendor HTTP calls. Both outbound calls now use
+httpx.AsyncClient and the whole chain (`_pull_credit` -> `_run_model` -> `decide`)
+is async, so a request waiting on Experian or the AI scorer frees the thread pool
+entirely -- the event loop's own async I/O handles many more concurrent in-flight
+vendor calls than a fixed-size thread pool ever could. The DB write in `decide()`
+stays a synchronous psycopg2 call (a fast local Postgres INSERT, not the external-
+vendor bottleneck this rework targets) -- a fully async DB layer (asyncpg) is a
+separate, larger change, not done here. Scope note: this fixes decision-service's
+OWN internal chain only; origination-service's own call INTO decision-service
+(services/origination-service/app/clients.py) is still synchronous -- that's a
+different service's own thread-pool budget, out of scope for this fix.
 """
+import asyncio
 import json
-import time
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -92,8 +104,9 @@ def _stub_score(ssn: str) -> int:
     return 680 if ssn and ssn[-1] in "02468" else 612
 
 
-def _pull_credit(ssn: str) -> int:
-    """Synchronous bureau call. Blocks the request thread. No real timeout budget."""
+async def _pull_credit(ssn: str) -> int:
+    """Async bureau call (see module docstring's async-rework note). No real
+    timeout budget beyond the client's own 30s."""
     if not EXPERIAN_KEY:
         if not ALLOW_CREDIT_STUB:
             raise CreditBureauUnavailableError(
@@ -105,12 +118,12 @@ def _pull_credit(ssn: str) -> int:
 
     try:
         # structured like a real call; in dev there's no live bureau so we fall back.
-        resp = httpx.get(
-            f"{EXPERIAN_BASE_URL}/score",
-            params={"ssn": ssn},
-            headers={"Authorization": f"Bearer {EXPERIAN_KEY}"},
-            timeout=30,
-        )
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{EXPERIAN_BASE_URL}/score",
+                params={"ssn": ssn},
+                headers={"Authorization": f"Bearer {EXPERIAN_KEY}"},
+            )
         return resp.json().get("score", 680)
     except Exception:
         if not ALLOW_CREDIT_STUB:
@@ -125,7 +138,7 @@ def _stub_model_score(bureau_score: int, income: float) -> int:
     return int(bureau_score * 0.9 + (income / 1000))
 
 
-def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
+async def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
     """Call the newly licensed AI credit-scoring model. Same fail-closed contract as
     _pull_credit: a missing/unreachable licensed model must not silently score from
     fake data outside dev/test.
@@ -156,17 +169,17 @@ def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
 
     try:
         # structured like a real call; in dev/test there's no live vendor endpoint.
-        resp = httpx.post(
-            f"{AI_MODEL_BASE_URL}/score",
-            json={
-                "bureau_score": bureau_score,
-                "income": income,
-                "requested_amount": application.get("requested_amount"),
-                "term_months": application.get("term_months"),
-            },
-            headers={"Authorization": f"Bearer {AI_MODEL_API_KEY}"},
-            timeout=30,
-        )
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{AI_MODEL_BASE_URL}/score",
+                json={
+                    "bureau_score": bureau_score,
+                    "income": income,
+                    "requested_amount": application.get("requested_amount"),
+                    "term_months": application.get("term_months"),
+                },
+                headers={"Authorization": f"Bearer {AI_MODEL_API_KEY}"},
+            )
         resp.raise_for_status()
         body = resp.json()
         try:
@@ -218,13 +231,14 @@ def _reason_codes(bureau_score: int, income: float) -> list[str]:
     return [REASON_INSUFFICIENT_INCOME]
 
 
-def _run_model(bureau_score: int, application: dict) -> dict:
+async def _run_model(bureau_score: int, application: dict) -> dict:
     """Score via the licensed AI scorer (or its dev/test stub), decide, and report
     the adverse-action reasons the scorer itself said actually drove the score down
     (see _call_ai_scorer — never re-derived locally for a real vendor response)."""
-    time.sleep(0.05)  # stand-in for a slow scorecard pass on the request thread
+    await asyncio.sleep(0.05)  # stand-in for a slow scorecard pass -- asyncio.sleep,
+                               # not time.sleep, so this doesn't block the event loop
     income = application.get("income", 0)
-    scored = _call_ai_scorer(bureau_score, application)
+    scored = await _call_ai_scorer(bureau_score, application)
     model_score = scored["score"]
     model_version = scored["model_version"]
     is_stub = model_version.endswith("-stub")
@@ -282,19 +296,21 @@ def _run_model(bureau_score: int, application: dict) -> dict:
     }
 
 
-def decide(application: dict) -> dict:
-    """Full synchronous decisioning chain. Persists the legacy outcome-only
-    `decisions` row and the append-only `decision_events` row (inputs, model
-    score/version, top features, reason codes) as ONE transaction — both land or
-    neither does, so a decision is never returned to the caller without the audit
+async def decide(application: dict) -> dict:
+    """Full decisioning chain (async -- see module docstring). Persists the legacy
+    outcome-only `decisions` row and the append-only `decision_events` row (inputs,
+    model score/version, top features, reason codes) as ONE transaction — both land
+    or neither does, so a decision is never returned to the caller without the audit
     row that proves it happened (review finding: the two used to be written
     separately with each failure only logged, letting a decision commit with no
     matching audit event when the second insert failed silently)."""
-    bureau_score = _pull_credit(application.get("ssn", ""))
-    result = _run_model(bureau_score, application)
+    bureau_score = await _pull_credit(application.get("ssn", ""))
+    result = await _run_model(bureau_score, application)
     app_id = application.get("app_id")
 
     try:
+        # Still a synchronous psycopg2 call -- a fast local Postgres write, not the
+        # external-vendor bottleneck this async rework targets (see module docstring).
         db.transaction([
             (
                 "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "

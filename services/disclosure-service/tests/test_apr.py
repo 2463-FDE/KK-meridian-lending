@@ -1,10 +1,10 @@
 """APR money-math tests.
 
-These currently FAIL because apr.py uses float and a crude annualization. CI runs them
-with continue-on-error so the build stays green. (This is the W4 discovery material.)
-
-DELIBERATELY-FAILING by design — documents debt D1 (float money math breaching the Reg Z
-APR tolerance) and D6 (the three drifted ORIGINATION_FEE_PCT copies). Do not "fix".
+These used to FAIL by design (float money math + a drifted fee constant breaching
+the Reg Z APR tolerance -- D12 and D6). Both are fixed now: apr.py/offer.py/
+schedule.py compute in Decimal throughout, and ORIGINATION_FEE_PCT has one
+source of truth (fees.py) instead of three independent copies. These tests
+should pass -- if either regresses, one of these two fixes broke.
 """
 from decimal import Decimal, getcontext
 from app import apr

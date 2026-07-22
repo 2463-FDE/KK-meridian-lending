@@ -98,5 +98,7 @@ orchestrates the LOS flow and calls them over HTTP.
 make test    # runs pytest in both backend services (non-blocking)
 ```
 
-Some money-math tests (`test_apr.py`, `test_money.py`) currently FAIL by design — they
-encode the float-rounding defects we have not fixed. CI runs them `continue-on-error`.
+`test_apr.py` (disclosure-service) and `test_money.py` (servicing-service) used to
+FAIL by design, encoding float-rounding defects (D12/D6). Both are fixed now — a
+real Decimal migration, not a weakened test (see `kal_docs/ROADMAP.md`, Week 1). CI
+no longer runs any service `continue-on-error`; every service's tests are blocking.

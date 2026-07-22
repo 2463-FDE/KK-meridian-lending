@@ -1,10 +1,13 @@
 """SQLAlchemy ORM models for the LOS tables.
 
-Money columns are mapped to Float — they are DOUBLE PRECISION in Postgres (the float-money
-debt). The `decisions` table is mapped exactly as it exists: outcome only, no reason / no
-model drivers / no timestamp (the missing decision audit trail).
+D12 fix: money columns map to Numeric now (NUMERIC in Postgres, not DOUBLE
+PRECISION) -- exact base-10 decimal storage. `asdecimal=False` keeps the
+Python-side value a plain float, so this is a storage-layer fix, not a
+ripple of Decimal typing through every caller that reads these columns. The
+`decisions` table is mapped exactly as it exists: outcome only, no reason /
+no model drivers / no timestamp (the missing decision audit trail).
 """
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -32,13 +35,13 @@ class Application(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     applicant_id: Mapped[int | None] = mapped_column(ForeignKey("applicants.id"), nullable=True)
-    amount: Mapped[float] = mapped_column(Float)          # money as float (debt)
+    amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     term_months: Mapped[int] = mapped_column(Integer)
     purpose: Mapped[str | None] = mapped_column(String, nullable=True)
-    income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    income: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     employer: Mapped[str | None] = mapped_column(String, nullable=True)
     job_title: Mapped[str | None] = mapped_column(String, nullable=True)
-    employment_years: Mapped[float | None] = mapped_column(Float, nullable=True)
+    employment_years: Mapped[float | None] = mapped_column(Float, nullable=True)  # a duration, not money -- left as-is
     status: Mapped[str | None] = mapped_column(String, default="submitted")
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -69,9 +72,9 @@ class Offer(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     app_id: Mapped[int | None] = mapped_column(ForeignKey("applications.id"), nullable=True)
-    apr: Mapped[float | None] = mapped_column(Float, nullable=True)             # float APR (debt)
-    finance_charge: Mapped[float | None] = mapped_column(Float, nullable=True)
-    monthly_payment: Mapped[float | None] = mapped_column(Float, nullable=True)
-    amount_financed: Mapped[float | None] = mapped_column(Float, nullable=True)
-    total_of_payments: Mapped[float | None] = mapped_column(Float, nullable=True)
+    apr: Mapped[float | None] = mapped_column(Numeric(7, 3, asdecimal=False), nullable=True)
+    finance_charge: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    monthly_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    amount_financed: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    total_of_payments: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
