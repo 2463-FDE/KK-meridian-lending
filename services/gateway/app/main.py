@@ -37,6 +37,7 @@ from .config import (
     PAYMENT_URL,
     SERVICING_URL,
 )
+from .rate_limit import RateLimitMiddleware
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("gateway")
@@ -49,6 +50,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Middleware runs in reverse-add order (last added runs first) -- rate limiting
+# added after CORS so it's the first check a request actually hits.
+app.add_middleware(RateLimitMiddleware)
 
 
 @app.get("/health")
