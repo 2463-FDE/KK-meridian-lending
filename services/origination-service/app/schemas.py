@@ -1,7 +1,8 @@
 """Pydantic request/response models for the LOS API."""
+import re
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 T = TypeVar("T")
 
@@ -22,6 +23,29 @@ class ApplicationIn(BaseModel):
     employer: Optional[str] = None
     job_title: Optional[str] = None
     employment_years: Optional[float] = Field(default=None, ge=0)
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v.strip() == "":
+            return v
+        digits = re.sub(r"\D", "", v)
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]  # strip a leading US country code
+        if len(digits) != 10:
+            raise ValueError("phone must be a 10-digit US number")
+        return digits
+
+    @field_validator("ssn")
+    @classmethod
+    def _validate_ssn(cls, v: Optional[str]) -> Optional[str]:
+        # Entity applicants use ein instead -- ssn stays optional/empty for them.
+        if v is None or v.strip() == "":
+            return v
+        digits = re.sub(r"\D", "", v)
+        if len(digits) != 9:
+            raise ValueError("ssn must be a 9-digit US SSN")
+        return digits
 
 
 class KycOut(BaseModel):

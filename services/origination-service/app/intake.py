@@ -14,20 +14,23 @@ def create_application(payload: dict) -> int:
     """Insert applicant + application. Logs the full body including PII (D5)."""
     log.info("POST /applications intake req=%s", payload)  # full PII in the log
     applicant = db.query(
-        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
-        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, email, phone, address) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
             payload.get("name"), payload.get("dob"), payload.get("ssn"),
-            payload.get("ein"), payload.get("is_entity", False), payload.get("address"),
+            payload.get("ein"), payload.get("is_entity", False),
+            payload.get("email"), payload.get("phone"), payload.get("address"),
         ),
     )
     applicant_id = applicant[0]["id"]
     app_row = db.query(
-        "INSERT INTO applications (applicant_id, amount, term_months, purpose, income) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        "INSERT INTO applications (applicant_id, amount, term_months, purpose, income, "
+        "employer, job_title, employment_years) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
             applicant_id, payload.get("amount"), payload.get("term_months", 36),
             payload.get("purpose"), payload.get("income"),
+            payload.get("employer"), payload.get("job_title"), payload.get("employment_years"),
         ),
     )
     return app_row[0]["id"]
