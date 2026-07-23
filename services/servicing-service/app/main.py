@@ -10,6 +10,7 @@ import os
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional
 
@@ -22,6 +23,9 @@ log = get_logger("servicing")
 
 app = FastAPI(title="Meridian Servicing Service (LSS)", version="2.0.0")
 app.include_router(loans.router)
+# W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
+# comment for why this exists across all 8 services now.
+Instrumentator().instrument(app).expose(app)
 
 
 @app.exception_handler(Exception)
