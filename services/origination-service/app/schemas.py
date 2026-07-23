@@ -16,6 +16,7 @@ class ApplicationIn(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
+    zip_code: Optional[str] = None
     amount: float = Field(gt=0, le=50000)
     term_months: int = Field(default=36, ge=12, le=60)
     purpose: Optional[str] = None
@@ -45,6 +46,20 @@ class ApplicationIn(BaseModel):
         digits = re.sub(r"\D", "", v)
         if len(digits) != 9:
             raise ValueError("ssn must be a 9-digit US SSN")
+        return digits
+
+    @field_validator("zip_code")
+    @classmethod
+    def _validate_zip(cls, v: Optional[str]) -> Optional[str]:
+        # W8: fair-lending ZIP-level check needs a real, consistent ZIP --
+        # not "whatever the applicant typed" buried inside free-text address.
+        if v is None or v.strip() == "":
+            return v
+        digits = re.sub(r"\D", "", v)
+        if len(digits) == 9:
+            digits = digits[:5]  # ZIP+4 -- the base 5-digit ZIP is all the fairness check needs
+        if len(digits) != 5:
+            raise ValueError("zip_code must be a 5-digit US ZIP (optionally ZIP+4)")
         return digits
 
 

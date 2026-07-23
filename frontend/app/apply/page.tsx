@@ -46,6 +46,7 @@ interface FormState {
   email: string;
   phone: string;
   address: string;
+  zip_code: string;
   employer: string;
   job_title: string;
   annual_income: string;
@@ -114,6 +115,7 @@ export default function ApplyPage() {
     email: "",
     phone: "",
     address: "",
+    zip_code: "",
     employer: "",
     job_title: "",
     annual_income: "",
@@ -158,6 +160,9 @@ export default function ApplyPage() {
       else if (form.phone.replace(/\D/g, "").length !== 10)
         e.phone = "Enter a 10-digit phone number";
       if (!form.address.trim()) e.address = "Required";
+      if (!form.zip_code.trim()) e.zip_code = "Required";
+      else if (form.zip_code.replace(/\D/g, "").length !== 5 && form.zip_code.replace(/\D/g, "").length !== 9)
+        e.zip_code = "Enter a 5-digit ZIP code";
     } else if (s === 2) {
       if (!form.employer.trim()) e.employer = "Required";
       if (!form.job_title.trim()) e.job_title = "Required";
@@ -192,6 +197,7 @@ export default function ApplyPage() {
         dob: form.dob,
         ssn: form.ssn,
         address: form.address,
+        zip_code: form.zip_code,
         email: form.email,
         phone: form.phone,
         employer: form.employer,
@@ -342,6 +348,14 @@ export default function ApplyPage() {
                 placeholder="123 Main St, Springfield, IL 62704"
               />
             </Field>
+            <Field label="ZIP code" error={errors.zip_code}>
+              <input
+                value={form.zip_code}
+                onChange={(e) => set("zip_code", e.target.value)}
+                placeholder="62704"
+                maxLength={10}
+              />
+            </Field>
           </>
         )}
 
@@ -460,6 +474,7 @@ export default function ApplyPage() {
               <SummaryRow label="Email" value={form.email} />
               <SummaryRow label="Phone" value={form.phone} />
               <SummaryRow label="Address" value={form.address} />
+              <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
             <SummaryGroup title="Employment & income">
               <SummaryRow label="Employer" value={form.employer} />

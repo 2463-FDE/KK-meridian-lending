@@ -69,3 +69,28 @@ def test_ssn_formatted_accepted_and_normalized():
 def test_ssn_omitted_allowed():
     a = ApplicationIn(name="Test", amount=10000)
     assert a.ssn is None
+
+
+def test_zip_wrong_length_rejected():
+    with pytest.raises(ValidationError):
+        ApplicationIn(name="Test", amount=10000, zip_code="123")
+
+
+def test_zip_non_digits_rejected():
+    with pytest.raises(ValidationError):
+        ApplicationIn(name="Test", amount=10000, zip_code="not-a-zip")
+
+
+def test_zip_plus4_normalized_to_base_five():
+    a = ApplicationIn(name="Test", amount=10000, zip_code="20912-1234")
+    assert a.zip_code == "20912"
+
+
+def test_zip_five_digit_accepted():
+    a = ApplicationIn(name="Test", amount=10000, zip_code="20912")
+    assert a.zip_code == "20912"
+
+
+def test_zip_omitted_allowed():
+    a = ApplicationIn(name="Test", amount=10000)
+    assert a.zip_code is None

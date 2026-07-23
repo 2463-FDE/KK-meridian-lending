@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS applicants (
     email       TEXT,
     phone       TEXT,
     address     TEXT,
+    zip_code    TEXT,             -- W8: fair-lending ZIP-level check needs this; address alone is free text
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 

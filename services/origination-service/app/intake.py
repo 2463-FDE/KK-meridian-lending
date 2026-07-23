@@ -14,12 +14,13 @@ def create_application(payload: dict) -> int:
     """Insert applicant + application. Logs the full body including PII (D5)."""
     log.info("POST /applications intake req=%s", payload)  # full PII in the log
     applicant = db.query(
-        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, email, phone, address) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, email, phone, address, zip_code) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
             payload.get("name"), payload.get("dob"), payload.get("ssn"),
             payload.get("ein"), payload.get("is_entity", False),
             payload.get("email"), payload.get("phone"), payload.get("address"),
+            payload.get("zip_code"),
         ),
     )
     applicant_id = applicant[0]["id"]
