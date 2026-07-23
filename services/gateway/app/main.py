@@ -25,6 +25,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 from . import auth, db
@@ -53,6 +54,12 @@ app.add_middleware(
 # Middleware runs in reverse-add order (last added runs first) -- rate limiting
 # added after CORS so it's the first check a request actually hits.
 app.add_middleware(RateLimitMiddleware)
+
+# W7: exposes GET /metrics in Prometheus text format -- request count, latency
+# histograms, in-progress requests, broken down by route/method/status. No
+# service in this repo had any cross-service metrics before this; LangSmith
+# only ever covered the LLM calls, not the other seven services.
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health")

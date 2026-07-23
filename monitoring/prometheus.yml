@@ -1,0 +1,22 @@
+# W7: scrape config for the 8 backend services' /metrics endpoints
+# (prometheus-fastapi-instrumentator, wired in each service's app/main.py).
+# No cross-service metrics existed anywhere in this repo before this --
+# LangSmith only ever covered the LLM calls in loan-assistant.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: meridian-services
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - gateway:8000
+          - origination-service:8001
+          - servicing-service:8002
+          - kyc-service:8003
+          - decision-service:8004
+          - disclosure-service:8005
+          - payment-service:8006
+          - loan-assistant:8007
+        labels:
+          project: meridian-lending

@@ -10,6 +10,7 @@ import os
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 from .config import ORIGINATION_URL
@@ -27,6 +28,9 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("loan-assistant")
 
 app = FastAPI(title="Meridian Loan Assistant", version="1.0.0")
+# W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
+# comment for why this exists across all 8 services now.
+Instrumentator().instrument(app).expose(app)
 
 _FETCH_TIMEOUT = 10.0
 

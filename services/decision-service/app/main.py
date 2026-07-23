@@ -10,6 +10,7 @@ import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from . import db
 from .config import (
@@ -27,6 +28,9 @@ log = get_logger("decision-service")
 
 app = FastAPI(title="Meridian Decision Service", version="2.0.0")
 app.include_router(decisions.router)
+# W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
+# comment for why this exists across all 8 services now.
+Instrumentator().instrument(app).expose(app)
 
 # Outside dev/test, a missing EXPERIAN_KEY or AI_MODEL_API_KEY means every
 # /decisions call will raise CreditBureauUnavailableError/ModelUnavailableError --
