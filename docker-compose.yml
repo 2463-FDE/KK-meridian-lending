@@ -55,8 +55,12 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8002:8002"
+    # No published host port: this service moves money (adjust-balance, charge
+    # application) with no auth of its own -- the gateway's ownership/role checks
+    # are the only thing standing between a caller and those endpoints. Publishing
+    # this port let anyone on the host bypass the gateway entirely and hit it
+    # directly (review finding). Reachable from other containers on the compose
+    # network by service name; not reachable from the host.
     depends_on:
       postgres:
         condition: service_healthy
@@ -143,8 +147,10 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8006:8006"
+    # No published host port: POST /payments charges a card with no auth of its
+    # own -- publishing this let anyone on the host bypass the gateway's ownership
+    # check and move money directly (review finding). Reachable from other
+    # containers on the compose network by service name; not from the host.
     depends_on:
       postgres:
         condition: service_healthy

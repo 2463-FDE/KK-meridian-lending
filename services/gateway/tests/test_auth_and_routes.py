@@ -10,6 +10,7 @@ the fix: staff-only for portfolio-wide/money-moving actions, owner-or-staff for
 a specific loan's read actions and charging a payment, 403/404 otherwise.
 """
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -183,6 +184,34 @@ def test_lss_loans_list_borrower_gets_own_scoped_results(monkeypatch):
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["id"] == 5
+
+
+def test_lss_loans_list_borrower_decimal_rows_serialize(monkeypatch):
+    """Review finding: after the D12 NUMERIC migration, raw psycopg2 reads of
+    principal/apr/balance/past_due come back as Decimal, not float -- and
+    JSONResponse (stdlib json.dumps under the hood) can't serialize Decimal.
+    Feeds _borrower_loans() real Decimal values, the way a live NUMERIC column
+    actually would, and asserts the route still returns 200 with plain floats."""
+    class _FakeDb:
+        def query(self, sql, params=None):
+            assert params == (1,)
+            return [{
+                "id": 5, "applicant_name": "Maria Gonzalez",
+                "principal": Decimal("10000.00"), "apr": Decimal("12.500"),
+                "term_months": 36, "status": "current",
+                "balance": Decimal("9000.00"), "past_due": Decimal("0.00"),
+                "opened_at": None,
+            }]
+
+    monkeypatch.setattr(main, "db", _FakeDb())
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.get("/lss/loans", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["principal"] == 10000.0
+    assert item["balance"] == 9000.0
 
 
 def test_lss_loans_list_borrower_without_applicant_id_is_forbidden(monkeypatch):

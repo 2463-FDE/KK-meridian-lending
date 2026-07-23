@@ -149,12 +149,17 @@ def _borrower_loans(applicant_id: int) -> dict:
         {
             "id": r["id"],
             "applicant_name": r["applicant_name"],
-            "principal": r["principal"],
-            "apr": r["apr"],
+            # NUMERIC columns come back as Decimal from raw psycopg2 (unlike a
+            # SQLAlchemy read, this isn't affected by any asdecimal setting) --
+            # JSONResponse below uses stdlib json.dumps, which can't serialize
+            # Decimal. Cast to float at this boundary, same fix as everywhere
+            # else a raw-DB-read money value crosses a JSON response/request.
+            "principal": float(r["principal"]),
+            "apr": float(r["apr"]),
             "term_months": r["term_months"],
             "status": r["status"],
-            "balance": r["balance"],
-            "past_due": r["past_due"],
+            "balance": float(r["balance"]),
+            "past_due": float(r["past_due"]),
             "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
         }
         for r in rows
