@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, db, intake, models
+from .. import clients, db, disclosure_graph, intake, kg, models
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -184,7 +184,13 @@ def run_decision(app_id: int):
     })
     outcome = resp["outcome"]
     if outcome == "approve":
-        _auto_generate_offer(app_id, r)
+        # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
+        # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
+        # must not fail the decision that already happened.
+        try:
+            disclosure_graph.auto_generate_offer(app_id)
+        except Exception as e:  # noqa
+            log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
     return DecisionOut(
         app_id=app_id,
         decision=outcome,
@@ -193,23 +199,23 @@ def run_decision(app_id: int):
     )
 
 
-def _auto_generate_offer(app_id: int, r: dict) -> None:
-    """W4: auto-build the offer + TILA disclosure right after approval, instead of
-    leaving it as a separate manual step. Best-effort -- a disclosure-service hiccup
-    must not fail the decision that already happened (same resilience pattern as the
-    KYC call in submit_application above); the loan officer can still build it
-    manually via POST /los/offer if this fails.
+@router.get("/{app_id}/history")
+def get_loan_history(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    """W4: the full borrower -> application -> decision -> offer graph for one
+    application, via the kg.py traversal layer -- the concrete "trace this
+    loan's whole history" capability the roadmap wanted. Staff only: this
+    includes decision score/reason codes, the same underwriting-sensitive bar
+    as get_application_financials above.
     """
-    try:
-        clients.post(clients.DISCLOSURE_URL, "/offers", {
-            "application_id": app_id,
-            "decision_id": app_id,  # decisions.app_id is that table's PK
-            "principal": float(r.get("amount")),
-            "term_months": r.get("term_months"),
-            "annual_rate": 7.99,  # no per-applicant rate exists elsewhere -- same default make_offer() uses
-        })
-    except Exception as e:  # noqa
-        log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
+    if x_user_role not in _STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="staff only")
+    history = kg.get_loan_history(app_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="application not found")
+    return history
 
 
 @router.post("/{app_id}/accept")
