@@ -413,6 +413,49 @@ def test_assistant_accepts_staff_roles(monkeypatch, role):
     assert resp.status_code == 200
 
 
+@pytest.mark.parametrize("prefix", ["/decision/decisions", "/disclosure/offers"])
+def test_decision_and_disclosure_require_authentication(monkeypatch, prefix):
+    # Security fix: these used to proxy with an optional session -- an anonymous
+    # caller could POST directly to decision-service/disclosure-service (bypassing
+    # origination-service entirely) with a guessed application_id and fabricated
+    # data, overwriting a real decision or a real approved loan's TILA numbers.
+    monkeypatch.setattr(auth, "get_session", lambda token: None)
+
+    resp = client.post(prefix, json={"application_id": 1})
+
+    assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("prefix", ["/decision/decisions", "/disclosure/offers"])
+def test_decision_and_disclosure_reject_non_staff_role(monkeypatch, prefix):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez",
+    })
+
+    resp = client.post(
+        prefix, json={"application_id": 1},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("prefix", ["/decision/decisions", "/disclosure/offers"])
+@pytest.mark.parametrize("role", ["csr", "underwriter", "admin"])
+def test_decision_and_disclosure_accept_staff_roles(monkeypatch, prefix, role):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": role, "name": "X",
+    })
+
+    resp = client.post(
+        prefix, json={"application_id": 1},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 200
+
+
 def test_proxy_strips_inbound_authorization_header(monkeypatch):
     # The client's own Authorization header (the gateway session token) must
     # never be forwarded downstream verbatim -- _proxy explicitly drops it.

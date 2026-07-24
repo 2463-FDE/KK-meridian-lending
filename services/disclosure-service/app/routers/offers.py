@@ -36,8 +36,28 @@ def create_offer(body: OfferIn):
         )
     decision_id = decision_rows[0]["app_id"]
 
-    o = offer_mod.build_offer(body.principal, body.annual_rate, body.term_months)
-    rows = schedule.amortization(body.principal, body.annual_rate, body.term_months)
+    # Security fix: principal/term_months/annual_rate used to come straight from
+    # the caller with only an "is this application approved" check -- anyone who
+    # could reach this endpoint could overwrite a real approved loan's TILA
+    # numbers with fabricated values. Source principal/term from the application's
+    # own record instead, same as the auto-generation path (disclosure_graph.py)
+    # already does; annual_rate has no per-applicant concept anywhere in this
+    # system, so it's never caller-supplied either, just the same fixed default.
+    app_rows = db.query(
+        "SELECT amount, term_months FROM applications WHERE id = %s",
+        (body.application_id,),
+    )
+    if not app_rows:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no application on record for application_id={body.application_id}",
+        )
+    principal = float(app_rows[0]["amount"])
+    term_months = app_rows[0]["term_months"]
+    annual_rate = 7.99
+
+    o = offer_mod.build_offer(principal, annual_rate, term_months)
+    rows = schedule.amortization(principal, annual_rate, term_months)
     # W4: snapshot the fee rule version in effect right now, on this row, so a later
     # change to ORIGINATION_FEE_PCT can never retroactively change what this offer
     # is proven to have used.
