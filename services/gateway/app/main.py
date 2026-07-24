@@ -225,13 +225,33 @@ async def kyc(path: str, request: Request, authorization: str | None = Header(No
 
 @app.api_route("/decision/{path:path}", methods=["GET", "POST"])
 async def decision(path: str, request: Request, authorization: str | None = Header(None)):
-    user = auth.get_session(auth.bearer_token(authorization))
+    # Security fix: this used to forward with an optional session -- an anonymous
+    # caller could POST /decision/decisions directly (bypassing origination-service
+    # entirely) with a guessed application_id and fabricated income/SSN, and
+    # decision-service's ON CONFLICT DO UPDATE would overwrite the real underwriting
+    # outcome + its audit trail. The normal decision flow never comes through this
+    # route at all -- origination-service calls decision-service server-to-server
+    # over the internal network -- so this proxy only exists for staff/ops tooling
+    # to inspect or re-run a decision directly. Staff-only, no exceptions.
+    user = _require_user(authorization)
+    if not auth.is_staff(user):
+        raise HTTPException(status_code=403, detail="staff only")
     return await _proxy(DECISION_URL, f"/{path}", request, user)
 
 
 @app.api_route("/disclosure/{path:path}", methods=["GET", "POST"])
 async def disclosure(path: str, request: Request, authorization: str | None = Header(None)):
-    user = auth.get_session(auth.bearer_token(authorization))
+    # Security fix: same gap as /decision/* above -- an anonymous caller could POST
+    # /disclosure/offers directly with an approved application_id and any
+    # principal/rate/term, overwriting the canonical TILA disclosure. The normal
+    # auto-offer flow never comes through this route -- origination-service's
+    # disclosure_graph calls disclosure-service server-to-server. Staff-only.
+    # (disclosure-service's own create_offer also now derives principal/term
+    # server-side rather than trusting the body -- see offers.py -- so this is
+    # defense in depth, not the only fix.)
+    user = _require_user(authorization)
+    if not auth.is_staff(user):
+        raise HTTPException(status_code=403, detail="staff only")
     return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
 
 

@@ -26,18 +26,24 @@ client = TestClient(app)
 
 
 class _FakeDb:
-    """Records every query() call; scripted to return the decision-lookup rows
-    and the insert's RETURNING row."""
+    """Records every query() call; scripted to return the decision-lookup rows,
+    the application-lookup row, and the insert's RETURNING row."""
 
-    def __init__(self, decision_rows, insert_id=101):
+    def __init__(self, decision_rows, insert_id=101, application_rows=None):
         self.decision_rows = decision_rows
         self.insert_id = insert_id
+        self.application_rows = (
+            application_rows if application_rows is not None
+            else [{"amount": 12000, "term_months": 36}]
+        )
         self.calls = []
 
     def query(self, sql, params=None):
         self.calls.append((sql, params))
         if "FROM decisions" in sql:
             return self.decision_rows
+        if "FROM applications" in sql:
+            return self.application_rows
         if "INSERT INTO offers" in sql:
             return [{"id": self.insert_id}]
         raise AssertionError(f"unexpected query: {sql}")
@@ -93,6 +99,65 @@ def test_create_offer_insert_is_idempotent_per_decision(monkeypatch):
     insert_call = next(c for c in fake_db.calls if "INSERT INTO offers" in c[0])
     assert "ON CONFLICT (decision_id)" in insert_call[0]
     assert "DO UPDATE" in insert_call[0]
+
+
+def test_create_offer_ignores_client_supplied_principal_and_term(monkeypatch):
+    """Security fix: a caller used to be able to supply any principal/term/rate
+    for an approved application_id and have it persisted verbatim, overwriting
+    the real TILA numbers. The application's own record (amount=12000,
+    term_months=36 here) must win over the different values in the request body."""
+    fake_db = _FakeDb(
+        decision_rows=[{"app_id": 10}],
+        application_rows=[{"amount": 12000, "term_months": 36}],
+    )
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    resp = client.post(
+        "/offers",
+        json=_offer_payload(application_id=10, principal=49999) | {"term_months": 60, "annual_rate": 35},
+    )
+
+    assert resp.status_code == 200
+    expected = offer_mod.build_offer(12000, 7.99, 36)
+    assert resp.json()["apr"] == expected["apr"]
+    assert resp.json()["monthly_payment"] == expected["monthly_payment"]
+
+    insert_call = next(c for c in fake_db.calls if "INSERT INTO offers" in c[0])
+    assert insert_call[1][3] == expected["apr"]  # apr positional param -- not derived from principal=49999
+
+
+def test_repeated_create_offer_with_different_body_values_leaves_offer_unchanged(monkeypatch):
+    """Review's exact ask: create an offer, repeat POST /offers for the same
+    application_id with a different principal/rate/term, assert the persisted
+    offer is unchanged. The ON CONFLICT (decision_id) DO UPDATE only ever writes
+    server-derived values now, so a repeat call recomputes the identical numbers
+    regardless of what the caller sends -- it can never drift."""
+    fake_db = _FakeDb(
+        decision_rows=[{"app_id": 10}],
+        application_rows=[{"amount": 12000, "term_months": 36}],
+    )
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    first = client.post("/offers", json=_offer_payload(application_id=10, principal=12000))
+    second = client.post(
+        "/offers",
+        json=_offer_payload(application_id=10, principal=49999) | {"term_months": 60, "annual_rate": 35},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["apr"] == second.json()["apr"]
+    assert first.json()["monthly_payment"] == second.json()["monthly_payment"]
+    assert first.json()["disclosure"]["amount_financed"] == second.json()["disclosure"]["amount_financed"]
+
+
+def test_create_offer_rejects_when_no_application_on_record(monkeypatch):
+    fake_db = _FakeDb(decision_rows=[{"app_id": 10}], application_rows=[])
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    resp = client.post("/offers", json=_offer_payload(application_id=10))
+
+    assert resp.status_code == 404
 
 
 class _FakeOffer:
