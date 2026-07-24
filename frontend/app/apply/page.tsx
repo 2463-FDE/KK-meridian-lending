@@ -202,7 +202,7 @@ export default function ApplyPage() {
         phone: form.phone,
         employer: form.employer,
         job_title: form.job_title,
-        annual_income: parseFloat(form.annual_income || "0"),
+        income: parseFloat(form.annual_income || "0"),
         employment_years: parseInt(form.employment_years || "0", 10),
         amount: form.amount,
         term_months: parseInt(form.term_months, 10),
