@@ -230,7 +230,16 @@ async def kyc(path: str, request: Request, authorization: str | None = Header(No
 
 @app.api_route("/decision/{path:path}", methods=["GET", "POST"])
 async def decision(path: str, request: Request, authorization: str | None = Header(None)):
-    user = auth.get_session(auth.bearer_token(authorization))
+    # Security fix: this used to forward with an optional session -- an anonymous
+    # caller could POST /decision/decisions directly with an SSN, triggering a
+    # real credit pull and overwriting the decision for any existing application
+    # via the upsert. The normal decision flow never comes through this route at
+    # all -- origination-service calls decision-service server-to-server over the
+    # internal network -- so this proxy only exists for staff/ops tooling to
+    # inspect or re-run a decision directly. Staff-only, no exceptions.
+    user = _require_user(authorization)
+    if not auth.is_staff(user):
+        raise HTTPException(status_code=403, detail="staff only")
     return await _proxy(DECISION_URL, f"/{path}", request, user)
 
 

@@ -442,6 +442,46 @@ def test_assistant_accepts_staff_roles(monkeypatch, role):
     assert resp.status_code == 200
 
 
+def test_decision_requires_authentication(monkeypatch):
+    # Security fix: this route used to proxy with an optional session -- an
+    # anonymous caller could POST /decision/decisions directly with an SSN,
+    # triggering a real credit pull and overwriting the decision for any
+    # existing application via the upsert.
+    monkeypatch.setattr(auth, "get_session", lambda token: None)
+
+    resp = client.post("/decision/decisions", json={"application_id": 1})
+
+    assert resp.status_code == 401
+
+
+def test_decision_rejects_non_staff_role(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez",
+    })
+
+    resp = client.post(
+        "/decision/decisions", json={"application_id": 1},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("role", ["csr", "underwriter", "admin"])
+def test_decision_accepts_staff_roles(monkeypatch, role):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": role, "name": "X",
+    })
+
+    resp = client.post(
+        "/decision/decisions", json={"application_id": 1},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 200
+
+
 def test_proxy_strips_inbound_authorization_header(monkeypatch):
     # The client's own Authorization header (the gateway session token) must
     # never be forwarded downstream verbatim -- _proxy explicitly drops it.
