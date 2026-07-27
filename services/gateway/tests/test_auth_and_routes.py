@@ -375,22 +375,21 @@ def test_payments_unrecognized_subpath_fails_closed_not_found(monkeypatch):
     assert resp.status_code == 404
 
 
-def test_assistant_requires_authentication(monkeypatch):
+def test_assistant_summary_requires_authentication(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: None)
 
-    resp = client.post("/assistant/policy-chat", json={"question": "x"})
+    resp = client.post("/assistant/applications/1/summary")
 
     assert resp.status_code == 401
 
 
-def test_assistant_rejects_non_staff_role(monkeypatch):
+def test_assistant_summary_rejects_non_staff_role(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: {
         "id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez",
     })
 
     resp = client.post(
-        "/assistant/policy-chat",
-        json={"question": "x"},
+        "/assistant/applications/1/summary",
         headers={"Authorization": "Bearer faketoken123"},
     )
 
@@ -398,10 +397,36 @@ def test_assistant_rejects_non_staff_role(monkeypatch):
 
 
 @pytest.mark.parametrize("role", ["csr", "underwriter", "admin"])
-def test_assistant_accepts_staff_roles(monkeypatch, role):
+def test_assistant_summary_accepts_staff_roles(monkeypatch, role):
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(auth, "get_session", lambda token: {
         "id": 2, "username": "x", "role": role, "name": "X",
+    })
+
+    resp = client.post(
+        "/assistant/applications/1/summary",
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 200
+
+
+def test_assistant_policy_chat_proxies_anonymously_with_no_session(monkeypatch):
+    # Policy Q&A is generic lending-policy content, no per-applicant financials
+    # or risk_tier -- unlike /assistant/applications/*/summary, it's open to a
+    # borrower with no account, same anonymous-allowed pattern as /los/*.
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: None)
+
+    resp = client.post("/assistant/policy-chat", json={"question": "x"})
+
+    assert resp.status_code == 200
+
+
+def test_assistant_policy_chat_allows_borrower_role(monkeypatch):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez",
     })
 
     resp = client.post(

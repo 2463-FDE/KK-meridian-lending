@@ -303,9 +303,23 @@ async def payments(path: str, request: Request, authorization: str | None = Head
     raise HTTPException(status_code=404, detail="not found")
 
 
+@app.post("/assistant/policy-chat")
+async def assistant_policy_chat(request: Request, authorization: str | None = Header(None)):
+    # Registered before the /assistant/{path:path} catch-all below so this literal
+    # path wins the match. Policy Q&A is generic lending-policy content -- no
+    # per-applicant financials or risk_tier -- so it doesn't need the staff-only
+    # gate that protects /assistant/applications/*/summary; a borrower can ask
+    # without an account, same anonymous-allowed pattern as /los/*.
+    # loan-assistant's own cost guard (MAX_INPUT_TOKENS) and this gateway's
+    # per-IP rate limiter both already apply regardless of caller identity.
+    user = auth.get_session(auth.bearer_token(authorization))
+    return await _proxy(LOAN_ASSISTANT_URL, "/policy-chat", request, user)
+
+
 @app.api_route("/assistant/{path:path}", methods=["GET", "POST"])
 async def assistant(path: str, request: Request, authorization: str | None = Header(None)):
-    # AI summary returns risk tier + internal flags — staff only, not the borrower.
+    # AI summary returns risk tier + internal flags — staff only, not the
+    # borrower. (Policy Q&A is split out above -- no per-applicant financials there.)
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="Forbidden")
