@@ -24,3 +24,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # had no rate limiting of any kind before this.
 RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "120"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+# Sent as X-Internal-Token on the staff-ops /decision/* proxy (see main.py) --
+# must match decision-service's own copy (docker-compose.yml wires both from
+# the same var).
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")

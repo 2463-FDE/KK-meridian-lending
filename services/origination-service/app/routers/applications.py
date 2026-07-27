@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, db, disclosure_graph, fair_lending, intake, kg, models
+from .. import clients, config, db, disclosure_graph, fair_lending, intake, kg, models
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -197,7 +197,7 @@ def run_decision(app_id: int):
         "annual_income": float(r.get("income") or 0),
         "monthly_debt": 0,            # not captured in the LOS today
         "credit_score": None,         # pulled downstream by decision-service
-    })
+    }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     outcome = resp["outcome"]
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct

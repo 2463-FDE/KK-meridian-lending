@@ -38,3 +38,9 @@ DATABASE_URL = os.getenv(
 )
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Required on every POST /decisions (see routers/decisions.py) -- defense in
+# depth for the network boundary (decision-service has no host port mapping;
+# see docker-compose.yml). Unset means no caller can ever match it, so a
+# deploy that forgets to configure this fails closed rather than open.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")

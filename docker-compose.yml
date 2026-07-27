@@ -33,6 +33,11 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # Shared with decision-service/gateway below -- sent as X-Internal-Token
+      # on the server-to-server call to decision-service so it has a check to
+      # fail closed on even if a future compose change re-publishes its port.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
     ports:
       - "8001:8001"
     depends_on:
@@ -102,8 +107,16 @@ services:
       # (see app/config.py). Default the local compose path to dev so it boots ready
       # to use; an .env that sets ENVIRONMENT still wins.
       ENVIRONMENT: ${ENVIRONMENT:-development}
-    ports:
-      - "8004:8004"
+      # Required on every POST /decisions (see routers/decisions.py) -- defense
+      # in depth so a future accidental host-port re-exposure (or any other
+      # container reachable on this compose network) still can't submit
+      # decisions without also knowing this. Same default as origination-
+      # service/gateway below so the three agree without an .env entry.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+    # No host port mapping: decision-service handles SSNs and the
+    # decision-overwrite bug (see routers/decisions.py) means it must only be
+    # reachable over the internal compose network, never from the host. The
+    # gateway is the sole external path in (staff-only, see gateway/main.py).
     depends_on:
       postgres:
         condition: service_healthy
@@ -202,6 +215,10 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # Forwarded as X-Internal-Token on the staff-ops /decision/* proxy path
+      # (see app/main.py) -- must match decision-service's copy above.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
     ports:
       - "8000:8000"
     depends_on:
