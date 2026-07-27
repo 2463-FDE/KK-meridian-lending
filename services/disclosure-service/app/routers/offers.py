@@ -37,12 +37,16 @@ def create_offer(body: OfferIn):
     decision_id = decision_rows[0]["app_id"]
 
     # Security fix: principal/term_months/annual_rate used to come straight from
-    # the caller with only an "is this application approved" check -- anyone who
-    # could reach this endpoint could overwrite a real approved loan's TILA
-    # numbers with fabricated values. Source principal/term from the application's
-    # own record instead, same as the auto-generation path (disclosure_graph.py)
-    # already does; annual_rate has no per-applicant concept anywhere in this
-    # system, so it's never caller-supplied either, just the same fixed default.
+    # the caller with only an "is this application approved" check -- combined with
+    # ON CONFLICT (decision_id) DO UPDATE, a repeat POST for an approved
+    # application_id could overwrite the canonical offer with whatever numbers the
+    # caller sent, and offer creation wasn't restricted to staff/services. Source
+    # principal/term from the application's own record instead, same as the
+    # auto-generation path (disclosure_graph.py) already does; annual_rate has no
+    # per-applicant concept anywhere in this system, so it's never caller-supplied
+    # either, just the same fixed default. This makes the upsert genuinely
+    # idempotent -- a repeat call for the same application always recomputes the
+    # exact same numbers, never drifts based on what the caller happens to send.
     app_rows = db.query(
         "SELECT amount, term_months FROM applications WHERE id = %s",
         (body.application_id,),
