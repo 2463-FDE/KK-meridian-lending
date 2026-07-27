@@ -17,25 +17,6 @@ router = APIRouter(tags=["offers"])
 
 @router.post("/offers", response_model=OfferResponse)
 def create_offer(body: OfferIn):
-    # W4 review fix: never trust a caller-supplied decision_id directly -- the FK
-    # on offers.decision_id only proves that SOME decision with that id exists,
-    # not that it belongs to this application_id. application_id=A + decision_id=B
-    # with no real relation between them would have sailed through, leaking
-    # applicant B's decision into application A's audit trail. decisions.app_id is
-    # that table's own PK (one decision per application), so the only decision_id
-    # that can ever legitimately apply here is the one derived from application_id
-    # itself -- and it must actually be an approval, not just exist.
-    decision_rows = db.query(
-        "SELECT app_id FROM decisions WHERE app_id = %s AND outcome = 'approve'",
-        (body.application_id,),
-    )
-    if not decision_rows:
-        raise HTTPException(
-            status_code=422,
-            detail=f"no approved decision on record for application_id={body.application_id}",
-        )
-    decision_id = decision_rows[0]["app_id"]
-
     # Security fix: principal/term_months/annual_rate used to come straight from
     # the caller with only an "is this application approved" check -- combined with
     # ON CONFLICT (decision_id) DO UPDATE, a repeat POST for an approved
@@ -44,9 +25,7 @@ def create_offer(body: OfferIn):
     # principal/term from the application's own record instead, same as the
     # auto-generation path (disclosure_graph.py) already does; annual_rate has no
     # per-applicant concept anywhere in this system, so it's never caller-supplied
-    # either, just the same fixed default. This makes the upsert genuinely
-    # idempotent -- a repeat call for the same application always recomputes the
-    # exact same numbers, never drifts based on what the caller happens to send.
+    # either, just the same fixed default.
     app_rows = db.query(
         "SELECT amount, term_months FROM applications WHERE id = %s",
         (body.application_id,),
@@ -66,36 +45,68 @@ def create_offer(body: OfferIn):
     # change to ORIGINATION_FEE_PCT can never retroactively change what this offer
     # is proven to have used.
     fee_pct_used = float(offer_mod.ORIGINATION_FEE_PCT)
-    # persist via raw psycopg2 (matches origination's write path) — float money columns.
-    # ON CONFLICT (decision_id): a retried/duplicated call (timeout retry, double
-    # click) for the same decision updates the one canonical offer row instead of
-    # minting a second one that ORDER BY id DESC would then silently prefer
-    # (review finding -- see 0007_offers_decision_id_unique.sql).
+
+    # Review fix: the "is this application approved" check and the offer write
+    # used to be two separate statements (a SELECT, then an INSERT) -- a
+    # concurrent decision rerun could flip the outcome to 'deny' in the gap
+    # between them, leaving an offer attached to a denied decision. Folding
+    # the approval check into the INSERT's own SELECT ... FROM decisions
+    # WHERE outcome = 'approve' makes the check and the write atomic: a row
+    # is only ever inserted for a decision that is STILL approved at the
+    # instant of the insert. decisions.app_id is that table's own PK (one
+    # decision per application), so it doubles as the offer's decision_id --
+    # never trust a caller-supplied decision_id directly (W4 review fix): the
+    # FK alone only proves SOME decision with that id exists, not that it
+    # belongs to this application_id.
+    #
+    # Review fix: ON CONFLICT ... DO UPDATE used to recompute APR/finance
+    # charge/fee_pct_used from whatever the fee config happens to be right
+    # now on every retried/duplicated call -- if the fee rule changed between
+    # the original request and a retry, the borrower's canonical disclosure
+    # would silently change underneath them. DO NOTHING instead, then fall
+    # back to reading the already-stored row below -- a retry always gets
+    # back the ORIGINAL terms, never a recomputed set.
     inserted = db.query(
         "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
         "monthly_payment, amount_financed, total_of_payments) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (decision_id) DO UPDATE SET "
-        "  app_id = EXCLUDED.app_id, fee_pct_used = EXCLUDED.fee_pct_used, "
-        "  apr = EXCLUDED.apr, finance_charge = EXCLUDED.finance_charge, "
-        "  monthly_payment = EXCLUDED.monthly_payment, "
-        "  amount_financed = EXCLUDED.amount_financed, "
-        "  total_of_payments = EXCLUDED.total_of_payments "
-        "RETURNING id",
-        (body.application_id, decision_id, fee_pct_used, o["apr"], o["finance_charge"],
-         o["monthly_payment"], o["amount_financed"], o["total_of_payments"]),
+        "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s "
+        "FROM decisions d WHERE d.app_id = %s AND d.outcome = 'approve' "
+        "ON CONFLICT (decision_id) DO NOTHING "
+        "RETURNING id, app_id, decision_id, fee_pct_used, apr, finance_charge, "
+        "monthly_payment, amount_financed, total_of_payments",
+        (fee_pct_used, o["apr"], o["finance_charge"], o["monthly_payment"],
+         o["amount_financed"], o["total_of_payments"], body.application_id),
     )
-    offer_id = inserted[0]["id"]
+    if inserted:
+        row = inserted[0]
+    else:
+        # Either no approved decision exists for this application_id, or an
+        # offer already exists for it (ON CONFLICT DO NOTHING -- see above).
+        # decisions.app_id is this offer's decision_id, so it's also
+        # body.application_id here.
+        existing = db.query(
+            "SELECT id, app_id, decision_id, fee_pct_used, apr, finance_charge, "
+            "monthly_payment, amount_financed, total_of_payments "
+            "FROM offers WHERE decision_id = %s",
+            (body.application_id,),
+        )
+        if not existing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"no approved decision on record for application_id={body.application_id}",
+            )
+        row = existing[0]
+
     disclosure = Disclosure(
-        apr=o["apr"], finance_charge=o["finance_charge"],
-        monthly_payment=o["monthly_payment"], amount_financed=o["amount_financed"],
-        total_of_payments=o["total_of_payments"],
+        apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
+        monthly_payment=float(row["monthly_payment"]), amount_financed=float(row["amount_financed"]),
+        total_of_payments=float(row["total_of_payments"]),
     )
     return OfferResponse(
-        offer_id=offer_id, application_id=body.application_id,
-        decision_id=decision_id, fee_pct_used=fee_pct_used,
-        apr=o["apr"], finance_charge=o["finance_charge"],
-        monthly_payment=o["monthly_payment"], total_of_payments=o["total_of_payments"],
+        offer_id=row["id"], application_id=row["app_id"],
+        decision_id=row["decision_id"], fee_pct_used=float(row["fee_pct_used"]),
+        apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
+        monthly_payment=float(row["monthly_payment"]), total_of_payments=float(row["total_of_payments"]),
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],
     )
 
