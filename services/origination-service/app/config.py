@@ -18,3 +18,8 @@ DECISION_URL = os.getenv("DECISION_URL", "http://decision-service:8004")
 DISCLOSURE_URL = os.getenv("DISCLOSURE_URL", "http://disclosure-service:8005")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Sent as X-Internal-Token on the server-to-server call to decision-service's
+# POST /decisions (see clients.py / routers/applications.py) -- must match
+# decision-service's own copy (docker-compose.yml wires both from the same var).
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")

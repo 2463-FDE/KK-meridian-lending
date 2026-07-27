@@ -31,6 +31,7 @@ from . import auth, db
 from .config import (
     DECISION_URL,
     DISCLOSURE_URL,
+    INTERNAL_SERVICE_TOKEN,
     KYC_URL,
     LOAN_ASSISTANT_URL,
     ORIGINATION_URL,
@@ -92,7 +93,7 @@ def me(authorization: str | None = Header(None)):
 
 # -------------------------------------------------------------------------- proxy
 
-async def _proxy(base: str, path: str, request: Request, user: dict | None):
+async def _proxy(base: str, path: str, request: Request, user: dict | None, extra_headers: dict | None = None):
     method = request.method
     body = await request.body()
     headers = {
@@ -103,6 +104,8 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None):
     if user:
         headers["X-User-Id"] = str(user.get("id", ""))
         headers["X-User-Role"] = str(user.get("role", ""))
+    if extra_headers:
+        headers.update(extra_headers)
     async with httpx.AsyncClient(timeout=35) as client:
         resp = await client.request(
             method, f"{base}{path}", content=body, headers=headers,
@@ -240,7 +243,10 @@ async def decision(path: str, request: Request, authorization: str | None = Head
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="staff only")
-    return await _proxy(DECISION_URL, f"/{path}", request, user)
+    return await _proxy(
+        DECISION_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 @app.api_route("/disclosure/{path:path}", methods=["GET", "POST"])

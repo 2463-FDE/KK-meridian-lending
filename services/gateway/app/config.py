@@ -18,3 +18,8 @@ LOAN_ASSISTANT_URL = os.getenv("LOAN_ASSISTANT_URL", "http://loan-assistant:8007
 # 8-hour sessions. (No refresh, no rotation, no CSRF token — Halcyon "v1 auth".)
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "28800"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Sent as X-Internal-Token on the staff-ops /decision/* proxy (see main.py) --
+# must match decision-service's own copy (docker-compose.yml wires both from
+# the same var).
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
