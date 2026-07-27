@@ -7,7 +7,7 @@ over HTTP and maps its response into the OfferOut shape the frontend already exp
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import clients
+from .. import clients, config
 from ..schemas import Disclosure, OfferOut, ScheduleRow
 
 router = APIRouter(tags=["offers"])
@@ -42,7 +42,7 @@ def make_offer(body: OfferIn):
         "principal": body.principal,
         "term_months": body.term_months,
         "annual_rate": body.annual_rate_pct,
-    })
+    }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     return _to_offer_out(body.app_id, resp)
 
 

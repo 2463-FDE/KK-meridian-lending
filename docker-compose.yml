@@ -135,8 +135,17 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8005:8005"
+    environment:
+      # Required on every POST /offers (see routers/offers.py) -- defense in
+      # depth so a future accidental host-port re-exposure still can't submit
+      # offers without also knowing this. Same default as the other services
+      # so they all agree without an .env entry.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+    # No host port mapping: POST /offers persists the canonical TILA numbers
+    # for an approved loan with no auth of its own -- publishing this let
+    # anyone on the host bypass the gateway's staff-only /disclosure/* check
+    # entirely (review finding). Reachable from other containers on the
+    # compose network by service name; not reachable from the host.
     depends_on:
       postgres:
         condition: service_healthy
@@ -156,8 +165,17 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8006:8006"
+    environment:
+      # Required on every POST /payments (see routers/payments.py) -- defense
+      # in depth so a future accidental host-port re-exposure still can't
+      # charge a card without also knowing this. Same default as the other
+      # services so they all agree without an .env entry.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+    # No host port mapping: POST /payments charges a card/ACH with no auth of
+    # its own -- publishing this let anyone on the host bypass the gateway's
+    # ownership check and move money directly (review finding). Reachable
+    # from other containers on the compose network by service name; not from
+    # the host.
     depends_on:
       postgres:
         condition: service_healthy

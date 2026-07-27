@@ -16,13 +16,17 @@ Also covers: get_offer() reading fee_pct_used from the stored row instead of
 the live ORIGINATION_FEE_PCT constant -- the exact drift this column exists to
 prevent.
 """
-from app import db
+from app import config, db
 from app import offer as offer_mod
 from app.database import get_session
 from app.main import app
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
+# Defaulted for every request in this file so the pre-existing tests below
+# don't each need updating -- the X-Internal-Token rejection tests further
+# down override/clear it per-call instead.
+client.headers.update({"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
 
 
 class _FakeDb:
@@ -68,6 +72,41 @@ def test_create_offer_rejects_when_no_approved_decision(monkeypatch):
     resp = client.post("/offers", json=_offer_payload(application_id=10))
 
     assert resp.status_code == 422
+
+
+def test_create_offer_rejects_missing_internal_token(monkeypatch):
+    """Defense in depth for POST /offers -- see docker-compose.yml (no host
+    port for this service) and app/config.py."""
+    fake_db = _FakeDb(decision_rows=[{"app_id": 10}])
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    resp = client.post("/offers", json=_offer_payload(application_id=10), headers={"X-Internal-Token": ""})
+
+    assert resp.status_code == 401
+
+
+def test_create_offer_rejects_wrong_internal_token(monkeypatch):
+    fake_db = _FakeDb(decision_rows=[{"app_id": 10}])
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    resp = client.post(
+        "/offers", json=_offer_payload(application_id=10),
+        headers={"X-Internal-Token": "attacker-guessed-token"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_create_offer_rejects_everything_when_config_token_unset(monkeypatch):
+    """A deploy that forgets to set INTERNAL_SERVICE_TOKEN must fail closed --
+    no caller (not even one that sends the empty string) should ever match."""
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    fake_db = _FakeDb(decision_rows=[{"app_id": 10}])
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    resp = client.post("/offers", json=_offer_payload(application_id=10), headers={"X-Internal-Token": ""})
+
+    assert resp.status_code == 401
 
 
 def test_create_offer_ignores_mismatched_client_decision_id(monkeypatch):

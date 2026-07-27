@@ -269,7 +269,10 @@ async def disclosure(path: str, request: Request, authorization: str | None = He
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="staff only")
-    return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
+    return await _proxy(
+        DISCLOSURE_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 @app.api_route("/payments/{path:path}", methods=["GET", "POST"])
@@ -282,8 +285,9 @@ async def payments(path: str, request: Request, authorization: str | None = Head
     user = _require_user(authorization)
 
     if path == "" and request.method == "POST":
+        payment_headers = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
         if auth.is_staff(user):
-            return await _proxy(PAYMENT_URL, "/payments", request, user)
+            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         # Borrower: only allowed to charge a loan their own applicant_id owns.
         # request.body() is cached by Starlette after the first read, so _proxy's
         # own await request.body() below still gets the same bytes.
@@ -293,7 +297,7 @@ async def payments(path: str, request: Request, authorization: str | None = Head
         except Exception:
             loan_id = None
         if loan_id is not None and auth.owns_loan(user, loan_id):
-            return await _proxy(PAYMENT_URL, "/payments", request, user)
+            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         raise HTTPException(status_code=403, detail="forbidden")
 
     raise HTTPException(status_code=404, detail="not found")

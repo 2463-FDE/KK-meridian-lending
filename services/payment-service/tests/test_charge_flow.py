@@ -10,10 +10,14 @@ import httpx as httpx_module
 import pytest
 from fastapi.testclient import TestClient
 
-from app import payments
+from app import config, payments
 from app.main import app
 
 client = TestClient(app)
+# Defaulted for every request in this file so the pre-existing tests below
+# don't each need updating -- the X-Internal-Token rejection tests further
+# down override/clear it per-call instead.
+client.headers.update({"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
 
 
 class _FakeDb:
@@ -139,6 +143,42 @@ def test_post_payment_still_reports_captured_when_servicing_unreachable(fake_db,
     # whole request.
     assert resp.status_code == 200
     assert resp.json()["status"] == "captured"
+
+
+def test_post_payment_rejects_missing_internal_token(fake_db):
+    """Defense in depth for POST /payments -- see docker-compose.yml (no host
+    port for this service) and app/config.py."""
+    resp = client.post(
+        "/payments",
+        json={"loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": 250.0},
+        headers={"X-Internal-Token": ""},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_post_payment_rejects_wrong_internal_token(fake_db):
+    resp = client.post(
+        "/payments",
+        json={"loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": 250.0},
+        headers={"X-Internal-Token": "attacker-guessed-token"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_post_payment_rejects_everything_when_config_token_unset(fake_db, monkeypatch):
+    """A deploy that forgets to set INTERNAL_SERVICE_TOKEN must fail closed --
+    no caller (not even one that sends the empty string) should ever match."""
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+
+    resp = client.post(
+        "/payments",
+        json={"loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": 250.0},
+        headers={"X-Internal-Token": ""},
+    )
+
+    assert resp.status_code == 401
 
 
 def test_retried_post_payment_double_charges(fake_db):

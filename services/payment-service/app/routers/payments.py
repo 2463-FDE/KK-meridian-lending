@@ -1,7 +1,7 @@
 """Payment capture API. POST /payments charges a card/ACH and applies it to the balance."""
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 
-from .. import payments
+from .. import config, payments
 from ..schemas import PaymentIn, PaymentOut
 
 router = APIRouter(tags=["payments"])
@@ -16,7 +16,17 @@ def _mask_pan(pan: str | None) -> str | None:
 
 
 @router.post("/payments", response_model=PaymentOut)
-def post_payment(body: PaymentIn):
+def post_payment(
+    body: PaymentIn,
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    # Defense in depth: the network boundary (no host port -- see
+    # docker-compose.yml) is the primary control; this is the fallback in case
+    # that boundary is ever mistakenly reopened. An unset config token can
+    # never match, so a deploy that forgets to set one fails closed.
+    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=401, detail="not authorized")
+
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
     return payments.charge(
         body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method

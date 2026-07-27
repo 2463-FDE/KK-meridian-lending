@@ -4,11 +4,11 @@ Write path (POST /offers) builds the offer + amortization schedule with float ma
 persists an offers row via raw psycopg2 (matches the LOS write path). Read path
 (GET /applications/{id}/offer) goes through SQLAlchemy.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import db, models, offer as offer_mod, schedule
+from .. import config, db, models, offer as offer_mod, schedule
 from ..database import get_session
 from ..schemas import Disclosure, OfferIn, OfferResponse, ScheduleRow
 
@@ -16,7 +16,17 @@ router = APIRouter(tags=["offers"])
 
 
 @router.post("/offers", response_model=OfferResponse)
-def create_offer(body: OfferIn):
+def create_offer(
+    body: OfferIn,
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    # Defense in depth: the network boundary (no host port -- see
+    # docker-compose.yml) is the primary control; this is the fallback in case
+    # that boundary is ever mistakenly reopened. An unset config token can
+    # never match, so a deploy that forgets to set one fails closed.
+    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=401, detail="not authorized")
+
     # W4 review fix: never trust a caller-supplied decision_id directly -- the FK
     # on offers.decision_id only proves that SOME decision with that id exists,
     # not that it belongs to this application_id. application_id=A + decision_id=B
