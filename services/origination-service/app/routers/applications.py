@@ -177,7 +177,26 @@ def get_application_financials(
 
 
 @router.post("/{app_id}/decision", response_model=DecisionOut)
-def run_decision(app_id: int):
+def run_decision(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    # Security fix: this route has no session of its own -- the gateway's /los/*
+    # proxy forwards it anonymously on purpose, since a freshly-submitted
+    # applicant has no account yet and this is how they get their first
+    # decision (frontend/app/apply/page.tsx's "Get decision" button). That's
+    # fine for a ONE-TIME first run. Without a check, though, the same route
+    # let anyone who guesses an app_id rerun decisioning on a stranger's
+    # already-decided application -- triggering a real bureau pull and
+    # overwriting their decision row via decision-service's own
+    # ON CONFLICT (app_id) DO UPDATE (graph.py). Once a decision exists, a
+    # rerun requires a staff session (the underwriting console's own "Run
+    # decision" button already sends one) -- same _STAFF_ROLES gate as
+    # get_application_financials above.
+    existing_decision = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
+    if existing_decision and x_user_role not in _STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="staff only to rerun a decision")
+
     rows = db.query(
         "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
@@ -235,16 +254,34 @@ def get_loan_history(
 
 
 @router.post("/{app_id}/accept")
-def accept_offer(app_id: int):
+def accept_offer(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    # Security fix: this never checked that the application actually has an
+    # approved decision on record, and never guarded against re-acceptance --
+    # anyone who guessed an app_id could board/fund a real loan for an
+    # application that was denied, still pending, or belongs to a stranger,
+    # or re-board an already-funded one a second time. Anonymous is still
+    # allowed for a fresh accept (frontend/app/apply/page.tsx's own borrower
+    # flow has no account yet), same tradeoff as run_decision above; once the
+    # application is already funded, accepting again requires staff.
     rows = db.query(
-        "SELECT a.amount, a.term_months, ap.name, o.apr "
+        "SELECT a.amount, a.term_months, a.status, ap.name, o.apr, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
-        "LEFT JOIN offers o ON o.app_id = a.id WHERE a.id = %s ORDER BY o.id DESC",
+        "LEFT JOIN offers o ON o.app_id = a.id "
+        "LEFT JOIN decisions d ON d.app_id = a.id "
+        "WHERE a.id = %s ORDER BY o.id DESC",
         (app_id,),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]
+    if r.get("outcome") != "approve":
+        raise HTTPException(status_code=422, detail="application is not approved")
+    if r.get("status") == "funded" and x_user_role not in _STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="staff only to re-accept a funded application")
+
     rate = r.get("apr") or 7.99
     loan_id = intake.board_to_servicing(
         app_id, r.get("name") or "Borrower", r["amount"], rate, r["term_months"]
