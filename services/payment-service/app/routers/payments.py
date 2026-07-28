@@ -27,7 +27,7 @@ def post_payment(
     if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="not authorized")
 
-    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
     return payments.charge(
-        body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method
+        body.loan_id, body.pan, body.cvv, body.amount, body.idempotency_key,
+        body.ssn, body.name, body.method,
     )

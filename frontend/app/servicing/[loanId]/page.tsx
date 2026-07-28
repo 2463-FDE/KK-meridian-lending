@@ -78,6 +78,12 @@ function LoanDetailContent() {
   const [newBalance, setNewBalance] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
 
+  // POST /payments now requires an idempotency_key (review fix -- a retry or
+  // a double-click used to double-charge). Minted once and reused across
+  // retries of the SAME submit attempt; a fresh one is minted only after a
+  // successful charge, so the next distinct payment gets its own key.
+  const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => crypto.randomUUID());
+
   // Only CSR/admin SEE the money-moving rep actions (adjust balance / waive
   // fee). This is now backed by a real server-side gate too (gateway/app/
   // main.py's /lss/accounts/{id}/adjust-balance|waive-fee are staff-only,
@@ -148,15 +154,18 @@ function LoanDetailContent() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // NOTE: no idempotency key — a retry double-charges.
       await apiPost("/payments", {
         loan_id: loanId,
         pan: "4111111111111111", // hardcoded test card PAN (texture)
         cvv: "123", // hardcoded test CVV (texture)
         amount: parseFloat(payAmount || "0"),
         method: "card",
+        idempotency_key: payIdempotencyKey,
       });
       setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+      // Only rotate the key on success -- a retry of a still-in-flight or
+      // failed attempt must reuse the same key so the server can recognize it.
+      setPayIdempotencyKey(crypto.randomUUID());
       await refreshBalanceAndHistory();
     } catch (err) {
       setActionErr(errMsg(err, "Payment failed."));
