@@ -161,7 +161,26 @@ def get_application_financials(
 
 
 @router.post("/{app_id}/decision", response_model=DecisionOut)
-def run_decision(app_id: int):
+def run_decision(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    # Security fix: this route has no session of its own -- the gateway's /los/*
+    # proxy forwards it anonymously on purpose, since a freshly-submitted
+    # applicant has no account yet and this is how they get their first
+    # decision (frontend/app/apply/page.tsx's "Get decision" button). That's
+    # fine for a ONE-TIME first run. Without a check, though, the same route
+    # let anyone who guesses an app_id rerun decisioning on a stranger's
+    # already-decided application -- triggering a real bureau pull and
+    # overwriting their decision row via decision-service's own
+    # ON CONFLICT (app_id) DO UPDATE (graph.py). Once a decision exists, a
+    # rerun requires a staff session (the underwriting console's own "Run
+    # decision" button already sends one) -- same _STAFF_ROLES gate as
+    # get_application_financials above.
+    existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
+    if existing and x_user_role not in _STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="staff only to rerun a decision")
+
     rows = db.query(
         "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
