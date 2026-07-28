@@ -17,7 +17,7 @@ def _mask_pan(pan: str | None) -> str | None:
 
 @router.post("/payments", response_model=PaymentOut)
 def post_payment(body: PaymentIn):
-    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
     return payments.charge(
-        body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method
+        body.loan_id, body.pan, body.cvv, body.amount, body.idempotency_key,
+        body.ssn, body.name, body.method,
     )

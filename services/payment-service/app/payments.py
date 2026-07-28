@@ -1,13 +1,7 @@
 """Payment handling (moved verbatim from servicing-service's payments.py).
 
 Stores the FULL PAN and the CVV on the payments row (D5 — still open; that's the
-persisted-storage half, unrelated to logging and not fixed here). There is NO
-idempotency key — a retried POST inserts a second payments row and applies the
-amount twice (double-charge, D2, tracked separately — spec only, see Week 5).
-
-The amount is applied to the balance by calling servicing-service over HTTP (the
-servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
-charge is still reported captured so this service stands alone.
+persisted-storage half, unrelated to logging and not fixed here).
 
 D12 note: unlike disclosure-service/servicing-service, this service does no
 repeated arithmetic on amount (no accumulation loop), so there's no float-drift
@@ -17,6 +11,16 @@ never validated or normalized at all -- a malformed float from a client (e.g.
 now quantizes to exactly 2 decimal places via Decimal before it touches the DB
 row or the servicing call, so every downstream consumer sees the same, correct
 cents value instead of whatever precision happened to arrive.
+
+Review fix: a timeout retry or a double-click on submit used to insert a
+second payments row and apply the balance twice via servicing-service -- there
+was no idempotency key at all. `idempotency_key` is now required at the API
+boundary (see routers/payments.py / schemas.PaymentIn) and enforced by a
+partial unique index (db/migrations/0009). The insert's own
+ON CONFLICT ... DO NOTHING makes the check-and-write atomic (same pattern
+disclosure-service's create_offer uses): a duplicate request is detected even
+if it races the original, and returns the ORIGINAL payment result without
+charging or calling servicing-service again.
 """
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
@@ -36,8 +40,8 @@ def _to_cents(amount) -> float:
     return float(d.quantize(_CENTS, rounding=ROUND_HALF_UP))
 
 
-def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
-           name: str = None, method: str = "card") -> dict:
+def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str,
+           ssn: str = None, name: str = None, method: str = "card") -> dict:
     amount = _to_cents(amount)
 
     # D5 fix: the log line used to write full PAN/CVV/SSN at INFO with zero
@@ -45,24 +49,43 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
     # gap -- this only closes the logging half.
     safe_req = redact_dict({
         "pan": pan, "cvv": cvv, "ssn": ssn, "amount": amount,
-        "loan_id": loan_id, "name": name,
+        "loan_id": loan_id, "name": name, "idempotency_key": idempotency_key,
     })
     log.info("POST /payments charge req=%s -> ok", safe_req)
-    # No idempotency check. No unique charge reference. Every POST inserts a row.
-    rows = db.query(
-        "INSERT INTO payments (loan_id, pan, cvv, amount, method) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (loan_id, pan, cvv, amount, method),   # full PAN + CVV persisted
-    )
-    payment_id = rows[0]["id"] if rows else None
 
-    # Apply the captured amount to the balance via servicing-service.
-    _apply_via_servicing(loan_id, amount, payment_id)
+    # Review fix: atomic check-and-write, same ON CONFLICT DO NOTHING + read-
+    # back pattern disclosure-service's create_offer uses. A duplicate request
+    # (retry, double-click) never inserts a second row or re-applies the
+    # balance, even if it races the original request.
+    inserted = db.query(
+        "INSERT INTO payments (loan_id, pan, cvv, amount, method, idempotency_key) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
+        "RETURNING id, loan_id, amount",
+        (loan_id, pan, cvv, amount, method, idempotency_key),   # full PAN + CVV persisted
+    )
+    if inserted:
+        row = inserted[0]
+        payment_id = row["id"]
+        # Apply the captured amount to the balance via servicing-service --
+        # only for the request that actually inserted the row.
+        _apply_via_servicing(loan_id, amount, payment_id)
+    else:
+        row = db.query(
+            "SELECT id, loan_id, amount FROM payments WHERE idempotency_key = %s",
+            (idempotency_key,),
+        )[0]
+        payment_id = row["id"]
+        log.info(
+            "duplicate POST /payments for idempotency_key=%s -> returning original payment_id=%s",
+            idempotency_key, payment_id,
+        )
+
     return {
         "payment_id": payment_id,
-        "loan_id": loan_id,
+        "loan_id": row["loan_id"],
         "status": "captured",
-        "applied_amount": amount,
+        "applied_amount": float(row["amount"]),
     }
 
 

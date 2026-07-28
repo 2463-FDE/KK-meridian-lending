@@ -67,7 +67,11 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 CREATE TABLE IF NOT EXISTS offers (
     id          SERIAL PRIMARY KEY,
-    app_id      INTEGER REFERENCES applications(id),
+    -- Review fix: UNIQUE here (not just on decision_id below) is the real
+    -- "one canonical offer per application" guarantee -- app_id is populated
+    -- on every offer row, unlike the nullable decision_id, whose own UNIQUE
+    -- constraint silently allows unlimited NULL rows to coexist.
+    app_id      INTEGER REFERENCES applications(id) UNIQUE,
     decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,  -- W4: which decision this offer came from; UNIQUE makes offer creation idempotent per decision
     fee_pct_used NUMERIC(5,4),          -- W4: snapshot of ORIGINATION_FEE_PCT used at creation time
     apr         NUMERIC(7,3),           -- D12: was DOUBLE PRECISION
@@ -98,7 +102,7 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV. No idempotency key. No unique charge reference.
+-- Payments: stores full PAN + CVV (still open, PCI debt — unrelated to the fix below).
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
@@ -106,9 +110,15 @@ CREATE TABLE IF NOT EXISTS payments (
     cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION
     method      TEXT DEFAULT 'card',
+    -- Review fix: a timeout retry or a double-click on submit used to insert a
+    -- second row and apply the balance twice (no idempotency key at all).
+    -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
+    -- unique index below deliberately excludes (see db/migrations/0009).
+    idempotency_key TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
-    -- no idempotency_key, no unique(charge_ref)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_key
+    ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
 CREATE TABLE IF NOT EXISTS audit_logs (
