@@ -1,5 +1,9 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
+import secrets
+
+import psycopg2.errors
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -218,6 +222,7 @@ def run_decision(
         "credit_score": None,         # pulled downstream by decision-service
     }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     outcome = resp["outcome"]
+    accept_token = None
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
@@ -226,11 +231,24 @@ def run_decision(
             disclosure_graph.auto_generate_offer(app_id)
         except Exception as e:  # noqa
             log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
+        # Security fix: accept_offer used to run fully anonymously for a fresh
+        # accept -- fine for the legitimate no-account borrower flow, except
+        # app_id is a sequential, guessable integer, so anyone could accept/
+        # fund a STRANGER's approved application. This one-time token is
+        # minted only now, held by the borrower's own browser (decision
+        # response -> frontend state -> accept call), and is the proof of
+        # ownership accept_offer requires from a non-staff caller.
+        accept_token = secrets.token_urlsafe(32)
+        db.query(
+            "UPDATE applications SET accept_token = %s WHERE id = %s",
+            (accept_token, app_id),
+        )
     return DecisionOut(
         app_id=app_id,
         decision=outcome,
         score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
         adverse_action_reason=resp.get("reason"),
+        accept_token=accept_token,
     )
 
 
@@ -253,21 +271,28 @@ def get_loan_history(
     return history
 
 
+class AcceptIn(BaseModel):
+    # Review fix: the one-time token minted onto the application when it was
+    # approved (run_decision) -- stands in for a real session for the
+    # legitimate no-account borrower flow. Optional so a staff-session accept
+    # (re-accept of an already-funded application) needs no token.
+    accept_token: str | None = None
+
+
 @router.post("/{app_id}/accept")
 def accept_offer(
     app_id: int,
+    body: AcceptIn = AcceptIn(),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
 ):
     # Security fix: this never checked that the application actually has an
     # approved decision on record, and never guarded against re-acceptance --
     # anyone who guessed an app_id could board/fund a real loan for an
     # application that was denied, still pending, or belongs to a stranger,
-    # or re-board an already-funded one a second time. Anonymous is still
-    # allowed for a fresh accept (frontend/app/apply/page.tsx's own borrower
-    # flow has no account yet), same tradeoff as run_decision above; once the
-    # application is already funded, accepting again requires staff.
+    # or re-board an already-funded one a second time. Once the application
+    # is already funded, accepting again requires staff.
     rows = db.query(
-        "SELECT a.amount, a.term_months, a.status, ap.name, o.apr, d.outcome "
+        "SELECT a.amount, a.term_months, a.status, a.accept_token, ap.name, o.apr, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
@@ -279,12 +304,48 @@ def accept_offer(
     r = rows[0]
     if r.get("outcome") != "approve":
         raise HTTPException(status_code=422, detail="application is not approved")
-    if r.get("status") == "funded" and x_user_role not in _STAFF_ROLES:
-        raise HTTPException(status_code=403, detail="staff only to re-accept a funded application")
 
     rate = r.get("apr") or 7.99
-    loan_id = intake.board_to_servicing(
-        app_id, r.get("name") or "Borrower", r["amount"], rate, r["term_months"]
-    )
-    db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
+    name = r.get("name") or "Borrower"
+
+    if r.get("status") == "funded":
+        if x_user_role not in _STAFF_ROLES:
+            raise HTTPException(status_code=403, detail="staff only to re-accept a funded application")
+        try:
+            loan_id = intake.board_to_servicing(app_id, name, r["amount"], rate, r["term_months"])
+        except psycopg2.errors.UniqueViolation:
+            # loans_app_id_key (db/migrations/0011) -- a loan already exists
+            # for this application; surface that instead of a raw 500.
+            raise HTTPException(status_code=409, detail="a loan already exists for this application")
+        db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
+        return {"loan_id": loan_id}
+
+    # Security fix: a fresh accept used to run fully anonymously with no
+    # ownership check at all -- app_id is a sequential, guessable integer, so
+    # anyone could accept/fund a STRANGER's approved application. Staff or
+    # the one-time accept_token (minted in run_decision, held only by the
+    # borrower's own browser session) is now required.
+    is_owner = bool(body.accept_token) and bool(r.get("accept_token")) and body.accept_token == r["accept_token"]
+    if x_user_role not in _STAFF_ROLES and not is_owner:
+        raise HTTPException(status_code=403, detail="not authorized to accept this offer")
+
+    # Security fix: two concurrent accepts on the same not-yet-funded
+    # application both used to pass this same (stale-read) status check and
+    # both board a loan. The UPDATE below is the real, atomic guard --
+    # Postgres row-locks the application for the duration of the UPDATE, so
+    # only ONE concurrent caller's WHERE status <> 'funded' can still be
+    # true; the other gets zero rows back and never boards anything.
+    # Boarding runs in the SAME transaction, so a mid-board failure leaves
+    # status unfunded (safe to retry) instead of stuck funded-with-no-loan.
+    # loans_app_id_key (db/migrations/0011) is the second, database-level
+    # backstop for any other path that ever inserts a loan.
+    with db.transaction() as cur:
+        cur.execute(
+            "UPDATE applications SET status = 'funded', accept_token = NULL "
+            "WHERE id = %s AND status <> 'funded' RETURNING id",
+            (app_id,),
+        )
+        if not cur.fetchall():
+            raise HTTPException(status_code=409, detail="application already funded")
+        loan_id = intake.board_to_servicing_tx(cur, app_id, name, r["amount"], rate, r["term_months"])
     return {"loan_id": loan_id}

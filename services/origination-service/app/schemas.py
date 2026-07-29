@@ -100,6 +100,10 @@ class DecisionOut(BaseModel):
     decision: str
     score: int
     adverse_action_reason: Optional[str] = None
+    # Review fix: minted only when decision == "approve" (see run_decision) --
+    # the one-time proof of ownership an anonymous, no-account borrower needs
+    # to accept their own offer. See routers/applications.py accept_offer.
+    accept_token: Optional[str] = None
 
 
 class ScheduleRow(BaseModel):

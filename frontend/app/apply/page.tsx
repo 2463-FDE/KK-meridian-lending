@@ -74,6 +74,10 @@ interface DecisionResult {
   decision: string;
   score?: number;
   adverse_action_reason?: string;
+  // Review fix: one-time proof of ownership, minted only when approved -- the
+  // no-account borrower flow has no session, so this stands in for one when
+  // accepting (see acceptOffer below and origination-service's accept_offer).
+  accept_token?: string;
 }
 
 interface Disclosure {
@@ -257,9 +261,9 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost(
-        `/los/applications/${app.app_id}/accept`
-      )) as { loan_id: string | number };
+      const res = (await apiPost(`/los/applications/${app.app_id}/accept`, {
+        accept_token: decision?.accept_token,
+      })) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));

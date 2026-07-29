@@ -56,5 +56,28 @@ def board_to_servicing(app_id: int, applicant_name: str, principal: float,
     return loan_id
 
 
+def board_to_servicing_tx(cur, app_id: int, applicant_name: str, principal: float,
+                          annual_rate_pct: float, term_months: int) -> int:
+    """Same insert as board_to_servicing, but runs on a caller-supplied cursor
+    so it lands in the SAME transaction as the caller's own statements (see
+    routers/applications.py accept_offer + db.transaction()) -- a boarding
+    failure then rolls back everything in that transaction together, instead
+    of leaving a status flip committed with no loan behind it.
+    """
+    cur.execute(
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct, term_months),
+    )
+    loan_id = cur.fetchone()["id"]
+    cur.execute(
+        "INSERT INTO balances (loan_id, balance) VALUES (%s, %s) "
+        "ON CONFLICT (loan_id) DO NOTHING",
+        (loan_id, float(principal)),
+    )
+    log.info("boarded app_id=%s -> loan_id=%s (direct LSS insert, in tx)", app_id, loan_id)
+    return loan_id
+
+
 # build_disclosure was removed: offer/disclosure build moved to disclosure-service, which
 # now persists the offers row itself. The offers router calls it over HTTP (see clients.py).

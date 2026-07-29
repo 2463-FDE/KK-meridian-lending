@@ -4,9 +4,16 @@ Review finding: a timeout retry or a double-click on submit inserted a second
 payments row and applied the balance twice via servicing-service -- there was
 no idempotency key at all. These tests cover the fix: `idempotency_key` is now
 required at the API boundary, and a repeated request with the SAME key
-returns the ORIGINAL payment result without a second insert or a second call
-to servicing-service -- even the ON CONFLICT DO NOTHING's atomicity (a
-duplicate is detected even if it races the original).
+returns the ORIGINAL payment result without a second insert -- even the
+ON CONFLICT DO NOTHING's atomicity (a duplicate is detected even if it races
+the original).
+
+Review finding (follow-up): a charge could still silently never reach the
+loan balance -- a servicing-side failure was swallowed and charge() reported
+"captured" regardless, with no record anything was left undone. These tests
+also cover that fix: `applied_at` tracks confirmed-applied separately from
+captured, an apply failure reports "pending" (not "captured"), and a same-key
+retry retries the apply instead of repeating a false "captured".
 
 test_pan_mask.py still documents the remaining, deliberately-untested debt:
 full PAN/CVV persistence (D5/PCI).
@@ -29,12 +36,14 @@ class _FakeDb:
     """Stands in for app.db.query -- simulates a payments table with a partial
     unique index on idempotency_key: the INSERT ... ON CONFLICT DO NOTHING
     only succeeds once per (non-null) key, and the fallback SELECT reads back
-    whatever the first successful insert stored."""
+    whatever the first successful insert stored. Also tracks applied_at, set
+    by the UPDATE charge() issues once servicing confirms the apply."""
 
     def __init__(self):
         self.calls = []
         self._next_id = 1
         self._by_key = {}
+        self._by_id = {}
 
     def query(self, sql, params=None):
         self.calls.append((sql, params))
@@ -43,14 +52,19 @@ class _FakeDb:
             loan_id, pan, cvv, amount, method, idempotency_key = params
             if idempotency_key is not None and idempotency_key in self._by_key:
                 return []  # ON CONFLICT DO NOTHING -- a row already exists for this key
-            row = {"id": self._next_id, "loan_id": loan_id, "amount": amount}
+            row = {"id": self._next_id, "loan_id": loan_id, "amount": amount, "applied_at": None}
             self._next_id += 1
             if idempotency_key is not None:
                 self._by_key[idempotency_key] = row
+            self._by_id[row["id"]] = row
             return [row]
         if stmt.startswith("SELECT"):
             (idempotency_key,) = params
             return [self._by_key[idempotency_key]]
+        if stmt.startswith("UPDATE"):
+            (payment_id,) = params
+            self._by_id[payment_id]["applied_at"] = "2026-07-29T00:00:00Z"
+            return []
         raise AssertionError(f"unexpected query: {sql}")
 
 
@@ -148,13 +162,14 @@ def test_post_payment_persists_full_pan_and_cvv_unmasked(fake_db):
     # display-only and never touches what's actually persisted here.
     client.post("/payments", json=_payload(cvv="999", amount=10.0))
 
-    assert len(fake_db.calls) == 1
-    _, params = fake_db.calls[0]
+    insert_calls = [c for c in fake_db.calls if c[0].strip().startswith("INSERT")]
+    assert len(insert_calls) == 1
+    _, params = insert_calls[0]
     assert "4111111111111111" in params
     assert "999" in params
 
 
-def test_post_payment_still_reports_captured_when_servicing_unreachable(fake_db, monkeypatch):
+def test_post_payment_reports_pending_when_servicing_unreachable(fake_db, monkeypatch):
     def _boom(*a, **k):
         raise httpx_module.ConnectError("connection refused")
 
@@ -162,12 +177,14 @@ def test_post_payment_still_reports_captured_when_servicing_unreachable(fake_db,
 
     resp = client.post("/payments", json=_payload(amount=100.0))
 
-    # Documented tradeoff (payments.py _apply_via_servicing docstring): the
-    # card is already charged and the row already written by this point, so a
-    # servicing-side failure still reports "captured" rather than erroring the
-    # whole request.
+    # Review fix: the card is already charged and the row already written by
+    # this point, so the request still succeeds -- but the status must say
+    # "pending", not "captured", since the balance was never confirmed
+    # applied. applied_at stays NULL (no UPDATE call went out).
     assert resp.status_code == 200
-    assert resp.json()["status"] == "captured"
+    assert resp.json()["status"] == "pending"
+    update_calls = [c for c in fake_db.calls if c[0].strip().startswith("UPDATE")]
+    assert update_calls == []
 
 
 def test_post_payment_rejects_missing_internal_token(fake_db):
@@ -221,10 +238,56 @@ def test_repeated_post_payment_with_same_idempotency_key_is_not_double_charged(f
     assert second.status_code == 200
     assert first.json()["payment_id"] == second.json()["payment_id"]
     assert first.json()["applied_amount"] == second.json()["applied_amount"] == 500.0
+    assert first.json()["status"] == second.json()["status"] == "captured"
 
     insert_calls = [c for c in fake_db.calls if c[0].strip().startswith("INSERT")]
     assert len(insert_calls) == 2  # both requests attempt the insert...
     assert len(servicing_calls) == 1  # ...but only the first ever reaches servicing
+    # applied_at was already set by the first call, so the retry never re-called
+    # servicing -- it just read back the already-applied row.
+
+
+def test_repeated_post_payment_reconciles_a_pending_apply(fake_db, monkeypatch):
+    """Review fix (follow-up): insert succeeds, servicing fails -> pending. A
+    same-key retry must retry the apply, not just repeat "captured" -- and
+    if servicing succeeds this time, the payment reconciles to "captured"."""
+    servicing_calls = []
+
+    def _boom(*a, **k):
+        raise httpx_module.ConnectError("connection refused")
+
+    monkeypatch.setattr(payments.httpx, "post", _boom)
+    body = _payload(amount=300.0, idempotency_key="pending-then-retry")
+
+    first = client.post("/payments", json=body)
+    assert first.json()["status"] == "pending"
+
+    def _ok(*a, **k):
+        servicing_calls.append((a, k))
+        return _FakeServicingResponse()
+
+    monkeypatch.setattr(payments.httpx, "post", _ok)
+    second = client.post("/payments", json=body)
+
+    assert second.status_code == 200
+    assert second.json()["payment_id"] == first.json()["payment_id"]
+    assert second.json()["status"] == "captured"
+    assert len(servicing_calls) == 1  # the retry is what actually reaches servicing
+
+
+def test_repeated_post_payment_still_pending_if_servicing_fails_again(fake_db, monkeypatch):
+    """Same scenario, but servicing fails again on retry -- must keep
+    reporting "pending", never fall back to a false "captured"."""
+    def _boom(*a, **k):
+        raise httpx_module.ConnectError("connection refused")
+
+    monkeypatch.setattr(payments.httpx, "post", _boom)
+    body = _payload(amount=300.0, idempotency_key="still-pending")
+
+    first = client.post("/payments", json=body)
+    second = client.post("/payments", json=body)
+
+    assert first.json()["status"] == second.json()["status"] == "pending"
 
 
 def test_different_idempotency_keys_charge_separately(fake_db):
