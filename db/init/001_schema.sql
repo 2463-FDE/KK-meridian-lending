@@ -115,10 +115,27 @@ CREATE TABLE IF NOT EXISTS payments (
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
     -- unique index below deliberately excludes (see db/migrations/0009).
     idempotency_key TEXT,
+    -- Review fix: NULL means captured but not yet applied to the loan balance
+    -- (a pending/outbox record) -- set once servicing-service confirms the
+    -- apply succeeded. A retry on the same idempotency_key checks this and
+    -- retries the apply instead of blindly reporting "captured" again.
+    applied_at  TIMESTAMPTZ,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_key
     ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+-- Review fix: guards servicing-service's apply-payment endpoint against
+-- applying the same captured payment twice (a payment-service retry after a
+-- lost response, or two requests racing). One row per payment_id that has
+-- actually been applied to a balance; the INSERT that creates this row is
+-- the atomic idempotency check -- see services/servicing-service/app/balance.py.
+CREATE TABLE IF NOT EXISTS payment_applications (
+    payment_id  INTEGER PRIMARY KEY,
+    loan_id     INTEGER NOT NULL,
+    amount      NUMERIC(14,2) NOT NULL,
+    applied_at  TIMESTAMPTZ DEFAULT now()
+);
 
 -- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
 CREATE TABLE IF NOT EXISTS audit_logs (
