@@ -298,7 +298,7 @@ def test_reaccept_of_an_already_funded_application_succeeds_for_staff(monkeypatc
 
 
 def test_reaccept_reports_409_when_a_loan_already_exists(monkeypatch):
-    """loans_app_id_key (db/migrations/0011) is the database-level backstop --
+    """loans_app_id_key (db/migrations/0013) is the database-level backstop --
     if a staff re-accept somehow races a loan that already exists for this
     app_id, surface a clean 409 instead of a raw 500."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])

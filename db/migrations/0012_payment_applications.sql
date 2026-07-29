@@ -1,8 +1,8 @@
--- 0013 — review fix, other half of 0012: servicing-service's apply-payment
+-- 0012 — review fix, other half of 0011: servicing-service's apply-payment
 -- endpoint applied the balance change unconditionally every time it was
 -- called, with no idempotency of its own -- it trusted payment-service to
 -- never call it twice for the same payment. Once payment-service started
--- retrying a pending apply (0012), that assumption had to become a real
+-- retrying a pending apply (0011), that assumption had to become a real
 -- guarantee: apply-payment must be safe to call more than once for the same
 -- payment_id (a payment-service retry, or two requests racing) and only
 -- ever move the balance once.

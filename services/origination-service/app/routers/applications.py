@@ -314,7 +314,7 @@ def accept_offer(
         try:
             loan_id = intake.board_to_servicing(app_id, name, r["amount"], rate, r["term_months"])
         except psycopg2.errors.UniqueViolation:
-            # loans_app_id_key (db/migrations/0011) -- a loan already exists
+            # loans_app_id_key (db/migrations/0013) -- a loan already exists
             # for this application; surface that instead of a raw 500.
             raise HTTPException(status_code=409, detail="a loan already exists for this application")
         db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
@@ -337,7 +337,7 @@ def accept_offer(
     # true; the other gets zero rows back and never boards anything.
     # Boarding runs in the SAME transaction, so a mid-board failure leaves
     # status unfunded (safe to retry) instead of stuck funded-with-no-loan.
-    # loans_app_id_key (db/migrations/0011) is the second, database-level
+    # loans_app_id_key (db/migrations/0013) is the second, database-level
     # backstop for any other path that ever inserts a loan.
     with db.transaction() as cur:
         cur.execute(

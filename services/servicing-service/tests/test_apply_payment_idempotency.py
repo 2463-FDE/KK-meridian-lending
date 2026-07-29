@@ -1,4 +1,4 @@
-"""Tests for balance.apply_payment_once (db/migrations/0013).
+"""Tests for balance.apply_payment_once (db/migrations/0012).
 
 Review finding: apply-payment applied the balance unconditionally on every
 call, with no idempotency of its own -- it trusted payment-service to never
@@ -16,7 +16,7 @@ class _FakeDb:
     """Stands in for app.db -- one balances row, plus a payment_applications
     table keyed on payment_id (PRIMARY KEY -> INSERT ... ON CONFLICT DO
     NOTHING only lands a row once per payment_id, mirroring the real unique
-    constraint from db/migrations/0013)."""
+    constraint from db/migrations/0012)."""
 
     def __init__(self, balance=0.0):
         self.balance = balance
