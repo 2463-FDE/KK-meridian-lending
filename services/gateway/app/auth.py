@@ -20,6 +20,9 @@ from .config import REDIS_URL, SESSION_TTL_SECONDS
 _redis = None
 
 STAFF_ROLES = ("csr", "underwriter", "admin")
+# Money-moving actions (adjust-balance/waive-fee/late-fee) are CSR/admin only --
+# underwriter is staff but has no business changing a loan's balance or past-due.
+MONEY_ROLES = ("csr", "admin")
 
 
 def _client() -> "redis.Redis":
@@ -61,6 +64,10 @@ def authenticate(username: str, password: str) -> dict | None:
 
 def is_staff(user: dict) -> bool:
     return user.get("role") in STAFF_ROLES
+
+
+def can_move_money(user: dict) -> bool:
+    return user.get("role") in MONEY_ROLES
 
 
 def owns_loan(user: dict, loan_id) -> bool:
