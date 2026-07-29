@@ -277,10 +277,31 @@ def test_lss_account_money_moving_action_rejects_owning_borrower(monkeypatch, ac
 
 
 @pytest.mark.parametrize("action", ["adjust-balance", "waive-fee", "late-fee"])
-def test_lss_account_money_moving_action_allows_staff(monkeypatch, action):
+def test_lss_account_money_moving_action_rejects_underwriter(monkeypatch, action):
+    # Review finding: underwriter is staff (auth.is_staff -> True) but has no
+    # business moving money -- the servicing UI only shows this button to
+    # CSR/admin, but the gateway used to accept any is_staff() caller, so an
+    # underwriter could POST straight past the UI and alter a loan's balance
+    # or past-due amount. Must be CSR/admin only now.
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(auth, "get_session", lambda token: {
-        "id": 2, "username": "x", "role": "admin", "name": "X", "applicant_id": None,
+        "id": 2, "username": "sam", "role": "underwriter", "name": "Sam Okafor", "applicant_id": None,
+    })
+
+    resp = client.post(
+        f"/lss/accounts/5/{action}", json={"new_balance": 0, "amount": 0},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("action", ["adjust-balance", "waive-fee", "late-fee"])
+@pytest.mark.parametrize("role", ["csr", "admin"])
+def test_lss_account_money_moving_action_allows_csr_and_admin(monkeypatch, action, role):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": role, "name": "X", "applicant_id": None,
     })
 
     resp = client.post(

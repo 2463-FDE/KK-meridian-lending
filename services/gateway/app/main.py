@@ -179,7 +179,8 @@ def _borrower_loans(applicant_id: int) -> dict:
 _LOAN_SUBPATH_RE = re.compile(r"^loans/(\d+)(?:/(schedule|payments))?$")
 _ACCOUNT_ACTION_RE = re.compile(r"^accounts/(\d+)/(balance|adjust-balance|waive-fee|late-fee)$")
 # Read-only, ownership-checked for a borrower; every other accounts/ action below
-# (adjust-balance, waive-fee, late-fee) is a money-moving action -- staff only.
+# (adjust-balance, waive-fee, late-fee) is a money-moving action -- CSR/admin only
+# (underwriter is staff but not permitted to move money -- see can_move_money).
 _ACCOUNT_READ_ACTIONS = ("balance",)
 
 
@@ -208,10 +209,13 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
             if auth.is_staff(user) or auth.owns_loan(user, loan_id):
                 return await _proxy(SERVICING_URL, f"/{path}", request, user)
             raise HTTPException(status_code=403, detail="forbidden")
-        # adjust-balance / waive-fee / late-fee -- staff only, no exceptions.
-        if auth.is_staff(user):
+        # adjust-balance / waive-fee / late-fee -- CSR/admin only. Underwriter is
+        # staff but has no business moving money; is_staff() alone let an
+        # underwriter POST straight to these routes even though the servicing UI
+        # never shows them the button.
+        if auth.can_move_money(user):
             return await _proxy(SERVICING_URL, f"/{path}", request, user)
-        raise HTTPException(status_code=403, detail="staff only")
+        raise HTTPException(status_code=403, detail="csr/admin only")
 
     if path == "reconciliation/peek":
         if auth.is_staff(user):
