@@ -72,17 +72,18 @@ function LoanDetailContent() {
 
   // action panels
   const [payAmount, setPayAmount] = useState("250.00");
+  // POST /payments now requires an idempotency_key (review fix -- a retry or
+  // a double-click used to double-charge). Minted once and reused across
+  // retries of the SAME submit attempt; a fresh one is minted only after the
+  // server confirms the balance was actually applied ("captured"), so a
+  // "pending" response (charged, balance apply not yet confirmed) keeps the
+  // same key on the next retry instead of starting a new, undetectable charge.
+  const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => crypto.randomUUID());
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [newBalance, setNewBalance] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
-
-  // POST /payments now requires an idempotency_key (review fix -- a retry or
-  // a double-click used to double-charge). Minted once and reused across
-  // retries of the SAME submit attempt; a fresh one is minted only after a
-  // successful charge, so the next distinct payment gets its own key.
-  const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => crypto.randomUUID());
 
   // Only CSR/admin SEE the money-moving rep actions (adjust balance / waive
   // fee). This is now backed by a real server-side gate too (gateway/app/
@@ -154,18 +155,29 @@ function LoanDetailContent() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      await apiPost("/payments", {
+      const resp = (await apiPost("/payments", {
         loan_id: loanId,
         pan: "4111111111111111", // hardcoded test card PAN (texture)
         cvv: "123", // hardcoded test CVV (texture)
         amount: parseFloat(payAmount || "0"),
         method: "card",
         idempotency_key: payIdempotencyKey,
-      });
-      setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
-      // Only rotate the key on success -- a retry of a still-in-flight or
-      // failed attempt must reuse the same key so the server can recognize it.
-      setPayIdempotencyKey(crypto.randomUUID());
+      })) as { status?: string };
+
+      // Review fix: payment-service deliberately returns HTTP 200 with
+      // status: "pending" when the charge captured but applying it to the
+      // balance failed/hasn't been confirmed yet -- that is NOT success. Only
+      // rotate the key once the server confirms "captured"; on "pending" keep
+      // the same key so a retry reconciles the SAME payment instead of the
+      // server having no way to tell it apart from a brand-new charge.
+      if (resp?.status === "captured") {
+        setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+        setPayIdempotencyKey(crypto.randomUUID());
+      } else {
+        setActionMsg(
+          `Payment of ${usd(payAmount)} is pending -- click "Pay with card on file" again to retry.`
+        );
+      }
       await refreshBalanceAndHistory();
     } catch (err) {
       setActionErr(errMsg(err, "Payment failed."));
@@ -387,7 +399,10 @@ function LoanDetailContent() {
               min="0"
               step="0.01"
               value={payAmount}
-              onChange={(e) => setPayAmount(e.target.value)}
+              onChange={(e) => {
+                setPayAmount(e.target.value);
+                setPayIdempotencyKey(crypto.randomUUID());
+              }}
             />
           </div>
           <button onClick={makePayment} disabled={actionBusy}>

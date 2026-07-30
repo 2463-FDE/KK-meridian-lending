@@ -35,6 +35,10 @@ class ApplicationCreated(BaseModel):
     app_id: int
     status: str
     kyc: KycOut
+    # Review fix: proves ownership for the first (anonymous, no-account)
+    # decision call on this application -- see routers/applications.py
+    # run_decision. Always present; minted on every submission.
+    access_token: str
 
 
 class ApplicantOut(BaseModel):

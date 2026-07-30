@@ -16,21 +16,26 @@ Review fix: a timeout retry or a double-click on submit used to insert a
 second payments row and apply the balance twice via servicing-service -- there
 was no idempotency key at all. `idempotency_key` is now required at the API
 boundary (see routers/payments.py / schemas.PaymentIn) and enforced by a
-partial unique index (db/migrations/0009). The insert's own
-ON CONFLICT ... DO NOTHING makes the check-and-write atomic (same pattern
-disclosure-service's create_offer uses): a duplicate request is detected even
-if it races the original, and returns the ORIGINAL payment result without
-charging or calling servicing-service again.
+partial unique index (db/migrations/0007, redundantly also 0010 -- see that
+file). The insert's own ON CONFLICT ... DO NOTHING makes the check-and-write
+atomic (same pattern disclosure-service's create_offer uses): a duplicate
+request is detected even if it races the original, and returns the ORIGINAL
+payment result without charging or calling servicing-service again.
 
 Review fix (D2 follow-up): the above closed the double-CHARGE gap, but a
 charge could still silently never reach the loan balance -- if
 _apply_via_servicing failed, the exception was swallowed and charge() still
-reported "captured". `applied_at` (db/migrations/0011) tracks that
+reported "captured". `applied_at` (db/migrations/0012) tracks that
 separately from "the card was charged": NULL is a pending/outbox record. A
 retry on the same idempotency_key now checks it and retries the apply instead
 of blindly repeating "captured". servicing-service's apply-payment is now
-idempotent by payment_id itself (db/migrations/0012,
+idempotent by payment_id itself (db/migrations/0013,
 services/servicing-service/app/balance.py), so retrying it is always safe.
+
+Review fix: `amount` is range-constrained in schemas.PaymentIn (0, 1_000_000] --
+a negative value used to credit the borrower's balance instead of charging
+them (servicing computes new_balance = current - amount), and NaN/Infinity
+passed through uncaught too.
 """
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
@@ -90,7 +95,7 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str
             # Review fix: the original request's apply either never ran or
             # never confirmed -- this retry is the reconciliation opportunity,
             # not just a read-back. Safe to call again: servicing-service's
-            # apply-payment is idempotent by payment_id (db/migrations/0012).
+            # apply-payment is idempotent by payment_id (db/migrations/0013).
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
                 "not yet applied, retrying apply",
@@ -123,7 +128,7 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     Returns whether the apply was confirmed. Review fix: this used to swallow
     the exception and let charge() report "captured" regardless -- the card
     was charged but the balance never moved, with no record anything was left
-    undone. Now records applied_at (db/migrations/0011) only on confirmed
+    undone. Now records applied_at (db/migrations/0012) only on confirmed
     success, so a same-key retry can tell the difference and retry the apply
     instead of repeating a false "captured".
     """

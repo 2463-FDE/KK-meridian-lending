@@ -266,3 +266,39 @@ def test_different_idempotency_keys_charge_separately(fake_db):
     assert first.json()["payment_id"] != second.json()["payment_id"]
     assert first.json()["applied_amount"] == 100.0
     assert second.json()["applied_amount"] == 200.0
+
+
+@pytest.mark.parametrize("amount", [0, -500.0])
+def test_post_payment_rejects_non_positive_amount(fake_db, amount):
+    # Review fix: amount was an unconstrained float -- a negative value
+    # credited the borrower's balance instead of charging them (servicing
+    # computes new_balance = current - amount).
+    resp = client.post("/payments", json=_payload(amount=amount))
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_post_payment_rejects_non_finite_amount(fake_db, literal):
+    # httpx's own json= encoder refuses to put NaN/Infinity on the wire at all
+    # (raises ValueError) -- build the request body by hand to prove the
+    # server-side still rejects a client that sends one anyway.
+    body = (
+        '{"loan_id": 42, "pan": "4111111111111111", "cvv": "123", '
+        '"idempotency_key": "nonfinite-key", "amount": %s}' % literal
+    )
+
+    resp = client.post(
+        "/payments", content=body, headers={"Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []
+
+
+def test_post_payment_rejects_amount_over_the_ceiling(fake_db):
+    resp = client.post("/payments", json=_payload(amount=1_000_000.01))
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []

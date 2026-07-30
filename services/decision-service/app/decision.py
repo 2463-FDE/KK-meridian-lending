@@ -27,7 +27,6 @@ OWN internal chain only; origination-service's own call INTO decision-service
 different service's own thread-pool budget, out of scope for this fix.
 """
 import asyncio
-import json
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -303,54 +302,15 @@ async def decide(application: dict) -> dict:
     or neither does, so a decision is never returned to the caller without the audit
     row that proves it happened (review finding: the two used to be written
     separately with each failure only logged, letting a decision commit with no
-    matching audit event when the second insert failed silently)."""
-    bureau_score = await _pull_credit(application.get("ssn", ""))
-    result = await _run_model(bureau_score, application)
-    app_id = application.get("app_id")
+    matching audit event when the second insert failed silently).
 
-    try:
-        # Still a synchronous psycopg2 call -- a fast local Postgres write, not the
-        # external-vendor bottleneck this async rework targets (see module docstring).
-        db.transaction([
-            (
-                "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
-                "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
-                (app_id, result["decision"]),
-            ),
-            (
-                "INSERT INTO decision_events "
-                "(app_id, requested_amount, term_months, annual_income, bureau_score, "
-                " model_score, model_version, top_features, decision, reason_codes) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    app_id,
-                    application.get("requested_amount"),
-                    application.get("term_months"),
-                    application.get("income"),
-                    bureau_score,
-                    result["score"],
-                    result["model_version"],
-                    json.dumps(result["top_features"]),
-                    result["decision"],
-                    json.dumps(result["reason_codes"]),
-                ),
-            ),
-        ])
-    except Exception as e:
-        log.error("could not persist decision + decision_event: %s", e)
-        raise DecisionPersistenceError(
-            f"app_id={app_id}: decision computed ({result['decision']}, score="
-            f"{result['score']}) but could not be durably recorded — refusing to "
-            "report an outcome with no matching audit trail."
-        ) from e
+    Week 3: the pull-credit / score / persist steps are now an explicit LangGraph
+    graph (app/graph.py) instead of inline code here -- same three calls, same
+    fail-closed exceptions, now individually traceable. Deferred import: graph.py
+    imports this module at its own load time, so importing it up top would be
+    circular; by the time decide() is actually called, this module has finished
+    loading and the import below is just a sys.modules lookup.
+    """
+    from .graph import run as _run_graph
 
-    log.info(
-        "GET /decision app_id=%s model_score=%s decision=%s reason_codes=%s",
-        app_id, result["score"], result["decision"], result["reason_codes"],
-    )
-    return {
-        "score": result["score"],
-        "decision": result["decision"],
-        "reason_codes": result["reason_codes"],
-        "adverse_action_reason": result["reason_codes"][0] if result["reason_codes"] else None,
-    }
+    return await _run_graph(application)

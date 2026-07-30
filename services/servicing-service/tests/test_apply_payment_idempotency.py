@@ -1,4 +1,4 @@
-"""Tests for balance.apply_payment_once (db/migrations/0012).
+"""Tests for balance.apply_payment_once (db/migrations/0013).
 
 Review finding: apply-payment applied the balance unconditionally on every
 call, with no idempotency of its own -- it trusted payment-service to never
@@ -6,7 +6,16 @@ call it twice for the same payment. Once payment-service started retrying a
 pending apply on a same-key retry, a duplicate call here (the retry itself,
 or two requests racing) had to be guaranteed not to double-apply the same
 payment_id. These tests exercise apply_payment_once() directly.
+
+Review finding (follow-up): the marker INSERT and the balance UPDATE used to
+each auto-commit on their own -- a balance-update failure after the marker
+had already landed left a permanent marker with no balance ever applied,
+silently skipping every future retry forever. test_apply_payment_once_rolls_
+back_marker_and_retries_after_a_failed_balance_update covers the fix:
+db.transaction() rolling both statements back together.
 """
+from contextlib import contextmanager
+
 import pytest
 
 from app import balance
@@ -16,7 +25,8 @@ class _FakeDb:
     """Stands in for app.db -- one balances row, plus a payment_applications
     table keyed on payment_id (PRIMARY KEY -> INSERT ... ON CONFLICT DO
     NOTHING only lands a row once per payment_id, mirroring the real unique
-    constraint from db/migrations/0012)."""
+    constraint from db/migrations/0013). transaction() mimics real Postgres
+    rollback: state changes made inside the block are reverted if it raises."""
 
     def __init__(self, balance=0.0):
         self.balance = balance
@@ -36,6 +46,17 @@ class _FakeDb:
             self.balance = params[0]
             return []
         raise AssertionError(f"unexpected query: {sql}")
+
+    @contextmanager
+    def transaction(self):
+        snapshot_balance = self.balance
+        snapshot_applications = set(self.applications)
+        try:
+            yield
+        except Exception:
+            self.balance = snapshot_balance
+            self.applications = snapshot_applications
+            raise
 
 
 @pytest.fixture
@@ -72,3 +93,34 @@ def test_apply_payment_once_applies_separately_for_different_payment_ids(fake_db
 
     assert applied is True
     assert fake_db.balance == 50.0
+
+
+def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance_update(fake_db):
+    """The exact review scenario: the balance UPDATE fails AFTER the marker
+    INSERT would otherwise have landed. The marker must roll back with it --
+    otherwise a retry for this payment_id hits the ON CONFLICT path forever
+    and the balance never moves, even though the marker claims it's applied."""
+    real_query = fake_db.query
+
+    def _fail_the_balance_update(sql, params=None):
+        if "SET balance" in sql.strip():
+            raise RuntimeError("simulated balance update failure")
+        return real_query(sql, params)
+
+    fake_db.query = _fail_the_balance_update
+
+    with pytest.raises(RuntimeError):
+        balance.apply_payment_once(payment_id=9, loan_id=5, amount=30.0)
+
+    # Rolled back: no marker, balance untouched.
+    assert 9 not in fake_db.applications
+    assert fake_db.balance == 100.0
+
+    # A retry with no failure this time must actually apply -- not silently
+    # skip because a stale marker survived the failed attempt.
+    fake_db.query = real_query
+    new_balance, applied = balance.apply_payment_once(payment_id=9, loan_id=5, amount=30.0)
+
+    assert applied is True
+    assert new_balance == 70.0
+    assert fake_db.balance == 70.0

@@ -50,26 +50,38 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
     """Review fix: apply_payment() above has no idempotency of its own -- it
     trusted payment-service to never call apply-payment twice for the same
     payment. payment-service now retries a pending apply on a same-key retry
-    (db/migrations/0011), so that trust has to be a real guarantee instead:
+    (db/migrations/0012), so that trust has to be a real guarantee instead:
     calling this twice for the same payment_id must move the balance once.
 
     payment_applications' PK on payment_id is the atomic guard -- the INSERT
     only lands a row for whichever call gets there first; only that call goes
     on to actually move the balance. Returns (balance, applied) so the caller
     can tell a genuine apply from a no-op replay.
+
+    Review fix: the marker INSERT and the balance UPDATE must commit or roll
+    back together. Each used to be its own auto-committed statement, so if
+    apply_payment()'s UPDATE errored or timed out AFTER the marker had already
+    landed, the marker was permanent but the balance never moved -- every
+    retry for this payment_id then hit the ON CONFLICT path and silently
+    skipped the apply forever (money captured, loan never credited). Both
+    statements now run inside one transaction (db.transaction()): if the
+    UPDATE raises, the marker rolls back with it, so a retry sees no marker
+    and genuinely retries the apply instead of skipping it.
     """
-    inserted = db.query(
-        "INSERT INTO payment_applications (payment_id, loan_id, amount) "
-        "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING RETURNING payment_id",
-        (payment_id, loan_id, amount),
-    )
-    if not inserted:
-        log.info(
-            "apply-payment payment_id=%s already applied -- skipping duplicate apply",
-            payment_id,
+    with db.transaction():
+        inserted = db.query(
+            "INSERT INTO payment_applications (payment_id, loan_id, amount) "
+            "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING RETURNING payment_id",
+            (payment_id, loan_id, amount),
         )
-        return get_balance(loan_id), False
-    return apply_payment(loan_id, amount), True
+        if not inserted:
+            log.info(
+                "apply-payment payment_id=%s already applied -- skipping duplicate apply",
+                payment_id,
+            )
+            return get_balance(loan_id), False
+        new_balance = apply_payment(loan_id, amount)
+    return new_balance, True
 
 
 def adjust_balance(loan_id: int, new_value: float) -> float:

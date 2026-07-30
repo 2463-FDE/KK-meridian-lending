@@ -1,4 +1,4 @@
--- 0010 — review fix: the 0007 unique constraint on offers.decision_id never
+-- 0011 — review fix: the 0009 unique constraint on offers.decision_id never
 -- fired for legacy rows, since decision_id was NULL for every offer created
 -- before the W4 decision-link feature existed, and Postgres lets any number
 -- of NULLs coexist under a UNIQUE constraint. A repeat POST /offers for one
@@ -14,7 +14,7 @@
 -- Review fix (ordering): this used to backfill decision_id BEFORE resolving
 -- duplicates. Backfilling sets decision_id = app_id, so two duplicate rows
 -- for the same app_id got the SAME decision_id -- which immediately violated
--- 0007's offers_decision_id_key UNIQUE constraint and aborted the whole
+-- 0009's offers_decision_id_key UNIQUE constraint and aborted the whole
 -- migration, on exactly the data this migration exists to repair. Resolving
 -- duplicates first leaves at most one row per app_id, so the backfill below
 -- can never collide.
@@ -52,7 +52,7 @@ WHERE fee_pct_used IS NULL;
 
 -- 4. The real "one canonical offer per application" guarantee -- app_id has
 -- been populated on every offer row since this table's first migration,
--- unlike decision_id, so this constraint (unlike 0007's) has no NULL gap to
+-- unlike decision_id, so this constraint (unlike 0009's) has no NULL gap to
 -- exploit.
 ALTER TABLE offers
     ADD CONSTRAINT offers_app_id_key UNIQUE (app_id);

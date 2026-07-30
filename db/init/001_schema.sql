@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS applications (
     job_title         TEXT,
     employment_years  DOUBLE PRECISION,            -- a duration, not money -- left as-is
     status            TEXT DEFAULT 'submitted',
+    -- Review fix: minted once at submission (intake.create_application) and
+    -- returned to the caller -- proves ownership for the FIRST decision call
+    -- (see routers/applications.py run_decision), since app_id alone is a
+    -- guessable integer and the borrower has no account yet at this point.
+    access_token      TEXT,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
@@ -102,7 +107,7 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV (still open, PCI debt — unrelated to the fix below).
+-- Payments: stores full PAN + CVV (still open, PCI debt -- unrelated to the fix below).
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
@@ -113,7 +118,7 @@ CREATE TABLE IF NOT EXISTS payments (
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
-    -- unique index below deliberately excludes (see db/migrations/0009).
+    -- unique index below deliberately excludes (see db/migrations/0007).
     idempotency_key TEXT,
     -- Review fix: NULL means captured but not yet applied to the loan balance
     -- (a pending/outbox record) -- set once servicing-service confirms the
@@ -147,8 +152,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- A few indexes added over time for the servicing dashboard. (No idempotency index on
--- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
+-- A few indexes added over time for the servicing dashboard. (No reason/driver
+-- columns on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);

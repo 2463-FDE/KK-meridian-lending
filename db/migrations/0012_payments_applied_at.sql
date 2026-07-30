@@ -1,4 +1,4 @@
--- 0011 — review fix: a charged payment could silently never reach the loan
+-- 0012 — review fix: a charged payment could silently never reach the loan
 -- balance. payment-service's charge() commits the payments row, then calls
 -- servicing-service to apply it; if that call times out or errors, the
 -- exception was swallowed and charge() still returned status "captured" --

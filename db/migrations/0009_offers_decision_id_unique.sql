@@ -1,4 +1,4 @@
--- 0007 — Week 4 review fix: make offer creation idempotent per decision.
+-- 0009 — Week 4 review fix: make offer creation idempotent per decision.
 -- Hand-tracked, as usual. Authoritative DDL lives in db/init/001_schema.sql.
 --
 -- Without this, a retried/duplicated create_offer call (timeout retry, double
