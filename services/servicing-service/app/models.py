@@ -8,8 +8,11 @@ so this is a storage-layer fix, not a ripple of Decimal typing through every
 caller that reads these columns.
 
 The `balances` table is still a single mutable balance column (no ledger).
-The `payments` table still carries the full PAN + CVV (PCI debt) and has no
-idempotency key.
+
+ADR 0008 (Week 5 tokenization): `pan`/`cvv` are legacy, nullable, dead-
+going-forward columns for rows that predate tokenization -- payment-service
+never receives a raw PAN/CVV to write here anymore. New rows populate
+`last4`/`brand` instead.
 """
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -46,8 +49,10 @@ class Payment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     loan_id: Mapped[int | None] = mapped_column(ForeignKey("loans.id"), nullable=True)
-    pan: Mapped[str | None] = mapped_column(String, nullable=True)   # full PAN stored (debt)
-    cvv: Mapped[str | None] = mapped_column(String, nullable=True)   # CVV stored (debt)
+    pan: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
+    cvv: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
+    last4: Mapped[str | None] = mapped_column(String, nullable=True)
+    brand: Mapped[str | None] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     method: Mapped[str | None] = mapped_column(String, default="card")
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

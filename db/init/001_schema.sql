@@ -122,8 +122,16 @@ CREATE TABLE IF NOT EXISTS balances (
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
-    pan         TEXT,                 -- full PAN stored
-    cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
+    -- Week 5 tokenization fix (ADR 0008, supersedes ADR 0003): pan/cvv are
+    -- legacy columns, kept nullable for rows that predate tokenization --
+    -- never written to by any code path anymore (payment-service never
+    -- receives a raw PAN/CVV to store in the first place). New rows use
+    -- last4/brand instead, populated from the processor's own token
+    -- response, never from a raw card number.
+    pan         TEXT,                 -- full PAN stored (legacy rows only)
+    cvv         TEXT,                 -- CVV stored (legacy rows only, SAD — flat PCI prohibition)
+    last4       TEXT,                 -- display only; never enough to reconstruct a PAN
+    brand       TEXT,                 -- e.g. "visa", "mastercard" -- display only
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION
     method      TEXT DEFAULT 'card',
     -- Review fix: a timeout retry or a double-click on submit used to insert a

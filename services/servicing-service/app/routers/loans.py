@@ -18,10 +18,17 @@ from ..schemas import (
 router = APIRouter(prefix="/loans", tags=["loans"])
 
 
-def _mask_pan(pan: str | None) -> str | None:
-    if not pan:
-        return None
-    return "•••• " + pan[-4:]
+def _display_last4(payment) -> str | None:
+    # ADR 0008 (Week 5 tokenization): new rows carry last4 directly (the
+    # processor's own token response, never a raw PAN) -- prefer it. Legacy
+    # rows that predate tokenization still have a full pan; mask it the same
+    # way this always displayed, so payment history for old rows doesn't
+    # regress.
+    if payment.last4:
+        return "•••• " + payment.last4
+    if payment.pan:
+        return "•••• " + payment.pan[-4:]
+    return None
 
 
 @router.get("", response_model=Page[LoanListItem])
@@ -83,7 +90,7 @@ def loan_payments(loan_id: int, session: Session = Depends(get_session)):
     ).all()
     items = [
         PaymentItem(
-            id=p.id, amount=p.amount, method=p.method, masked_pan=_mask_pan(p.pan),
+            id=p.id, amount=p.amount, method=p.method, masked_pan=_display_last4(p),
             created_at=p.created_at.isoformat() if p.created_at else None,
         )
         for p in rows

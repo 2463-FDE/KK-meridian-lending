@@ -15,8 +15,11 @@ also cover that fix: `applied_at` tracks confirmed-applied separately from
 captured, an apply failure reports "pending" (not "captured"), and a same-key
 retry retries the apply instead of repeating a false "captured".
 
-test_pan_mask.py still documents the remaining, deliberately-untested debt:
-full PAN/CVV persistence (D5/PCI).
+ADR 0008 (Week 5 tokenization): this endpoint no longer accepts pan/cvv/ssn
+at all -- see PaymentIn (schemas.py). test_post_payment_never_persists_
+processor_token and test_post_payment_stores_last4_and_brand cover the new
+contract: only an opaque processor_token (used transiently, never stored)
+plus last4/brand for display.
 """
 import httpx as httpx_module
 import pytest
@@ -49,10 +52,13 @@ class _FakeDb:
         self.calls.append((sql, params))
         stmt = sql.strip()
         if stmt.startswith("INSERT"):
-            loan_id, pan, cvv, amount, method, idempotency_key = params
+            loan_id, last4, brand, amount, method, idempotency_key = params
             if idempotency_key is not None and idempotency_key in self._by_key:
                 return []  # ON CONFLICT DO NOTHING -- a row already exists for this key
-            row = {"id": self._next_id, "loan_id": loan_id, "amount": amount, "applied_at": None}
+            row = {
+                "id": self._next_id, "loan_id": loan_id, "amount": amount,
+                "last4": last4, "brand": brand, "applied_at": None,
+            }
             self._next_id += 1
             if idempotency_key is not None:
                 self._by_key[idempotency_key] = row
@@ -89,8 +95,8 @@ def _stub_servicing_call(monkeypatch):
 
 def _payload(**overrides):
     body = {
-        "loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": 250.0,
-        "idempotency_key": "idem-key-1",
+        "loan_id": 42, "processor_token": "tok_mock_abc123", "last4": "1111",
+        "brand": "visa", "amount": 250.0, "idempotency_key": "idem-key-1",
     }
     body.update(overrides)
     return body
@@ -135,38 +141,70 @@ def test_post_payment_quantizes_malformed_float_amount_to_cents(fake_db):
     assert params[3] == 20.0  # the amount actually persisted to the payments row
 
 
-def test_post_payment_log_line_redacts_pan_cvv_ssn(fake_db, caplog):
-    # D5 fix: the log line used to write full PAN/CVV/SSN at INFO with zero
-    # redaction (services/payment-service/app/payments.py). Storage in the
-    # payments table is a separate, still-open half of D5 -- this only proves
-    # the logging half is fixed.
+def test_post_payment_log_line_redacts_processor_token(fake_db, caplog):
+    # ADR 0008: pan/cvv/ssn no longer exist on this endpoint at all (D5's
+    # storage half is closed by not receiving them in the first place). The
+    # processor_token is opaque but still sensitive -- a vaulted token found
+    # in a log is itself a real credential leak -- so it's still redacted.
     import logging
     caplog.set_level(logging.INFO, logger="payment")
 
-    client.post("/payments", json=_payload(ssn="412-55-9981", amount=10.0))
+    client.post("/payments", json=_payload(processor_token="tok_mock_secret999", amount=10.0))
 
     charge_lines = [r.message for r in caplog.records if "charge req=" in r.message]
     assert charge_lines, "expected a charge log line"
     logged = charge_lines[0]
-    assert "4111111111111111" not in logged
-    assert "123" not in logged
-    assert "412-55-9981" not in logged
-    # redact_dict() redacts by key name (pan/cvv/ssn), not the pattern-based
-    # markers redact_str() uses on free text where the key isn't already known.
-    assert logged.count("[REDACTED]") == 3
+    assert "tok_mock_secret999" not in logged
+    assert "[REDACTED]" in logged
 
 
-def test_post_payment_persists_full_pan_and_cvv_unmasked(fake_db):
-    # Characterizes the documented PCI debt (D5/adr/0003): the stored row gets
-    # the full PAN and CVV, not a masked/tokenized value. _mask_pan is
-    # display-only and never touches what's actually persisted here.
-    client.post("/payments", json=_payload(cvv="999", amount=10.0))
+def test_post_payment_never_persists_processor_token(fake_db):
+    # ADR 0008 (Week 5 tokenization): the token is used only to (mock-)charge
+    # the processor -- it must never reach the payments row. Only last4/brand
+    # persist, for display.
+    client.post("/payments", json=_payload(processor_token="tok_mock_should_not_be_stored", amount=10.0))
 
     insert_calls = [c for c in fake_db.calls if c[0].strip().startswith("INSERT")]
     assert len(insert_calls) == 1
     _, params = insert_calls[0]
-    assert "4111111111111111" in params
-    assert "999" in params
+    assert "tok_mock_should_not_be_stored" not in params
+
+
+def test_post_payment_stores_last4_and_brand(fake_db):
+    resp = client.post("/payments", json=_payload(last4="4242", brand="mastercard", amount=10.0))
+
+    assert resp.status_code == 200
+    insert_calls = [c for c in fake_db.calls if c[0].strip().startswith("INSERT")]
+    _, params = insert_calls[0]
+    assert "4242" in params
+    assert "mastercard" in params
+
+
+@pytest.mark.parametrize("field,value", [("pan", "4111111111111111"), ("cvv", "123"), ("ssn", "412-55-9981")])
+def test_post_payment_rejects_pan_cvv_ssn_outright(fake_db, field, value):
+    # ADR 0008: this endpoint used to accept these directly. `extra="forbid"`
+    # on PaymentIn makes the new contract a real rejection (422), not a silent
+    # drop of a field the client may still be sending out of habit.
+    resp = client.post("/payments", json=_payload(**{field: value}))
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []
+
+
+def test_post_payment_rejects_missing_processor_token(fake_db):
+    body = _payload()
+    del body["processor_token"]
+
+    resp = client.post("/payments", json=body)
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("last4", ["123", "12345", "abcd", ""])
+def test_post_payment_rejects_malformed_last4(fake_db, last4):
+    resp = client.post("/payments", json=_payload(last4=last4))
+
+    assert resp.status_code == 422
 
 
 def test_post_payment_reports_pending_when_servicing_unreachable(fake_db, monkeypatch):
@@ -348,7 +386,7 @@ def test_post_payment_rejects_non_finite_amount(fake_db, literal):
     # (raises ValueError) -- build the request body by hand to prove the
     # server-side still rejects a client that sends one anyway.
     body = (
-        '{"loan_id": 42, "pan": "4111111111111111", "cvv": "123", '
+        '{"loan_id": 42, "processor_token": "tok_mock_abc123", "last4": "1111", '
         '"idempotency_key": "nonfinite-key", "amount": %s}' % literal
     )
 

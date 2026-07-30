@@ -1,7 +1,12 @@
 """Payment handling (moved verbatim from servicing-service's payments.py).
 
-Stores the FULL PAN and the CVV on the payments row (D5 — still open; that's the
-persisted-storage half, unrelated to logging and not fixed here).
+Review fix (ADR 0008, Week 5 tokenization): this used to store the FULL PAN
+and CVV on the payments row (D5). Card capture now tokenizes at the processor
+(see frontend/lib/tokenize.ts) -- this service never receives a raw PAN/CVV
+at all anymore, only an opaque processor_token plus last4/brand for display.
+The token itself is never persisted either (a vaulted token is itself
+sensitive) -- only last4/brand reach the `payments` row. See
+specs/0001-online-payments-idempotency-tokenization.md Part 2.
 
 D12 note: unlike disclosure-service/servicing-service, this service does no
 repeated arithmetic on amount (no accumulation loop), so there's no float-drift
@@ -69,16 +74,18 @@ def _to_cents(amount) -> float:
     return float(d.quantize(_CENTS, rounding=ROUND_HALF_UP))
 
 
-def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str,
-           ssn: str = None, name: str = None, method: str = "card") -> dict:
+def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempotency_key: str,
+           brand: str = None, name: str = None, method: str = "card") -> dict:
     amount = _to_cents(amount)
 
-    # D5 fix: the log line used to write full PAN/CVV/SSN at INFO with zero
-    # redaction. Storage in the payments table (below) is a separate, still-open
-    # gap -- this only closes the logging half.
+    # Review fix: the log line used to write full PAN/CVV/SSN at INFO with zero
+    # redaction (D5). There's no raw PAN/CVV/SSN to log anymore (ADR 0008) --
+    # redact_dict still guards processor_token, since a vaulted token is
+    # itself sensitive even though it's opaque.
     safe_req = redact_dict({
-        "pan": pan, "cvv": cvv, "ssn": ssn, "amount": amount,
-        "loan_id": loan_id, "name": name, "idempotency_key": idempotency_key,
+        "processor_token": processor_token, "last4": last4, "brand": brand,
+        "amount": amount, "loan_id": loan_id, "name": name,
+        "idempotency_key": idempotency_key,
     })
     log.info("POST /payments charge req=%s -> ok", safe_req)
 
@@ -86,12 +93,18 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str
     # back pattern disclosure-service's create_offer uses. A duplicate request
     # (retry, double-click) never inserts a second row or re-applies the
     # balance, even if it races the original request.
+    #
+    # ADR 0008: processor_token proves the card was already tokenized/charged
+    # at the processor boundary (frontend/lib/tokenize.ts's mock stands in for
+    # a real processor call here, same simplification the original PAN/CVV
+    # design made -- receiving it means captured). It is NEVER written to the
+    # payments row -- only last4/brand persist, for display.
     inserted = db.query(
-        "INSERT INTO payments (loan_id, pan, cvv, amount, method, idempotency_key) "
+        "INSERT INTO payments (loan_id, last4, brand, amount, method, idempotency_key) "
         "VALUES (%s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
         "RETURNING id, loan_id, amount",
-        (loan_id, pan, cvv, amount, method, idempotency_key),   # full PAN + CVV persisted
+        (loan_id, last4, brand, amount, method, idempotency_key),
     )
     if inserted:
         row = inserted[0]

@@ -8,14 +8,6 @@ from ..schemas import PaymentIn, PaymentOut
 router = APIRouter(tags=["payments"])
 
 
-def _mask_pan(pan: str | None) -> str | None:
-    # Display-only helper. The stored payments row and the payment log keep the FULL PAN
-    # and CVV (PCI debt) — masking is never applied to what this service persists.
-    if not pan:
-        return None
-    return "•••• " + pan[-4:]
-
-
 @router.post("/payments", response_model=PaymentOut)
 def post_payment(
     body: PaymentIn,
@@ -30,8 +22,8 @@ def post_payment(
 
     try:
         return payments.charge(
-            body.loan_id, body.pan, body.cvv, body.amount, body.idempotency_key,
-            body.ssn, body.name, body.method,
+            body.loan_id, body.processor_token, body.last4, body.amount, body.idempotency_key,
+            body.brand, body.name, body.method,
         )
     except IdempotencyKeyConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc))
