@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost, getUser } from "../../../lib/api";
@@ -72,6 +72,12 @@ function LoanDetailContent() {
 
   // action panels
   const [payAmount, setPayAmount] = useState("250.00");
+  // Review fix: same key reused across retries of the SAME attempted payment
+  // (e.g. resubmitting after a timeout) so payment-service's idempotency
+  // check can recognize it as a replay instead of a second charge. A new key
+  // is only minted when the user actually changes the amount -- see
+  // setPayAmount below.
+  const payIdempotencyKey = useRef(crypto.randomUUID());
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -148,15 +154,16 @@ function LoanDetailContent() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // NOTE: no idempotency key — a retry double-charges.
       await apiPost("/payments", {
         loan_id: loanId,
         pan: "4111111111111111", // hardcoded test card PAN (texture)
         cvv: "123", // hardcoded test CVV (texture)
         amount: parseFloat(payAmount || "0"),
         method: "card",
+        idempotency_key: payIdempotencyKey.current,
       });
       setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+      payIdempotencyKey.current = crypto.randomUUID();
       await refreshBalanceAndHistory();
     } catch (err) {
       setActionErr(errMsg(err, "Payment failed."));
@@ -378,7 +385,10 @@ function LoanDetailContent() {
               min="0"
               step="0.01"
               value={payAmount}
-              onChange={(e) => setPayAmount(e.target.value)}
+              onChange={(e) => {
+                setPayAmount(e.target.value);
+                payIdempotencyKey.current = crypto.randomUUID();
+              }}
             />
           </div>
           <button onClick={makePayment} disabled={actionBusy}>

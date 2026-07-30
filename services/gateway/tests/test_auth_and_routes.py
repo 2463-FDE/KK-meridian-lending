@@ -415,6 +415,64 @@ def test_payments_borrower_cannot_charge_other_loan(monkeypatch):
     assert resp.status_code == 403
 
 
+# --- POST /payments -- amount validation, both staff and borrower callers. --
+
+@pytest.mark.parametrize("amount", [0, -500, -0.01])
+def test_payments_rejects_non_positive_amount_for_staff(monkeypatch, amount):
+    # Review finding: a negative amount credited the borrower's balance
+    # instead of charging them (servicing computes new_balance = current -
+    # amount) -- the gateway is the first hop for staff and borrower alike.
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "csr", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": amount},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_payments_rejects_non_positive_amount_for_borrower(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.post(
+        "/payments", json={"loan_id": 5, "amount": -500},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_payments_rejects_amount_over_the_ceiling(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "csr", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": 1_000_000.01},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_payments_rejects_amount_missing_or_wrong_type(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "csr", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": "50"},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
 def test_payments_unrecognized_subpath_fails_closed_not_found(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: {
         "id": 2, "username": "x", "role": "admin", "name": "X", "applicant_id": None,

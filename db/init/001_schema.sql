@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS applications (
     job_title         TEXT,
     employment_years  DOUBLE PRECISION,            -- a duration, not money -- left as-is
     status            TEXT DEFAULT 'submitted',
+    -- Review fix: minted once at submission (intake.create_application) and
+    -- returned to the caller -- proves ownership for the FIRST decision call
+    -- (see routers/applications.py run_decision), since app_id alone is a
+    -- guessable integer and the borrower has no account yet at this point.
+    access_token      TEXT,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
@@ -96,7 +101,7 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV. No idempotency key. No unique charge reference.
+-- Payments: stores full PAN + CVV (still open, PCI debt -- unrelated to the fix below).
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
@@ -104,9 +109,15 @@ CREATE TABLE IF NOT EXISTS payments (
     cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION
     method      TEXT DEFAULT 'card',
+    -- Review fix: a timeout retry or a double-click on submit used to insert
+    -- a second row and apply the balance twice -- there was no idempotency
+    -- key at all. Caller-supplied; NULL only for rows that predate this
+    -- column, which the partial unique index below deliberately excludes.
+    idempotency_key TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
-    -- no idempotency_key, no unique(charge_ref)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_key
+    ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -118,8 +129,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- A few indexes added over time for the servicing dashboard. (No idempotency index on
--- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
+-- A few indexes added over time for the servicing dashboard. (No reason/driver
+-- columns on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);

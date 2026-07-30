@@ -18,6 +18,7 @@ with no authz decision made for it).
 """
 import json
 import logging
+import math
 import os
 import re
 
@@ -259,6 +260,19 @@ async def disclosure(path: str, request: Request, authorization: str | None = He
     return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
 
 
+# Review fix: payment-service is the authoritative amount check (schemas.PaymentIn
+# rejects this same range), but the gateway is the first hop every caller (staff
+# and borrower alike) passes through -- reject here too instead of trusting the
+# proxy target to catch it, same ceiling as payment-service's _MAX_AMOUNT.
+_MAX_PAYMENT_AMOUNT = 1_000_000.00
+
+
+def _valid_amount(amount) -> bool:
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return False
+    return math.isfinite(amount) and 0 < amount <= _MAX_PAYMENT_AMOUNT
+
+
 @app.api_route("/payments/{path:path}", methods=["GET", "POST"])
 async def payments(path: str, request: Request, authorization: str | None = Header(None)):
     # Pre-existing bug fixed in passing: unlike /los or /lss, payment-service's
@@ -269,16 +283,24 @@ async def payments(path: str, request: Request, authorization: str | None = Head
     user = _require_user(authorization)
 
     if path == "" and request.method == "POST":
-        if auth.is_staff(user):
-            return await _proxy(PAYMENT_URL, "/payments", request, user)
-        # Borrower: only allowed to charge a loan their own applicant_id owns.
         # request.body() is cached by Starlette after the first read, so _proxy's
         # own await request.body() below still gets the same bytes.
         try:
             payload = json.loads(await request.body())
-            loan_id = payload.get("loan_id")
         except Exception:
-            loan_id = None
+            payload = {}
+
+        # Review fix: amount was forwarded unchecked -- a negative value credited
+        # the borrower's balance instead of charging them (servicing computes
+        # new_balance = current - amount), and zero/NaN/Infinity all passed
+        # through too. Enforced for staff and borrower alike.
+        if not _valid_amount(payload.get("amount")):
+            raise HTTPException(status_code=400, detail="amount must be a positive number")
+
+        if auth.is_staff(user):
+            return await _proxy(PAYMENT_URL, "/payments", request, user)
+        # Borrower: only allowed to charge a loan their own applicant_id owns.
+        loan_id = payload.get("loan_id")
         if loan_id is not None and auth.owns_loan(user, loan_id):
             return await _proxy(PAYMENT_URL, "/payments", request, user)
         raise HTTPException(status_code=403, detail="forbidden")

@@ -1,9 +1,18 @@
 """Payment handling (moved verbatim from servicing-service's payments.py).
 
 Stores the FULL PAN and the CVV on the payments row (D5 — still open; that's the
-persisted-storage half, unrelated to logging and not fixed here). There is NO
-idempotency key — a retried POST inserts a second payments row and applies the
-amount twice (double-charge, D2, tracked separately — spec only, see Week 5).
+persisted-storage half, unrelated to logging and not fixed here).
+
+Review fix (D2): a retried POST used to unconditionally insert a second payments
+row and apply the amount twice (double-charge). `charge()` now takes an optional
+caller-supplied `idempotency_key`; when present, the INSERT is `ON CONFLICT
+(idempotency_key) DO NOTHING` against the partial unique index added in
+db/migrations/0007_payments_idempotency_key.sql. A conflict means this exact key
+was already charged -- the original row is looked up and its result replayed
+verbatim, and servicing-service is never called a second time. No key means no
+way to recognize a retry, so two identical calls with no key are still two
+separate (legitimate, caller's choice) charges -- see
+test_retried_post_payment_double_charges.
 
 The amount is applied to the balance by calling servicing-service over HTTP (the
 servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
@@ -37,7 +46,7 @@ def _to_cents(amount) -> float:
 
 
 def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
-           name: str = None, method: str = "card") -> dict:
+           name: str = None, method: str = "card", idempotency_key: str = None) -> dict:
     amount = _to_cents(amount)
 
     # D5 fix: the log line used to write full PAN/CVV/SSN at INFO with zero
@@ -45,15 +54,40 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
     # gap -- this only closes the logging half.
     safe_req = redact_dict({
         "pan": pan, "cvv": cvv, "ssn": ssn, "amount": amount,
-        "loan_id": loan_id, "name": name,
+        "loan_id": loan_id, "name": name, "idempotency_key": idempotency_key,
     })
     log.info("POST /payments charge req=%s -> ok", safe_req)
-    # No idempotency check. No unique charge reference. Every POST inserts a row.
-    rows = db.query(
-        "INSERT INTO payments (loan_id, pan, cvv, amount, method) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (loan_id, pan, cvv, amount, method),   # full PAN + CVV persisted
-    )
+
+    if idempotency_key:
+        rows = db.query(
+            "INSERT INTO payments (loan_id, pan, cvv, amount, method, idempotency_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (idempotency_key) DO NOTHING RETURNING id",
+            (loan_id, pan, cvv, amount, method, idempotency_key),
+        )
+        if not rows:
+            existing = db.query(
+                "SELECT id, loan_id, amount FROM payments WHERE idempotency_key = %s",
+                (idempotency_key,),
+            )
+            if existing:
+                e = existing[0]
+                log.info(
+                    "duplicate POST /payments idempotency_key=%s -> replaying payment_id=%s",
+                    idempotency_key, e["id"],
+                )
+                return {
+                    "payment_id": e["id"],
+                    "loan_id": e["loan_id"],
+                    "status": "captured",
+                    "applied_amount": float(e["amount"]),
+                }
+    else:
+        rows = db.query(
+            "INSERT INTO payments (loan_id, pan, cvv, amount, method) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (loan_id, pan, cvv, amount, method),   # full PAN + CVV persisted
+        )
     payment_id = rows[0]["id"] if rows else None
 
     # Apply the captured amount to the balance via servicing-service.

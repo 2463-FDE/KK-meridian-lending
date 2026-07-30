@@ -18,14 +18,36 @@ client = TestClient(app)
 
 class _FakeDb:
     """Stands in for app.db.query -- records every INSERT and hands back an
-    incrementing id, like a real `RETURNING id` would for repeated inserts."""
+    incrementing id, like a real `RETURNING id` would for repeated inserts.
+
+    Also simulates the real Postgres behavior payments.charge() relies on for
+    idempotency: an `ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`
+    insert returns no row on a repeat key (instead of a real unique-index
+    violation), and a keyed row can be looked back up by that same key.
+    """
 
     def __init__(self):
         self.calls = []
         self._next_id = 1
+        self._by_key = {}
 
     def query(self, sql, params=None):
         self.calls.append((sql, params))
+        params = params or ()
+
+        if "ON CONFLICT (idempotency_key)" in sql:
+            key = params[5]
+            if key in self._by_key:
+                return []
+            row = {"id": self._next_id, "loan_id": params[0], "amount": params[3]}
+            self._by_key[key] = row
+            self._next_id += 1
+            return [{"id": row["id"]}]
+
+        if "WHERE idempotency_key = " in sql:
+            row = self._by_key.get(params[0])
+            return [row] if row else []
+
         row = {"id": self._next_id}
         self._next_id += 1
         return [row]
@@ -141,10 +163,11 @@ def test_post_payment_still_reports_captured_when_servicing_unreachable(fake_db,
     assert resp.json()["status"] == "captured"
 
 
-def test_retried_post_payment_double_charges(fake_db):
-    # Characterizes debt D2: no idempotency key means an identical retried
-    # POST inserts a SECOND payments row and reports a SECOND applied_amount,
-    # rather than being recognized as a duplicate of the first.
+def test_retried_post_payment_without_key_still_double_charges(fake_db):
+    # No idempotency_key means there's nothing to recognize a retry BY -- two
+    # identical calls with no key are two separate, legitimate charges (the
+    # caller's choice not to send a key, not a bug). See
+    # test_retried_post_payment_with_key_is_deduped below for the actual fix.
     body = {"loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": 500.0}
 
     first = client.post("/payments", json=body)
@@ -155,3 +178,77 @@ def test_retried_post_payment_double_charges(fake_db):
     assert first.json()["payment_id"] != second.json()["payment_id"]
     assert len(fake_db.calls) == 2
     assert first.json()["applied_amount"] == second.json()["applied_amount"] == 500.0
+
+
+def test_retried_post_payment_with_key_is_deduped(fake_db, monkeypatch):
+    # Review fix (D2): a retried POST carrying the SAME idempotency_key must
+    # be recognized as a replay of the first charge, not a second one --
+    # exactly one payments row, exactly one call to servicing-service.
+    servicing_calls = []
+    monkeypatch.setattr(
+        payments.httpx, "post",
+        lambda *a, **k: servicing_calls.append((a, k)) or _FakeServicingResponse(),
+    )
+    body = {
+        "loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": 500.0,
+        "idempotency_key": "retry-key-1",
+    }
+
+    first = client.post("/payments", json=body)
+    second = client.post("/payments", json=body)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["payment_id"] == second.json()["payment_id"]
+    assert first.json()["applied_amount"] == second.json()["applied_amount"] == 500.0
+    assert len(servicing_calls) == 1
+
+
+def test_different_idempotency_keys_are_not_deduped(fake_db):
+    # A different key is a genuinely different payment -- must not collide
+    # with an unrelated charge just because the loan/amount happen to match.
+    first = client.post("/payments", json={
+        "loan_id": 42, "amount": 500.0, "idempotency_key": "key-a",
+    })
+    second = client.post("/payments", json={
+        "loan_id": 42, "amount": 500.0, "idempotency_key": "key-b",
+    })
+
+    assert first.json()["payment_id"] != second.json()["payment_id"]
+
+
+@pytest.mark.parametrize("amount", [0, -500.0])
+def test_post_payment_rejects_non_positive_amount(fake_db, amount):
+    # Review fix: amount was an unconstrained float -- a negative value
+    # credited the borrower's balance instead of charging them (servicing
+    # computes new_balance = current - amount).
+    resp = client.post("/payments", json={
+        "loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": amount,
+    })
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_post_payment_rejects_non_finite_amount(fake_db, literal):
+    # httpx's own json= encoder refuses to put NaN/Infinity on the wire at all
+    # (raises ValueError) -- build the request body by hand to prove the
+    # server-side still rejects a client that sends one anyway.
+    body = '{"loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": %s}' % literal
+
+    resp = client.post(
+        "/payments", content=body, headers={"Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []
+
+
+def test_post_payment_rejects_amount_over_the_ceiling(fake_db):
+    resp = client.post("/payments", json={
+        "loan_id": 42, "pan": "4111111111111111", "cvv": "123", "amount": 1_000_000.01,
+    })
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []

@@ -1,5 +1,6 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -40,7 +41,8 @@ _STAFF_ROLES = {"csr", "underwriter", "admin"}
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
-    app_id = intake.create_application(payload)  # creates applicant+application rows, logs full PII (D5 — KEEP)
+    # creates applicant+application rows, logs full PII (D5 — KEEP)
+    app_id, access_token = intake.create_application(payload)
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:
@@ -78,7 +80,7 @@ def submit_application(body: ApplicationIn):
         }
     except Exception as e:  # noqa
         log.warning("kyc-service call failed: %s", e)
-    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip)}
+    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip), "access_token": access_token}
 
 
 @router.get("", response_model=Page[ApplicationListItem])
@@ -160,35 +162,53 @@ def get_application_financials(
     return ApplicationFinancials(income=a.income, employment_years=a.employment_years)
 
 
+class DecisionIn(BaseModel):
+    # Review fix: proof of ownership for the FIRST decision call -- minted at
+    # submission (ApplicationCreated.access_token) and held only by the
+    # borrower's own browser for this session. Optional so a staff-session
+    # call (the underwriting console's own "Run decision" button) needs none.
+    access_token: str | None = None
+
+
 @router.post("/{app_id}/decision", response_model=DecisionOut)
 def run_decision(
     app_id: int,
+    body: DecisionIn = DecisionIn(),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
 ):
     # Security fix: this route has no session of its own -- the gateway's /los/*
     # proxy forwards it anonymously on purpose, since a freshly-submitted
     # applicant has no account yet and this is how they get their first
-    # decision (frontend/app/apply/page.tsx's "Get decision" button). That's
-    # fine for a ONE-TIME first run. Without a check, though, the same route
-    # let anyone who guesses an app_id rerun decisioning on a stranger's
-    # already-decided application -- triggering a real bureau pull and
-    # overwriting their decision row via decision-service's own
-    # ON CONFLICT (app_id) DO UPDATE (graph.py). Once a decision exists, a
-    # rerun requires a staff session (the underwriting console's own "Run
-    # decision" button already sends one) -- same _STAFF_ROLES gate as
-    # get_application_financials above.
-    existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
-    if existing and x_user_role not in _STAFF_ROLES:
-        raise HTTPException(status_code=403, detail="staff only to rerun a decision")
-
+    # decision (frontend/app/apply/page.tsx's "Get decision" button).
+    #
+    # Once a decision exists, a rerun requires a staff session (the
+    # underwriting console's own "Run decision" button already sends one) --
+    # same _STAFF_ROLES gate as get_application_financials above.
+    #
+    # Security fix (review): the rerun guard above used to be the ONLY check
+    # -- the very FIRST decision call was wide open, so anyone who guessed an
+    # app_id could trigger a real bureau pull (a credit check) using a
+    # stranger's stored SSN. A first call now also requires either a staff
+    # session or the access_token minted onto this application at submission.
     rows = db.query(
-        "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, ap.name, ap.ssn "
+        "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, a.access_token, "
+        "ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]
+
+    existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
+    if existing:
+        if x_user_role not in _STAFF_ROLES:
+            raise HTTPException(status_code=403, detail="staff only to rerun a decision")
+    else:
+        is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
+        if x_user_role not in _STAFF_ROLES and not is_owner:
+            raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
+
     # Decisioning moved to decision-service; it persists the (outcome-only) decisions row.
     resp = clients.post(clients.DECISION_URL, "/decisions", {
         "application_id": app_id,
