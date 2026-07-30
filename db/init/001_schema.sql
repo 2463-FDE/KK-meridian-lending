@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS payments (
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
-    -- unique index below deliberately excludes (see db/migrations/0009).
+    -- unique index below deliberately excludes (see db/migrations/0007).
     idempotency_key TEXT,
     -- Review fix: NULL means captured but not yet applied to the loan balance
     -- (a pending/outbox record) -- set once servicing-service confirms the

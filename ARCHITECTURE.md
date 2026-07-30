@@ -131,8 +131,8 @@ boundary (no host port) is ever accidentally reopened.
 `db/init/001_schema.sql`. Seed: `db/init/002_seed.sql` (curated anchors) +
 `db/init/003_seed_bulk.sql` (synthetic portfolio of ~300 applications / ~180 loans / ~600
 payments). Migrations under `db/migrations/` are hand-tracked and lag the init DDL —
-notably `0005_money_columns_to_numeric.sql`, `0006_offer_decision_link.sql` +
-`0007_offers_decision_id_unique.sql`, and `0008_add_applicant_zip.sql`.
+notably `0005_money_columns_to_numeric.sql`, `0008_offer_decision_link.sql` +
+`0009_offers_decision_id_unique.sql`, and `0014_add_applicant_zip.sql`.
 
 Money columns are `NUMERIC` (D12 fix — every dollar-amount column used to be `DOUBLE
 PRECISION`; `employment_years` stayed float since it's a duration, not money). `balances`

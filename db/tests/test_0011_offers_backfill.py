@@ -1,9 +1,9 @@
-"""Integration test for db/migrations/0010_offers_backfill_and_app_id_unique.sql.
+"""Integration test for db/migrations/0011_offers_backfill_and_app_id_unique.sql.
 
-Review finding: 0010's original ordering backfilled decision_id (step 1)
+Review finding: 0011's original ordering backfilled decision_id (step 1)
 BEFORE resolving duplicate legacy offers (step 3). Backfilling sets
 decision_id = app_id, so two duplicate rows for the same app_id got the SAME
-decision_id -- which immediately violated 0007's offers_decision_id_key
+decision_id -- which immediately violated 0009's offers_decision_id_key
 UNIQUE constraint and aborted the whole migration, on exactly the data this
 migration exists to repair.
 
@@ -24,7 +24,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against")
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
-SCHEMA = "migration_test_0010"
+SCHEMA = "migration_test_0011"
 
 
 @pytest.fixture
@@ -55,9 +55,9 @@ def _apply_migration(conn, filename):
 
 
 def _seed_legacy_schema_with_duplicate_offers(conn):
-    """Builds the pre-0006 shape of applications/decisions/offers (no
+    """Builds the pre-0008 shape of applications/decisions/offers (no
     decision_id/fee_pct_used columns, no app_id uniqueness) and seeds two
-    duplicate legacy offers for the same application -- the exact shape 0010
+    duplicate legacy offers for the same application -- the exact shape 0011
     is meant to repair. Every legacy offer predates decision_id entirely, so
     it's NULL on every row, same as a real pre-W4 database."""
     with conn.cursor() as cur:
@@ -89,18 +89,18 @@ def _seed_legacy_schema_with_duplicate_offers(conn):
     conn.commit()
 
 
-def test_0010_migration_succeeds_on_duplicate_legacy_offers(conn):
+def test_0011_migration_succeeds_on_duplicate_legacy_offers(conn):
     _seed_legacy_schema_with_duplicate_offers(conn)
 
-    # Prerequisite migrations: 0006 adds decision_id/fee_pct_used, 0007 adds
-    # the decision_id UNIQUE constraint that a pre-fix 0010 could no longer
+    # Prerequisite migrations: 0008 adds decision_id/fee_pct_used, 0009 adds
+    # the decision_id UNIQUE constraint that a pre-fix 0011 could no longer
     # satisfy once backfill ran before dedup.
-    _apply_migration(conn, "0006_offer_decision_link.sql")
-    _apply_migration(conn, "0007_offers_decision_id_unique.sql")
+    _apply_migration(conn, "0008_offer_decision_link.sql")
+    _apply_migration(conn, "0009_offers_decision_id_unique.sql")
 
-    # This must not raise -- a pre-fix 0010 aborts here with a unique
+    # This must not raise -- a pre-fix 0011 aborts here with a unique
     # violation on offers_decision_id_key.
-    _apply_migration(conn, "0010_offers_backfill_and_app_id_unique.sql")
+    _apply_migration(conn, "0011_offers_backfill_and_app_id_unique.sql")
 
     with _cur(conn) as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
@@ -115,21 +115,21 @@ def test_0010_migration_succeeds_on_duplicate_legacy_offers(conn):
     with _cur(conn) as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("SELECT conname FROM pg_constraint WHERE conname = 'offers_app_id_key'")
-        assert cur.fetchall(), "offers_app_id_key must exist after 0010"
+        assert cur.fetchall(), "offers_app_id_key must exist after 0011"
 
 
-def test_0010_migration_keeps_newest_offer_on_duplicate(conn):
+def test_0011_migration_keeps_newest_offer_on_duplicate(conn):
     _seed_legacy_schema_with_duplicate_offers(conn)
     with conn.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
         # A third, distinguishable offer for the same app -- the newest one,
-        # by id -- so we can assert 0010 kept the RIGHT row, not just one row.
+        # by id -- so we can assert 0011 kept the RIGHT row, not just one row.
         cur.execute("INSERT INTO offers (app_id, apr) VALUES (1, 99.9)")
     conn.commit()
 
-    _apply_migration(conn, "0006_offer_decision_link.sql")
-    _apply_migration(conn, "0007_offers_decision_id_unique.sql")
-    _apply_migration(conn, "0010_offers_backfill_and_app_id_unique.sql")
+    _apply_migration(conn, "0008_offer_decision_link.sql")
+    _apply_migration(conn, "0009_offers_decision_id_unique.sql")
+    _apply_migration(conn, "0011_offers_backfill_and_app_id_unique.sql")
 
     with _cur(conn) as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")

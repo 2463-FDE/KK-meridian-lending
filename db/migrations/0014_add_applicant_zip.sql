@@ -1,4 +1,4 @@
--- 0008 — Week 8 fair-lending fix: add the ZIP field the roadmap flagged as
+-- 0014 — Week 8 fair-lending fix: add the ZIP field the roadmap flagged as
 -- missing entirely ("Can't check" a ZIP-level disparate-impact question --
 -- confirmed no ZIP field exists anywhere in the schema; applicants.address is
 -- one free-text column). Hand-tracked, as usual. Authoritative DDL lives in

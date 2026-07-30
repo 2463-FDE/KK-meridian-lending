@@ -1,4 +1,4 @@
--- 0013 — review fix: POST /applications/{app_id}/accept ran fully
+-- 0015 — review fix: POST /applications/{app_id}/accept ran fully
 -- anonymously for a not-yet-funded application (the legitimate no-account
 -- borrower flow needs this), but app_id is a sequential, guessable integer --
 -- so anyone could accept/fund a STRANGER's approved application, not just

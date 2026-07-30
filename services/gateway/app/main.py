@@ -270,6 +270,9 @@ async def decision(path: str, request: Request, authorization: str | None = Head
     # route at all -- origination-service calls decision-service server-to-server
     # over the internal network -- so this proxy only exists for staff/ops tooling
     # to inspect or re-run a decision directly. Staff-only, no exceptions.
+    # decision-service itself now requires X-Internal-Token on every call (see
+    # routers/decisions.py) -- this proxy has to forward it too, or a staff
+    # session hitting decision-service through the gateway gets 401'd.
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="staff only")

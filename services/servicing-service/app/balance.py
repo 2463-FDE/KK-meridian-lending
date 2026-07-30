@@ -50,7 +50,7 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
     """Review fix: apply_payment() above has no idempotency of its own -- it
     trusted payment-service to never call apply-payment twice for the same
     payment. payment-service now retries a pending apply on a same-key retry
-    (db/migrations/0011), so that trust has to be a real guarantee instead:
+    (db/migrations/0012), so that trust has to be a real guarantee instead:
     calling this twice for the same payment_id must move the balance once.
 
     payment_applications' PK on payment_id is the atomic guard -- the INSERT

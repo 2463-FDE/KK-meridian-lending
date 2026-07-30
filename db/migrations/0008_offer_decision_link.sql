@@ -1,4 +1,4 @@
--- 0006 — Week 4 fix: link an offer back to the decision + fee-rule version that
+-- 0008 — Week 4 fix: link an offer back to the decision + fee-rule version that
 -- produced it. Hand-tracked, as usual. Authoritative DDL lives in db/init/001_schema.sql.
 --
 -- Needed on any existing database whose Postgres volume already existed before this
