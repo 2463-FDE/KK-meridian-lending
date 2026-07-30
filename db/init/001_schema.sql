@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS applications (
     job_title         TEXT,
     employment_years  DOUBLE PRECISION,            -- a duration, not money -- left as-is
     status            TEXT DEFAULT 'submitted',
+    -- Review fix: minted once at submission (intake.create_application) and
+    -- returned to the caller -- proves ownership for the FIRST decision call
+    -- (see routers/applications.py run_decision), since app_id alone is a
+    -- guessable integer and the borrower has no account yet at this point.
+    access_token      TEXT,
     -- Review fix: one-time token minted onto the application when it's
     -- approved (run_decision), required to accept it anonymously (the
     -- no-account borrower flow) since app_id is a sequential, guessable
@@ -113,7 +118,7 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV (still open, PCI debt — unrelated to the fix below).
+-- Payments: stores full PAN + CVV (still open, PCI debt -- unrelated to the fix below).
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
@@ -158,8 +163,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- A few indexes added over time for the servicing dashboard. (No idempotency index on
--- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
+-- A few indexes added over time for the servicing dashboard. (No reason/driver
+-- columns on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);

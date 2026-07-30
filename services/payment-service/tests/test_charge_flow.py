@@ -301,3 +301,67 @@ def test_different_idempotency_keys_charge_separately(fake_db):
     assert first.json()["payment_id"] != second.json()["payment_id"]
     assert first.json()["applied_amount"] == 100.0
     assert second.json()["applied_amount"] == 200.0
+
+
+def test_reusing_a_key_with_a_different_loan_id_is_a_409_not_a_misapply(fake_db, monkeypatch):
+    # Review fix: a retry reusing an idempotency_key but claiming a DIFFERENT
+    # loan_id must never be honored against either the request's loan_id (the
+    # original bug) or silently against the stored one -- surfaced as a 409
+    # so the caller knows this key collision is not a safe retry, and never
+    # reaches servicing-service for the mismatched request at all.
+    servicing_calls = []
+    monkeypatch.setattr(
+        payments.httpx, "post",
+        lambda *a, **k: servicing_calls.append((a, k)) or _FakeServicingResponse(),
+    )
+
+    first = client.post("/payments", json=_payload(idempotency_key="reused-key", loan_id=42))
+    second = client.post("/payments", json=_payload(idempotency_key="reused-key", loan_id=999))
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert len(servicing_calls) == 1  # the mismatched retry never re-applied anything
+
+
+def test_reusing_a_key_with_a_different_amount_is_a_409(fake_db):
+    first = client.post("/payments", json=_payload(idempotency_key="reused-key-2", amount=100.0))
+    second = client.post("/payments", json=_payload(idempotency_key="reused-key-2", amount=999.0))
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+
+
+@pytest.mark.parametrize("amount", [0, -500.0])
+def test_post_payment_rejects_non_positive_amount(fake_db, amount):
+    # Review fix: amount was an unconstrained float -- a negative value
+    # credited the borrower's balance instead of charging them (servicing
+    # computes new_balance = current - amount).
+    resp = client.post("/payments", json=_payload(amount=amount))
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_post_payment_rejects_non_finite_amount(fake_db, literal):
+    # httpx's own json= encoder refuses to put NaN/Infinity on the wire at all
+    # (raises ValueError) -- build the request body by hand to prove the
+    # server-side still rejects a client that sends one anyway.
+    body = (
+        '{"loan_id": 42, "pan": "4111111111111111", "cvv": "123", '
+        '"idempotency_key": "nonfinite-key", "amount": %s}' % literal
+    )
+
+    resp = client.post(
+        "/payments", content=body, headers={"Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []
+
+
+def test_post_payment_rejects_amount_over_the_ceiling(fake_db):
+    resp = client.post("/payments", json=_payload(amount=1_000_000.01))
+
+    assert resp.status_code == 422
+    assert fake_db.calls == []

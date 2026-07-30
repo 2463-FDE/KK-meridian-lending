@@ -41,10 +41,33 @@ _STAFF_ROLES = {"csr", "underwriter", "admin"}
 #      get_application_financials below), not on the public response.
 
 
+def _is_staff(x_user_role: str | None, x_internal_token: str | None) -> bool:
+    """Review fix: every staff-gated route below used to trust X-User-Role
+    alone. docker-compose.yml no longer publishes this service's host port,
+    but that's network topology, not an application-level check -- if the
+    port were ever reopened (or this service reached some other way inside
+    the compose network), a direct caller could set X-User-Role: admin itself
+    with nothing to verify the claim, and fund/read a guessed app_id with no
+    real staff session behind it. The gateway now forwards X-Internal-Token
+    (the same shared secret already used for the decision-service call below)
+    on every /los/* proxy; a direct caller doesn't know that secret, so it can
+    claim any role it wants but still never pass this check.
+    """
+    if x_user_role not in _STAFF_ROLES:
+        return False
+    return bool(config.INTERNAL_SERVICE_TOKEN) and x_internal_token == config.INTERNAL_SERVICE_TOKEN
+
+
+def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> None:
+    if not _is_staff(x_user_role, x_internal_token):
+        raise HTTPException(status_code=403, detail="staff only")
+
+
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
-    app_id = intake.create_application(payload)  # creates applicant+application rows, logs full PII (D5 — KEEP)
+    # creates applicant+application rows, logs full PII (D5 — KEEP)
+    app_id, access_token = intake.create_application(payload)
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:
@@ -82,7 +105,7 @@ def submit_application(body: ApplicationIn):
         }
     except Exception as e:  # noqa
         log.warning("kyc-service call failed: %s", e)
-    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip)}
+    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip), "access_token": access_token}
 
 
 @router.get("", response_model=Page[ApplicationListItem])
@@ -115,6 +138,7 @@ def list_applications(
 @router.get("/fair-lending/zip-analysis")
 def get_zip_disparate_impact_report(
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
     """W8: ZIP-level disparate-impact screen (fair_lending.py). Registered
     before /{app_id} -- a literal path segment must be matched ahead of a
@@ -123,8 +147,7 @@ def get_zip_disparate_impact_report(
     Staff only: approval-rate breakdowns are underwriting-sensitive, same bar
     as get_application_financials below.
     """
-    if x_user_role not in _STAFF_ROLES:
-        raise HTTPException(status_code=403, detail="staff only")
+    _require_staff(x_user_role, x_internal_token)
     return fair_lending.zip_disparate_impact_report()
 
 
@@ -168,47 +191,70 @@ def get_application_financials(
     app_id: int,
     session: Session = Depends(get_session),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
     # Staff only: income/employment_years are underwriting inputs, not borrower
     # status data. The gateway forwards X-User-Role for authenticated sessions
     # (see gateway/app/main.py _proxy); anonymous /los/* callers send none.
-    if x_user_role not in _STAFF_ROLES:
-        raise HTTPException(status_code=403, detail="staff only")
+    _require_staff(x_user_role, x_internal_token)
     a = session.get(models.Application, app_id)
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
     return ApplicationFinancials(income=a.income, employment_years=a.employment_years)
 
 
+class DecisionIn(BaseModel):
+    # Review fix: proof of ownership for the FIRST decision call -- minted at
+    # submission (ApplicationCreated.access_token) and held only by the
+    # borrower's own browser for this session. Optional so a staff-session
+    # call (the underwriting console's own "Run decision" button) needs none.
+    access_token: str | None = None
+
+
 @router.post("/{app_id}/decision", response_model=DecisionOut)
 def run_decision(
     app_id: int,
+    body: DecisionIn = DecisionIn(),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
     # Security fix: this route has no session of its own -- the gateway's /los/*
     # proxy forwards it anonymously on purpose, since a freshly-submitted
     # applicant has no account yet and this is how they get their first
-    # decision (frontend/app/apply/page.tsx's "Get decision" button). That's
-    # fine for a ONE-TIME first run. Without a check, though, the same route
-    # let anyone who guesses an app_id rerun decisioning on a stranger's
-    # already-decided application -- triggering a real bureau pull and
-    # overwriting their decision row via decision-service's own
-    # ON CONFLICT (app_id) DO UPDATE (graph.py). Once a decision exists, a
-    # rerun requires a staff session (the underwriting console's own "Run
-    # decision" button already sends one) -- same _STAFF_ROLES gate as
-    # get_application_financials above.
-    existing_decision = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
-    if existing_decision and x_user_role not in _STAFF_ROLES:
-        raise HTTPException(status_code=403, detail="staff only to rerun a decision")
-
+    # decision (frontend/app/apply/page.tsx's "Get decision" button).
+    #
+    # Once a decision exists, a rerun requires a staff session (the
+    # underwriting console's own "Run decision" button already sends one) --
+    # same _STAFF_ROLES gate as get_application_financials above -- since
+    # otherwise anyone who guesses an app_id could rerun decisioning on a
+    # stranger's already-decided application, triggering a real bureau pull
+    # and overwriting their decision row via decision-service's own
+    # ON CONFLICT (app_id) DO UPDATE (graph.py).
+    #
+    # Security fix (review): the rerun guard above used to be the ONLY check
+    # -- the very FIRST decision call was wide open, so anyone who guessed an
+    # app_id could trigger a real bureau pull (a credit check) using a
+    # stranger's stored SSN. A first call now also requires either a staff
+    # session or the access_token minted onto this application at submission.
     rows = db.query(
-        "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, ap.name, ap.ssn "
+        "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, a.access_token, "
+        "ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]
+
+    existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
+    if existing:
+        if not _is_staff(x_user_role, x_internal_token):
+            raise HTTPException(status_code=403, detail="staff only to rerun a decision")
+    else:
+        is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
+        if not _is_staff(x_user_role, x_internal_token) and not is_owner:
+            raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
+
     # Decisioning moved to decision-service; it persists the (outcome-only) decisions row.
     resp = clients.post(clients.DECISION_URL, "/decisions", {
         "application_id": app_id,
@@ -256,6 +302,7 @@ def run_decision(
 def get_loan_history(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
     """W4: the full borrower -> application -> decision -> offer graph for one
     application, via the kg.py traversal layer -- the concrete "trace this
@@ -263,8 +310,7 @@ def get_loan_history(
     includes decision score/reason codes, the same underwriting-sensitive bar
     as get_application_financials above.
     """
-    if x_user_role not in _STAFF_ROLES:
-        raise HTTPException(status_code=403, detail="staff only")
+    _require_staff(x_user_role, x_internal_token)
     history = kg.get_loan_history(app_id)
     if history is None:
         raise HTTPException(status_code=404, detail="application not found")
@@ -284,6 +330,7 @@ def accept_offer(
     app_id: int,
     body: AcceptIn = AcceptIn(),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
     # Security fix: this never checked that the application actually has an
     # approved decision on record, and never guarded against re-acceptance --
@@ -309,7 +356,7 @@ def accept_offer(
     name = r.get("name") or "Borrower"
 
     if r.get("status") == "funded":
-        if x_user_role not in _STAFF_ROLES:
+        if not _is_staff(x_user_role, x_internal_token):
             raise HTTPException(status_code=403, detail="staff only to re-accept a funded application")
         try:
             loan_id = intake.board_to_servicing(app_id, name, r["amount"], rate, r["term_months"])
@@ -326,7 +373,7 @@ def accept_offer(
     # the one-time accept_token (minted in run_decision, held only by the
     # borrower's own browser session) is now required.
     is_owner = bool(body.accept_token) and bool(r.get("accept_token")) and body.accept_token == r["accept_token"]
-    if x_user_role not in _STAFF_ROLES and not is_owner:
+    if not _is_staff(x_user_role, x_internal_token) and not is_owner:
         raise HTTPException(status_code=403, detail="not authorized to accept this offer")
 
     # Security fix: two concurrent accepts on the same not-yet-funded

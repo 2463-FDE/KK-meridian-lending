@@ -6,9 +6,11 @@ NO idempotency key — a retried POST double-charges. The captured amount is app
 loan balance by calling servicing-service over HTTP. (D2, D5, D13 — kept on purpose)
 """
 import logging
+import math
 import os
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -23,6 +25,26 @@ app.include_router(payments.router)
 # W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
 # comment for why this exists across all 8 services now.
 Instrumentator().instrument(app).expose(app)
+
+
+def _sanitize_non_finite(obj):
+    # A rejected NaN/Infinity amount gets echoed back in the 422 body's own
+    # "input" field (FastAPI includes the offending value in each error) --
+    # Starlette's JSONResponse renders with allow_nan=False, so leaving a raw
+    # NaN/Infinity float in there would crash the error response itself with
+    # a ValueError instead of returning the 422.
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: _sanitize_non_finite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_non_finite(v) for v in obj]
+    return obj
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": _sanitize_non_finite(exc.errors())})
 
 
 @app.exception_handler(Exception)

@@ -45,6 +45,20 @@ log = get_logger("payment")   # writes to logs/payment-service.log
 _CENTS = Decimal("0.01")
 
 
+class IdempotencyKeyConflict(Exception):
+    """Raised when a repeated idempotency_key arrives attached to a DIFFERENT
+    loan_id or amount than the request that originally used that key.
+
+    Review fix: silently honoring the stored row would either misapply the
+    ORIGINAL amount to a caller who thinks they're charging a different
+    loan/amount, or -- before this check existed -- risk reconciling against
+    whichever loan_id happened to be passed on the retry. A key collision like
+    this means the caller reused a key for a genuinely different payment,
+    which is a client bug (or an attempted key-guessing attack), not a safe
+    retry -- surfaced as 409 rather than silently doing either thing.
+    """
+
+
 def _to_cents(amount) -> float:
     d = amount if isinstance(amount, Decimal) else Decimal(str(amount))
     return float(d.quantize(_CENTS, rounding=ROUND_HALF_UP))
@@ -86,6 +100,12 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str
             (idempotency_key,),
         )[0]
         payment_id = row["id"]
+        if row["loan_id"] != loan_id or row["amount"] != amount:
+            raise IdempotencyKeyConflict(
+                f"idempotency_key={idempotency_key!r} was already used for "
+                f"loan_id={row['loan_id']} amount={row['amount']} -- this "
+                f"request is loan_id={loan_id} amount={amount}"
+            )
         if row["applied_at"] is None:
             # Review fix: the original request's apply either never ran or
             # never confirmed -- this retry is the reconciliation opportunity,
@@ -96,7 +116,11 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str
                 "not yet applied, retrying apply",
                 idempotency_key, payment_id,
             )
-            applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
+            # Review fix: reconcile against the ORIGINALLY stored loan_id, not
+            # the retry request's own loan_id parameter -- a retry that (by
+            # bug or bad-faith) sends a different loan_id with the same
+            # idempotency_key must never misapply the payment to that loan.
+            applied = _apply_via_servicing(row["loan_id"], row["amount"], payment_id)
         else:
             applied = True
             log.info(

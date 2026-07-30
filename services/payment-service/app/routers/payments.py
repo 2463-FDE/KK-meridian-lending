@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Header, HTTPException
 
 from .. import config, payments
+from ..payments import IdempotencyKeyConflict
 from ..schemas import PaymentIn, PaymentOut
 
 router = APIRouter(tags=["payments"])
@@ -27,7 +28,10 @@ def post_payment(
     if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="not authorized")
 
-    return payments.charge(
-        body.loan_id, body.pan, body.cvv, body.amount, body.idempotency_key,
-        body.ssn, body.name, body.method,
-    )
+    try:
+        return payments.charge(
+            body.loan_id, body.pan, body.cvv, body.amount, body.idempotency_key,
+            body.ssn, body.name, body.method,
+        )
+    except IdempotencyKeyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))

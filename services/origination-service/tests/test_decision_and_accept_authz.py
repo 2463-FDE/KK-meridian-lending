@@ -8,8 +8,11 @@ application id could rerun decisioning on a stranger's application, or
 board/fund a real loan for one that was never even approved.
 
 These tests cover the fix: the first decision for an application still runs
-anonymously (the legitimate no-account borrower flow in
-frontend/app/apply/page.tsx is unaffected), but a decision RERUN or a
+for the legitimate no-account borrower flow (frontend/app/apply/page.tsx),
+now proven via the access_token minted onto the application at submission
+(merged in from main's own review fix -- see intake.create_application /
+ApplicationCreated.access_token), not just anonymously -- anyone who merely
+guessed an app_id with no token is rejected. A decision RERUN or a
 re-ACCEPT of an already-funded application now requires a staff session, and
 accept now refuses an application that was never actually approved.
 
@@ -28,15 +31,18 @@ import contextlib
 
 import psycopg2.errors
 
-from app import clients, db, intake
+from app import clients, config, db, intake
 from app.main import app
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
 
+_ACCESS_TOKEN = "real-access-token-xyz789"
+
 _APPLICATION_ROW = {
     "id": 10, "applicant_id": 5, "amount": 9000, "term_months": 24,
     "income": 40000, "name": "Jane Borrower", "ssn": "123456781",
+    "access_token": _ACCESS_TOKEN,
 }
 
 
@@ -53,7 +59,9 @@ def _fake_decision_client_post(monkeypatch, response=None):
     return calls
 
 
-def test_first_decision_for_an_application_runs_anonymously(monkeypatch):
+def test_first_decision_with_the_applications_own_access_token_runs(monkeypatch):
+    """The legitimate no-account borrower flow: the access_token minted at
+    submission and handed back is round-tripped on the "Get decision" call."""
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return []  # no decision on record yet -- this is the first run
@@ -62,9 +70,41 @@ def test_first_decision_for_an_application_runs_anonymously(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
 
-    resp = client.post("/applications/10/decision")
+    resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
     assert resp.status_code == 200
+
+
+def test_first_decision_by_a_stranger_who_only_guessed_the_app_id_is_forbidden(monkeypatch):
+    """Merged in from main's own review fix: no decision exists yet, and the
+    caller is anonymous with no access_token -- must not trigger a bureau pull."""
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return []
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    calls = _fake_decision_client_post(monkeypatch)
+
+    resp = client.post("/applications/10/decision")
+
+    assert resp.status_code == 403
+    assert not calls  # never reached decision-service -- no bureau pull triggered
+
+
+def test_first_decision_with_the_wrong_access_token_is_forbidden(monkeypatch):
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return []
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    calls = _fake_decision_client_post(monkeypatch)
+
+    resp = client.post("/applications/10/decision", json={"access_token": "attacker-guessed-token"})
+
+    assert resp.status_code == 403
+    assert not calls
 
 
 def test_approved_decision_mints_an_accept_token(monkeypatch):
@@ -84,7 +124,7 @@ def test_approved_decision_mints_an_accept_token(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
 
-    resp = client.post("/applications/10/decision")
+    resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
     assert resp.status_code == 200
     token = resp.json()["accept_token"]
@@ -101,7 +141,7 @@ def test_denied_decision_mints_no_accept_token(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch, response={"outcome": "deny", "score": 500, "reason": "low score"})
 
-    resp = client.post("/applications/10/decision")
+    resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
     assert resp.status_code == 200
     assert resp.json()["accept_token"] is None
@@ -131,9 +171,30 @@ def test_rerun_of_an_existing_decision_succeeds_for_staff(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
 
-    resp = client.post("/applications/10/decision", headers={"X-User-Role": "underwriter"})
+    resp = client.post(
+        "/applications/10/decision",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
 
     assert resp.status_code == 200
+
+
+def test_rerun_of_an_existing_decision_by_staff_without_internal_token_is_forbidden(monkeypatch):
+    """Review fix: X-User-Role alone must not be enough -- a caller who skips
+    the gateway (e.g. origination-service's host port were ever reopened)
+    could set X-User-Role: admin itself with nothing to verify the claim."""
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return [{"app_id": 10}]
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    calls = _fake_decision_client_post(monkeypatch)
+
+    resp = client.post("/applications/10/decision", headers={"X-User-Role": "underwriter"})
+
+    assert resp.status_code == 403
+    assert not calls
 
 
 # --- POST /{app_id}/accept ---------------------------------------------------
@@ -244,10 +305,23 @@ def test_first_accept_succeeds_for_staff_without_a_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
     _stub_transaction(monkeypatch, claim_succeeds=True, loan_id=888)
 
-    resp = client.post("/applications/10/accept", headers={"X-User-Role": "csr"})
+    resp = client.post(
+        "/applications/10/accept",
+        headers={"X-User-Role": "csr", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
 
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 888
+
+
+def test_first_accept_by_staff_without_internal_token_is_forbidden(monkeypatch):
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-User-Role": "csr"})
+
+    assert resp.status_code == 403
+    assert not board_calls
 
 
 def test_first_accept_returns_409_when_a_concurrent_accept_already_won(monkeypatch):
@@ -292,9 +366,22 @@ def test_reaccept_of_an_already_funded_application_succeeds_for_staff(monkeypatc
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", headers={"X-User-Role": "underwriter"})
+    resp = client.post(
+        "/applications/10/accept",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
 
     assert resp.status_code == 200
+
+
+def test_reaccept_of_an_already_funded_application_by_staff_without_internal_token_is_forbidden(monkeypatch):
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-User-Role": "underwriter"})
+
+    assert resp.status_code == 403
+    assert not board_calls
 
 
 def test_reaccept_reports_409_when_a_loan_already_exists(monkeypatch):
@@ -304,6 +391,9 @@ def test_reaccept_reports_409_when_a_loan_already_exists(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     _stub_board_to_servicing(monkeypatch, raises=psycopg2.errors.UniqueViolation("dup"))
 
-    resp = client.post("/applications/10/accept", headers={"X-User-Role": "underwriter"})
+    resp = client.post(
+        "/applications/10/accept",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
 
     assert resp.status_code == 409

@@ -18,6 +18,7 @@ with no authz decision made for it).
 """
 import json
 import logging
+import math
 import os
 import re
 
@@ -139,8 +140,21 @@ def _require_user(authorization: str | None) -> dict:
 async def los(path: str, request: Request, authorization: str | None = Header(None)):
     # Origination is borrower-facing; an applicant can apply without an account.
     # If a session is present we forward it, otherwise we proxy anonymously.
+    #
+    # Review fix: origination-service's own staff-only routes (financials,
+    # rerun-decision, history, accept/re-accept) trust X-User-Role alone --
+    # docker-compose.yml no longer publishes its host port, but that's network
+    # topology, not an application-level check. X-Internal-Token (the same
+    # shared secret already forwarded to decision-service/disclosure-service/
+    # payment-service above) proves this request actually came through the
+    # gateway; a caller who reaches origination-service directly (e.g. if the
+    # port is ever mistakenly reopened) can still fake X-User-Role but doesn't
+    # know this secret, so it fails origination-service's own staff check too.
     user = auth.get_session(auth.bearer_token(authorization))
-    return await _proxy(ORIGINATION_URL, f"/{path}", request, user)
+    return await _proxy(
+        ORIGINATION_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 def _borrower_loans(applicant_id: int) -> dict:
@@ -163,12 +177,17 @@ def _borrower_loans(applicant_id: int) -> dict:
         {
             "id": r["id"],
             "applicant_name": r["applicant_name"],
-            "principal": r["principal"],
-            "apr": r["apr"],
+            # NUMERIC columns come back as Decimal from raw psycopg2 (unlike a
+            # SQLAlchemy read, this isn't affected by any asdecimal setting) --
+            # JSONResponse below uses stdlib json.dumps, which can't serialize
+            # Decimal. Cast to float at this boundary, same fix as everywhere
+            # else a raw-DB-read money value crosses a JSON response/request.
+            "principal": float(r["principal"]),
+            "apr": float(r["apr"]),
             "term_months": r["term_months"],
             "status": r["status"],
-            "balance": r["balance"],
-            "past_due": r["past_due"],
+            "balance": float(r["balance"]),
+            "past_due": float(r["past_due"]),
             "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
         }
         for r in rows
@@ -279,6 +298,19 @@ async def disclosure(path: str, request: Request, authorization: str | None = He
     )
 
 
+# Review fix: payment-service is the authoritative amount check (schemas.PaymentIn
+# rejects this same range), but the gateway is the first hop every caller (staff
+# and borrower alike) passes through -- reject here too instead of trusting the
+# proxy target to catch it, same ceiling as payment-service's _MAX_AMOUNT.
+_MAX_PAYMENT_AMOUNT = 1_000_000.00
+
+
+def _valid_amount(amount) -> bool:
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return False
+    return math.isfinite(amount) and 0 < amount <= _MAX_PAYMENT_AMOUNT
+
+
 @app.api_route("/payments/{path:path}", methods=["GET", "POST"])
 async def payments(path: str, request: Request, authorization: str | None = Header(None)):
     # Pre-existing bug fixed in passing: unlike /los or /lss, payment-service's
@@ -290,16 +322,24 @@ async def payments(path: str, request: Request, authorization: str | None = Head
 
     if path == "" and request.method == "POST":
         payment_headers = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
-        if auth.is_staff(user):
-            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
-        # Borrower: only allowed to charge a loan their own applicant_id owns.
         # request.body() is cached by Starlette after the first read, so _proxy's
         # own await request.body() below still gets the same bytes.
         try:
             payload = json.loads(await request.body())
-            loan_id = payload.get("loan_id")
         except Exception:
-            loan_id = None
+            payload = {}
+
+        # Review fix: amount was forwarded unchecked -- a negative value credited
+        # the borrower's balance instead of charging them (servicing computes
+        # new_balance = current - amount), and zero/NaN/Infinity all passed
+        # through too. Enforced for staff and borrower alike.
+        if not _valid_amount(payload.get("amount")):
+            raise HTTPException(status_code=400, detail="amount must be a positive number")
+
+        if auth.is_staff(user):
+            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
+        # Borrower: only allowed to charge a loan their own applicant_id owns.
+        loan_id = payload.get("loan_id")
         if loan_id is not None and auth.owns_loan(user, loan_id):
             return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         raise HTTPException(status_code=403, detail="forbidden")

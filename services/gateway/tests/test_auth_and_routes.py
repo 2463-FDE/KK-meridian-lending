@@ -10,6 +10,7 @@ the fix: staff-only for portfolio-wide/money-moving actions, owner-or-staff for
 a specific loan's read actions and charging a payment, 403/404 otherwise.
 """
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -140,6 +141,19 @@ def test_los_proxies_anonymously_with_no_session(monkeypatch):
     assert resp.status_code == 200
 
 
+def test_los_proxy_forwards_internal_token(monkeypatch):
+    # Review fix: origination-service's own staff-gated routes now verify
+    # X-Internal-Token in addition to X-User-Role -- the gateway has to
+    # actually forward it on every /los/* proxy or every staff action there
+    # would break (403 for a real staff session, not just a spoofed one).
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+
+    resp = client.get("/los/applications/1")
+
+    assert resp.status_code == 200
+    assert _FakeAsyncClient.last_headers["X-Internal-Token"] == main.INTERNAL_SERVICE_TOKEN
+
+
 def test_lss_requires_authentication(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: None)
 
@@ -183,6 +197,34 @@ def test_lss_loans_list_borrower_gets_own_scoped_results(monkeypatch):
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["id"] == 5
+
+
+def test_lss_loans_list_borrower_decimal_rows_serialize(monkeypatch):
+    """Review finding: after the D12 NUMERIC migration, raw psycopg2 reads of
+    principal/apr/balance/past_due come back as Decimal, not float -- and
+    JSONResponse (stdlib json.dumps under the hood) can't serialize Decimal.
+    Feeds _borrower_loans() real Decimal values, the way a live NUMERIC column
+    actually would, and asserts the route still returns 200 with plain floats."""
+    class _FakeDb:
+        def query(self, sql, params=None):
+            assert params == (1,)
+            return [{
+                "id": 5, "applicant_name": "Maria Gonzalez",
+                "principal": Decimal("10000.00"), "apr": Decimal("12.500"),
+                "term_months": 36, "status": "current",
+                "balance": Decimal("9000.00"), "past_due": Decimal("0.00"),
+                "opened_at": None,
+            }]
+
+    monkeypatch.setattr(main, "db", _FakeDb())
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.get("/lss/loans", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["principal"] == 10000.0
+    assert item["balance"] == 9000.0
 
 
 def test_lss_loans_list_borrower_without_applicant_id_is_forbidden(monkeypatch):
@@ -386,6 +428,64 @@ def test_payments_borrower_cannot_charge_other_loan(monkeypatch):
     assert resp.status_code == 403
 
 
+# --- POST /payments -- amount validation, both staff and borrower callers. --
+
+@pytest.mark.parametrize("amount", [0, -500, -0.01])
+def test_payments_rejects_non_positive_amount_for_staff(monkeypatch, amount):
+    # Review finding: a negative amount credited the borrower's balance
+    # instead of charging them (servicing computes new_balance = current -
+    # amount) -- the gateway is the first hop for staff and borrower alike.
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "csr", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": amount},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_payments_rejects_non_positive_amount_for_borrower(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.post(
+        "/payments", json={"loan_id": 5, "amount": -500},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_payments_rejects_amount_over_the_ceiling(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "csr", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": 1_000_000.01},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_payments_rejects_amount_missing_or_wrong_type(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "csr", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post(
+        "/payments", json={"loan_id": 999, "amount": "50"},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 400
+
+
 def test_payments_unrecognized_subpath_fails_closed_not_found(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: {
         "id": 2, "username": "x", "role": "admin", "name": "X", "applicant_id": None,
@@ -496,6 +596,46 @@ def test_decision_and_disclosure_accept_staff_roles(monkeypatch, prefix, role):
 
     resp = client.post(
         prefix, json={"application_id": 1},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 200
+
+
+def test_decision_requires_authentication(monkeypatch):
+    # Security fix: this route used to proxy with an optional session -- an
+    # anonymous caller could POST /decision/decisions directly with an SSN,
+    # triggering a real credit pull and overwriting the decision for any
+    # existing application via the upsert.
+    monkeypatch.setattr(auth, "get_session", lambda token: None)
+
+    resp = client.post("/decision/decisions", json={"application_id": 1})
+
+    assert resp.status_code == 401
+
+
+def test_decision_rejects_non_staff_role(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez",
+    })
+
+    resp = client.post(
+        "/decision/decisions", json={"application_id": 1},
+        headers={"Authorization": "Bearer faketoken123"},
+    )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("role", ["csr", "underwriter", "admin"])
+def test_decision_accepts_staff_roles(monkeypatch, role):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": role, "name": "X",
+    })
+
+    resp = client.post(
+        "/decision/decisions", json={"application_id": 1},
         headers={"Authorization": "Bearer faketoken123"},
     )
 

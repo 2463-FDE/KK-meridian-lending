@@ -33,13 +33,18 @@ services:
     env_file:
       - path: .env
         required: false
+    # Security fix: no host port mapping -- origination-service is reachable only
+    # on the internal compose network now. It used to publish 8001:8001, so anyone
+    # on the host could call GET /applications/{id}/financials directly with a
+    # forged X-User-Role: admin header and read borrower income/employment data.
+    # The gateway strips inbound X-User-* headers before setting its own trusted
+    # ones, but only for requests that actually go through it -- a direct hit on
+    # the published port bypassed that entirely.
     environment:
       # Shared with decision-service/gateway below -- sent as X-Internal-Token
       # on the server-to-server call to decision-service so it has a check to
       # fail closed on even if a future compose change re-publishes its port.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
-    ports:
-      - "8001:8001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,8 +65,12 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8002:8002"
+    # No published host port: this service moves money (adjust-balance, charge
+    # application) with no auth of its own -- the gateway's ownership/role checks
+    # are the only thing standing between a caller and those endpoints. Publishing
+    # this port let anyone on the host bypass the gateway entirely and hit it
+    # directly (review finding). Reachable from other containers on the compose
+    # network by service name; not reachable from the host.
     depends_on:
       postgres:
         condition: service_healthy

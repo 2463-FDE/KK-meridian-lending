@@ -387,7 +387,10 @@ function LoanDetailContent() {
               min="0"
               step="0.01"
               value={payAmount}
-              onChange={(e) => setPayAmount(e.target.value)}
+              onChange={(e) => {
+                setPayAmount(e.target.value);
+                setPayIdempotencyKey(crypto.randomUUID());
+              }}
             />
           </div>
           <button onClick={makePayment} disabled={actionBusy}>
