@@ -1,6 +1,8 @@
-"""Logging — writes the full charge request body (PAN, CVV, SSN) at INFO. No redaction.
+"""Logging setup for payment-service.
 
-Output goes to logs/payment-service.log, the same file handed over in the repo. (D5, #7)
+Output goes to logs/payment-service.log. D5 (full PAN/CVV/SSN logged at INFO
+with no redaction) is fixed at the call site -- see payments.py::charge(),
+which now redacts via redactor.py before this logger ever sees the payload.
 """
 import logging
 import os

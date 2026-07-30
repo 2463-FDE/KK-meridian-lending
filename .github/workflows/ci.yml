@@ -32,17 +32,24 @@ jobs:
       - name: Install deps
         run: |
           cd services/${{ matrix.service }}
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-dev.txt
       - name: Import smoke
         run: |
           cd services/${{ matrix.service }}
           python -c "import app.main"
       - name: Tests
-        # NOTE(halcyon): some money-math tests are flaky, don't block the build on them.
-        continue-on-error: true
+        # Blocking, all eight services: `|| true` on top of continue-on-error used to
+        # double-mask every failure, including "No module named pytest" -- pytest was
+        # never in requirements.txt or installed here at all, so this step silently
+        # reported success without running a single test for this entire engagement.
+        # The backend-known-flaky split (disclosure-service, then servicing-service)
+        # is gone now too -- both had a real float-money bug (D12/D6), both fixed with
+        # a real Decimal migration (see apr.py/offer.py/schedule.py and
+        # balance.py/delinquency.py/schedule.py), both tests genuinely pass now. No
+        # service in this repo has a known-failing test anymore.
         run: |
           cd services/${{ matrix.service }}
-          python -m pytest -q || true
+          python -m pytest -q --cov=app --cov-report=term-missing
 
   frontend:
     runs-on: ubuntu-latest
@@ -57,6 +64,54 @@ jobs:
           npm ci || npm install
           npm run build
 
-  # GAP: no dependency audit, no SAST. Secret scanning added (RF-22).
-  # GAP: backend tests are still continue-on-error for the known money-math test
-  # failures (RF-13) — drop that once RF-13 lands (see kal_docs/10_WEEK_PLAN.md Week 10).
+  # Dependency vulnerability scan -- no SAST/dependency audit existed at all before this.
+  # Non-blocking for now: this repo has never been scanned, so the first run's findings
+  # need triage (upgrade vs. accept-risk vs. false positive) before it's safe to gate the
+  # build on. Drop continue-on-error once that triage lands. Covers all eight backend
+  # services regardless of the money-math split above -- a vulnerable dependency is
+  # unrelated to RF-13's float-money test failures.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service, loan-assistant]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pip-audit (non-blocking -- first run, findings not yet triaged)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          cd services/${{ matrix.service }}
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt
+
+  dependency-audit-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm audit (non-blocking -- first run, findings not yet triaged)
+        continue-on-error: true
+        run: |
+          cd frontend
+          npm ci || npm install
+          npm audit --audit-level=high
+
+  # GAP: dependency-audit/dependency-audit-frontend above are still continue-on-error --
+  # this repo has never had a dependency scan before, so findings need a first triage
+  # pass (upgrade vs. accept-risk vs. false positive) before it's safe to gate on. No
+  # SAST tool yet either.
+  # FIXED: the backend-known-flaky split (disclosure-service, then servicing-service)
+  # is gone -- both services' float-money bugs (D12/D6) got a real Decimal migration
+  # (apr.py/offer.py/schedule.py; balance.py/delinquency.py/schedule.py), both known-
+  # failing tests genuinely pass now, and all eight services run in one blocking job.
+  # FIXED (review pass): pytest was never installed here (no requirements-dev.txt,
+  # no separate install step) and `|| true` on the test command masked that
+  # completely -- every "backend (X)" check has been reporting success without
+  # running a single real test, for every PR, this entire engagement. Each service
+  # now has requirements-dev.txt (pytest + pytest-cov); this step installs it and
+  # reports coverage; `|| true` is gone so a real test failure is now visible.

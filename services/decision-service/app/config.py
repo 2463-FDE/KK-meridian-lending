@@ -11,6 +11,13 @@ EXPERIAN_BASE_URL = os.getenv("EXPERIAN_BASE_URL", "https://api.experian.example
 
 CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "")
 
+# The newly licensed "more accurate" AI credit-scoring model (Week 3). Same
+# fail-closed contract as the bureau call below -- a missing/unreachable licensed
+# model must not silently fall back to fake data outside dev/test either.
+AI_MODEL_API_KEY = os.getenv("AI_MODEL_API_KEY", "")
+AI_MODEL_BASE_URL = os.getenv("AI_MODEL_BASE_URL", "https://api.creditai.example.com/v1")
+AI_MODEL_VERSION = os.getenv("AI_MODEL_VERSION", "creditai-2026.1")
+
 # Whether a missing/failed bureau call may fall back to a deterministic stub score.
 # Defaults closed (no stub): an UNSET ENVIRONMENT must not silently enable it. Since
 # `.env` is optional for docker compose (env_file required: false — a clean checkout
@@ -20,6 +27,10 @@ CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "")
 # docker-compose.yml), and a deploy that skips that setup fails closed.
 ENVIRONMENT = os.getenv("ENVIRONMENT", "").lower()
 ALLOW_CREDIT_STUB = ENVIRONMENT in ("development", "dev", "test", "local")
+# Same gate covers the AI scorer stub -- one environment flag decides whether ANY
+# external-model dependency (bureau or scorer) may fall back to a deterministic
+# stub, kept as its own name so tests can flip one without the other.
+ALLOW_MODEL_STUB = ALLOW_CREDIT_STUB
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -27,3 +38,9 @@ DATABASE_URL = os.getenv(
 )
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Required on every POST /decisions (see routers/decisions.py) -- defense in
+# depth for the network boundary (decision-service has no host port mapping;
+# see docker-compose.yml). Unset means no caller can ever match it, so a
+# deploy that forgets to configure this fails closed rather than open.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")

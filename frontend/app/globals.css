@@ -1,4 +1,9 @@
 :root {
+  /* This is a dark-themed site but never told the browser -- native controls
+     (date-picker popup, scrollbars, etc.) rendered in light mode by default,
+     and the WebKit calendar icon drew in its default dark color, effectively
+     invisible against this UI's dark inputs. */
+  color-scheme: dark;
   --bg: #0c1626;
   --bg-2: #0a1320;
   --panel: #16243a;
@@ -318,6 +323,20 @@ textarea:focus {
 input[type="range"] {
   padding: 0;
   accent-color: var(--accent);
+}
+input[type="date"] {
+  color-scheme: dark;
+}
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  /* The default icon renders near-black -- invert it so it's actually
+     visible against this input's dark background. */
+  filter: invert(0.8) brightness(1.4);
+}
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  background: var(--panel-2);
 }
 .field-error {
   color: var(--red-ink);

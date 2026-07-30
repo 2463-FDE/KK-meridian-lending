@@ -15,9 +15,9 @@ log = get_logger("clients")
 _TIMEOUT = 30.0
 
 
-def post(base_url: str, path: str, payload: dict) -> dict:
+def post(base_url: str, path: str, payload: dict, headers: dict | None = None) -> dict:
     """POST JSON to a downstream service, raise on non-2xx, return the decoded body."""
-    resp = httpx.post(f"{base_url}{path}", json=payload, timeout=_TIMEOUT)
+    resp = httpx.post(f"{base_url}{path}", json=payload, timeout=_TIMEOUT, headers=headers)
     resp.raise_for_status()
     return resp.json()
 

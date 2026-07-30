@@ -23,10 +23,22 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 # Function words carry no topical signal but appear in nearly every chunk and every
 # query -- without filtering them, two unrelated chunks can out-score the right one
 # just by both being grammatically ordinary sentences.
+#
+# Second line added live against the policy-chat feature: a naturally-phrased
+# question ("I want to know the NSF fee") failed classify_answerable()'s 0.6
+# coverage threshold that the exact same question's terse form ("NSF fee")
+# passed -- "want"/"know" never appear in the terse policy text, so they drag
+# coverage down even though the actual content term ("nsf") is present and
+# correctly retrieved. rag_eval.EVAL_QUERIES was written tersely and never
+# exercised this; a live chat gets natural Q&A framing routinely. These are
+# common request-framing verbs, not policy vocabulary -- same rationale as the
+# grammatical stopwords above, just for conversational rather than grammatical
+# filler.
 _STOPWORDS = frozenset(
     "a an the is are was were be been being to of in on at for with and or but "
     "this that these those it its as by from what when where which who how do "
-    "does did not no if then than so such we you i he she they them our your".split()
+    "does did not no if then than so such we you i he she they them our your "
+    "want know need tell please explain understand clarify give provide".split()
 )
 
 

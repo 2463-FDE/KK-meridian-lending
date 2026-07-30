@@ -3,37 +3,109 @@
 This logic was lifted verbatim out of the origination service into its own
 decision-service — the behaviour (and the debt) is unchanged by the split.
 
-The credit pull, the bureau call, and the model run are a SYNCHRONOUS chain executed
-inline on the request thread (load note: timeouts past ~20 concurrent apps).
+Week 3: the AI scorer call now has the same fail-closed contract as the bureau call
+(ModelUnavailableError), adverse-action reasons are mapped to whichever input actually
+drove the score down instead of a fixed nearest-checkbox string, and every decision
+persists an append-only `decision_events` row (inputs, model score/version, top
+features, reason codes) — the dispute-proof record Reg B requires and the legacy
+outcome-only `decisions` table never had.
 
-Adverse-action reasons are a generic nearest-checkbox string ("purchasing history") that
-does NOT reflect the model's actual top features. No decision record is persisted beyond
-the bare outcome in the `decisions` table — no inputs, no model drivers, no reason, no
-timestamp. There is no append-only audit trail. (D4, D9, D10)
+Async rework (adr/0006): the credit pull, the bureau call, and the model run used to
+be a synchronous chain executed inline on the request thread -- decision-service's
+own thread pool (FastAPI's default for sync `def` routes) exhausted above ~20
+concurrent applications, since each one held a worker thread for the full duration
+of two blocking, up-to-30s vendor HTTP calls. Both outbound calls now use
+httpx.AsyncClient and the whole chain (`_pull_credit` -> `_run_model` -> `decide`)
+is async, so a request waiting on Experian or the AI scorer frees the thread pool
+entirely -- the event loop's own async I/O handles many more concurrent in-flight
+vendor calls than a fixed-size thread pool ever could. The DB write in `decide()`
+stays a synchronous psycopg2 call (a fast local Postgres INSERT, not the external-
+vendor bottleneck this rework targets) -- a fully async DB layer (asyncpg) is a
+separate, larger change, not done here. Scope note: this fixes decision-service's
+OWN internal chain only; origination-service's own call INTO decision-service
+(services/origination-service/app/clients.py) is still synchronous -- that's a
+different service's own thread-pool budget, out of scope for this fix.
 """
-import time
+import asyncio
+
 import httpx
-from .config import EXPERIAN_KEY, EXPERIAN_BASE_URL, ALLOW_CREDIT_STUB, ENVIRONMENT
+from pydantic import BaseModel, Field, ValidationError
+
+from .config import (
+    AI_MODEL_API_KEY,
+    AI_MODEL_BASE_URL,
+    AI_MODEL_VERSION,
+    ALLOW_CREDIT_STUB,
+    ALLOW_MODEL_STUB,
+    ENVIRONMENT,
+    EXPERIAN_BASE_URL,
+    EXPERIAN_KEY,
+)
 from .logging_config import get_logger
 from . import db
 
 log = get_logger("decision")
 
-# Generic adverse-action reasons. The model emits one of these regardless of the real
-# driver — a "nearest checkbox," not the specific principal reason Reg B requires.
-GENERIC_REASONS = ["purchasing history", "insufficient credit profile"]
+# Specific, per-applicant adverse-action reasons — see _reason_codes() for which
+# input drives which reason. Replaces the old single hardcoded "purchasing history"
+# string that never reflected what the model actually weighed.
+REASON_LOW_BUREAU_SCORE = "Low credit bureau score relative to lending criteria"
+REASON_INSUFFICIENT_INCOME = "Insufficient income relative to lending criteria"
+
+# Baseline "healthy applicant" values used only to compare which input is further
+# below a reasonable bar — not approval thresholds themselves. See _reason_codes().
+_HEALTHY_BUREAU_SCORE = 720
+_HEALTHY_INCOME = 50_000
 
 
 class CreditBureauUnavailableError(RuntimeError):
     """Bureau not configured/reachable and stubbing isn't allowed in this environment."""
 
 
+class ModelUnavailableError(RuntimeError):
+    """Licensed AI scorer not configured/reachable and stubbing isn't allowed here."""
+
+
+class DecisionPersistenceError(RuntimeError):
+    """Could not durably record the decision + its audit event (decision_events).
+
+    Raised instead of swallowed: a decision that can't be proven to have happened
+    is exactly the gap the append-only audit trail exists to close, so returning
+    a decision to the caller anyway would defeat the point of recording one at all.
+    """
+
+
+class _ScorerResponse(BaseModel):
+    """Strict schema for a real vendor scorer response.
+
+    Review finding: the old check only confirmed score/reason_codes were present
+    (not None) -- never that they were the right *type*. A vendor drift like
+    reason_codes: "high_debt_to_income" (a string, not a list) is truthy, so it
+    sailed through: persisted to decision_events as-is, adverse_action_reason
+    became the string's first character ("h"), and the router's
+    DecisionOut(reason_codes=...) then failed response validation -- after the
+    decision_events row had already committed. Validating the full shape here,
+    before _run_model() touches the payload and before any DB write, means a
+    malformed vendor response fails closed with ModelUnavailableError instead of
+    committing a malformed audit event first.
+
+    score is bounded to a generous 0-1000 range (loose enough to cover a
+    licensed model's own scale, which needn't match a traditional 300-850 bureau
+    score) purely to catch garbage -- negative values, NaN/Infinity, or an
+    obviously wrong magnitude -- not to encode a real business threshold.
+    """
+
+    score: float = Field(ge=0, le=1000, allow_inf_nan=False)
+    reason_codes: list[str]
+
+
 def _stub_score(ssn: str) -> int:
     return 680 if ssn and ssn[-1] in "02468" else 612
 
 
-def _pull_credit(ssn: str) -> int:
-    """Synchronous bureau call. Blocks the request thread. No real timeout budget."""
+async def _pull_credit(ssn: str) -> int:
+    """Async bureau call (see module docstring's async-rework note). No real
+    timeout budget beyond the client's own 30s."""
     if not EXPERIAN_KEY:
         if not ALLOW_CREDIT_STUB:
             raise CreditBureauUnavailableError(
@@ -45,12 +117,12 @@ def _pull_credit(ssn: str) -> int:
 
     try:
         # structured like a real call; in dev there's no live bureau so we fall back.
-        resp = httpx.get(
-            f"{EXPERIAN_BASE_URL}/score",
-            params={"ssn": ssn},
-            headers={"Authorization": f"Bearer {EXPERIAN_KEY}"},
-            timeout=30,
-        )
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{EXPERIAN_BASE_URL}/score",
+                params={"ssn": ssn},
+                headers={"Authorization": f"Bearer {EXPERIAN_KEY}"},
+            )
         return resp.json().get("score", 680)
     except Exception:
         if not ALLOW_CREDIT_STUB:
@@ -59,43 +131,186 @@ def _pull_credit(ssn: str) -> int:
         return _stub_score(ssn)
 
 
-def _run_model(bureau_score: int, application: dict) -> dict:
-    """The rules-based risk scorecard. Returns a score + decision + a GENERIC reason.
+def _stub_model_score(bureau_score: int, income: float) -> int:
+    """Deterministic stand-in for the licensed scorer, dev/test only. Mirrors the
+    legacy rules scorecard's own math so existing fixtures/expectations still hold."""
+    return int(bureau_score * 0.9 + (income / 1000))
 
-    (This is the legacy statistical scorecard. The client keeps asking for a smarter
-    "AI" model — that work has not started; there is no ML/LLM in the baseline.)
-    """
-    time.sleep(0.05)  # stand-in for a slow scorecard pass on the request thread
-    model_score = int(bureau_score * 0.9 + (application.get("income", 0) / 1000))
+
+async def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
+    """Call the newly licensed AI credit-scoring model. Same fail-closed contract as
+    _pull_credit: a missing/unreachable licensed model must not silently score from
+    fake data outside dev/test.
+
+    Returns {"score", "model_version", "reason_codes"}. reason_codes must come from
+    the vendor itself when a real call succeeds, not from _reason_codes()'s legacy
+    bureau/income shortfall formula — the licensed model also sees requested_amount
+    and term_months and may weight them, so a locally-guessed reason could name a
+    driver that isn't actually why the real model scored this applicant the way it
+    did (review finding). A real response that omits reason_codes fails closed
+    (ModelUnavailableError) rather than falling back to that guess. The deterministic
+    dev/test stub is the one case _reason_codes() is authoritative for, since the
+    stub's score IS computed by that exact bureau/income formula (_stub_model_score)."""
+    income = application.get("income", 0)
+
+    if not AI_MODEL_API_KEY:
+        if not ALLOW_MODEL_STUB:
+            raise ModelUnavailableError(
+                f"AI_MODEL_API_KEY is not set (ENVIRONMENT={ENVIRONMENT!r}) — refusing "
+                "to score from a fake model outside development/test."
+            )
+        log.warning("AI_MODEL_API_KEY not set — using deterministic dev stub score")
+        return {
+            "score": _stub_model_score(bureau_score, income),
+            "model_version": f"{AI_MODEL_VERSION}-stub",
+            "reason_codes": _reason_codes(bureau_score, income),
+        }
+
+    try:
+        # structured like a real call; in dev/test there's no live vendor endpoint.
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{AI_MODEL_BASE_URL}/score",
+                json={
+                    "bureau_score": bureau_score,
+                    "income": income,
+                    "requested_amount": application.get("requested_amount"),
+                    "term_months": application.get("term_months"),
+                },
+                headers={"Authorization": f"Bearer {AI_MODEL_API_KEY}"},
+            )
+        resp.raise_for_status()
+        body = resp.json()
+        try:
+            validated = _ScorerResponse.model_validate(body)
+        except ValidationError as e:
+            # The vendor responded but the payload doesn't match the required
+            # shape — missing field, wrong type (e.g. reason_codes as a bare
+            # string instead of a list), or a score outside a sane range.
+            # Guessing a score, or guessing a reason from the legacy
+            # bureau/income formula, risks a fabricated score or a
+            # legally-required reason that wasn't the model's actual driver —
+            # fail closed instead, same as an unreachable model, and before
+            # anything reaches the database.
+            raise ModelUnavailableError(
+                f"AI scorer response failed validation: {e} — refusing to guess "
+                "a score or an adverse-action reason from a formula the "
+                "licensed model may not actually be using (it also weighs "
+                "requested_amount/term_months, unlike the legacy bureau/income-only "
+                "heuristic)."
+            ) from e
+        return {
+            "score": validated.score,
+            "model_version": AI_MODEL_VERSION,
+            "reason_codes": validated.reason_codes,
+        }
+    except ModelUnavailableError:
+        raise
+    except Exception:
+        if not ALLOW_MODEL_STUB:
+            raise
+        return {
+            "score": _stub_model_score(bureau_score, income),
+            "model_version": f"{AI_MODEL_VERSION}-stub",
+            "reason_codes": _reason_codes(bureau_score, income),
+        }
+
+
+def _reason_codes(bureau_score: int, income: float) -> list[str]:
+    """Which input actually pulled the score down — Reg B's "specific principal
+    reason," not a fixed nearest-checkbox string. Compares each factor's shortfall
+    from a healthy baseline (not an approval threshold); whichever shortfall is
+    larger is the principal driver of the low score."""
+    bureau_shortfall = max(0.0, (_HEALTHY_BUREAU_SCORE - bureau_score) * 0.9)
+    income_shortfall = max(0.0, (_HEALTHY_INCOME - income) / 1000)
+    if bureau_shortfall == 0 and income_shortfall == 0:
+        return []
+    if bureau_shortfall >= income_shortfall:
+        return [REASON_LOW_BUREAU_SCORE]
+    return [REASON_INSUFFICIENT_INCOME]
+
+
+async def _run_model(bureau_score: int, application: dict) -> dict:
+    """Score via the licensed AI scorer (or its dev/test stub), decide, and report
+    the adverse-action reasons the scorer itself said actually drove the score down
+    (see _call_ai_scorer — never re-derived locally for a real vendor response)."""
+    await asyncio.sleep(0.05)  # stand-in for a slow scorecard pass -- asyncio.sleep,
+                               # not time.sleep, so this doesn't block the event loop
+    income = application.get("income", 0)
+    scored = await _call_ai_scorer(bureau_score, application)
+    model_score = scored["score"]
+    model_version = scored["model_version"]
+    is_stub = model_version.endswith("-stub")
+
+    # The bureau/income "contribution" formula is the *stub's own scoring math*
+    # (_stub_model_score) -- authoritative for the stub, but never returned by
+    # the real vendor (_ScorerResponse only has score/reason_codes, no feature
+    # attributions). Persisting it for a real response would claim bureau/income
+    # drove a decision the licensed model may have made on requested_amount/
+    # term_months instead -- fabricated audit data, same failure mode as the
+    # reason_codes gap below. Record null rather than guess.
+    top_features = (
+        {
+            "bureau_score": bureau_score,
+            "income": income,
+            "bureau_contribution": round(bureau_score * 0.9, 2),
+            "income_contribution": round(income / 1000, 2),
+        }
+        if is_stub
+        else None
+    )
+
     if model_score >= 660:
-        return {"score": model_score, "decision": "approve", "adverse_action_reason": None}
-    decision = "deny" if model_score < 600 else "refer"
-    # generic reason — not mapped to the model's actual top features
+        return {
+            "score": model_score,
+            "decision": "approve",
+            "reason_codes": [],
+            "model_version": model_version,
+            "top_features": top_features,
+        }
+
+    decision_outcome = "deny" if model_score < 600 else "refer"
+    reason_codes = scored["reason_codes"]
+    if not reason_codes:
+        if is_stub:
+            # The dev/test stub score IS computed by the bureau/income formula
+            # (_stub_model_score), so _reason_codes() is authoritative here.
+            reason_codes = _reason_codes(bureau_score, income)
+        else:
+            # Real vendor call succeeded with a sub-660 score but no reason_codes.
+            # Filling in a locally-guessed reason (e.g. REASON_INSUFFICIENT_INCOME)
+            # would persist an adverse-action reason the licensed model never
+            # actually gave -- an audit/compliance failure. Fail closed instead.
+            raise ModelUnavailableError(
+                f"AI scorer returned score={model_score} (<660) with empty "
+                "reason_codes -- refusing to fabricate an adverse-action reason "
+                "the licensed model never gave."
+            )
     return {
         "score": model_score,
-        "decision": decision,
-        "adverse_action_reason": GENERIC_REASONS[0],
+        "decision": decision_outcome,
+        "reason_codes": reason_codes,
+        "model_version": model_version,
+        "top_features": top_features,
     }
 
 
-def decide(application: dict) -> dict:
-    """Full synchronous decisioning chain. Persists OUTCOME ONLY."""
-    bureau_score = _pull_credit(application.get("ssn", ""))
-    result = _run_model(bureau_score, application)
+async def decide(application: dict) -> dict:
+    """Full decisioning chain (async -- see module docstring). Persists the legacy
+    outcome-only `decisions` row and the append-only `decision_events` row (inputs,
+    model score/version, top features, reason codes) as ONE transaction — both land
+    or neither does, so a decision is never returned to the caller without the audit
+    row that proves it happened (review finding: the two used to be written
+    separately with each failure only logged, letting a decision commit with no
+    matching audit event when the second insert failed silently).
 
-    app_id = application.get("app_id")
-    # The only thing recorded: the outcome. No reason, no inputs, no model drivers, no time.
-    try:
-        db.query(
-            "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
-            "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
-            (app_id, result["decision"]),
-        )
-    except Exception as e:  # noqa
-        log.warning("could not persist decision: %s", e)
+    Week 3: the pull-credit / score / persist steps are now an explicit LangGraph
+    graph (app/graph.py) instead of inline code here -- same three calls, same
+    fail-closed exceptions, now individually traceable. Deferred import: graph.py
+    imports this module at its own load time, so importing it up top would be
+    circular; by the time decide() is actually called, this module has finished
+    loading and the import below is just a sys.modules lookup.
+    """
+    from .graph import run as _run_graph
 
-    log.info(
-        "GET /decision app_id=%s model_score=%s decision=%s adverse_action_reason=%s",
-        app_id, result["score"], result["decision"], result["adverse_action_reason"],
-    )
-    return result
+    return await _run_graph(application)

@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost, getUser } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
@@ -45,6 +46,20 @@ function errMsg(err: unknown, fallback: string): string {
 }
 
 export default function LoanDetailPage() {
+  // Shared page: staff reach it from /servicing's portfolio list, borrowers
+  // reach it from /my-loan's "View account & make a payment" link -- so
+  // "borrower" must be allowed here too. Ownership is enforced server-side
+  // (gateway/app/main.py's owner-or-staff checks on /lss/loans/{id} and
+  // POST /payments); the "Servicing rep actions" panel below stays hidden
+  // from non-staff via canRepActions regardless.
+  return (
+    <RequireRole allow={["borrower", "csr", "underwriter", "admin"]}>
+      <LoanDetailContent />
+    </RequireRole>
+  );
+}
+
+function LoanDetailContent() {
   const params = useParams<{ loanId: string }>();
   const loanId = params?.loanId;
 
@@ -57,16 +72,23 @@ export default function LoanDetailPage() {
 
   // action panels
   const [payAmount, setPayAmount] = useState("250.00");
+  // Review fix: same key reused across retries of the SAME attempted payment
+  // (e.g. resubmitting after a timeout) so payment-service's idempotency
+  // check can recognize it as a replay instead of a second charge. A new key
+  // is only minted when the user actually changes the amount -- see
+  // setPayAmount below.
+  const payIdempotencyKey = useRef(crypto.randomUUID());
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [newBalance, setNewBalance] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
 
-  // UI-only affordance: only CSR/admin SEE the money-moving rep actions
-  // (adjust balance / waive fee). The gateway/API still accept ANY
-  // authenticated caller — server-side authz is intentionally absent
-  // (debt D8, fixed in W6). Hiding the buttons changes nothing server-side.
+  // Only CSR/admin SEE the money-moving rep actions (adjust balance / waive
+  // fee). This is now backed by a real server-side gate too (gateway/app/
+  // main.py's /lss/accounts/{id}/adjust-balance|waive-fee are staff-only,
+  // regardless of loan ownership) -- hiding the buttons here is a UX
+  // nicety on top of that, not the only thing stopping a non-staff caller.
   const [canRepActions, setCanRepActions] = useState(false);
   useEffect(() => {
     const role = getUser()?.role;
@@ -132,15 +154,16 @@ export default function LoanDetailPage() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // NOTE: no idempotency key — a retry double-charges.
       await apiPost("/payments", {
         loan_id: loanId,
         pan: "4111111111111111", // hardcoded test card PAN (texture)
         cvv: "123", // hardcoded test CVV (texture)
         amount: parseFloat(payAmount || "0"),
         method: "card",
+        idempotency_key: payIdempotencyKey.current,
       });
       setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+      payIdempotencyKey.current = crypto.randomUUID();
       await refreshBalanceAndHistory();
     } catch (err) {
       setActionErr(errMsg(err, "Payment failed."));
@@ -154,7 +177,7 @@ export default function LoanDetailPage() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // weak authz: any authenticated user can do this
+      // Gateway now enforces staff-only here regardless of who calls it.
       await apiPost(`/lss/accounts/${loanId}/adjust-balance`, {
         new_balance: parseFloat(newBalance || "0"),
       });
@@ -172,7 +195,7 @@ export default function LoanDetailPage() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // weak authz: any authenticated user can do this
+      // Gateway now enforces staff-only here regardless of who calls it.
       await apiPost(`/lss/accounts/${loanId}/waive-fee`, {
         amount: parseFloat(waiveAmount || "0"),
       });
@@ -362,7 +385,10 @@ export default function LoanDetailPage() {
               min="0"
               step="0.01"
               value={payAmount}
-              onChange={(e) => setPayAmount(e.target.value)}
+              onChange={(e) => {
+                setPayAmount(e.target.value);
+                payIdempotencyKey.current = crypto.randomUUID();
+              }}
             />
           </div>
           <button onClick={makePayment} disabled={actionBusy}>
@@ -374,10 +400,8 @@ export default function LoanDetailPage() {
         </p>
       </div>
 
-      {/* Rep actions — UI-only affordance, shown only to CSR/admin. */}
-      {/* UI-only affordance. The gateway/API still accept ANY authenticated */}
-      {/* caller — server-side authz is intentionally absent (debt D8, fixed */}
-      {/* in W6). The endpoints below remain callable by every role. */}
+      {/* Rep actions — shown only to CSR/admin, and the gateway backs that up: */}
+      {/* /lss/accounts/{id}/adjust-balance|waive-fee are staff-only server-side. */}
       {canRepActions ? (
         <>
           <h2>Servicing rep actions</h2>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import RequireRole from "../../components/RequireRole";
 import StatusChip from "../../components/StatusChip";
 import { apiGet } from "../../lib/api";
 import { usd, pct, shortDate } from "../../lib/format";
@@ -34,6 +35,14 @@ const STATUS_OPTIONS = [
 ];
 
 export default function ServicingPage() {
+  return (
+    <RequireRole allow={["csr", "underwriter", "admin"]}>
+      <ServicingContent />
+    </RequireRole>
+  );
+}
+
+function ServicingContent() {
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);

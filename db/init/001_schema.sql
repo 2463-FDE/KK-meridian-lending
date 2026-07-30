@@ -1,5 +1,9 @@
 -- Meridian Lending — schema (Halcyon v1, extended in-place over the years)
--- NOTE: money is stored as double precision throughout. Keeps the app code simple.
+-- D12 fix: money columns are NUMERIC now, not DOUBLE PRECISION -- see
+-- db/migrations/0005_money_columns_to_numeric.sql for the ALTER TABLE path on an
+-- existing deployment (this file only runs automatically on a fresh volume).
+-- Dollar-amount columns: NUMERIC(14,2). Percentage/rate columns (apr): NUMERIC(7,3),
+-- matching the app's own round(apr, 3) convention.
 
 -- Staff + borrower logins. Passwords are sha256 hex (no salt, no bcrypt — Halcyon's
 -- "we'll harden it later"). Roles: admin | underwriter | csr | borrower.
@@ -30,14 +34,19 @@ CREATE TABLE IF NOT EXISTS applicants (
 CREATE TABLE IF NOT EXISTS applications (
     id                SERIAL PRIMARY KEY,
     applicant_id      INTEGER REFERENCES applicants(id),
-    amount            DOUBLE PRECISION NOT NULL,   -- money as float
+    amount            NUMERIC(14,2) NOT NULL,      -- D12: was DOUBLE PRECISION
     term_months       INTEGER NOT NULL,
     purpose           TEXT,
-    income            DOUBLE PRECISION,            -- money as float
+    income            NUMERIC(14,2),                -- D12: was DOUBLE PRECISION
     employer          TEXT,
     job_title         TEXT,
-    employment_years  DOUBLE PRECISION,
+    employment_years  DOUBLE PRECISION,            -- a duration, not money -- left as-is
     status            TEXT DEFAULT 'submitted',
+    -- Review fix: minted once at submission (intake.create_application) and
+    -- returned to the caller -- proves ownership for the FIRST decision call
+    -- (see routers/applications.py run_decision), since app_id alone is a
+    -- guessable integer and the borrower has no account yet at this point.
+    access_token      TEXT,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
@@ -64,11 +73,11 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE TABLE IF NOT EXISTS offers (
     id          SERIAL PRIMARY KEY,
     app_id      INTEGER REFERENCES applications(id),
-    apr         DOUBLE PRECISION,    -- float APR (rounding risk)
-    finance_charge DOUBLE PRECISION, -- float
-    monthly_payment DOUBLE PRECISION,
-    amount_financed DOUBLE PRECISION,
-    total_of_payments DOUBLE PRECISION,
+    apr         NUMERIC(7,3),           -- D12: was DOUBLE PRECISION
+    finance_charge NUMERIC(14,2),       -- D12: was DOUBLE PRECISION
+    monthly_payment NUMERIC(14,2),      -- D12: was DOUBLE PRECISION
+    amount_financed NUMERIC(14,2),      -- D12: was DOUBLE PRECISION
+    total_of_payments NUMERIC(14,2),    -- D12: was DOUBLE PRECISION
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
@@ -77,8 +86,8 @@ CREATE TABLE IF NOT EXISTS loans (
     id              SERIAL PRIMARY KEY,
     app_id          INTEGER,
     applicant_name  TEXT,
-    principal       DOUBLE PRECISION NOT NULL,   -- money as float
-    apr             DOUBLE PRECISION NOT NULL,
+    principal       NUMERIC(14,2) NOT NULL,   -- D12: was DOUBLE PRECISION
+    apr             NUMERIC(7,3) NOT NULL,     -- D12: was DOUBLE PRECISION
     term_months     INTEGER NOT NULL,
     status          TEXT DEFAULT 'current',
     opened_at       TIMESTAMPTZ DEFAULT now()
@@ -87,22 +96,28 @@ CREATE TABLE IF NOT EXISTS loans (
 -- Mutable balance: one column, overwritten in place. No ledger, no transaction history.
 CREATE TABLE IF NOT EXISTS balances (
     loan_id     INTEGER PRIMARY KEY REFERENCES loans(id),
-    balance     DOUBLE PRECISION NOT NULL,   -- money as float, UPDATE-d in place
-    past_due    DOUBLE PRECISION DEFAULT 0,
+    balance     NUMERIC(14,2) NOT NULL,    -- D12: was DOUBLE PRECISION, UPDATE-d in place
+    past_due    NUMERIC(14,2) DEFAULT 0,   -- D12: was DOUBLE PRECISION
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV. No idempotency key. No unique charge reference.
+-- Payments: stores full PAN + CVV (still open, PCI debt -- unrelated to the fix below).
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
     pan         TEXT,                 -- full PAN stored
     cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
-    amount      DOUBLE PRECISION NOT NULL,  -- money as float
+    amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION
     method      TEXT DEFAULT 'card',
+    -- Review fix: a timeout retry or a double-click on submit used to insert
+    -- a second row and apply the balance twice -- there was no idempotency
+    -- key at all. Caller-supplied; NULL only for rows that predate this
+    -- column, which the partial unique index below deliberately excludes.
+    idempotency_key TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
-    -- no idempotency_key, no unique(charge_ref)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_key
+    ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -114,8 +129,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- A few indexes added over time for the servicing dashboard. (No idempotency index on
--- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
+-- A few indexes added over time for the servicing dashboard. (No reason/driver
+-- columns on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);

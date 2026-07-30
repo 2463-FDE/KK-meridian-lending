@@ -25,6 +25,19 @@ const PURPOSES = [
 ];
 
 const OFFER_RATE_PCT = 7.99;
+const MIN_AGE_YEARS = 18; // lending policy floor -- see policy-chat's eligibility excerpt
+
+function isoDateYearsAgo(years: number): string {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - years);
+  return d.toISOString().slice(0, 10);
+}
+
+// Bounds the native date picker itself so a future date or a date implying
+// under-18/over-120 was never selectable in the first place, not just
+// rejected after the fact.
+const MAX_DOB = isoDateYearsAgo(MIN_AGE_YEARS);
+const MIN_DOB = isoDateYearsAgo(120);
 
 interface FormState {
   name: string;
@@ -86,6 +99,12 @@ function errMsg(err: unknown, fallback: string): string {
   return fallback;
 }
 
+function maskSsn(ssn: string): string {
+  const digits = ssn.replace(/\D/g, "");
+  if (digits.length < 4) return "•••-••-••••";
+  return `•••-••-${digits.slice(-4)}`;
+}
+
 export default function ApplyPage() {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<FormState>({
@@ -104,6 +123,7 @@ export default function ApplyPage() {
     purpose: "debt_consolidation",
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [showSsn, setShowSsn] = useState(false);
 
   // submission / decision / offer state
   const [busy, setBusy] = useState(false);
@@ -125,6 +145,9 @@ export default function ApplyPage() {
     if (s === 1) {
       if (!form.name.trim()) e.name = "Required";
       if (!form.dob) e.dob = "Required";
+      else if (Number.isNaN(new Date(form.dob).getTime())) e.dob = "Enter a valid date";
+      else if (form.dob > MAX_DOB) e.dob = `Must be at least ${MIN_AGE_YEARS} years old`;
+      else if (form.dob < MIN_DOB) e.dob = "Enter a valid date of birth";
       if (!form.ssn.trim()) e.ssn = "Required";
       if (!form.email.trim()) e.email = "Required";
       else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(form.email))
@@ -266,14 +289,29 @@ export default function ApplyPage() {
                   type="date"
                   value={form.dob}
                   onChange={(e) => set("dob", e.target.value)}
+                  min={MIN_DOB}
+                  max={MAX_DOB}
                 />
               </Field>
               <Field label="Social Security Number" error={errors.ssn}>
-                <input
-                  value={form.ssn}
-                  onChange={(e) => set("ssn", e.target.value)}
-                  placeholder="###-##-####"
-                />
+                <div className="row" style={{ gap: 8 }}>
+                  <input
+                    type={showSsn ? "text" : "password"}
+                    autoComplete="off"
+                    value={form.ssn}
+                    onChange={(e) => set("ssn", e.target.value)}
+                    placeholder="###-##-####"
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm"
+                    onClick={() => setShowSsn((v) => !v)}
+                    aria-label={showSsn ? "Hide SSN" : "Show SSN"}
+                  >
+                    {showSsn ? "Hide" : "Show"}
+                  </button>
+                </div>
               </Field>
             </div>
             <div className="field-row">
@@ -414,7 +452,7 @@ export default function ApplyPage() {
             <SummaryGroup title="Personal">
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
-              <SummaryRow label="SSN" value={form.ssn} />
+              <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
               <SummaryRow label="Email" value={form.email} />
               <SummaryRow label="Phone" value={form.phone} />
               <SummaryRow label="Address" value={form.address} />

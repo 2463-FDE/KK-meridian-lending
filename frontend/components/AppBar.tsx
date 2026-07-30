@@ -35,7 +35,12 @@ export default function AppBar() {
   // UI-only affordance: nav is built from the session role purely to shape what
   // each role SEES. It does NOT restrict access — every route is reachable by
   // URL and the gateway/API still accept ANY authenticated caller (debt D8,
-  // fixed in W6).
+  // fixed in W6). EXCEPTION: "Policy Chat" below actually is backed by a real
+  // server-side gate — the gateway's /assistant/* proxy only forwards to
+  // loan-assistant for csr/underwriter/admin sessions (gateway/app/main.py
+  // assistant()) — so unlike every other link here, hiding/showing this one
+  // matches what the backend actually enforces, not just what's convenient to
+  // click.
   const navItems = ((): { href: string; label: string }[] => {
     switch (user?.role) {
       case "borrower":
@@ -48,12 +53,14 @@ export default function AppBar() {
         return [
           { href: "/", label: "Home" },
           { href: "/servicing", label: "Servicing" },
+          { href: "/policy-chat", label: "Policy Chat" },
         ];
       case "underwriter":
         return [
           { href: "/", label: "Home" },
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
+          { href: "/policy-chat", label: "Policy Chat" },
         ];
       case "admin":
         return [
@@ -61,6 +68,7 @@ export default function AppBar() {
           { href: "/admin", label: "Overview" },
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
+          { href: "/policy-chat", label: "Policy Chat" },
         ];
       default:
         // anonymous / unknown role

@@ -1,9 +1,14 @@
 """SQLAlchemy ORM model for the offers table.
 
-Money columns are mapped to Float — they are DOUBLE PRECISION in Postgres (the float-money
-debt). The disclosure-service reads/writes the same `offers` table the LOS does.
+D12 fix: money columns map to Numeric now (NUMERIC in Postgres, not DOUBLE
+PRECISION) -- exact base-10 decimal storage, not a binary float.
+`asdecimal=False` keeps the Python-side value a plain float (matching
+apr.py's own Decimal-internally/float-at-the-boundary pattern), so this is a
+storage-layer fix, not a ripple of Decimal typing through every caller that
+reads these columns. The disclosure-service reads/writes the same `offers`
+table the LOS does.
 """
-from sqlalchemy import DateTime, Float, ForeignKey, Integer
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -16,9 +21,9 @@ class Offer(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     app_id: Mapped[int | None] = mapped_column(ForeignKey("applications.id"), nullable=True)
-    apr: Mapped[float | None] = mapped_column(Float, nullable=True)             # float APR (debt)
-    finance_charge: Mapped[float | None] = mapped_column(Float, nullable=True)
-    monthly_payment: Mapped[float | None] = mapped_column(Float, nullable=True)
-    amount_financed: Mapped[float | None] = mapped_column(Float, nullable=True)
-    total_of_payments: Mapped[float | None] = mapped_column(Float, nullable=True)
+    apr: Mapped[float | None] = mapped_column(Numeric(7, 3, asdecimal=False), nullable=True)
+    finance_charge: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    monthly_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    amount_financed: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    total_of_payments: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
