@@ -18,7 +18,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from . import clients, kg
+from . import clients, config, kg
 from .logging_config import get_logger
 
 log = get_logger("disclosure_graph")
@@ -52,7 +52,7 @@ def _node_assemble_disclosure(state: DisclosureState) -> dict:
         "principal": float(inputs["amount"]),
         "term_months": inputs["term_months"],
         "annual_rate": 7.99,  # no per-applicant rate exists elsewhere -- same default make_offer() uses
-    })
+    }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     return {"offer": offer}
 
 

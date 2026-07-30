@@ -8,7 +8,7 @@ returns the ORIGINAL payment result without a second insert -- even the
 ON CONFLICT DO NOTHING's atomicity (a duplicate is detected even if it races
 the original).
 
-Review finding (D2 follow-up): a charge could still silently never reach the
+Review finding (follow-up): a charge could still silently never reach the
 loan balance -- a servicing-side failure was swallowed and charge() reported
 "captured" regardless, with no record anything was left undone. These tests
 also cover that fix: `applied_at` tracks confirmed-applied separately from
@@ -22,10 +22,14 @@ import httpx as httpx_module
 import pytest
 from fastapi.testclient import TestClient
 
-from app import payments
+from app import config, payments
 from app.main import app
 
 client = TestClient(app)
+# Defaulted for every request in this file so the pre-existing tests below
+# don't each need updating -- the X-Internal-Token rejection tests further
+# down override/clear it per-call instead.
+client.headers.update({"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
 
 
 class _FakeDb:
@@ -183,6 +187,37 @@ def test_post_payment_reports_pending_when_servicing_unreachable(fake_db, monkey
     assert update_calls == []
 
 
+def test_post_payment_rejects_missing_internal_token(fake_db):
+    """Defense in depth for POST /payments -- see docker-compose.yml (no host
+    port for this service) and app/config.py."""
+    resp = client.post(
+        "/payments", json=_payload(), headers={"X-Internal-Token": ""},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_post_payment_rejects_wrong_internal_token(fake_db):
+    resp = client.post(
+        "/payments", json=_payload(),
+        headers={"X-Internal-Token": "attacker-guessed-token"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_post_payment_rejects_everything_when_config_token_unset(fake_db, monkeypatch):
+    """A deploy that forgets to set INTERNAL_SERVICE_TOKEN must fail closed --
+    no caller (not even one that sends the empty string) should ever match."""
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+
+    resp = client.post(
+        "/payments", json=_payload(), headers={"X-Internal-Token": ""},
+    )
+
+    assert resp.status_code == 401
+
+
 def test_repeated_post_payment_with_same_idempotency_key_is_not_double_charged(fake_db, monkeypatch):
     """The review's exact scenario: a timeout retry or a double-click resends
     the identical request, same idempotency_key. Must return the ORIGINAL
@@ -213,8 +248,8 @@ def test_repeated_post_payment_with_same_idempotency_key_is_not_double_charged(f
 
 
 def test_repeated_post_payment_reconciles_a_pending_apply(fake_db, monkeypatch):
-    """Review fix (D2 follow-up): insert succeeds, servicing fails -> pending.
-    A same-key retry must retry the apply, not just repeat "captured" -- and
+    """Review fix (follow-up): insert succeeds, servicing fails -> pending. A
+    same-key retry must retry the apply, not just repeat "captured" -- and
     if servicing succeeds this time, the payment reconciles to "captured"."""
     servicing_calls = []
 
@@ -266,6 +301,34 @@ def test_different_idempotency_keys_charge_separately(fake_db):
     assert first.json()["payment_id"] != second.json()["payment_id"]
     assert first.json()["applied_amount"] == 100.0
     assert second.json()["applied_amount"] == 200.0
+
+
+def test_reusing_a_key_with_a_different_loan_id_is_a_409_not_a_misapply(fake_db, monkeypatch):
+    # Review fix: a retry reusing an idempotency_key but claiming a DIFFERENT
+    # loan_id must never be honored against either the request's loan_id (the
+    # original bug) or silently against the stored one -- surfaced as a 409
+    # so the caller knows this key collision is not a safe retry, and never
+    # reaches servicing-service for the mismatched request at all.
+    servicing_calls = []
+    monkeypatch.setattr(
+        payments.httpx, "post",
+        lambda *a, **k: servicing_calls.append((a, k)) or _FakeServicingResponse(),
+    )
+
+    first = client.post("/payments", json=_payload(idempotency_key="reused-key", loan_id=42))
+    second = client.post("/payments", json=_payload(idempotency_key="reused-key", loan_id=999))
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert len(servicing_calls) == 1  # the mismatched retry never re-applied anything
+
+
+def test_reusing_a_key_with_a_different_amount_is_a_409(fake_db):
+    first = client.post("/payments", json=_payload(idempotency_key="reused-key-2", amount=100.0))
+    second = client.post("/payments", json=_payload(idempotency_key="reused-key-2", amount=999.0))
+
+    assert first.status_code == 200
+    assert second.status_code == 409
 
 
 @pytest.mark.parametrize("amount", [0, -500.0])

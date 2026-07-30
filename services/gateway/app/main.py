@@ -26,6 +26,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 from . import auth, db
@@ -39,6 +40,7 @@ from .config import (
     PAYMENT_URL,
     SERVICING_URL,
 )
+from .rate_limit import RateLimitMiddleware
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("gateway")
@@ -51,6 +53,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Middleware runs in reverse-add order (last added runs first) -- rate limiting
+# added after CORS so it's the first check a request actually hits.
+app.add_middleware(RateLimitMiddleware)
+
+# W7: exposes GET /metrics in Prometheus text format -- request count, latency
+# histograms, in-progress requests, broken down by route/method/status. No
+# service in this repo had any cross-service metrics before this; LangSmith
+# only ever covered the LLM calls, not the other seven services.
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health")
@@ -129,8 +140,21 @@ def _require_user(authorization: str | None) -> dict:
 async def los(path: str, request: Request, authorization: str | None = Header(None)):
     # Origination is borrower-facing; an applicant can apply without an account.
     # If a session is present we forward it, otherwise we proxy anonymously.
+    #
+    # Review fix: origination-service's own staff-only routes (financials,
+    # rerun-decision, history, accept/re-accept) trust X-User-Role alone --
+    # docker-compose.yml no longer publishes its host port, but that's network
+    # topology, not an application-level check. X-Internal-Token (the same
+    # shared secret already forwarded to decision-service/disclosure-service/
+    # payment-service above) proves this request actually came through the
+    # gateway; a caller who reaches origination-service directly (e.g. if the
+    # port is ever mistakenly reopened) can still fake X-User-Role but doesn't
+    # know this secret, so it fails origination-service's own staff check too.
     user = auth.get_session(auth.bearer_token(authorization))
-    return await _proxy(ORIGINATION_URL, f"/{path}", request, user)
+    return await _proxy(
+        ORIGINATION_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 def _borrower_loans(applicant_id: int) -> dict:
@@ -271,7 +295,10 @@ async def disclosure(path: str, request: Request, authorization: str | None = He
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="staff only")
-    return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
+    return await _proxy(
+        DISCLOSURE_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 # Review fix: payment-service is the authoritative amount check (schemas.PaymentIn
@@ -297,6 +324,7 @@ async def payments(path: str, request: Request, authorization: str | None = Head
     user = _require_user(authorization)
 
     if path == "" and request.method == "POST":
+        payment_headers = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
         # request.body() is cached by Starlette after the first read, so _proxy's
         # own await request.body() below still gets the same bytes.
         try:
@@ -312,19 +340,33 @@ async def payments(path: str, request: Request, authorization: str | None = Head
             raise HTTPException(status_code=400, detail="amount must be a positive number")
 
         if auth.is_staff(user):
-            return await _proxy(PAYMENT_URL, "/payments", request, user)
+            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         # Borrower: only allowed to charge a loan their own applicant_id owns.
         loan_id = payload.get("loan_id")
         if loan_id is not None and auth.owns_loan(user, loan_id):
-            return await _proxy(PAYMENT_URL, "/payments", request, user)
+            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         raise HTTPException(status_code=403, detail="forbidden")
 
     raise HTTPException(status_code=404, detail="not found")
 
 
+@app.post("/assistant/policy-chat")
+async def assistant_policy_chat(request: Request, authorization: str | None = Header(None)):
+    # Registered before the /assistant/{path:path} catch-all below so this literal
+    # path wins the match. Policy Q&A is generic lending-policy content -- no
+    # per-applicant financials or risk_tier -- so it doesn't need the staff-only
+    # gate that protects /assistant/applications/*/summary; a borrower can ask
+    # without an account, same anonymous-allowed pattern as /los/*.
+    # loan-assistant's own cost guard (MAX_INPUT_TOKENS) and this gateway's
+    # per-IP rate limiter both already apply regardless of caller identity.
+    user = auth.get_session(auth.bearer_token(authorization))
+    return await _proxy(LOAN_ASSISTANT_URL, "/policy-chat", request, user)
+
+
 @app.api_route("/assistant/{path:path}", methods=["GET", "POST"])
 async def assistant(path: str, request: Request, authorization: str | None = Header(None)):
-    # AI summary returns risk tier + internal flags — staff only, not the borrower.
+    # AI summary returns risk tier + internal flags — staff only, not the
+    # borrower. (Policy Q&A is split out above -- no per-applicant financials there.)
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="Forbidden")

@@ -46,6 +46,7 @@ interface FormState {
   email: string;
   phone: string;
   address: string;
+  zip_code: string;
   employer: string;
   job_title: string;
   annual_income: string;
@@ -73,6 +74,10 @@ interface DecisionResult {
   decision: string;
   score?: number;
   adverse_action_reason?: string;
+  // Review fix: one-time proof of ownership, minted only when approved -- the
+  // no-account borrower flow has no session, so this stands in for one when
+  // accepting (see acceptOffer below and origination-service's accept_offer).
+  accept_token?: string;
 }
 
 interface Disclosure {
@@ -114,6 +119,7 @@ export default function ApplyPage() {
     email: "",
     phone: "",
     address: "",
+    zip_code: "",
     employer: "",
     job_title: "",
     annual_income: "",
@@ -149,11 +155,18 @@ export default function ApplyPage() {
       else if (form.dob > MAX_DOB) e.dob = `Must be at least ${MIN_AGE_YEARS} years old`;
       else if (form.dob < MIN_DOB) e.dob = "Enter a valid date of birth";
       if (!form.ssn.trim()) e.ssn = "Required";
+      else if (form.ssn.replace(/\D/g, "").length !== 9)
+        e.ssn = "Enter a 9-digit SSN";
       if (!form.email.trim()) e.email = "Required";
       else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(form.email))
         e.email = "Enter a valid email";
       if (!form.phone.trim()) e.phone = "Required";
+      else if (form.phone.replace(/\D/g, "").length !== 10)
+        e.phone = "Enter a 10-digit phone number";
       if (!form.address.trim()) e.address = "Required";
+      if (!form.zip_code.trim()) e.zip_code = "Required";
+      else if (form.zip_code.replace(/\D/g, "").length !== 5 && form.zip_code.replace(/\D/g, "").length !== 9)
+        e.zip_code = "Enter a 5-digit ZIP code";
     } else if (s === 2) {
       if (!form.employer.trim()) e.employer = "Required";
       if (!form.job_title.trim()) e.job_title = "Required";
@@ -188,11 +201,12 @@ export default function ApplyPage() {
         dob: form.dob,
         ssn: form.ssn,
         address: form.address,
+        zip_code: form.zip_code,
         email: form.email,
         phone: form.phone,
         employer: form.employer,
         job_title: form.job_title,
-        annual_income: parseFloat(form.annual_income || "0"),
+        income: parseFloat(form.annual_income || "0"),
         employment_years: parseInt(form.employment_years || "0", 10),
         amount: form.amount,
         term_months: parseInt(form.term_months, 10),
@@ -247,9 +261,9 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost(
-        `/los/applications/${app.app_id}/accept`
-      )) as { loan_id: string | number };
+      const res = (await apiPost(`/los/applications/${app.app_id}/accept`, {
+        accept_token: decision?.accept_token,
+      })) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));
@@ -336,6 +350,14 @@ export default function ApplyPage() {
                 value={form.address}
                 onChange={(e) => set("address", e.target.value)}
                 placeholder="123 Main St, Springfield, IL 62704"
+              />
+            </Field>
+            <Field label="ZIP code" error={errors.zip_code}>
+              <input
+                value={form.zip_code}
+                onChange={(e) => set("zip_code", e.target.value)}
+                placeholder="62704"
+                maxLength={10}
               />
             </Field>
           </>
@@ -456,6 +478,7 @@ export default function ApplyPage() {
               <SummaryRow label="Email" value={form.email} />
               <SummaryRow label="Phone" value={form.phone} />
               <SummaryRow label="Address" value={form.address} />
+              <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
             <SummaryGroup title="Employment & income">
               <SummaryRow label="Employer" value={form.employer} />

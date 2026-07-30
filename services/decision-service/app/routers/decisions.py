@@ -7,7 +7,7 @@ reason codes) via decision.decide().
 """
 from fastapi import APIRouter, Header, HTTPException
 
-from .. import config, decision
+from .. import config, db, decision
 from ..logging_config import get_logger
 from ..schemas import DecisionIn, DecisionOut
 
@@ -27,18 +27,33 @@ async def run_decision(
     if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="not authorized")
 
-    payload = body.model_dump()
-    # map the request onto the dict the scoring chain expects
+    # Security fix: name/ssn/requested_amount/term_months/annual_income used to be
+    # trusted straight from the request body and persisted verbatim -- reachable
+    # (until the gateway fix) by any caller who could POST an existing
+    # application_id with fabricated financials, overwriting the real decision +
+    # its audit trail via decide()'s ON CONFLICT DO UPDATE. Only application_id is
+    # trusted from the caller now; everything else is loaded from the application's
+    # own record, the same one origination-service itself sourced this data from
+    # before ever calling here.
+    rows = db.query(
+        "SELECT a.id, a.amount, a.term_months, a.income, ap.ssn "
+        "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
+        "WHERE a.id = %s",
+        (body.application_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="application not found")
+    r = rows[0]
     application = {
-        "app_id": payload["application_id"],
-        "ssn": payload.get("ssn") or "",
-        "income": payload.get("annual_income") or 0,
-        "requested_amount": payload.get("requested_amount"),
-        "term_months": payload.get("term_months"),
+        "app_id": r["id"],
+        "ssn": r.get("ssn") or "",
+        "income": float(r["income"]) if r.get("income") is not None else 0,
+        "requested_amount": float(r["amount"]) if r.get("amount") is not None else None,
+        "term_months": r.get("term_months"),
     }
     result = await decision.decide(application)
     return DecisionOut(
-        application_id=payload["application_id"],
+        application_id=body.application_id,
         outcome=result["decision"],
         score=result["score"],
         reason=result.get("adverse_action_reason"),

@@ -144,8 +144,17 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8005:8005"
+    environment:
+      # Required on every POST /offers (see routers/offers.py) -- defense in
+      # depth so a future accidental host-port re-exposure still can't submit
+      # offers without also knowing this. Same default as the other services
+      # so they all agree without an .env entry.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+    # No host port mapping: POST /offers persists the canonical TILA numbers
+    # for an approved loan with no auth of its own -- publishing this let
+    # anyone on the host bypass the gateway's staff-only /disclosure/* check
+    # entirely (review finding). Reachable from other containers on the
+    # compose network by service name; not reachable from the host.
     depends_on:
       postgres:
         condition: service_healthy
@@ -165,10 +174,17 @@ services:
     env_file:
       - path: .env
         required: false
-    # No published host port: POST /payments charges a card with no auth of its
-    # own -- publishing this let anyone on the host bypass the gateway's ownership
-    # check and move money directly (review finding). Reachable from other
-    # containers on the compose network by service name; not from the host.
+    environment:
+      # Required on every POST /payments (see routers/payments.py) -- defense
+      # in depth so a future accidental host-port re-exposure still can't
+      # charge a card without also knowing this. Same default as the other
+      # services so they all agree without an .env entry.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+    # No host port mapping: POST /payments charges a card/ACH with no auth of
+    # its own -- publishing this let anyone on the host bypass the gateway's
+    # ownership check and move money directly (review finding). Reachable
+    # from other containers on the compose network by service name; not from
+    # the host.
     depends_on:
       postgres:
         condition: service_healthy
@@ -265,5 +281,30 @@ services:
     depends_on:
       - gateway
 
+  # W7: scrapes /metrics off all 8 backend services (prometheus-fastapi-
+  # instrumentator) -- no cross-service metrics existed anywhere before this.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
+  prometheus-data:
+  grafana-data:

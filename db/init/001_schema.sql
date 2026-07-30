@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS applicants (
     email       TEXT,
     phone       TEXT,
     address     TEXT,
+    zip_code    TEXT,             -- W8: fair-lending ZIP-level check needs this; address alone is free text
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
@@ -47,6 +48,12 @@ CREATE TABLE IF NOT EXISTS applications (
     -- (see routers/applications.py run_decision), since app_id alone is a
     -- guessable integer and the borrower has no account yet at this point.
     access_token      TEXT,
+    -- Review fix: one-time token minted onto the application when it's
+    -- approved (run_decision), required to accept it anonymously (the
+    -- no-account borrower flow) since app_id is a sequential, guessable
+    -- integer. NULL means "no token issued or already spent" -- never
+    -- valid to accept with. See routers/applications.py accept_offer.
+    accept_token      TEXT,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
@@ -90,7 +97,11 @@ CREATE TABLE IF NOT EXISTS offers (
 -- LSS tables. A funded loan is "boarded" here by a direct insert from origination.
 CREATE TABLE IF NOT EXISTS loans (
     id              SERIAL PRIMARY KEY,
-    app_id          INTEGER,
+    -- Review fix: UNIQUE -- one canonical loan per application, no matter
+    -- what code path inserts here. Closes a race where two concurrent
+    -- accept_offer calls on the same not-yet-funded application both used
+    -- to pass the (stale-read) status check and both board a loan.
+    app_id          INTEGER UNIQUE,
     applicant_name  TEXT,
     principal       NUMERIC(14,2) NOT NULL,   -- D12: was DOUBLE PRECISION
     apr             NUMERIC(7,3) NOT NULL,     -- D12: was DOUBLE PRECISION

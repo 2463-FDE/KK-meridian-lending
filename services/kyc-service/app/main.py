@@ -10,6 +10,7 @@ import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from .logging_config import get_logger
 from .routers import kyc
@@ -19,6 +20,9 @@ log = get_logger("kyc")
 
 app = FastAPI(title="Meridian KYC Service", version="2.0.0")
 app.include_router(kyc.router)
+# W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
+# comment for why this exists across all 8 services now.
+Instrumentator().instrument(app).expose(app)
 
 
 @app.exception_handler(Exception)

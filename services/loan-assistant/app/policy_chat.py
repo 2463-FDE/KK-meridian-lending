@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, ValidationError
 from . import llm_client
 from .corpus import load_policy_corpus
 from .embeddings import LocalTfidfEmbedder, build_idf
+from .prompt_injection import contains_injection_attempt
 from .rag_eval import classify_answerable, retrieve
 from .redactor import redact_str
 from .schemas import PolicyAnswer
@@ -31,6 +32,12 @@ log = logging.getLogger(__name__)
 _NOT_RECORDED_ANSWER = (
     "I don't have a recorded answer for that in the lending policy documents. "
     "This may need a human to confirm."
+)
+
+_INJECTION_BLOCKED_ANSWER = (
+    "This question can't be processed as written -- it looks like it's trying "
+    "to override the assistant's instructions rather than ask about lending "
+    "policy. Rephrase it as a plain policy question."
 )
 
 _SYSTEM = """
@@ -100,6 +107,10 @@ def answer_policy_question(question: str) -> PolicyAnswer:
     for a question classify_answerable() has already flagged as ungrounded."""
     safe_question = redact_str(question)
     log.info("policy_chat question=%s", safe_question)
+
+    if contains_injection_attempt(safe_question):
+        log.warning("policy_chat blocked a suspected prompt-injection attempt")
+        return PolicyAnswer(answerable=False, answer=_INJECTION_BLOCKED_ANSWER, source_chunk_id=None)
 
     chunks, embedder, idf = _corpus_state()
     hits = retrieve(safe_question, chunks, embedder, idf)

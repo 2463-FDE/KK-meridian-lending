@@ -72,6 +72,11 @@ function LoanDetailContent() {
 
   // action panels
   const [payAmount, setPayAmount] = useState("250.00");
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [newBalance, setNewBalance] = useState("");
+  const [waiveAmount, setWaiveAmount] = useState("");
   // POST /payments now requires an idempotency_key (review fix -- a retry or
   // a double-click used to double-charge). Minted once and reused across
   // retries of the SAME submit attempt; a fresh one is minted only after the
@@ -79,11 +84,6 @@ function LoanDetailContent() {
   // "pending" response (charged, balance apply not yet confirmed) keeps the
   // same key on the next retry instead of starting a new, undetectable charge.
   const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => crypto.randomUUID());
-  const [actionMsg, setActionMsg] = useState<string | null>(null);
-  const [actionErr, setActionErr] = useState<string | null>(null);
-  const [actionBusy, setActionBusy] = useState(false);
-  const [newBalance, setNewBalance] = useState("");
-  const [waiveAmount, setWaiveAmount] = useState("");
 
   // Only CSR/admin SEE the money-moving rep actions (adjust balance / waive
   // fee). This is now backed by a real server-side gate too (gateway/app/

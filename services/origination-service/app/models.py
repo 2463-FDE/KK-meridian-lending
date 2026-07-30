@@ -27,6 +27,7 @@ class Applicant(Base):
     email: Mapped[str | None] = mapped_column(String, nullable=True)
     phone: Mapped[str | None] = mapped_column(String, nullable=True)
     address: Mapped[str | None] = mapped_column(String, nullable=True)
+    zip_code: Mapped[str | None] = mapped_column(String, nullable=True)  # W8: fair-lending ZIP-level check
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

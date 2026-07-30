@@ -51,6 +51,18 @@ jobs:
           cd services/${{ matrix.service }}
           python -m pytest -q --cov=app --cov-report=term-missing
 
+  # Review finding: every backend Dockerfile unconditionally COPYed
+  # combined-ca-bundle.pem, which .gitignore excludes and which isn't in the
+  # repo -- `docker build` failed on any clean checkout. This runner has no
+  # such file either, so it exercises the exact same clean-checkout path the
+  # Dockerfiles now fall back on (see each service's Dockerfile).
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose build
+        run: docker compose build
+
   # Review fix: db/migrations/*.sql were never actually run anywhere in CI --
   # 0010's backfill-before-dedup ordering bug (aborted on exactly the
   # duplicate-legacy-offer data it was meant to repair) could only have been
