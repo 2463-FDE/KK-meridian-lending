@@ -21,6 +21,7 @@ from ..schemas import (
     Disclosure,
     KycOut,
     Page,
+    ReviewIn,
 )
 
 log = get_logger("applications")
@@ -311,6 +312,75 @@ def run_decision(
         decision=outcome,
         score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
         adverse_action_reason=resp.get("reason"),
+        accept_token=accept_token,
+    )
+
+
+@router.post("/{app_id}/review", response_model=DecisionOut)
+def review_application(
+    app_id: int,
+    body: ReviewIn,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    """Feature: staff tool to resolve a "refer" decision (policies/
+    underwriting_guidelines.md's manual-review band, score 600-659 or DTI
+    43-50%). Nothing let staff actually turn a refer into an approve/deny
+    before this -- accept_offer already correctly blocked self-accept on
+    anything but "approve", but a refer just sat there forever with no way
+    to move it. Staff-only, no borrower path at all -- this isn't a decision
+    the applicant can make for themselves.
+    """
+    _require_staff(x_user_role, x_internal_token)
+
+    rows = db.query("SELECT id FROM applications WHERE id = %s", (app_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="application not found")
+
+    existing = db.query("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+    if not existing:
+        raise HTTPException(status_code=422, detail="no decision exists yet for this application")
+    current_outcome = existing[0]["outcome"]
+    if current_outcome != "refer":
+        raise HTTPException(
+            status_code=422,
+            detail=f"only a 'refer' decision can be manually reviewed (current outcome: {current_outcome!r})",
+        )
+
+    db.query("UPDATE decisions SET outcome = %s WHERE app_id = %s", (body.outcome, app_id))
+    # Human-decision audit record -- kept separate from decision_events (the
+    # model's own append-only trail), see db/migrations/0018.
+    db.query(
+        "INSERT INTO manual_reviews (app_id, reviewer_role, outcome, reason) "
+        "VALUES (%s, %s, %s, %s)",
+        (app_id, x_user_role, body.outcome, body.reason),
+    )
+    # Same guard as run_decision's own status write: never regress an
+    # already-funded application's status backward.
+    db.query(
+        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+        (_DECISION_STATUS.get(body.outcome, body.outcome), app_id),
+    )
+
+    accept_token = None
+    if body.outcome == "approve":
+        # Same auto-offer + accept_token minting as the automated approve
+        # path in run_decision above -- a manually-approved application gets
+        # exactly the same borrower-facing flow from here on.
+        try:
+            disclosure_graph.auto_generate_offer(app_id)
+        except Exception as e:  # noqa
+            log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
+        accept_token = secrets.token_urlsafe(32)
+        db.query(
+            "UPDATE applications SET accept_token = %s WHERE id = %s",
+            (accept_token, app_id),
+        )
+
+    return DecisionOut(
+        app_id=app_id,
+        decision=body.outcome,
+        adverse_action_reason=body.reason if body.outcome == "deny" else None,
         accept_token=accept_token,
     )
 

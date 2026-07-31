@@ -1,6 +1,6 @@
 """Pydantic request/response models for the LOS API."""
 import re
-from typing import Generic, Optional, TypeVar
+from typing import Generic, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -102,12 +102,24 @@ class ApplicationListItem(BaseModel):
 class DecisionOut(BaseModel):
     app_id: int
     decision: str
-    score: int
+    # Optional: a manual staff review (see ReviewIn/review_application below)
+    # produces no model score at all -- there's no model run to report one
+    # from, only a human's approve/deny call.
+    score: Optional[int] = None
     adverse_action_reason: Optional[str] = None
     # Review fix: minted only when decision == "approve" (see run_decision) --
     # the one-time proof of ownership an anonymous, no-account borrower needs
     # to accept their own offer. See routers/applications.py accept_offer.
     accept_token: Optional[str] = None
+
+
+class ReviewIn(BaseModel):
+    # Feature: lets staff resolve a "refer" decision (policies/underwriting_
+    # guidelines.md's manual-review band, score 600-659 or DTI 43-50%) into a
+    # real approve/deny -- see routers/applications.py::review_application.
+    # Scoped to approve/deny only for now, no counteroffer.
+    outcome: Literal["approve", "deny"]
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class ScheduleRow(BaseModel):
