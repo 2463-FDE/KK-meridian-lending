@@ -64,23 +64,35 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
     landed, the marker was permanent but the balance never moved -- every
     retry for this payment_id then hit the ON CONFLICT path and silently
     skipped the apply forever (money captured, loan never credited). Both
-    statements now run inside one transaction (db.transaction()): if the
-    UPDATE raises, the marker rolls back with it, so a retry sees no marker
-    and genuinely retries the apply instead of skipping it.
+    statements now run inside one transaction (db.transaction()), through the
+    cursor it yields -- not apply_payment()/db.query(), which run on a
+    separate, shared autocommit connection and so would run outside this
+    transaction entirely: if the UPDATE raises, the marker rolls back with
+    it, so a retry sees no marker and genuinely retries the apply instead of
+    skipping it.
     """
-    with db.transaction():
-        inserted = db.query(
+    with db.transaction() as cur:
+        cur.execute(
             "INSERT INTO payment_applications (payment_id, loan_id, amount) "
             "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING RETURNING payment_id",
             (payment_id, loan_id, amount),
         )
-        if not inserted:
+        if not cur.fetchall():
             log.info(
                 "apply-payment payment_id=%s already applied -- skipping duplicate apply",
                 payment_id,
             )
             return get_balance(loan_id), False
-        new_balance = apply_payment(loan_id, amount)
+
+        cur.execute("SELECT balance FROM balances WHERE loan_id = %s", (loan_id,))
+        rows = cur.fetchall()
+        current = rows[0]["balance"] if rows else 0.0
+        new_balance = float(_to_decimal(current) - _to_decimal(amount))
+        cur.execute(
+            "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
+            (new_balance, loan_id),
+        )
+        log.info("applied payment loan_id=%s balance %s -> %s", loan_id, current, new_balance)
     return new_balance, True
 
 
