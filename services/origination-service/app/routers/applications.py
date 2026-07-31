@@ -21,6 +21,7 @@ from ..schemas import (
     Disclosure,
     KycOut,
     Page,
+    ReviewIn,
 )
 
 log = get_logger("applications")
@@ -29,6 +30,16 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 # Roles allowed to see underwriting-sensitive fields (income, employment_years).
 # Mirrors the staff role set the gateway already enforces for /assistant/*.
 _STAFF_ROLES = {"csr", "underwriter", "admin"}
+
+# Bug fix: applications.status used to only ever move 'submitted' -> 'funded'
+# (see accept_offer below) -- run_decision never wrote the decision outcome
+# back onto it at all. The underwriting console's status filter/KPIs
+# (frontend/app/underwriting/page.tsx) check for exactly these values, but
+# nothing in real request flow ever produced them -- only the synthetic bulk
+# seed data (db/init/003_seed_bulk.sql) faked a status column, bypassing the
+# app entirely. Every real, live-decisioned application was invisible to that
+# filter/KPI.
+_DECISION_STATUS = {"approve": "approved", "refer": "in_review", "deny": "denied"}
 
 # NOTE: the gateway's /los/{path:path} route (gateway/app/main.py) proxies to this
 # router with NO auth check — an applicant can check their own status without an
@@ -248,6 +259,72 @@ def run_decision(
     )
 
 
+@router.post("/{app_id}/review", response_model=DecisionOut)
+def review_application(
+    app_id: int,
+    body: ReviewIn,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    """Feature: staff tool to resolve a "refer" decision (policies/
+    underwriting_guidelines.md's manual-review band, score 600-659 or DTI
+    43-50%). Nothing let staff actually turn a refer into an approve/deny
+    before this -- accept_offer already correctly blocked self-accept on
+    anything but "approve", but a refer just sat there forever with no way
+    to move it. Staff-only, no borrower path at all -- this isn't a decision
+    the applicant can make for themselves.
+    """
+    if x_user_role not in _STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="staff only")
+
+    rows = db.query("SELECT id FROM applications WHERE id = %s", (app_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="application not found")
+
+    existing = db.query("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+    if not existing:
+        raise HTTPException(status_code=422, detail="no decision exists yet for this application")
+    current_outcome = existing[0]["outcome"]
+    if current_outcome != "refer":
+        raise HTTPException(
+            status_code=422,
+            detail=f"only a 'refer' decision can be manually reviewed (current outcome: {current_outcome!r})",
+        )
+
+    db.query("UPDATE decisions SET outcome = %s WHERE app_id = %s", (body.outcome, app_id))
+    # Human-decision audit record -- kept separate from decision_events (the
+    # model's own append-only trail), see db/migrations/0018.
+    db.query(
+        "INSERT INTO manual_reviews (app_id, reviewer_role, outcome, reason) "
+        "VALUES (%s, %s, %s, %s)",
+        (app_id, x_user_role, body.outcome, body.reason),
+    )
+    # Same guard as run_decision's own status write: never regress an
+    # already-funded application's status backward.
+    db.query(
+        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+        (_DECISION_STATUS.get(body.outcome, body.outcome), app_id),
+    )
+
+    accept_token = None
+    if body.outcome == "approve":
+        # Same accept_token minting as the automated approve path in
+        # run_decision above -- a manually-approved application gets the same
+        # borrower-facing accept flow from here on. (Auto-offer-generation on
+        # approval is a separate, not-yet-merged feature -- PR #6 -- so it's
+        # not called here; the loan officer builds the offer manually via
+        # POST /los/offer, same as any other approved application today.)
+        accept_token = secrets.token_urlsafe(32)
+        db.query(
+            "UPDATE applications SET accept_token = %s WHERE id = %s",
+            (accept_token, app_id),
+        )
+
+    return DecisionOut(
+        app_id=app_id,
+        decision=body.outcome,
+        adverse_action_reason=body.reason if body.outcome == "deny" else None,
+        accept_token=accept_token,
+    )
 class AcceptIn(BaseModel):
     # Review fix: the one-time token minted onto the application when it was
     # approved (run_decision) -- stands in for a real session for the

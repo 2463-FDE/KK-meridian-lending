@@ -100,6 +100,13 @@ function UnderwritingDetailContent() {
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
 
+  // Manual review (feature: staff tool to resolve a "refer" decision) --
+  // see app/routers/applications.py::review_application.
+  const [reviewOutcome, setReviewOutcome] = useState<"approve" | "deny">("approve");
+  const [reviewReason, setReviewReason] = useState("");
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewErr, setReviewErr] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     if (!appId) return;
     setLoading(true);
@@ -136,6 +143,27 @@ function UnderwritingDetailContent() {
       setActionErr(errMsg(err, "Could not run a decision."));
     } finally {
       setActionBusy(false);
+    }
+  }
+
+  async function submitReview() {
+    if (!appId || !reviewReason.trim()) return;
+    setReviewBusy(true);
+    setReviewErr(null);
+    setActionMsg(null);
+    try {
+      const res = (await apiPost(`/los/applications/${appId}/review`, {
+        outcome: reviewOutcome,
+        reason: reviewReason.trim(),
+      })) as DecisionResult;
+      setDecision(res);
+      setApp((prev) => (prev ? { ...prev, decision: res.decision } : prev));
+      setReviewReason("");
+      setActionMsg(`Manual review recorded: ${res.decision}.`);
+    } catch (err) {
+      setReviewErr(errMsg(err, "Could not record this review."));
+    } finally {
+      setReviewBusy(false);
     }
   }
 
@@ -334,6 +362,49 @@ function UnderwritingDetailContent() {
           </button>
         </div>
       </div>
+
+      {/* Manual review -- feature: staff tool to resolve a "refer" decision
+          (policies/underwriting_guidelines.md's manual-review band, score
+          600-659 or DTI 43-50%). Only shown once there's actually a refer
+          to resolve -- an approve/deny/no-decision application has nothing
+          for this panel to do. */}
+      {currentDecision === "refer" ? (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-title" style={{ marginBottom: 8 }}>
+            Manual review required
+          </div>
+          <p className="hint" style={{ marginBottom: 16 }}>
+            This application scored in the manual-review band. Resolve it
+            below — the applicant can&rsquo;t accept an offer until this
+            is decided.
+          </p>
+          <label>Decision</label>
+          <select
+            value={reviewOutcome}
+            onChange={(e) => setReviewOutcome(e.target.value as "approve" | "deny")}
+          >
+            <option value="approve">Approve</option>
+            <option value="deny">Deny</option>
+          </select>
+          <label>Reason (shown to the applicant if denied)</label>
+          <textarea
+            rows={3}
+            value={reviewReason}
+            onChange={(e) => setReviewReason(e.target.value)}
+            placeholder="e.g. DTI recalculated under policy threshold after verifying updated income"
+          />
+          {reviewErr ? <div className="alert alert-error">{reviewErr}</div> : null}
+          <button
+            style={{ marginTop: 14 }}
+            onClick={submitReview}
+            disabled={reviewBusy || !reviewReason.trim()}
+          >
+            {reviewBusy
+              ? "Recording…"
+              : `Record ${reviewOutcome === "approve" ? "approval" : "denial"}`}
+          </button>
+        </div>
+      ) : null}
 
       {/* Offer */}
       <h2>Offer</h2>
