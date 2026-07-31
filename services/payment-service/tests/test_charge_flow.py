@@ -20,6 +20,12 @@ at all -- see PaymentIn (schemas.py). test_post_payment_never_persists_
 processor_token and test_post_payment_stores_last4_and_brand cover the new
 contract: only an opaque processor_token (used transiently, never stored)
 plus last4/brand for display.
+
+Review finding: charge() used to treat receiving a processor_token as proof
+the card was charged -- the token was only shape/length-checked, never sent
+to a processor for real authorization. test_post_payment_with_a_made_up_
+token_never_captures_or_touches_the_balance is the exact attack: an arbitrary
+token gets declined, no balance-affecting call ever reaches servicing.
 """
 import httpx as httpx_module
 import pytest
@@ -39,8 +45,10 @@ class _FakeDb:
     """Stands in for app.db.query -- simulates a payments table with a partial
     unique index on idempotency_key: the INSERT ... ON CONFLICT DO NOTHING
     only succeeds once per (non-null) key, and the fallback SELECT reads back
-    whatever the first successful insert stored. Also tracks applied_at, set
-    by the UPDATE charge() issues once servicing confirms the apply."""
+    whatever the first successful insert stored. Also tracks applied_at (set
+    once servicing confirms the balance apply) and auth_status (set once the
+    processor confirms or declines the authorization) -- each via its own
+    UPDATE, distinguished by which column the real SQL text is setting."""
 
     def __init__(self):
         self.calls = []
@@ -58,6 +66,7 @@ class _FakeDb:
             row = {
                 "id": self._next_id, "loan_id": loan_id, "amount": amount,
                 "last4": last4, "brand": brand, "applied_at": None,
+                "auth_status": "pending",
             }
             self._next_id += 1
             if idempotency_key is not None:
@@ -69,7 +78,14 @@ class _FakeDb:
             return [self._by_key[idempotency_key]]
         if stmt.startswith("UPDATE"):
             (payment_id,) = params
-            self._by_id[payment_id]["applied_at"] = "2026-07-29T00:00:00Z"
+            if "auth_status = 'captured'" in stmt:
+                self._by_id[payment_id]["auth_status"] = "captured"
+            elif "auth_status = 'failed'" in stmt:
+                self._by_id[payment_id]["auth_status"] = "failed"
+            elif "applied_at" in stmt:
+                self._by_id[payment_id]["applied_at"] = "2026-07-29T00:00:00Z"
+            else:
+                raise AssertionError(f"unexpected UPDATE: {sql}")
             return []
         raise AssertionError(f"unexpected query: {sql}")
 
@@ -93,9 +109,16 @@ def _stub_servicing_call(monkeypatch):
     monkeypatch.setattr(payments.httpx, "post", lambda *a, **k: _FakeServicingResponse())
 
 
+# Shaped exactly like frontend/lib/tokenize.ts's own mock output
+# (`tok_mock_<uuid>`) -- app.processor._stub_authorize() only approves a
+# token matching this shape, same as a real processor only ever approves a
+# token it actually issued.
+_VALID_MOCK_TOKEN = "tok_mock_550e8400-e29b-41d4-a716-446655440000"
+
+
 def _payload(**overrides):
     body = {
-        "loan_id": 42, "processor_token": "tok_mock_abc123", "last4": "1111",
+        "loan_id": 42, "processor_token": _VALID_MOCK_TOKEN, "last4": "1111",
         "brand": "visa", "amount": 250.0, "idempotency_key": "idem-key-1",
     }
     body.update(overrides)
@@ -215,14 +238,18 @@ def test_post_payment_reports_pending_when_servicing_unreachable(fake_db, monkey
 
     resp = client.post("/payments", json=_payload(amount=100.0))
 
-    # Review fix: the card is already charged and the row already written by
-    # this point, so the request still succeeds -- but the status must say
-    # "pending", not "captured", since the balance was never confirmed
-    # applied. applied_at stays NULL (no UPDATE call went out).
+    # Review fix: the card is already authorized (auth_status -> 'captured')
+    # and the row already written by this point, so the request still
+    # succeeds -- but the response status must say "pending", not "captured",
+    # since the balance was never confirmed applied. applied_at stays NULL
+    # (no applied_at-setting UPDATE went out), even though the authorization
+    # UPDATE did.
     assert resp.status_code == 200
     assert resp.json()["status"] == "pending"
-    update_calls = [c for c in fake_db.calls if c[0].strip().startswith("UPDATE")]
-    assert update_calls == []
+    applied_at_updates = [
+        c for c in fake_db.calls if c[0].strip().startswith("UPDATE") and "applied_at" in c[0]
+    ]
+    assert applied_at_updates == []
 
 
 def test_post_payment_rejects_missing_internal_token(fake_db):
@@ -403,3 +430,77 @@ def test_post_payment_rejects_amount_over_the_ceiling(fake_db):
 
     assert resp.status_code == 422
     assert fake_db.calls == []
+
+
+# --- review finding: charge() used to trust processor_token with no real ---
+# --- authorization call at all -----------------------------------------
+
+def test_post_payment_with_a_made_up_token_never_captures_or_touches_the_balance(fake_db, monkeypatch):
+    """The exact attack the review flagged: a borrower POSTs an arbitrary,
+    never-issued processor_token. Must be declined -- no captured payment,
+    and servicing (the loan balance) is never called at all."""
+    servicing_calls = []
+    monkeypatch.setattr(
+        payments.httpx, "post",
+        lambda *a, **k: servicing_calls.append((a, k)) or _FakeServicingResponse(),
+    )
+
+    resp = client.post("/payments", json=_payload(processor_token="i-just-made-this-up", amount=250.0))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert not servicing_calls  # the loan balance was never touched
+
+    # The attempt is on record (an honest audit trail), but explicitly as
+    # declined -- never as captured.
+    payment_id = body["payment_id"]
+    assert fake_db._by_id[payment_id]["auth_status"] == "failed"
+
+
+def test_reused_key_stays_declined_after_a_failed_authorization(fake_db, monkeypatch):
+    """A retry of the SAME declined attempt (same idempotency_key) must not
+    somehow succeed on a second try -- a declined charge stays declined; a
+    genuine retry needs a new idempotency_key (a new attempt), not a replay."""
+    servicing_calls = []
+    monkeypatch.setattr(
+        payments.httpx, "post",
+        lambda *a, **k: servicing_calls.append((a, k)) or _FakeServicingResponse(),
+    )
+    body = _payload(processor_token="still-made-up", idempotency_key="declined-key")
+
+    first = client.post("/payments", json=body)
+    second = client.post("/payments", json=body)
+
+    assert first.json()["status"] == second.json()["status"] == "failed"
+    assert first.json()["payment_id"] == second.json()["payment_id"]
+    assert not servicing_calls
+
+
+def test_post_payment_declines_the_fixed_test_amount(fake_db):
+    """Mirrors a real processor's own published test-card convention: a
+    fixed amount always declines, so the decline path is exercisable without
+    a live processor -- proves the amount, not just the token, is checked."""
+    resp = client.post("/payments", json=_payload(amount=0.02))
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "failed"
+
+
+def test_authorize_charge_fails_closed_when_no_processor_is_configured(monkeypatch):
+    """Outside development/test, a missing processor must refuse to
+    authorize rather than silently approve against a fake authority --
+    same fail-closed contract as decision-service's bureau/AI-scorer calls.
+
+    Exercised at the unit level (not via TestClient) matching
+    decision-service's test_decision.py convention: TestClient re-raises an
+    unhandled exception instead of returning the 500 response the app's own
+    exception handler would produce, so pytest.raises against the function
+    itself is the correct way to assert the fail-closed contract here.
+    """
+    from app import processor as processor_module
+
+    monkeypatch.setattr(processor_module, "ALLOW_PAYMENT_STUB", False)
+
+    with pytest.raises(processor_module.ProcessorUnavailableError):
+        processor_module.authorize_charge(_VALID_MOCK_TOKEN, 250.0)

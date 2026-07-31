@@ -134,6 +134,15 @@ CREATE TABLE IF NOT EXISTS payments (
     brand       TEXT,                 -- e.g. "visa", "mastercard" -- display only
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION
     method      TEXT DEFAULT 'card',
+    -- Review fix: charge() used to treat a processor_token as proof of a real
+    -- charge without ever calling a processor -- 'pending' is written first
+    -- (before authorization is confirmed), then flipped to 'captured' or
+    -- 'failed' once services/payment-service/app/processor.py::authorize_
+    -- charge() actually returns. A row stuck at 'pending' means the process
+    -- died mid-authorization, not that anything was approved. Historical
+    -- rows (before this column existed) default to 'captured' -- they really
+    -- were, just without a formal record of it.
+    auth_status TEXT NOT NULL DEFAULT 'captured',
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial

@@ -14,6 +14,10 @@ ADR 0008 (Week 5 tokenization): `pan`/`cvv` are legacy, nullable, dead-
 going-forward columns for rows that predate tokenization -- no code path
 writes to them anymore. New rows populate `last4`/`brand` instead, from the
 processor's own token response.
+
+Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/
+0017) tracks whether a real processor authorization was ever confirmed for
+this row -- see app/processor.py::authorize_charge().
 """
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -34,4 +38,5 @@ class Payment(Base):
     brand: Mapped[str | None] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     method: Mapped[str | None] = mapped_column(String, default="card")
+    auth_status: Mapped[str] = mapped_column(String, default="captured")
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

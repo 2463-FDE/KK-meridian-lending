@@ -1,5 +1,5 @@
 """Pydantic models for the Payment Service API."""
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -43,7 +43,13 @@ class PaymentIn(BaseModel):
 class PaymentOut(BaseModel):
     payment_id: Optional[int] = None
     loan_id: int
-    status: str
+    # Review fix: an explicit enum, not a free string -- "captured" (the
+    # processor confirmed authorization AND the balance is confirmed applied),
+    # "pending" (authorization confirmed, balance apply not yet confirmed --
+    # a retry with the same idempotency_key keeps reconciling it), or "failed"
+    # (the processor declined the authorization -- no balance was ever
+    # touched). See app/payments.py::charge() and app/processor.py.
+    status: Literal["captured", "pending", "failed"]
     applied_amount: float
 
 
