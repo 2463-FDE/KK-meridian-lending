@@ -52,6 +52,7 @@ export default function AppBar() {
       case "csr":
         return [
           { href: "/", label: "Home" },
+          { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
           { href: "/policy-chat", label: "Policy Chat" },
         ];
