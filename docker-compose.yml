@@ -200,6 +200,11 @@ services:
       # corpus.py's local-checkout-relative default doesn't resolve inside this
       # image's shallower /app/app layout -- point it at the mount below instead.
       POLICIES_DIR: /app/policies
+      # Bug fix: needed on the server-to-server call to origination-service's
+      # /financials route (app/main.py's summarize()) -- that route requires
+      # this on top of a staff X-User-Role, and every AI-summary request
+      # 403'd without it. Same shared secret every other service already uses.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
     # No host port published — reachable only from other containers on the compose
     # network (gateway proxies /assistant/* to it internally). Publishing it would
     # let anyone on the host bypass the gateway's role check and trigger billed LLM

@@ -12,7 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .config import ORIGINATION_URL
+from .config import INTERNAL_SERVICE_TOKEN, ORIGINATION_URL
 from .llm_client import (
     LLMCostGuardError,
     LLMInsufficientDataError,
@@ -51,6 +51,11 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     # The gateway only proxies here for csr/underwriter/admin sessions (see
     # gateway/app/main.py assistant()) and forwards the resolved role as this
     # header; pass it through so origination-service will release financials.
+    #
+    # Bug fix: origination-service's financials route requires X-Internal-Token
+    # too, not just a staff X-User-Role (review fix closing a role-spoofing
+    # gap) -- this call never sent it, so every summary request 403'd
+    # regardless of caller role. See config.py's INTERNAL_SERVICE_TOKEN.
     try:
         resp = httpx.get(f"{ORIGINATION_URL}/applications/{app_id}", timeout=_FETCH_TIMEOUT)
     except httpx.HTTPError as exc:
@@ -63,9 +68,12 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     app_data = resp.json()
 
     try:
+        fin_headers = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
+        if x_user_role:
+            fin_headers["X-User-Role"] = x_user_role
         fin_resp = httpx.get(
             f"{ORIGINATION_URL}/applications/{app_id}/financials",
-            headers={"X-User-Role": x_user_role} if x_user_role else {},
+            headers=fin_headers,
             timeout=_FETCH_TIMEOUT,
         )
     except httpx.HTTPError as exc:
