@@ -21,6 +21,22 @@ import pytest
 from app import balance
 
 
+class _FakeCursor:
+    """Stands in for the psycopg2 RealDictCursor db.transaction() now yields
+    (review fix -- see db.py). apply_payment_once() runs its statements
+    through this cursor's execute()/fetchall(), not db.query()."""
+
+    def __init__(self, db):
+        self._db = db
+        self._last_result = []
+
+    def execute(self, sql, params=None):
+        self._last_result = self._db._run(sql, params)
+
+    def fetchall(self):
+        return self._last_result
+
+
 class _FakeDb:
     """Stands in for app.db -- one balances row, plus a payment_applications
     table keyed on payment_id (PRIMARY KEY -> INSERT ... ON CONFLICT DO
@@ -32,7 +48,7 @@ class _FakeDb:
         self.balance = balance
         self.applications = set()
 
-    def query(self, sql, params=None):
+    def _run(self, sql, params=None):
         stmt = sql.strip()
         if stmt.startswith("INSERT INTO payment_applications"):
             payment_id, loan_id, amount = params
@@ -47,12 +63,15 @@ class _FakeDb:
             return []
         raise AssertionError(f"unexpected query: {sql}")
 
+    def query(self, sql, params=None):
+        return self._run(sql, params)
+
     @contextmanager
     def transaction(self):
         snapshot_balance = self.balance
         snapshot_applications = set(self.applications)
         try:
-            yield
+            yield _FakeCursor(self)
         except Exception:
             self.balance = snapshot_balance
             self.applications = snapshot_applications
@@ -100,14 +119,14 @@ def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance
     INSERT would otherwise have landed. The marker must roll back with it --
     otherwise a retry for this payment_id hits the ON CONFLICT path forever
     and the balance never moves, even though the marker claims it's applied."""
-    real_query = fake_db.query
+    real_run = fake_db._run
 
     def _fail_the_balance_update(sql, params=None):
         if "SET balance" in sql.strip():
             raise RuntimeError("simulated balance update failure")
-        return real_query(sql, params)
+        return real_run(sql, params)
 
-    fake_db.query = _fail_the_balance_update
+    fake_db._run = _fail_the_balance_update
 
     with pytest.raises(RuntimeError):
         balance.apply_payment_once(payment_id=9, loan_id=5, amount=30.0)
@@ -118,7 +137,7 @@ def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance
 
     # A retry with no failure this time must actually apply -- not silently
     # skip because a stale marker survived the failed attempt.
-    fake_db.query = real_query
+    fake_db._run = real_run
     new_balance, applied = balance.apply_payment_once(payment_id=9, loan_id=5, amount=30.0)
 
     assert applied is True

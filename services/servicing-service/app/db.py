@@ -27,25 +27,28 @@ def query(sql, params=None):
 
 @contextmanager
 def transaction():
-    """Run a block of query() calls as one atomic transaction.
+    """A dedicated, non-autocommit connection for one all-or-nothing unit of
+    work (balance.apply_payment_once()'s idempotency marker INSERT and the
+    balance UPDATE it guards).
 
-    Review fix: every query() call above autocommits on its own -- fine for a
-    single statement, but balance.apply_payment_once() needs its idempotency
-    marker INSERT and the balance UPDATE it guards to commit or fail together.
-    Without this, a balance-update failure after the marker had already landed
-    left a permanent marker with no balance ever applied: every retry hit the
-    ON CONFLICT path and silently skipped the apply, forever. query() calls
-    made inside this block share the same connection with autocommit off, so
-    an exception rolls back everything (marker included) instead of leaving a
-    committed marker with no corresponding balance change.
+    Review fix: this used to toggle autocommit off on the shared module-level
+    _conn that every query() call also uses. Under a threaded server, a
+    different request's query() could land on that same connection while a
+    transaction was in flight and get committed or rolled back along with it
+    -- real money state at risk. Opens its own connection instead, same
+    pattern as origination-service's db.py: every statement in the
+    transaction must run through the yielded cursor directly, not through
+    query()/get_conn(), or it silently executes on the shared connection
+    again, outside this transaction.
     """
-    conn = get_conn()
+    conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
     try:
-        yield conn
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            yield cur
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
-        conn.autocommit = True
+        conn.close()
