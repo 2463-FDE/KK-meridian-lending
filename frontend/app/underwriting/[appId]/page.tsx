@@ -157,9 +157,14 @@ function UnderwritingDetailContent() {
         reason: reviewReason.trim(),
       })) as DecisionResult;
       setDecision(res);
-      setApp((prev) => (prev ? { ...prev, decision: res.decision } : prev));
       setReviewReason("");
       setActionMsg(`Manual review recorded: ${res.decision}.`);
+      // Bug fix: an approve auto-generates an offer server-side (same as the
+      // automated approve path), but this response only carries the decision
+      // outcome, not the offer itself -- reload the application so `offer`
+      // (and status) reflect what the server actually did instead of going
+      // stale until the next manual page refresh.
+      await load();
     } catch (err) {
       setReviewErr(errMsg(err, "Could not record this review."));
     } finally {
@@ -357,10 +362,22 @@ function UnderwritingDetailContent() {
               </div>
             ) : null}
           </div>
-          <button onClick={runDecision} disabled={actionBusy}>
-            {actionBusy ? "Working…" : "Run decision"}
-          </button>
+          {app?.status !== "funded" ? (
+            <button onClick={runDecision} disabled={actionBusy}>
+              {actionBusy ? "Working…" : "Run decision"}
+            </button>
+          ) : null}
         </div>
+        {app?.status === "funded" ? (
+          <p className="hint" style={{ marginTop: 10 }}>
+            {/* Bug fix: rerunning after funding used to silently reset the
+                recorded decision back to the automated outcome while the
+                loan sat funded on top of it -- the backend rejects this now
+                (422), so the button is hidden rather than offering an action
+                that always fails. */}
+            This application is funded — its decision can no longer be rerun.
+          </p>
+        ) : null}
       </div>
 
       {/* Manual review -- feature: staff tool to resolve a "refer" decision

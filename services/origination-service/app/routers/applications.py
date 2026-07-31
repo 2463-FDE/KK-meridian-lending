@@ -249,7 +249,7 @@ def run_decision(
     # session or the access_token minted onto this application at submission.
     rows = db.query(
         "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, a.access_token, "
-        "ap.name, ap.ssn "
+        "a.status, ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
     )
@@ -261,6 +261,28 @@ def run_decision(
     if existing:
         if not _is_staff(x_user_role, x_internal_token):
             raise HTTPException(status_code=403, detail="staff only to rerun a decision")
+        # Bug fix: reruns had no guard beyond staff-only -- since scoring is
+        # deterministic (same SSN/income -> same score), rerunning after the
+        # application was already funded silently reset its recorded decision
+        # back to the automated outcome (e.g. "refer") while the loan sat
+        # funded on top of it -- a real data-integrity break. Rerunning after
+        # a manual review (see review_application/manual_reviews) is just as
+        # bad: it silently overwrote a staff decision with a fresh automated
+        # one, and since that reset the outcome back to "refer" it made the
+        # application eligible for manual review AGAIN, letting the same app
+        # get reviewed and reversed indefinitely.
+        if r.get("status") == "funded":
+            raise HTTPException(
+                status_code=422,
+                detail="cannot rerun a decision on an already-funded application",
+            )
+        manual = db.query("SELECT id FROM manual_reviews WHERE app_id = %s", (app_id,))
+        if manual:
+            raise HTTPException(
+                status_code=422,
+                detail="this application's decision was manually resolved by staff -- "
+                "rerunning the automated model would silently overwrite that",
+            )
     else:
         is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
         if not _is_staff(x_user_role, x_internal_token) and not is_owner:
