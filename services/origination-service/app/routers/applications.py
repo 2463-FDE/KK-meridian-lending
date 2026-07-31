@@ -237,6 +237,13 @@ def run_decision(
     }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     outcome = resp["outcome"]
     accept_token = None
+    # Bug fix: reflect the outcome onto applications.status -- guarded so a
+    # staff rerun on an already-funded application (run_decision has no
+    # funded check of its own) can never regress a funded row backward.
+    db.query(
+        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+        (_DECISION_STATUS.get(outcome, outcome), app_id),
+    )
     if outcome == "approve":
         # Security fix: accept_offer used to run fully anonymously for a fresh
         # accept -- fine for the legitimate no-account borrower flow, except

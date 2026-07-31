@@ -25,12 +25,18 @@ interface AppsResponse {
 }
 
 const PAGE_SIZE = 25;
+// Bug fix: these values used to be "pending"/"in_review"/"approved"/"denied",
+// but the real applications.status column only ever held 'submitted' or
+// 'funded' -- the decision outcome was never written back onto it (see
+// origination-service/app/routers/applications.py::run_decision). Matches
+// the actual status values now.
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
-  { value: "pending", label: "Pending" },
+  { value: "submitted", label: "Pending decision" },
   { value: "in_review", label: "In review" },
   { value: "approved", label: "Approved" },
   { value: "denied", label: "Denied" },
+  { value: "funded", label: "Funded" },
 ];
 
 function prettyPurpose(p: string): string {
@@ -103,9 +109,7 @@ function UnderwritingContent() {
 
   // KPI summary derived from the current page of applications.
   const pendingCount = items.filter((a) =>
-    ["pending", "in_review", "refer", "review"].includes(
-      (a.status || "").toLowerCase()
-    )
+    ["submitted", "in_review"].includes((a.status || "").toLowerCase())
   ).length;
   const approvedCount = items.filter(
     (a) => (a.status || "").toLowerCase() === "approved"
