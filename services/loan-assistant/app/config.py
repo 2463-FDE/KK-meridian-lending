@@ -3,6 +3,14 @@ import os
 
 ORIGINATION_URL = os.getenv("ORIGINATION_URL", "http://origination-service:8001")
 
+# Bug fix: origination-service's /financials route requires this on top of
+# X-User-Role (review fix closing a role-spoofing gap -- see
+# origination-service/app/routers/applications.py::_is_staff). This service
+# never sent it, so /applications/{id}/summary 403'd for every staff role,
+# every time -- the AI Summary feature was broken end to end. Shared with
+# every other service's own INTERNAL_SERVICE_TOKEN (docker-compose.yml).
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Which backend calls Claude. "anthropic" (default) = direct Anthropic API,
