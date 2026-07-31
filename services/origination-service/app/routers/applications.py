@@ -30,6 +30,16 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 # Mirrors the staff role set the gateway already enforces for /assistant/*.
 _STAFF_ROLES = {"csr", "underwriter", "admin"}
 
+# Bug fix: applications.status used to only ever move 'submitted' -> 'funded'
+# (see accept_offer below) -- run_decision never wrote the decision outcome
+# back onto it at all. The underwriting console's status filter/KPIs
+# (frontend/app/underwriting/page.tsx) check for exactly these values, but
+# nothing in real request flow ever produced them -- only the synthetic bulk
+# seed data (db/init/003_seed_bulk.sql) faked a status column, bypassing the
+# app entirely. Every real, live-decisioned application was invisible to that
+# filter/KPI.
+_DECISION_STATUS = {"approve": "approved", "refer": "in_review", "deny": "denied"}
+
 # NOTE: the gateway's /los/{path:path} route (gateway/app/main.py) proxies to this
 # router with NO auth check — an applicant can check their own status without an
 # account, so anyone who guesses an app_id can hit any GET route here anonymously.
@@ -269,6 +279,13 @@ def run_decision(
     }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     outcome = resp["outcome"]
     accept_token = None
+    # Bug fix: reflect the outcome onto applications.status -- guarded so a
+    # staff rerun on an already-funded application (run_decision has no
+    # funded check of its own) can never regress a funded row backward.
+    db.query(
+        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+        (_DECISION_STATUS.get(outcome, outcome), app_id),
+    )
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
