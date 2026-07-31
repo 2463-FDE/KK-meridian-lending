@@ -155,11 +155,19 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     undone. Now records applied_at (db/migrations/0012) only on confirmed
     success, so a same-key retry can tell the difference and retry the apply
     instead of repeating a false "captured".
+
+    E2E bug found in the field: `amount` here is read back from the
+    payments row's RETURNING/SELECT (the caller's row["amount"]), and
+    psycopg2 hands back a NUMERIC column as Decimal regardless of what type
+    was inserted -- httpx's json= can't serialize Decimal, so this raised on
+    every single real (non-mocked) call and every payment silently reported
+    "pending" forever. float() here makes the JSON boundary correct
+    regardless of what type the caller passes.
     """
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
-            url, json={"amount": amount, "payment_id": payment_id}, timeout=5.0
+            url, json={"amount": float(amount), "payment_id": payment_id}, timeout=5.0
         )
         resp.raise_for_status()
         db.query("UPDATE payments SET applied_at = now() WHERE id = %s", (payment_id,))
