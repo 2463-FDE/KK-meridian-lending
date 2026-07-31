@@ -777,6 +777,171 @@ tbody tr:hover {
   border: 0;
 }
 
+/* ---- apply wizard polish ------------------------------------------------- */
+
+.eyebrow {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-ink);
+  margin: 0 0 8px;
+}
+.apply-grid {
+  display: grid;
+  grid-template-columns: 1.7fr 1fr;
+  gap: 22px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .apply-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.apply-card {
+  padding: 26px 28px;
+}
+.step-eyebrow {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-ink);
+  margin: 0 0 6px;
+}
+.step-heading {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 4px;
+}
+.step-desc {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 22px;
+}
+.field-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-2);
+  margin: 26px 0 2px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
+}
+.field-group-title:first-of-type {
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: none;
+}
+.input-adorn {
+  position: relative;
+}
+.input-adorn input {
+  padding-right: 42px;
+}
+.input-icon-left {
+  position: relative;
+}
+.input-icon-left input {
+  padding-left: 38px;
+}
+.input-icon-left svg {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  transform: translateY(-50%);
+  color: var(--muted-2);
+  pointer-events: none;
+}
+.field-row-address {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 0 16px;
+}
+@media (max-width: 620px) {
+  .field-row-address {
+    grid-template-columns: 1fr;
+  }
+}
+.input-adorn-btn {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+}
+.input-adorn-btn:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+.field-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted-2);
+  margin-top: 6px;
+}
+.field-note svg {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+/* ---- trust / summary sidebar --------------------------------------------- */
+
+.aside-card {
+  position: sticky;
+  top: 80px;
+}
+.aside-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.aside-item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.aside-icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-2);
+  color: var(--accent-ink);
+  border: 1px solid var(--line);
+}
+.aside-item-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  margin: 0 0 2px;
+}
+.aside-item-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 0;
+  line-height: 1.45;
+}
+
 /* ---- landing hero ------------------------------------------------------- */
 
 .hero {
