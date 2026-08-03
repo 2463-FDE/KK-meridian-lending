@@ -369,35 +369,56 @@ def review_application(
             detail=f"only a 'refer' decision can be manually reviewed (current outcome: {current_outcome!r})",
         )
 
-    db.query("UPDATE decisions SET outcome = %s WHERE app_id = %s", (body.outcome, app_id))
-    # Human-decision audit record -- kept separate from decision_events (the
-    # model's own append-only trail), see db/migrations/0018.
-    db.query(
-        "INSERT INTO manual_reviews (app_id, reviewer_role, outcome, reason) "
-        "VALUES (%s, %s, %s, %s)",
-        (app_id, x_user_role, body.outcome, body.reason),
-    )
-    # Same guard as run_decision's own status write: never regress an
-    # already-funded application's status backward.
-    db.query(
-        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
-        (_DECISION_STATUS.get(body.outcome, body.outcome), app_id),
-    )
-
+    # Review fix: the outcome update, audit insert, status change, and token
+    # mint used to run as separate autocommit statements -- a failure mid-way
+    # left a changed decision with no audit trail, and two concurrent
+    # reviewers could both pass the stale `current_outcome != "refer"` check
+    # above and both act on the same refer. The UPDATE below is the real,
+    # atomic guard (same RETURNING-gated pattern as accept_offer's funded
+    # check): only one concurrent reviewer's `outcome = 'refer'` can still be
+    # true, and everything else commits together with it or not at all.
     accept_token = None
+    with db.transaction() as cur:
+        cur.execute(
+            "UPDATE decisions SET outcome = %s WHERE app_id = %s AND outcome = 'refer' "
+            "RETURNING app_id",
+            (body.outcome, app_id),
+        )
+        if not cur.fetchall():
+            raise HTTPException(
+                status_code=409,
+                detail="this decision was already resolved by another reviewer",
+            )
+        # Human-decision audit record -- kept separate from decision_events (the
+        # model's own append-only trail), see db/migrations/0018.
+        cur.execute(
+            "INSERT INTO manual_reviews (app_id, reviewer_role, outcome, reason) "
+            "VALUES (%s, %s, %s, %s)",
+            (app_id, x_user_role, body.outcome, body.reason),
+        )
+        # Same guard as run_decision's own status write: never regress an
+        # already-funded application's status backward.
+        cur.execute(
+            "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+            (_DECISION_STATUS.get(body.outcome, body.outcome), app_id),
+        )
+        if body.outcome == "approve":
+            accept_token = secrets.token_urlsafe(32)
+            cur.execute(
+                "UPDATE applications SET accept_token = %s WHERE id = %s",
+                (accept_token, app_id),
+            )
+
     if body.outcome == "approve":
-        # Same auto-offer + accept_token minting as the automated approve
-        # path in run_decision above -- a manually-approved application gets
-        # exactly the same borrower-facing flow from here on.
+        # Same auto-offer as the automated approve path in run_decision above
+        # -- a manually-approved application gets exactly the same
+        # borrower-facing flow from here on. Best-effort and not part of the
+        # transaction above: a disclosure-service hiccup must not undo an
+        # already-committed manual review decision.
         try:
             disclosure_graph.auto_generate_offer(app_id)
         except Exception as e:  # noqa
             log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
-        accept_token = secrets.token_urlsafe(32)
-        db.query(
-            "UPDATE applications SET accept_token = %s WHERE id = %s",
-            (accept_token, app_id),
-        )
 
     return DecisionOut(
         app_id=app_id,

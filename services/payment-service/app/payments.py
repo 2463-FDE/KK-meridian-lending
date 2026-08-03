@@ -105,7 +105,12 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str
             (idempotency_key,),
         )[0]
         payment_id = row["id"]
-        if row["loan_id"] != loan_id or row["amount"] != amount:
+        # Review fix: row["amount"] comes back from Postgres as a Decimal
+        # (psycopg2 NUMERIC mapping) while `amount` here is a plain float --
+        # Decimal('10.99') != 10.99 under Python's float/Decimal comparison,
+        # so an identical retry was misjudged as a conflict and 409'd instead
+        # of returning the original result. Compare both sides as Decimal.
+        if row["loan_id"] != loan_id or row["amount"] != Decimal(str(amount)):
             raise IdempotencyKeyConflict(
                 f"idempotency_key={idempotency_key!r} was already used for "
                 f"loan_id={row['loan_id']} amount={row['amount']} -- this "

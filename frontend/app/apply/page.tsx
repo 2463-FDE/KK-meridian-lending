@@ -81,6 +81,11 @@ interface AppResult {
   app_id: string | number;
   status?: string;
   kyc?: Kyc;
+  // Review fix: anonymous applicants have no session -- this proves ownership
+  // on the first /decision call (see DecisionIn.access_token,
+  // origination-service's run_decision). Dropping it here silently 403'd every
+  // real borrower's own decision request.
+  access_token?: string;
 }
 
 interface DecisionResult {
@@ -261,9 +266,9 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost(
-        `/los/applications/${app.app_id}/decision`
-      )) as DecisionResult;
+      const res = (await apiPost(`/los/applications/${app.app_id}/decision`, {
+        access_token: app.access_token,
+      })) as DecisionResult;
       setDecision(res);
     } catch (err) {
       setApiError(errMsg(err, "Could not retrieve a decision."));

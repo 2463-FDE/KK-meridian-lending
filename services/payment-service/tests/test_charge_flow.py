@@ -18,6 +18,8 @@ retry retries the apply instead of repeating a false "captured".
 test_pan_mask.py still documents the remaining, deliberately-untested debt:
 full PAN/CVV persistence (D5/PCI).
 """
+from decimal import Decimal
+
 import httpx as httpx_module
 import pytest
 from fastapi.testclient import TestClient
@@ -52,7 +54,14 @@ class _FakeDb:
             loan_id, pan, cvv, amount, method, idempotency_key = params
             if idempotency_key is not None and idempotency_key in self._by_key:
                 return []  # ON CONFLICT DO NOTHING -- a row already exists for this key
-            row = {"id": self._next_id, "loan_id": loan_id, "amount": amount, "applied_at": None}
+            # Real Postgres hands a NUMERIC column back as Decimal regardless
+            # of what type was inserted -- mirror that here so a same-key
+            # retry's `row["amount"] != amount` comparison (Decimal vs. the
+            # request's float) is exercised the same way it is in production.
+            row = {
+                "id": self._next_id, "loan_id": loan_id,
+                "amount": Decimal(str(amount)), "applied_at": None,
+            }
             self._next_id += 1
             if idempotency_key is not None:
                 self._by_key[idempotency_key] = row
@@ -245,6 +254,31 @@ def test_repeated_post_payment_with_same_idempotency_key_is_not_double_charged(f
     assert len(servicing_calls) == 1  # ...but only the first ever reaches servicing
     # applied_at was already set by the first call, so the retry never re-called
     # servicing -- it just read back the already-applied row.
+
+
+def test_repeated_post_payment_with_a_cents_amount_is_not_misjudged_as_conflict(fake_db, monkeypatch):
+    """Review fix: row["amount"] reads back from Postgres as Decimal while the
+    incoming amount is a float -- Decimal('10.99') != 10.99 under naive
+    comparison, so an identical retry with a cents-precision amount used to
+    409 instead of returning the original result, leaving the payment stuck
+    with applied_at NULL. Must behave exactly like any other same-key retry."""
+    servicing_calls = []
+    monkeypatch.setattr(
+        payments.httpx, "post",
+        lambda *a, **k: servicing_calls.append((a, k)) or _FakeServicingResponse(),
+    )
+
+    body = _payload(amount=10.99, idempotency_key="cents-retry-key")
+
+    first = client.post("/payments", json=body)
+    second = client.post("/payments", json=body)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["payment_id"] == second.json()["payment_id"]
+    assert first.json()["applied_amount"] == second.json()["applied_amount"] == 10.99
+    assert first.json()["status"] == second.json()["status"] == "captured"
+    assert len(servicing_calls) == 1  # the retry never re-applied anything
 
 
 def test_repeated_post_payment_reconciles_a_pending_apply(fake_db, monkeypatch):

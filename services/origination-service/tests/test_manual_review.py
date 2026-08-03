@@ -8,6 +8,8 @@ state at all -- these tests cover the new endpoint: staff-only, only usable
 on an actual "refer" outcome, and an approve gets the same auto-offer +
 accept_token treatment the automated approve path in run_decision gets.
 """
+import contextlib
+
 from app import config, db
 from app.main import app
 from fastapi.testclient import TestClient
@@ -31,6 +33,40 @@ def _fake_query(decision_outcome, calls=None):
         return []
 
     return _query
+
+
+class _FakeReviewTxCursor:
+    """Stands in for the psycopg2 cursor db.transaction() yields for
+    review_application -- the outcome UPDATE ... RETURNING, the audit
+    INSERT, the status UPDATE, and (on approve) the accept_token UPDATE all
+    run through this one cursor, same as the real single transaction."""
+
+    def __init__(self, claim_succeeds, calls):
+        self.claim_succeeds = claim_succeeds
+        self.calls = calls
+        self._last = None
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql.strip(), params))
+        stmt = sql.strip()
+        if stmt.startswith("UPDATE decisions"):
+            self._last = [{"app_id": params[-1]}] if self.claim_succeeds else []
+        else:
+            self._last = []
+
+    def fetchall(self):
+        return self._last or []
+
+
+def _stub_transaction(monkeypatch, calls, claim_succeeds=True):
+    cursor = _FakeReviewTxCursor(claim_succeeds, calls)
+
+    @contextlib.contextmanager
+    def _fake_tx():
+        yield cursor
+
+    monkeypatch.setattr(db, "transaction", _fake_tx)
+    return cursor
 
 
 def test_review_requires_a_staff_session(monkeypatch):
@@ -104,6 +140,7 @@ def test_review_422s_on_an_already_decided_approve(monkeypatch):
 def test_review_approve_records_outcome_and_mints_accept_token(monkeypatch):
     calls = []
     monkeypatch.setattr(db, "query", _fake_query("refer", calls))
+    _stub_transaction(monkeypatch, calls)
 
     resp = client.post(
         "/applications/10/review",
@@ -133,6 +170,7 @@ def test_review_approve_records_outcome_and_mints_accept_token(monkeypatch):
 def test_review_deny_returns_the_staff_reason_as_adverse_action(monkeypatch):
     calls = []
     monkeypatch.setattr(db, "query", _fake_query("refer", calls))
+    _stub_transaction(monkeypatch, calls)
 
     resp = client.post(
         "/applications/10/review",
@@ -152,6 +190,28 @@ def test_review_deny_returns_the_staff_reason_as_adverse_action(monkeypatch):
     # No accept_token mint, no offer-generation attempt, on a deny.
     accept_token_updates = [c for c in calls if "accept_token" in c[0]]
     assert accept_token_updates == []
+
+
+def test_review_returns_409_when_another_reviewer_already_resolved_the_refer(monkeypatch):
+    """Review fix: the pre-transaction `current_outcome != "refer"` read is
+    stale by the time the transaction runs -- two concurrent reviewers can
+    both pass it. The atomic `UPDATE decisions ... WHERE outcome = 'refer'
+    RETURNING` is the real guard: the loser gets zero rows back and must
+    never insert an audit record or move the application status."""
+    calls = []
+    monkeypatch.setattr(db, "query", _fake_query("refer", calls))
+    _stub_transaction(monkeypatch, calls, claim_succeeds=False)
+
+    resp = client.post(
+        "/applications/10/review",
+        json={"outcome": "approve", "reason": "DTI recalculated under 43% with updated income"},
+        headers=_STAFF_HEADERS,
+    )
+
+    assert resp.status_code == 409
+    # The losing reviewer's audit insert and status update never ran.
+    assert not any(c[0].strip().startswith("INSERT INTO manual_reviews") for c in calls)
+    assert not any("SET status" in c[0] for c in calls)
 
 
 def test_review_rejects_an_empty_reason(monkeypatch):
