@@ -21,6 +21,7 @@ from ..schemas import (
     Disclosure,
     KycOut,
     Page,
+    ReviewIn,
 )
 
 log = get_logger("applications")
@@ -29,6 +30,16 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 # Roles allowed to see underwriting-sensitive fields (income, employment_years).
 # Mirrors the staff role set the gateway already enforces for /assistant/*.
 _STAFF_ROLES = {"csr", "underwriter", "admin"}
+
+# Bug fix: applications.status used to only ever move 'submitted' -> 'funded'
+# (see accept_offer below) -- run_decision never wrote the decision outcome
+# back onto it at all. The underwriting console's status filter/KPIs
+# (frontend/app/underwriting/page.tsx) check for exactly these values, but
+# nothing in real request flow ever produced them -- only the synthetic bulk
+# seed data (db/init/003_seed_bulk.sql) faked a status column, bypassing the
+# app entirely. Every real, live-decisioned application was invisible to that
+# filter/KPI.
+_DECISION_STATUS = {"approve": "approved", "refer": "in_review", "deny": "denied"}
 
 # NOTE: the gateway's /los/{path:path} route (gateway/app/main.py) proxies to this
 # router with NO auth check — an applicant can check their own status without an
@@ -238,7 +249,7 @@ def run_decision(
     # session or the access_token minted onto this application at submission.
     rows = db.query(
         "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, a.access_token, "
-        "ap.name, ap.ssn "
+        "a.status, ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
     )
@@ -250,6 +261,28 @@ def run_decision(
     if existing:
         if not _is_staff(x_user_role, x_internal_token):
             raise HTTPException(status_code=403, detail="staff only to rerun a decision")
+        # Bug fix: reruns had no guard beyond staff-only -- since scoring is
+        # deterministic (same SSN/income -> same score), rerunning after the
+        # application was already funded silently reset its recorded decision
+        # back to the automated outcome (e.g. "refer") while the loan sat
+        # funded on top of it -- a real data-integrity break. Rerunning after
+        # a manual review (see review_application/manual_reviews) is just as
+        # bad: it silently overwrote a staff decision with a fresh automated
+        # one, and since that reset the outcome back to "refer" it made the
+        # application eligible for manual review AGAIN, letting the same app
+        # get reviewed and reversed indefinitely.
+        if r.get("status") == "funded":
+            raise HTTPException(
+                status_code=422,
+                detail="cannot rerun a decision on an already-funded application",
+            )
+        manual = db.query("SELECT id FROM manual_reviews WHERE app_id = %s", (app_id,))
+        if manual:
+            raise HTTPException(
+                status_code=422,
+                detail="this application's decision was manually resolved by staff -- "
+                "rerunning the automated model would silently overwrite that",
+            )
     else:
         is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
         if not _is_staff(x_user_role, x_internal_token) and not is_owner:
@@ -269,6 +302,13 @@ def run_decision(
     }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     outcome = resp["outcome"]
     accept_token = None
+    # Bug fix: reflect the outcome onto applications.status -- guarded so a
+    # staff rerun on an already-funded application (run_decision has no
+    # funded check of its own) can never regress a funded row backward.
+    db.query(
+        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+        (_DECISION_STATUS.get(outcome, outcome), app_id),
+    )
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
@@ -294,6 +334,96 @@ def run_decision(
         decision=outcome,
         score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
         adverse_action_reason=resp.get("reason"),
+        accept_token=accept_token,
+    )
+
+
+@router.post("/{app_id}/review", response_model=DecisionOut)
+def review_application(
+    app_id: int,
+    body: ReviewIn,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    """Feature: staff tool to resolve a "refer" decision (policies/
+    underwriting_guidelines.md's manual-review band, score 600-659 or DTI
+    43-50%). Nothing let staff actually turn a refer into an approve/deny
+    before this -- accept_offer already correctly blocked self-accept on
+    anything but "approve", but a refer just sat there forever with no way
+    to move it. Staff-only, no borrower path at all -- this isn't a decision
+    the applicant can make for themselves.
+    """
+    _require_staff(x_user_role, x_internal_token)
+
+    rows = db.query("SELECT id FROM applications WHERE id = %s", (app_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="application not found")
+
+    existing = db.query("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+    if not existing:
+        raise HTTPException(status_code=422, detail="no decision exists yet for this application")
+    current_outcome = existing[0]["outcome"]
+    if current_outcome != "refer":
+        raise HTTPException(
+            status_code=422,
+            detail=f"only a 'refer' decision can be manually reviewed (current outcome: {current_outcome!r})",
+        )
+
+    # Review fix: the outcome update, audit insert, status change, and token
+    # mint used to run as separate autocommit statements -- a failure mid-way
+    # left a changed decision with no audit trail, and two concurrent
+    # reviewers could both pass the stale `current_outcome != "refer"` check
+    # above and both act on the same refer. The UPDATE below is the real,
+    # atomic guard (same RETURNING-gated pattern as accept_offer's funded
+    # check): only one concurrent reviewer's `outcome = 'refer'` can still be
+    # true, and everything else commits together with it or not at all.
+    accept_token = None
+    with db.transaction() as cur:
+        cur.execute(
+            "UPDATE decisions SET outcome = %s WHERE app_id = %s AND outcome = 'refer' "
+            "RETURNING app_id",
+            (body.outcome, app_id),
+        )
+        if not cur.fetchall():
+            raise HTTPException(
+                status_code=409,
+                detail="this decision was already resolved by another reviewer",
+            )
+        # Human-decision audit record -- kept separate from decision_events (the
+        # model's own append-only trail), see db/migrations/0018.
+        cur.execute(
+            "INSERT INTO manual_reviews (app_id, reviewer_role, outcome, reason) "
+            "VALUES (%s, %s, %s, %s)",
+            (app_id, x_user_role, body.outcome, body.reason),
+        )
+        # Same guard as run_decision's own status write: never regress an
+        # already-funded application's status backward.
+        cur.execute(
+            "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+            (_DECISION_STATUS.get(body.outcome, body.outcome), app_id),
+        )
+        if body.outcome == "approve":
+            accept_token = secrets.token_urlsafe(32)
+            cur.execute(
+                "UPDATE applications SET accept_token = %s WHERE id = %s",
+                (accept_token, app_id),
+            )
+
+    if body.outcome == "approve":
+        # Same auto-offer as the automated approve path in run_decision above
+        # -- a manually-approved application gets exactly the same
+        # borrower-facing flow from here on. Best-effort and not part of the
+        # transaction above: a disclosure-service hiccup must not undo an
+        # already-committed manual review decision.
+        try:
+            disclosure_graph.auto_generate_offer(app_id)
+        except Exception as e:  # noqa
+            log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
+
+    return DecisionOut(
+        app_id=app_id,
+        decision=body.outcome,
+        adverse_action_reason=body.reason if body.outcome == "deny" else None,
         accept_token=accept_token,
     )
 

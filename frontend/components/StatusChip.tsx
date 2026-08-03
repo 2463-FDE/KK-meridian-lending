@@ -10,6 +10,7 @@ const TONE: Record<string, string> = {
   current: "chip-green",
   approved: "chip-green",
   active: "chip-green",
+  funded: "chip-green",
   delinquent: "chip-red",
   past_due: "chip-red",
   default_: "chip-red",
@@ -19,6 +20,7 @@ const TONE: Record<string, string> = {
   closed: "chip-gray",
   refer: "chip-amber",
   pending: "chip-amber",
+  submitted: "chip-amber",
   in_review: "chip-amber",
   review: "chip-amber",
 };

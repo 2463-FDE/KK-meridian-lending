@@ -24,6 +24,18 @@ const PURPOSES = [
   { value: "other", label: "Other" },
 ];
 
+// Backend (origination-service ApplicationIn) has no separate city/state
+// columns -- just one free-text `address` string plus `zip_code`. Street/
+// City/State are a UI-only split for a proper address form; submitApplication
+// joins them back into that one string before the API call.
+const US_STATES = [
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL",
+  "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
+  "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH",
+  "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+  "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+];
+
 const OFFER_RATE_PCT = 7.99;
 const MIN_AGE_YEARS = 18; // lending policy floor -- see policy-chat's eligibility excerpt
 
@@ -45,7 +57,9 @@ interface FormState {
   ssn: string;
   email: string;
   phone: string;
-  address: string;
+  street: string;
+  city: string;
+  state: string;
   zip_code: string;
   employer: string;
   job_title: string;
@@ -67,6 +81,11 @@ interface AppResult {
   app_id: string | number;
   status?: string;
   kyc?: Kyc;
+  // Review fix: anonymous applicants have no session -- this proves ownership
+  // on the first /decision call (see DecisionIn.access_token,
+  // origination-service's run_decision). Dropping it here silently 403'd every
+  // real borrower's own decision request.
+  access_token?: string;
 }
 
 interface DecisionResult {
@@ -110,6 +129,23 @@ function maskSsn(ssn: string): string {
   return `•••-••-${digits.slice(-4)}`;
 }
 
+// Live-format as the borrower types -- backend normalizes by stripping
+// non-digits itself (origination-service's ApplicationIn validators), so a
+// dashed/parenthesized display value is safe to submit as-is.
+function formatSsnInput(raw: string): string {
+  const d = raw.replace(/\D/g, "").slice(0, 9);
+  if (d.length <= 3) return d;
+  if (d.length <= 5) return `${d.slice(0, 3)}-${d.slice(3)}`;
+  return `${d.slice(0, 3)}-${d.slice(3, 5)}-${d.slice(5)}`;
+}
+function formatPhoneInput(raw: string): string {
+  const d = raw.replace(/\D/g, "").slice(0, 10);
+  if (d.length === 0) return "";
+  if (d.length < 4) return `(${d}`;
+  if (d.length < 7) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
 export default function ApplyPage() {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<FormState>({
@@ -118,7 +154,9 @@ export default function ApplyPage() {
     ssn: "",
     email: "",
     phone: "",
-    address: "",
+    street: "",
+    city: "",
+    state: "",
     zip_code: "",
     employer: "",
     job_title: "",
@@ -163,7 +201,9 @@ export default function ApplyPage() {
       if (!form.phone.trim()) e.phone = "Required";
       else if (form.phone.replace(/\D/g, "").length !== 10)
         e.phone = "Enter a 10-digit phone number";
-      if (!form.address.trim()) e.address = "Required";
+      if (!form.street.trim()) e.street = "Required";
+      if (!form.city.trim()) e.city = "Required";
+      if (!form.state.trim()) e.state = "Required";
       if (!form.zip_code.trim()) e.zip_code = "Required";
       else if (form.zip_code.replace(/\D/g, "").length !== 5 && form.zip_code.replace(/\D/g, "").length !== 9)
         e.zip_code = "Enter a 5-digit ZIP code";
@@ -200,7 +240,7 @@ export default function ApplyPage() {
         name: form.name,
         dob: form.dob,
         ssn: form.ssn,
-        address: form.address,
+        address: `${form.street}, ${form.city}, ${form.state}`,
         zip_code: form.zip_code,
         email: form.email,
         phone: form.phone,
@@ -226,9 +266,9 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost(
-        `/los/applications/${app.app_id}/decision`
-      )) as DecisionResult;
+      const res = (await apiPost(`/los/applications/${app.app_id}/decision`, {
+        access_token: app.access_token,
+      })) as DecisionResult;
       setDecision(res);
     } catch (err) {
       setApiError(errMsg(err, "Could not retrieve a decision."));
@@ -272,26 +312,43 @@ export default function ApplyPage() {
     }
   }
 
-  const decisionApproved = (decision?.decision || "").toLowerCase() === "approved";
+  // Bug fix: backend always returns "approve" (decision-service/app/decision.py,
+  // origination-service's own outcome == "approve" check) -- never "approved".
+  // This compared against "approved" and so was always false, meaning "View
+  // your offer" never appeared through this page even on a genuine approval.
+  const decisionApproved = (decision?.decision || "").toLowerCase() === "approve";
+  const showAside = step < 5;
 
   return (
     <main className="wrap">
+      <p className="eyebrow">Personal Loan Application</p>
       <h1>Apply for a personal loan</h1>
-      <p className="sub">
-        Fixed-rate installment loan · $1,000–$50,000 · 12–60 months
+      <p className="sub" style={{ marginBottom: 14 }}>
+        Get a decision in minutes — no obligation until you accept your offer.
       </p>
+      <div className="badge-row" style={{ marginBottom: 28 }}>
+        <span className="badge">$1,000–$50,000</span>
+        <span className="badge">12–60 months</span>
+        <span className="badge">Fixed rate</span>
+      </div>
 
       <Stepper steps={STEPS} current={step} />
 
-      <div className="card">
+      <div className={showAside ? "apply-grid" : undefined}>
+        <div className="card apply-card">
         {/* ---- Step 1: Personal --------------------------------------- */}
         {step === 1 && (
           <>
-            <div className="card-title" style={{ marginBottom: 4 }}>
-              Step 1 · Personal information
-            </div>
+            <StepHeader
+              eyebrow="Step 1 of 5"
+              title="Personal information"
+              desc="This is used to verify your identity and won't affect your credit."
+            />
+
+            <div className="field-group-title">Identity</div>
             <Field label="Full name" error={errors.name}>
               <input
+                autoComplete="name"
                 value={form.name}
                 onChange={(e) => set("name", e.target.value)}
                 placeholder="Jane Q. Borrower"
@@ -301,6 +358,7 @@ export default function ApplyPage() {
               <Field label="Date of birth" error={errors.dob}>
                 <input
                   type="date"
+                  autoComplete="bday"
                   value={form.dob}
                   onChange={(e) => set("dob", e.target.value)}
                   min={MIN_DOB}
@@ -308,30 +366,37 @@ export default function ApplyPage() {
                 />
               </Field>
               <Field label="Social Security Number" error={errors.ssn}>
-                <div className="row" style={{ gap: 8 }}>
+                <div className="input-adorn">
                   <input
                     type={showSsn ? "text" : "password"}
                     autoComplete="off"
+                    inputMode="numeric"
                     value={form.ssn}
-                    onChange={(e) => set("ssn", e.target.value)}
-                    placeholder="###-##-####"
-                    style={{ flex: 1 }}
+                    onChange={(e) => set("ssn", formatSsnInput(e.target.value))}
+                    placeholder="123-45-6789"
                   />
                   <button
                     type="button"
-                    className="btn-ghost btn-sm"
+                    className="input-adorn-btn"
                     onClick={() => setShowSsn((v) => !v)}
                     aria-label={showSsn ? "Hide SSN" : "Show SSN"}
                   >
-                    {showSsn ? "Hide" : "Show"}
+                    {showSsn ? <EyeOffIcon /> : <EyeIcon />}
                   </button>
                 </div>
+                <p className="field-note">
+                  <LockIcon />
+                  Encrypted — used only to verify your identity.
+                </p>
               </Field>
             </div>
+
+            <div className="field-group-title">Contact information</div>
             <div className="field-row">
               <Field label="Email" error={errors.email}>
                 <input
                   type="email"
+                  autoComplete="email"
                   value={form.email}
                   onChange={(e) => set("email", e.target.value)}
                   placeholder="you@example.com"
@@ -339,36 +404,71 @@ export default function ApplyPage() {
               </Field>
               <Field label="Phone" error={errors.phone}>
                 <input
+                  type="tel"
+                  autoComplete="tel"
+                  inputMode="tel"
                   value={form.phone}
-                  onChange={(e) => set("phone", e.target.value)}
+                  onChange={(e) => set("phone", formatPhoneInput(e.target.value))}
                   placeholder="(555) 555-0123"
                 />
               </Field>
             </div>
-            <Field label="Home address" error={errors.address}>
-              <input
-                value={form.address}
-                onChange={(e) => set("address", e.target.value)}
-                placeholder="123 Main St, Springfield, IL 62704"
-              />
+            <Field label="Street address" error={errors.street}>
+              <div className="input-icon-left">
+                <PinIcon />
+                <input
+                  autoComplete="address-line1"
+                  value={form.street}
+                  onChange={(e) => set("street", e.target.value)}
+                  placeholder="123 Main St"
+                />
+              </div>
             </Field>
-            <Field label="ZIP code" error={errors.zip_code}>
-              <input
-                value={form.zip_code}
-                onChange={(e) => set("zip_code", e.target.value)}
-                placeholder="62704"
-                maxLength={10}
-              />
-            </Field>
+            <div className="field-row-address">
+              <Field label="City" error={errors.city}>
+                <input
+                  autoComplete="address-level2"
+                  value={form.city}
+                  onChange={(e) => set("city", e.target.value)}
+                  placeholder="Springfield"
+                />
+              </Field>
+              <Field label="State" error={errors.state}>
+                <select
+                  autoComplete="address-level1"
+                  value={form.state}
+                  onChange={(e) => set("state", e.target.value)}
+                >
+                  <option value="">Select</option>
+                  {US_STATES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="ZIP code" error={errors.zip_code}>
+                <input
+                  autoComplete="postal-code"
+                  inputMode="numeric"
+                  value={form.zip_code}
+                  onChange={(e) => set("zip_code", e.target.value)}
+                  placeholder="62704"
+                  maxLength={10}
+                />
+              </Field>
+            </div>
           </>
         )}
 
         {/* ---- Step 2: Employment & Income ---------------------------- */}
         {step === 2 && (
           <>
-            <div className="card-title" style={{ marginBottom: 4 }}>
-              Step 2 · Employment & income
-            </div>
+            <StepHeader
+              eyebrow="Step 2 of 5"
+              title="Employment & income"
+              desc="Helps us confirm you can comfortably afford this loan."
+            />
             <div className="field-row">
               <Field label="Employer" error={errors.employer}>
                 <input
@@ -413,9 +513,11 @@ export default function ApplyPage() {
         {/* ---- Step 3: Loan Details ----------------------------------- */}
         {step === 3 && (
           <>
-            <div className="card-title" style={{ marginBottom: 4 }}>
-              Step 3 · Loan details
-            </div>
+            <StepHeader
+              eyebrow="Step 3 of 5"
+              title="Loan details"
+              desc="Choose the amount and term that fits your budget."
+            />
             <label htmlFor="amount">Loan amount</label>
             <div className="range-readout">{usd(form.amount)}</div>
             <input
@@ -468,16 +570,20 @@ export default function ApplyPage() {
         {/* ---- Step 4: Review ----------------------------------------- */}
         {step === 4 && (
           <>
-            <div className="card-title" style={{ marginBottom: 12 }}>
-              Step 4 · Review your application
-            </div>
+            <StepHeader
+              eyebrow="Step 4 of 5"
+              title="Review your application"
+              desc="Double check everything below before you submit."
+            />
             <SummaryGroup title="Personal">
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
               <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
               <SummaryRow label="Email" value={form.email} />
               <SummaryRow label="Phone" value={form.phone} />
-              <SummaryRow label="Address" value={form.address} />
+              <SummaryRow label="Street address" value={form.street} />
+              <SummaryRow label="City" value={form.city} />
+              <SummaryRow label="State" value={form.state} />
               <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
             <SummaryGroup title="Employment & income">
@@ -524,9 +630,11 @@ export default function ApplyPage() {
         {/* ---- Step 5: Decision & Offer ------------------------------- */}
         {step === 5 && (
           <>
-            <div className="card-title" style={{ marginBottom: 12 }}>
-              Step 5 · Decision & offer
-            </div>
+            <StepHeader
+              eyebrow="Step 5 of 5"
+              title="Decision & offer"
+              desc="Your identity is verified and your application is on its way to underwriting."
+            />
 
             {!app ? (
               <div className="alert alert-warn">
@@ -628,12 +736,134 @@ export default function ApplyPage() {
             </button>
           </div>
         )}
+        </div>
+
+        {showAside && (
+          <aside className="apply-aside">
+            <div className="card aside-card">
+              <div className="card-title" style={{ marginBottom: 14 }}>
+                Why this is safe
+              </div>
+              <ul className="aside-list">
+                <li className="aside-item">
+                  <span className="aside-icon">
+                    <LockIcon />
+                  </span>
+                  <div>
+                    <p className="aside-item-title">Encrypted end to end</p>
+                    <p className="aside-item-desc">
+                      Your personal information is protected in transit and
+                      only used to process this application.
+                    </p>
+                  </div>
+                </li>
+                <li className="aside-item">
+                  <span className="aside-icon">
+                    <ShieldIcon />
+                  </span>
+                  <div>
+                    <p className="aside-item-title">No obligation</p>
+                    <p className="aside-item-desc">
+                      Reviewing your decision and offer doesn&rsquo;t commit
+                      you to anything — nothing is final until you accept.
+                    </p>
+                  </div>
+                </li>
+                <li className="aside-item">
+                  <span className="aside-icon">
+                    <ClockIcon />
+                  </span>
+                  <div>
+                    <p className="aside-item-title">Takes about 3 minutes</p>
+                    <p className="aside-item-desc">
+                      Five short steps — identity, income, loan details,
+                      review, and your decision.
+                    </p>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          </aside>
+        )}
       </div>
     </main>
   );
 }
 
 // ---- small presentational helpers ---------------------------------------
+
+function StepHeader({
+  eyebrow,
+  title,
+  desc,
+}: {
+  eyebrow: string;
+  title: string;
+  desc: string;
+}) {
+  return (
+    <div>
+      <div className="step-eyebrow">{eyebrow}</div>
+      <h2 className="step-heading">{title}</h2>
+      <p className="step-desc">{desc}</p>
+    </div>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-3.22 4.32M6.61 6.61C3.35 8.5 1 12 1 12s4 8 11 8a10.9 10.9 0 0 0 5.11-1.27" />
+      <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+      <path d="M1 1l22 22" />
+    </svg>
+  );
+}
+
+function PinIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+      <circle cx="12" cy="10" r="3" />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="11" width="18" height="11" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Z" />
+      <path d="m9 12 2 2 4-4" />
+    </svg>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
 
 function Field({
   label,

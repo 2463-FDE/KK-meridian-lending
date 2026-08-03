@@ -100,6 +100,13 @@ function UnderwritingDetailContent() {
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
 
+  // Manual review (feature: staff tool to resolve a "refer" decision) --
+  // see app/routers/applications.py::review_application.
+  const [reviewOutcome, setReviewOutcome] = useState<"approve" | "deny">("approve");
+  const [reviewReason, setReviewReason] = useState("");
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewErr, setReviewErr] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     if (!appId) return;
     setLoading(true);
@@ -136,6 +143,32 @@ function UnderwritingDetailContent() {
       setActionErr(errMsg(err, "Could not run a decision."));
     } finally {
       setActionBusy(false);
+    }
+  }
+
+  async function submitReview() {
+    if (!appId || !reviewReason.trim()) return;
+    setReviewBusy(true);
+    setReviewErr(null);
+    setActionMsg(null);
+    try {
+      const res = (await apiPost(`/los/applications/${appId}/review`, {
+        outcome: reviewOutcome,
+        reason: reviewReason.trim(),
+      })) as DecisionResult;
+      setDecision(res);
+      setReviewReason("");
+      setActionMsg(`Manual review recorded: ${res.decision}.`);
+      // Bug fix: an approve auto-generates an offer server-side (same as the
+      // automated approve path), but this response only carries the decision
+      // outcome, not the offer itself -- reload the application so `offer`
+      // (and status) reflect what the server actually did instead of going
+      // stale until the next manual page refresh.
+      await load();
+    } catch (err) {
+      setReviewErr(errMsg(err, "Could not record this review."));
+    } finally {
+      setReviewBusy(false);
     }
   }
 
@@ -329,11 +362,66 @@ function UnderwritingDetailContent() {
               </div>
             ) : null}
           </div>
-          <button onClick={runDecision} disabled={actionBusy}>
-            {actionBusy ? "Working…" : "Run decision"}
+          {app?.status !== "funded" ? (
+            <button onClick={runDecision} disabled={actionBusy}>
+              {actionBusy ? "Working…" : "Run decision"}
+            </button>
+          ) : null}
+        </div>
+        {app?.status === "funded" ? (
+          <p className="hint" style={{ marginTop: 10 }}>
+            {/* Bug fix: rerunning after funding used to silently reset the
+                recorded decision back to the automated outcome while the
+                loan sat funded on top of it -- the backend rejects this now
+                (422), so the button is hidden rather than offering an action
+                that always fails. */}
+            This application is funded — its decision can no longer be rerun.
+          </p>
+        ) : null}
+      </div>
+
+      {/* Manual review -- feature: staff tool to resolve a "refer" decision
+          (policies/underwriting_guidelines.md's manual-review band, score
+          600-659 or DTI 43-50%). Only shown once there's actually a refer
+          to resolve -- an approve/deny/no-decision application has nothing
+          for this panel to do. */}
+      {currentDecision === "refer" ? (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-title" style={{ marginBottom: 8 }}>
+            Manual review required
+          </div>
+          <p className="hint" style={{ marginBottom: 16 }}>
+            This application scored in the manual-review band. Resolve it
+            below — the applicant can&rsquo;t accept an offer until this
+            is decided.
+          </p>
+          <label>Decision</label>
+          <select
+            value={reviewOutcome}
+            onChange={(e) => setReviewOutcome(e.target.value as "approve" | "deny")}
+          >
+            <option value="approve">Approve</option>
+            <option value="deny">Deny</option>
+          </select>
+          <label>Reason (shown to the applicant if denied)</label>
+          <textarea
+            rows={3}
+            value={reviewReason}
+            onChange={(e) => setReviewReason(e.target.value)}
+            placeholder="e.g. DTI recalculated under policy threshold after verifying updated income"
+          />
+          {reviewErr ? <div className="alert alert-error">{reviewErr}</div> : null}
+          <button
+            style={{ marginTop: 14 }}
+            onClick={submitReview}
+            disabled={reviewBusy || !reviewReason.trim()}
+          >
+            {reviewBusy
+              ? "Recording…"
+              : `Record ${reviewOutcome === "approve" ? "approval" : "denial"}`}
           </button>
         </div>
-      </div>
+      ) : null}
 
       {/* Offer */}
       <h2>Offer</h2>

@@ -26,6 +26,17 @@ requires either a staff session or the one-time accept_token minted onto the
 application when it was approved (run_decision), and the actual boarding
 runs through an atomic conditional UPDATE (db.transaction()) that only one
 concurrent caller can win.
+
+Bug found in the field (test_manual_review.py's own feature): a rerun was
+only ever staff-gated, nothing else. Since scoring is deterministic (same
+SSN/income -> same score), rerunning a decision on an already-funded
+application silently reset its recorded outcome back to the automated
+result while the loan sat funded on top of it, and rerunning after a manual
+review (routers/applications.py's review_application) reset a staff
+decision back to "refer" -- making the SAME application eligible for manual
+review again, and again, indefinitely. These tests cover the fix: a rerun
+now 422s on either an already-funded application or one with a manual
+review on record.
 """
 import contextlib
 
@@ -166,6 +177,8 @@ def test_rerun_of_an_existing_decision_succeeds_for_staff(monkeypatch):
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return [{"app_id": 10}]
+        if "FROM manual_reviews" in sql:
+            return []  # not manually reviewed -- a plain automated rerun is fine
         return [_APPLICATION_ROW]
 
     monkeypatch.setattr(db, "query", _fake_query)
@@ -194,6 +207,53 @@ def test_rerun_of_an_existing_decision_by_staff_without_internal_token_is_forbid
     resp = client.post("/applications/10/decision", headers={"X-User-Role": "underwriter"})
 
     assert resp.status_code == 403
+    assert not calls
+
+
+def test_rerun_of_an_already_funded_application_is_rejected(monkeypatch):
+    """Bug found in the field: scoring is deterministic, so a rerun on a
+    funded application used to silently reset its recorded decision back to
+    the automated outcome while the loan sat funded on top of it."""
+    funded_row = {**_APPLICATION_ROW, "status": "funded"}
+
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return [{"app_id": 10}]
+        return [funded_row]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    calls = _fake_decision_client_post(monkeypatch)
+
+    resp = client.post(
+        "/applications/10/decision",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
+
+    assert resp.status_code == 422
+    assert not calls  # never reached decision-service -- no bureau pull triggered
+
+
+def test_rerun_of_a_manually_reviewed_application_is_rejected(monkeypatch):
+    """Bug found in the field: a rerun after a manual review (routers/
+    applications.py's review_application) silently reset the outcome back to
+    "refer", making the same application eligible for manual review again --
+    and again, indefinitely (observed: 5 flip-flopped reviews on one app)."""
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return [{"app_id": 10}]
+        if "FROM manual_reviews" in sql:
+            return [{"id": 1}]  # this application has a review on record
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    calls = _fake_decision_client_post(monkeypatch)
+
+    resp = client.post(
+        "/applications/10/decision",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
+
+    assert resp.status_code == 422
     assert not calls
 
 
