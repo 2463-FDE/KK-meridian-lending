@@ -52,6 +52,20 @@ dev/test, same convention as decision-service's bureau/AI-scorer calls) --
 a row is written `auth_status='pending'` before that call, then flipped to
 `'captured'` or `'failed'` once it actually returns (db/migrations/0017), so
 a crash mid-authorization is never silently mistaken for success.
+
+Review fix (double-charge on retry): flipping `auth_status` to 'captured'
+used to be a SEPARATE write from the processor call itself, with no record
+of the processor's own authorization id at all -- a crash between the
+processor approving the charge and that UPDATE running left a payment
+row stuck 'pending' with a real authorization already issued, and a same-
+key retry then called authorize_charge() again with no way to know that.
+Two things close this: (1) `authorization_id` (db/migrations/0019) is now
+persisted in the SAME UPDATE statement that flips auth_status to
+'captured' -- one atomic write, not two; (2) a pending retry calls
+`processor.get_authorization()` FIRST to ask the processor whether it
+already has a record of this idempotency_key, and only calls
+`authorize_charge()` (now itself passed the idempotency_key, so the
+processor also dedupes on its end) if the processor genuinely has none.
 """
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
@@ -121,7 +135,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # confirmed approval reaches _apply_via_servicing; a decline never
         # touches the loan balance at all.
         try:
-            processor.authorize_charge(processor_token, row["amount"])
+            auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
         except ChargeDeclinedError as exc:
             db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
             log.warning("charge declined payment_id=%s: %s", payment_id, exc)
@@ -129,7 +143,13 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 "payment_id": payment_id, "loan_id": row["loan_id"],
                 "status": "failed", "applied_amount": float(row["amount"]),
             }
-        db.query("UPDATE payments SET auth_status = 'captured' WHERE id = %s", (payment_id,))
+        # Review fix: auth_status and authorization_id used to be written in
+        # two separate statements -- a crash between them left 'captured'
+        # with no authorization id on record. One UPDATE, one atomic write.
+        db.query(
+            "UPDATE payments SET auth_status = 'captured', authorization_id = %s WHERE id = %s",
+            (auth_id, payment_id),
+        )
         applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
     else:
         row = db.query(
@@ -159,24 +179,43 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             }
 
         if row["auth_status"] == "pending":
-            # The original request's authorization call never ran or never
-            # confirmed (process died mid-flight) -- retry it now, using this
-            # retry's own processor_token since the token itself is never
-            # persisted (ADR 0008).
+            # The original request's authorization call never ran, never
+            # confirmed, or confirmed but the process died before persisting
+            # that fact (process died mid-flight, any of the three). Review
+            # fix: ask the processor whether it ALREADY has an authorization
+            # on record for this idempotency_key before charging again -- a
+            # blind re-authorize here risked a second real charge in exactly
+            # the "processor approved, then we crashed" case.
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
-                "still pending authorization, retrying", idempotency_key, payment_id,
+                "still pending authorization, checking processor before retrying",
+                idempotency_key, payment_id,
             )
-            try:
-                processor.authorize_charge(processor_token, row["amount"])
-            except ChargeDeclinedError as exc:
-                db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
-                log.warning("charge declined on retry payment_id=%s: %s", payment_id, exc)
-                return {
-                    "payment_id": payment_id, "loan_id": row["loan_id"],
-                    "status": "failed", "applied_amount": float(row["amount"]),
-                }
-            db.query("UPDATE payments SET auth_status = 'captured' WHERE id = %s", (payment_id,))
+            existing_auth_id = processor.get_authorization(idempotency_key)
+            if existing_auth_id:
+                log.info(
+                    "processor already has an authorization on record for "
+                    "idempotency_key=%s -> payment_id=%s, reusing it instead of "
+                    "re-charging", idempotency_key, payment_id,
+                )
+                auth_id = existing_auth_id
+            else:
+                # This retry's own processor_token since the token itself is
+                # never persisted (ADR 0008); idempotency_key is passed along
+                # so the processor also dedupes on its end.
+                try:
+                    auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
+                except ChargeDeclinedError as exc:
+                    db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
+                    log.warning("charge declined on retry payment_id=%s: %s", payment_id, exc)
+                    return {
+                        "payment_id": payment_id, "loan_id": row["loan_id"],
+                        "status": "failed", "applied_amount": float(row["amount"]),
+                    }
+            db.query(
+                "UPDATE payments SET auth_status = 'captured', authorization_id = %s WHERE id = %s",
+                (auth_id, payment_id),
+            )
 
         if row["applied_at"] is None:
             # Review fix: the original request's apply either never ran or

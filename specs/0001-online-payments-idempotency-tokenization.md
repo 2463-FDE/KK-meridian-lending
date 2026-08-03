@@ -160,3 +160,33 @@ and stored GLBA-covered data (SSN) inside a PCI-scoped flow for no reason.
   the same "false compliance claim" problem Week 1 fixed for the PCI-DSS
   claim itself. (Still conditional on an actual processor integration —
   the mock demonstrates the architecture, it is not itself a PCI control.)
+
+## Part 2 addendum — authorization is idempotent at the processor boundary too
+
+**Review finding:** `authorize_charge()`/auth_status were introduced alongside
+tokenization but weren't actually idempotent — the processor call carried no
+idempotency key, and a same-key retry on a `'pending'` row called
+`authorize_charge()` again unconditionally. A crash between the processor
+approving a charge and payment-service persisting that fact (`auth_status`
+and the processor's own authorization id were also two separate writes, not
+one) left a real risk of charging the card twice on retry.
+
+**Design, as built:**
+
+- `authorization_id` (`db/migrations/0019_payments_authorization_id.sql`) is
+  written in the SAME `UPDATE` that flips `auth_status` to `'captured'` —
+  one atomic write, not two.
+- `idempotency_key` is now passed to `processor.authorize_charge()`, forwarded
+  to a real processor as an `Idempotency-Key` header so it also dedupes on
+  its end.
+- A `'pending'` retry calls `processor.get_authorization(idempotency_key)`
+  first — reuses the processor's own record if one exists, and only calls
+  `authorize_charge()` if the processor genuinely has none.
+
+**Acceptance criteria (met, covered by tests):**
+
+- A same-key retry after a crash between processor approval and
+  `auth_status` being persisted reuses the existing authorization instead of
+  re-issuing a charge — `authorize_charge()` is called exactly once across
+  both attempts.
+  (`test_retry_after_crash_before_auth_status_persists_reuses_existing_authorization`)

@@ -18,6 +18,10 @@ processor's own token response.
 Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/
 0017) tracks whether a real processor authorization was ever confirmed for
 this row -- see app/processor.py::authorize_charge().
+
+Review fix: `authorization_id` (db/migrations/0019) is the processor's own
+authorization id, persisted in the same UPDATE that flips auth_status to
+'captured' -- see app/processor.py::get_authorization().
 """
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -39,4 +43,5 @@ class Payment(Base):
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     method: Mapped[str | None] = mapped_column(String, default="card")
     auth_status: Mapped[str] = mapped_column(String, default="captured")
+    authorization_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

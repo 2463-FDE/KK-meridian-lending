@@ -143,6 +143,12 @@ CREATE TABLE IF NOT EXISTS payments (
     -- rows (before this column existed) default to 'captured' -- they really
     -- were, just without a formal record of it.
     auth_status TEXT NOT NULL DEFAULT 'captured',
+    -- Review fix (db/migrations/0019): the processor's own authorization id,
+    -- persisted in the SAME UPDATE that flips auth_status to 'captured' --
+    -- a pending retry asks the processor for this via get_authorization()
+    -- before ever calling authorize_charge() again, instead of blindly
+    -- re-charging. See services/payment-service/app/payments.py.
+    authorization_id TEXT,
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial

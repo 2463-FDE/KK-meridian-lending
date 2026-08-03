@@ -33,7 +33,7 @@ import httpx as httpx_module
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config, payments
+from app import config, payments, processor
 from app.main import app
 
 client = TestClient(app)
@@ -41,6 +41,19 @@ client = TestClient(app)
 # don't each need updating -- the X-Internal-Token rejection tests further
 # down override/clear it per-call instead.
 client.headers.update({"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+
+
+@pytest.fixture(autouse=True)
+def _reset_stub_processor_authorizations():
+    """processor._stub_authorizations mimics a real processor's own
+    idempotency-key store, which is process-lifetime state by design (see
+    processor.py). Several tests in this file reuse the same default
+    idempotency_key ("idem-key-1") for genuinely unrelated attempts, so it
+    must not leak an authorization minted by an earlier test into a later
+    one expecting a fresh decline/approval."""
+    processor._stub_authorizations.clear()
+    yield
+    processor._stub_authorizations.clear()
 
 
 class _FakeDb:
@@ -72,7 +85,7 @@ class _FakeDb:
             row = {
                 "id": self._next_id, "loan_id": loan_id, "amount": Decimal(str(amount)),
                 "last4": last4, "brand": brand, "applied_at": None,
-                "auth_status": "pending",
+                "auth_status": "pending", "authorization_id": None,
             }
             self._next_id += 1
             if idempotency_key is not None:
@@ -83,12 +96,17 @@ class _FakeDb:
             (idempotency_key,) = params
             return [self._by_key[idempotency_key]]
         if stmt.startswith("UPDATE"):
-            (payment_id,) = params
             if "auth_status = 'captured'" in stmt:
+                # Review fix: auth_status and authorization_id are now written
+                # in the same UPDATE -- params carries both.
+                auth_id, payment_id = params
                 self._by_id[payment_id]["auth_status"] = "captured"
+                self._by_id[payment_id]["authorization_id"] = auth_id
             elif "auth_status = 'failed'" in stmt:
+                (payment_id,) = params
                 self._by_id[payment_id]["auth_status"] = "failed"
             elif "applied_at" in stmt:
+                (payment_id,) = params
                 self._by_id[payment_id]["applied_at"] = "2026-07-29T00:00:00Z"
             else:
                 raise AssertionError(f"unexpected UPDATE: {sql}")
@@ -516,6 +534,58 @@ def test_post_payment_declines_the_fixed_test_amount(fake_db):
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "failed"
+
+
+# --- review finding: authorization-retry could double-charge the processor ---
+
+def test_retry_after_crash_before_auth_status_persists_reuses_existing_authorization(fake_db, monkeypatch):
+    """The review's exact scenario: the processor approves the charge, but
+    the process dies before auth_status/authorization_id are persisted
+    (still 'pending' on record). A same-key retry must NOT call
+    authorize_charge() again -- it must ask the processor for its own record
+    of the idempotency_key (get_authorization()) and reuse that."""
+    authorize_calls = []
+
+    def _fake_authorize(token, amount, idempotency_key=None):
+        authorize_calls.append((token, amount, idempotency_key))
+        return "auth_abc123"
+
+    def _fake_get_authorization(idempotency_key):
+        # Mirrors a real processor's own idempotency-key store: it remembers
+        # the authorization from the first (crashed) attempt.
+        return "auth_abc123" if authorize_calls else None
+
+    monkeypatch.setattr(payments.processor, "authorize_charge", _fake_authorize)
+    monkeypatch.setattr(payments.processor, "get_authorization", _fake_get_authorization)
+
+    real_query = fake_db.query
+
+    def _crash_before_auth_status_update(sql, params=None):
+        if sql.strip().startswith("UPDATE") and "auth_status = 'captured'" in sql:
+            raise RuntimeError("simulated crash before auth_status/authorization_id persisted")
+        return real_query(sql, params)
+
+    monkeypatch.setattr(fake_db, "query", _crash_before_auth_status_update)
+
+    with pytest.raises(RuntimeError):
+        payments.charge(
+            loan_id=42, processor_token=_VALID_MOCK_TOKEN, last4="1111", brand="visa",
+            amount=250.0, idempotency_key="crash-before-persist",
+        )
+
+    assert fake_db._by_key["crash-before-persist"]["auth_status"] == "pending"
+    assert len(authorize_calls) == 1
+
+    monkeypatch.setattr(fake_db, "query", real_query)  # crash resolved -- app restarted
+
+    result = payments.charge(
+        loan_id=42, processor_token=_VALID_MOCK_TOKEN, last4="1111", brand="visa",
+        amount=250.0, idempotency_key="crash-before-persist",
+    )
+
+    assert result["status"] == "captured"
+    assert len(authorize_calls) == 1  # never re-issued a charge on retry
+    assert fake_db._by_key["crash-before-persist"]["authorization_id"] == "auth_abc123"
 
 
 def test_authorize_charge_fails_closed_when_no_processor_is_configured(monkeypatch):
