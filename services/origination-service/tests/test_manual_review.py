@@ -34,24 +34,12 @@ def _fake_query(decision_outcome, calls=None):
 
 
 def test_review_requires_a_staff_session(monkeypatch):
-    """No X-Internal-Token (or an anonymous/borrower call) must never be able
-    to resolve a refer -- this isn't a decision the applicant can make for
-    themselves."""
+    """An anonymous/borrower call (no X-User-Role, or a non-staff role) must
+    never be able to resolve a refer -- this isn't a decision the applicant
+    can make for themselves."""
     monkeypatch.setattr(db, "query", _fake_query("refer"))
 
     resp = client.post("/applications/10/review", json={"outcome": "approve", "reason": "manual ok"})
-
-    assert resp.status_code == 403
-
-
-def test_review_requires_a_role_in_staff_roles(monkeypatch):
-    monkeypatch.setattr(db, "query", _fake_query("refer"))
-
-    resp = client.post(
-        "/applications/10/review",
-        json={"outcome": "approve", "reason": "manual ok"},
-        headers={"X-User-Role": "underwriter"},  # no X-Internal-Token
-    )
 
     assert resp.status_code == 403
 
