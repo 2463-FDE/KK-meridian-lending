@@ -24,21 +24,26 @@ def create_application(payload: dict) -> tuple[int, str]:
     """
     log.info("POST /applications intake req=%s", payload)  # full PII in the log
     applicant = db.query(
-        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
-        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, email, phone, address, zip_code) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
             payload.get("name"), payload.get("dob"), payload.get("ssn"),
-            payload.get("ein"), payload.get("is_entity", False), payload.get("address"),
+            payload.get("ein"), payload.get("is_entity", False),
+            payload.get("email"), payload.get("phone"), payload.get("address"),
+            payload.get("zip_code"),
         ),
     )
     applicant_id = applicant[0]["id"]
     access_token = secrets.token_urlsafe(32)
     app_row = db.query(
-        "INSERT INTO applications (applicant_id, amount, term_months, purpose, income, access_token) "
-        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        "INSERT INTO applications (applicant_id, amount, term_months, purpose, income, "
+        "employer, job_title, employment_years, access_token) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
             applicant_id, payload.get("amount"), payload.get("term_months", 36),
-            payload.get("purpose"), payload.get("income"), access_token,
+            payload.get("purpose"), payload.get("income"),
+            payload.get("employer"), payload.get("job_title"), payload.get("employment_years"),
+            access_token,
         ),
     )
     return app_row[0]["id"], access_token
@@ -60,6 +65,29 @@ def board_to_servicing(app_id: int, applicant_name: str, principal: float,
         (loan_id, float(principal)),   # money as float
     )
     log.info("boarded app_id=%s -> loan_id=%s (direct LSS insert)", app_id, loan_id)
+    return loan_id
+
+
+def board_to_servicing_tx(cur, app_id: int, applicant_name: str, principal: float,
+                          annual_rate_pct: float, term_months: int) -> int:
+    """Same insert as board_to_servicing, but runs on a caller-supplied cursor
+    so it lands in the SAME transaction as the caller's own statements (see
+    routers/applications.py accept_offer + db.transaction()) -- a boarding
+    failure then rolls back everything in that transaction together, instead
+    of leaving a status flip committed with no loan behind it.
+    """
+    cur.execute(
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct, term_months),
+    )
+    loan_id = cur.fetchone()["id"]
+    cur.execute(
+        "INSERT INTO balances (loan_id, balance) VALUES (%s, %s) "
+        "ON CONFLICT (loan_id) DO NOTHING",
+        (loan_id, float(principal)),
+    )
+    log.info("boarded app_id=%s -> loan_id=%s (direct LSS insert, in tx)", app_id, loan_id)
     return loan_id
 
 
