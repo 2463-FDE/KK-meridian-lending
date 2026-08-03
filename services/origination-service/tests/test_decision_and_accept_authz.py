@@ -444,6 +444,37 @@ def test_reaccept_of_an_already_funded_application_by_staff_without_internal_tok
     assert not board_calls
 
 
+def test_first_accept_returns_409_when_no_offer_exists_yet(monkeypatch):
+    """Review fix: run_decision's auto_generate_offer call is best-effort, so
+    an approved application can reach accept_offer with no linked offer row
+    at all. This used to fall back to a hardcoded 7.99 APR and board the
+    borrower at a rate/terms nobody ever showed them -- no TILA disclosure on
+    record. Must fail closed (409) instead of ever silently making up a rate."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", apr=None)])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 409
+    assert not board_calls
+
+
+def test_reaccept_of_an_already_funded_application_returns_409_when_no_offer_exists(monkeypatch):
+    """Same guard on the staff re-accept-of-a-funded-application path -- a
+    funded-with-no-offer row (exactly the gap this review flagged) must not
+    board a second loan off a made-up rate either."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded", apr=None)])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post(
+        "/applications/10/accept",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
+
+    assert resp.status_code == 409
+    assert not board_calls
+
+
 def test_reaccept_reports_409_when_a_loan_already_exists(monkeypatch):
     """loans_app_id_key (db/migrations/0015) is the database-level backstop --
     if a staff re-accept somehow races a loan that already exists for this

@@ -482,7 +482,21 @@ def accept_offer(
     if r.get("outcome") != "approve":
         raise HTTPException(status_code=422, detail="application is not approved")
 
-    rate = r.get("apr") or 7.99
+    # Review fix: run_decision's auto_generate_offer call is best-effort (a
+    # disclosure-service hiccup must not fail the decision that already
+    # happened) -- but that meant an approved application with NO offer row
+    # could still reach here and board. `rate = r.get("apr") or 7.99` then
+    # silently boarded the borrower at a made-up rate they were never shown,
+    # with no TILA disclosure record at all. Fail closed instead: no linked
+    # offer means nothing to accept yet, on every path that can board a loan
+    # (including the staff re-accept-a-funded-application path below).
+    if r.get("apr") is None:
+        raise HTTPException(
+            status_code=409,
+            detail="no offer/disclosure exists yet for this application -- "
+            "generate one (POST /los/offer) before it can be accepted",
+        )
+    rate = r["apr"]
     name = r.get("name") or "Borrower"
 
     if r.get("status") == "funded":

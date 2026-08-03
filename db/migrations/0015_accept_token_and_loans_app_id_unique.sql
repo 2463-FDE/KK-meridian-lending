@@ -20,5 +20,64 @@ ALTER TABLE applications
 -- matter what code path ever inserts into loans. NULL stays legal (a
 -- Postgres UNIQUE constraint allows any number of NULLs) for the legacy
 -- direct-insert /board endpoint's loans that predate an app_id link.
+--
+-- Review fix (ordering): this used to add the constraint with no duplicate
+-- cleanup at all -- on any environment that actually hit the race this
+-- branch documents (two loans boarded for one application), the ALTER TABLE
+-- itself would fail on exactly the rows it exists to guard against, blocking
+-- deploy. Same three-step shape as 0011's offers cleanup: resolve duplicates
+-- deterministically first, then constrain -- except a loan (unlike an offer)
+-- has child rows (balances, payments) that reference it directly, so the
+-- losing duplicate's children must be reassigned/dropped before the loan
+-- row itself can be deleted.
+
+-- 1. Pick one canonical loan per app_id. A payment already applied against a
+-- loan is real, external evidence of which one the app/borrower actually
+-- used -- that loan wins regardless of id. If neither duplicate has a
+-- payment (the common case: the race's loser was never returned to any
+-- caller and nothing ever touched it again), fall back to the oldest id --
+-- the first one boarded, and so the one most likely to be the same loan_id
+-- any earlier response/log/support ticket already refers to.
+CREATE TEMP TABLE loans_survivor AS
+SELECT DISTINCT ON (l.app_id) l.app_id, l.id AS survivor_id
+FROM loans l
+WHERE l.app_id IS NOT NULL
+ORDER BY l.app_id,
+         (SELECT count(*) FROM payments p WHERE p.loan_id = l.id) DESC,
+         l.id ASC;
+
+-- 2. Reassign any payments recorded against a losing duplicate onto the
+-- survivor -- a payment is a money-movement record and must never just
+-- disappear, even for a loan_id nothing else will ever reference again.
+UPDATE payments p
+SET loan_id = s.survivor_id
+FROM loans l
+JOIN loans_survivor s ON s.app_id = l.app_id
+WHERE p.loan_id = l.id
+  AND l.id <> s.survivor_id;
+
+-- 3. Drop the losing duplicates' own balances rows -- board_to_servicing
+-- creates one balances row per loan at boarding time, so every duplicate has
+-- one. The survivor's own balances row (same principal, since both loans in
+-- a duplicate pair were boarded from the SAME application/amount) already
+-- reflects the correct balance; the loser's is now genuinely orphaned.
+DELETE FROM balances b
+USING loans l
+JOIN loans_survivor s ON s.app_id = l.app_id
+WHERE b.loan_id = l.id
+  AND l.id <> s.survivor_id;
+
+-- 4. Delete the losing duplicate loan rows themselves -- safe now that
+-- nothing still references them (step 2 moved any payments, step 3 dropped
+-- the balances row).
+DELETE FROM loans l
+USING loans_survivor s
+WHERE l.app_id = s.app_id
+  AND l.id <> s.survivor_id;
+
+DROP TABLE loans_survivor;
+
+-- 5. The real "one loan per application" guarantee -- safe to add now that
+-- step 1-4 leaves at most one non-NULL app_id per loan.
 ALTER TABLE loans
     ADD CONSTRAINT loans_app_id_key UNIQUE (app_id);
