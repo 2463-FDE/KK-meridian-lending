@@ -63,6 +63,12 @@ app.add_middleware(RateLimitMiddleware)
 # only ever covered the LLM calls, not the other seven services.
 Instrumentator().instrument(app).expose(app)
 
+# W7: exposes GET /metrics in Prometheus text format -- request count, latency
+# histograms, in-progress requests, broken down by route/method/status. No
+# service in this repo had any cross-service metrics before this; LangSmith
+# only ever covered the LLM calls, not the other seven services.
+Instrumentator().instrument(app).expose(app)
+
 
 @app.get("/health")
 def health():

@@ -6,3 +6,4 @@ pydantic==2.10.4
 SQLAlchemy==2.0.36
 prometheus-fastapi-instrumentator==7.0.0
 langgraph==0.2.62
+prometheus-fastapi-instrumentator==7.0.0
