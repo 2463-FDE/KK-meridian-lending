@@ -72,6 +72,12 @@ def authorize_charge(processor_token: str, amount: float) -> str:
         ProcessorUnavailableError: no processor is configured/reachable and
             ALLOW_PAYMENT_STUB is not set (i.e. outside development/test).
     """
+    # Review fix: callers pass row["amount"] read back from Postgres, which
+    # is a Decimal regardless of what type was inserted (same gap as
+    # _apply_via_servicing) -- httpx's json= can't serialize Decimal at all,
+    # and Decimal('0.02') != 0.02 under naive comparison broke the stub's own
+    # test-decline check. Normalize to float once, up front.
+    amount = float(amount)
     if not PROCESSOR_API_KEY:
         if not ALLOW_PAYMENT_STUB:
             raise ProcessorUnavailableError(
