@@ -40,20 +40,31 @@ def health():
 
 
 class PaymentIn(BaseModel):
+    # ADR 0008 (Week 5 tokenization): this used to accept raw pan/cvv/ssn
+    # directly and log/persist them unredacted (D5) -- the exact same gap
+    # payment-service's own /payments closed, just not yet ported to this
+    # duplicate, legacy endpoint. Same contract now: only the processor's
+    # opaque token plus non-sensitive display fields, never a raw PAN/CVV,
+    # and ssn had no functional role in a card/ACH charge here to begin with.
+    # `extra="forbid"` makes that a real rejection, not a silent field drop.
+    model_config = {"extra": "forbid"}
+
     loan_id: int
-    pan: Optional[str] = None
-    cvv: Optional[str] = None
+    processor_token: str
+    last4: Optional[str] = None
+    brand: Optional[str] = None
     amount: float
-    ssn: Optional[str] = None
     name: Optional[str] = None
     method: str = "card"
 
 
 @app.post("/payments")
 def post_payment(body: PaymentIn):
-    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
+    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2,
+    # unrelated to the PCI/D5 fix above -- left as-is, same scope boundary
+    # payment-service's own idempotency fix drew.)
     return payments.charge(
-        body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method
+        body.loan_id, body.processor_token, body.last4, body.brand, body.amount, body.name, body.method
     )
 
 
