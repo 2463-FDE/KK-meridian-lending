@@ -70,9 +70,52 @@ def _fake_decision_client_post(monkeypatch, response=None):
     return calls
 
 
+class _FakeRunDecisionTxCursor:
+    """Stands in for the psycopg2 cursor db.transaction() yields for
+    run_decision -- the applications row lock, the manual_reviews
+    re-check (both under that same lock), the decisions INSERT ... ON
+    CONFLICT DO UPDATE, the status UPDATE, and the accept_token mint all
+    run through this one cursor, same as the real single transaction.
+    manual_review lets a test simulate a staff decision committing between
+    the outer pre-check and this transaction (the race this design closes)."""
+
+    def __init__(self, calls, locked_status="submitted", manual_review=None):
+        self.calls = calls
+        self.locked_status = locked_status
+        self.manual_review = manual_review
+        self._last = None
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql.strip(), params))
+        stmt = sql.strip()
+        if stmt.startswith("SELECT status FROM applications"):
+            self._last = [{"status": self.locked_status}] if self.locked_status is not None else []
+        elif stmt.startswith("SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
+                              "FROM manual_reviews"):
+            self._last = [self.manual_review] if self.manual_review else []
+        else:
+            self._last = []
+
+    def fetchall(self):
+        return self._last or []
+
+
+def _stub_run_decision_transaction(monkeypatch, calls, locked_status="submitted", manual_review=None):
+    cursor = _FakeRunDecisionTxCursor(calls, locked_status, manual_review)
+
+    @contextlib.contextmanager
+    def _fake_tx():
+        yield cursor
+
+    monkeypatch.setattr(db, "transaction", _fake_tx)
+    return cursor
+
+
 def test_first_decision_with_the_applications_own_access_token_runs(monkeypatch):
     """The legitimate no-account borrower flow: the access_token minted at
     submission and handed back is round-tripped on the "Get decision" call."""
+    calls = []
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return []  # no decision on record yet -- this is the first run
@@ -80,6 +123,7 @@ def test_first_decision_with_the_applications_own_access_token_runs(monkeypatch)
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
@@ -122,28 +166,29 @@ def test_approved_decision_mints_an_accept_token(monkeypatch):
     """Review fix: accept_offer now requires either staff or this one-time
     token for a fresh accept -- it has to actually be minted (and returned to
     the caller) whenever the decision is an approval."""
-    update_calls = []
+    calls = []
 
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
-            return []
-        if sql.strip().startswith("UPDATE applications SET accept_token"):
-            update_calls.append(params)
             return []
         return [_APPLICATION_ROW]
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
     assert resp.status_code == 200
     token = resp.json()["accept_token"]
     assert token  # a real, non-empty token was minted
-    assert update_calls and update_calls[0][0] == token  # and persisted onto the app
+    update_calls = [c for c in calls if c[0].startswith("UPDATE applications SET accept_token")]
+    assert update_calls and update_calls[0][1][0] == token  # and persisted onto the app
 
 
 def test_denied_decision_mints_no_accept_token(monkeypatch):
+    calls = []
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return []
@@ -151,6 +196,7 @@ def test_denied_decision_mints_no_accept_token(monkeypatch):
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch, response={"outcome": "deny", "score": 500, "reason": "low score"})
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
@@ -174,6 +220,8 @@ def test_rerun_of_an_existing_decision_requires_staff(monkeypatch):
 
 
 def test_rerun_of_an_existing_decision_succeeds_for_staff(monkeypatch):
+    calls = []
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return [{"app_id": 10}]
@@ -183,6 +231,7 @@ def test_rerun_of_an_existing_decision_succeeds_for_staff(monkeypatch):
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post(
         "/applications/10/decision",
@@ -268,6 +317,53 @@ def test_rerun_of_a_manually_reviewed_application_is_rejected(monkeypatch):
     assert "Sam Okafor" in detail
     assert "DTI too high after manual re-verification" in detail
     assert "cannot be rerun" in detail
+
+
+def test_rerun_blocked_when_a_manual_review_commits_during_the_decision_service_call(monkeypatch):
+    """Architecture fix: decision-service no longer writes `decisions`
+    itself (it only proposes an outcome + records its own decision_events
+    audit row) -- origination-service is the sole writer, under a lock on
+    the SAME applications row review_application's own transaction locks.
+    Simulated here: the cheap pre-call check sees no manual review yet
+    (passes), decision-service responds with a proposed outcome, but by the
+    time this request's OWN transaction opens and takes the lock, a manual
+    review has landed (as if review_application's transaction committed
+    first) -- the authoritative in-transaction re-check (under the lock)
+    must catch this, never write decisions/applications.status/
+    accept_token, and report the real, effective decision."""
+    calls = []
+
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return [{"app_id": 10}]
+        if "FROM manual_reviews" in sql:
+            return []  # the cheap pre-call check -- nothing yet
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(
+        monkeypatch, calls,
+        manual_review={
+            "outcome": "approve", "reason": "DTI recalculated under 43%",
+            "reviewer_name": "Priya Nair", "reviewer_role": "csr",
+            "reviewed_at": "2026-08-01T12:05:00+00:00",
+        },
+    )
+
+    resp = client.post(
+        "/applications/10/decision",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "manually APPROVED" in detail
+    assert "Priya Nair" in detail
+    # The race was caught under the lock, inside the transaction -- no
+    # decisions INSERT, no status UPDATE, no accept_token mint ever ran.
+    assert not any(c[0].startswith("INSERT INTO decisions") for c in calls)
+    assert not any(c[0].startswith("UPDATE applications") for c in calls)
 
 
 # --- POST /{app_id}/accept ---------------------------------------------------

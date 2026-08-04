@@ -59,11 +59,12 @@ class _FakeReviewTxCursor:
     UPDATE, the status UPDATE, and the accept_token mint/clear all run
     through this one cursor, same as the real single transaction."""
 
-    def __init__(self, claim_succeeds, calls, locked_status="in_review", winning_row=None):
+    def __init__(self, claim_succeeds, calls, locked_status="in_review", winning_row=None, locked_outcome="refer"):
         self.claim_succeeds = claim_succeeds
         self.calls = calls
         self.locked_status = locked_status
         self.winning_row = winning_row or _PRIOR_APPROVE
+        self.locked_outcome = locked_outcome
         self._last = None
 
     def execute(self, sql, params=None):
@@ -71,6 +72,11 @@ class _FakeReviewTxCursor:
         stmt = sql.strip()
         if stmt.startswith("SELECT status FROM applications"):
             self._last = [{"status": self.locked_status}]
+        elif stmt.startswith("SELECT outcome FROM decisions"):
+            # Audit fix: review_application re-verifies current_outcome == 'refer'
+            # under a row lock inside the transaction, not just the outer
+            # pre-check -- defaults to 'refer' (the happy-path case) here.
+            self._last = [{"outcome": self.locked_outcome}] if self.locked_outcome is not None else []
         elif stmt.startswith("INSERT INTO manual_reviews"):
             # params = (app_id, reviewer_role, reviewer_name, outcome, reason)
             self._last = (
@@ -89,8 +95,8 @@ class _FakeReviewTxCursor:
         return self._last or []
 
 
-def _stub_transaction(monkeypatch, calls, claim_succeeds=True, locked_status="in_review", winning_row=None):
-    cursor = _FakeReviewTxCursor(claim_succeeds, calls, locked_status, winning_row)
+def _stub_transaction(monkeypatch, calls, claim_succeeds=True, locked_status="in_review", winning_row=None, locked_outcome="refer"):
+    cursor = _FakeReviewTxCursor(claim_succeeds, calls, locked_status, winning_row, locked_outcome)
 
     @contextlib.contextmanager
     def _fake_tx():
@@ -348,6 +354,30 @@ def test_review_denied_application_reports_its_original_deny_unchanged(monkeypat
     assert "Income insufficient for requested amount" in detail
     # The second attempt's own outcome/reason never appear -- only the original.
     assert "actually let's approve it" not in detail
+
+
+# --- audit fix: current_outcome == 'refer' re-verified under a row lock ---
+
+def test_review_rejects_when_outcome_changed_away_from_refer_between_precheck_and_transaction(monkeypatch):
+    """Audit fix: the outer current_outcome check reads via a separate,
+    autocommitted db.query() call BEFORE the transaction opens -- a
+    concurrent run_decision rerun could change decisions.outcome in that
+    gap. Simulated here: the outer pre-check sees 'refer' (passes), but the
+    SELECT ... FOR UPDATE inside the transaction sees 'approve' (changed in
+    between) -- must reject and write nothing."""
+    calls = []
+    monkeypatch.setattr(db, "query", _fake_query("refer", calls))  # outer pre-check sees 'refer'
+    _stub_transaction(monkeypatch, calls, locked_outcome="approve")  # but it already changed
+
+    resp = client.post(
+        "/applications/10/review",
+        json={"outcome": "deny", "reason": "trying to resolve a refer that no longer exists"},
+        headers=_STAFF_HEADERS,
+    )
+
+    assert resp.status_code == 422
+    assert "only a 'refer' decision can be reviewed" in resp.json()["detail"]
+    assert not any(c[0].strip().startswith("INSERT INTO manual_reviews") for c in calls)
 
 
 # --- requirement 5: two simultaneous decisions can't overwrite each other --

@@ -46,8 +46,22 @@ async def _node_score(state: DecisionState) -> dict:
 
 
 def _node_persist(state: DecisionState) -> dict:
-    """Same single db.transaction() call decide() always made -- both rows commit
-    or neither does, so a decision is never returned without its audit row."""
+    """Architecture fix (single-writer race closure): decision-service used
+    to also write the authoritative `decisions` row here
+    (`INSERT ... ON CONFLICT (app_id) DO UPDATE`), unconditionally --
+    nothing here knew whether origination-service's `manual_reviews` table
+    already held a staff's final decision for this app_id, so a rerun could
+    silently overwrite it out from under origination-service's own guards
+    (audit finding: an unclosed race between this call and
+    review_application's transaction).
+
+    decision-service now only computes and records its OWN append-only
+    audit trail (decision_events -- what the model proposed, and why) --
+    origination-service is the sole writer of the authoritative `decisions`
+    row, under a lock, with a staleness check against manual_reviews (see
+    routers/applications.py::run_decision). This function still commits
+    decision_events durably before returning: a proposed outcome is never
+    reported to the caller without a matching audit row explaining it."""
     application = state["application"]
     result = state["result"]
     bureau_score = state["bureau_score"]
@@ -55,11 +69,6 @@ def _node_persist(state: DecisionState) -> dict:
 
     try:
         decision.db.transaction([
-            (
-                "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
-                "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
-                (app_id, result["decision"]),
-            ),
             (
                 "INSERT INTO decision_events "
                 "(app_id, requested_amount, term_months, annual_income, bureau_score, "
@@ -80,7 +89,7 @@ def _node_persist(state: DecisionState) -> dict:
             ),
         ])
     except Exception as e:
-        log.error("could not persist decision + decision_event: %s", e)
+        log.error("could not persist decision_event: %s", e)
         raise decision.DecisionPersistenceError(
             f"app_id={app_id}: decision computed ({result['decision']}, score="
             f"{result['score']}) but could not be durably recorded — refusing to "

@@ -1,9 +1,16 @@
 """Credit decisioning endpoint.
 
 Runs the decisioning chain (async -- see decision.py's module docstring for the
-async rework). Persists both the legacy outcome-only `decisions` row and an
-append-only `decision_events` row (inputs, model score/version, top features,
-reason codes) via decision.decide().
+async rework) and persists decision-service's OWN append-only audit trail
+(decision_events: inputs, model score/version, top features, reason codes)
+via decision.decide().
+
+Architecture fix: this used to also persist the authoritative `decisions`
+row (outcome-only, unconditional ON CONFLICT DO UPDATE) -- that write is
+gone. This endpoint now only PROPOSES an outcome; origination-service is
+the sole writer of `decisions`, under a lock, with a staleness check
+against a staff final decision (manual_reviews). See routers/
+applications.py::run_decision and app/graph.py::_node_persist.
 """
 from fastapi import APIRouter, Header, HTTPException
 

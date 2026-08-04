@@ -326,18 +326,23 @@ async def test_decide_raises_when_audit_persistence_fails(monkeypatch):
         await decide({"app_id": 5, "ssn": "123456782", "income": 100000})
 
 
-async def test_decide_persists_decision_and_event_in_one_transaction_call(monkeypatch):
-    """Both rows must go through the SAME db.transaction() call (one atomic
-    commit/rollback), not two separate db.query() calls that could partially
-    succeed."""
+async def test_decide_persists_only_its_own_audit_event_not_the_decisions_row(monkeypatch):
+    """Architecture fix: decision-service used to also write the
+    authoritative `decisions` row here (unconditional ON CONFLICT DO
+    UPDATE) -- that let a rerun silently overwrite a staff final decision
+    out from under origination-service's own guards (audit finding).
+    decision-service now only proposes an outcome and persists its OWN
+    append-only audit trail (decision_events); origination-service is the
+    sole writer of `decisions`, under a lock (routers/applications.py::
+    run_decision)."""
     calls = []
     monkeypatch.setattr(
         decision.db, "transaction",
-        lambda statements: calls.append(statements) or [[], []],
+        lambda statements: calls.append(statements) or [[]],
     )
     await decide({"app_id": 6, "ssn": "123456782", "income": 100000})
     assert len(calls) == 1
     statements = calls[0]
-    assert len(statements) == 2
-    assert "INSERT INTO decisions" in statements[0][0]
-    assert "INSERT INTO decision_events" in statements[1][0]
+    assert len(statements) == 1
+    assert "INSERT INTO decision_events" in statements[0][0]
+    assert not any("INSERT INTO decisions" in s[0] for s in statements)

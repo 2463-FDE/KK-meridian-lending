@@ -15,6 +15,21 @@ def format_outcome_label(outcome: str) -> str:
     return _OUTCOME_LABEL.get(outcome, outcome.upper())
 
 
+def format_rerun_blocked_message(manual: dict) -> str:
+    """The message run_decision returns (409) when a final manual decision
+    already exists -- shared by the pre-call and post-call checks so both
+    say exactly the same thing."""
+    label = format_outcome_label(manual["outcome"])
+    reviewed_at = manual["reviewed_at"]
+    when = reviewed_at.isoformat() if hasattr(reviewed_at, "isoformat") else str(reviewed_at)
+    name = manual.get("reviewer_name") or manual.get("reviewer_role") or "a staff member"
+    return (
+        f"This application was manually {label} by {name} on {when}. "
+        f"Reason: {manual['reason']}. The automated decision cannot be "
+        "rerun because it would overwrite the final staff decision."
+    )
+
+
 def get_manual_review(app_id: int) -> dict | None:
     """The final staff decision on this application, if one has been
     recorded (manual_reviews.app_id is UNIQUE, db/migrations/0020 -- at most

@@ -296,24 +296,20 @@ def run_decision(
         # outcome/reason/who/when instead of just "resolved by staff".
         manual = decision_state.get_manual_review(app_id)
         if manual:
-            label = decision_state.format_outcome_label(manual["outcome"])
-            reviewed_at = manual["reviewed_at"]
-            when = reviewed_at.isoformat() if hasattr(reviewed_at, "isoformat") else str(reviewed_at)
-            name = manual.get("reviewer_name") or manual.get("reviewer_role") or "a staff member"
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"This application was manually {label} by {name} on {when}. "
-                    f"Reason: {manual['reason']}. The automated decision cannot be "
-                    "rerun because it would overwrite the final staff decision."
-                ),
-            )
+            raise HTTPException(status_code=409, detail=decision_state.format_rerun_blocked_message(manual))
     else:
         is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
         if not _is_staff(x_user_role, x_internal_token) and not is_owner:
             raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
 
-    # Decisioning moved to decision-service; it persists the (outcome-only) decisions row.
+    # Architecture fix (single-writer race closure): decision-service now
+    # only COMPUTES a proposed outcome (and records its own append-only
+    # decision_events audit row) -- it no longer writes the authoritative
+    # `decisions` row itself (see graph.py::_node_persist). Called
+    # deliberately BEFORE opening any transaction below: nothing about
+    # computing the proposal needs to be atomic, and holding a lock across
+    # a network call this slow (a simulated bureau pull) would be its own
+    # problem even before considering deadlock risk.
     resp = clients.post(clients.DECISION_URL, "/decisions", {
         "application_id": app_id,
         "applicant_id": r.get("applicant_id"),
@@ -326,34 +322,78 @@ def run_decision(
         "credit_score": None,         # pulled downstream by decision-service
     }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     outcome = resp["outcome"]
+
+    # Audit fix: origination-service is now the SOLE writer of `decisions`.
+    # This transaction locks the same coordination row (applications, FOR
+    # UPDATE) that review_application's own transaction locks before
+    # touching manual_reviews/decisions -- both endpoints contend for the
+    # same lock before writing either table, so whichever commits first is
+    # genuinely final, not "probably fine because scoring is deterministic".
+    # No external call happens while this lock is held (decision-service's
+    # call already finished above), so there is no deadlock risk here,
+    # unlike the previous detect-and-abort approach this replaces.
     accept_token = None
-    # Bug fix: reflect the outcome onto applications.status -- guarded so a
-    # staff rerun on an already-funded application (run_decision has no
-    # funded check of its own) can never regress a funded row backward.
-    db.query(
-        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
-        (_DECISION_STATUS.get(outcome, outcome), app_id),
-    )
+    with db.transaction() as cur:
+        cur.execute("SELECT status FROM applications WHERE id = %s FOR UPDATE", (app_id,))
+        locked = cur.fetchall()
+        if not locked:
+            raise HTTPException(status_code=404, detail="application not found")
+        if locked[0]["status"] == "funded":
+            raise HTTPException(
+                status_code=422,
+                detail="cannot rerun a decision on an already-funded application",
+            )
+        cur.execute(
+            "SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
+            "FROM manual_reviews WHERE app_id = %s",
+            (app_id,),
+        )
+        manual_locked = cur.fetchall()
+        if manual_locked:
+            raise HTTPException(
+                status_code=409,
+                detail=decision_state.format_rerun_blocked_message(manual_locked[0]),
+            )
+
+        cur.execute(
+            "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
+            "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
+            (app_id, outcome),
+        )
+        # Bug fix: reflect the outcome onto applications.status -- guarded so a
+        # staff rerun on an already-funded application can never regress a
+        # funded row backward (redundant with the funded check above now
+        # that both live in the same transaction, kept as defense in depth).
+        cur.execute(
+            "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+            (_DECISION_STATUS.get(outcome, outcome), app_id),
+        )
+        if outcome == "approve":
+            # Security fix: accept_offer used to run fully anonymously for a
+            # fresh accept -- fine for the legitimate no-account borrower
+            # flow, except app_id is a sequential, guessable integer, so
+            # anyone could accept/fund a STRANGER's approved application.
+            # This one-time token is minted only now, held by the
+            # borrower's own browser (decision response -> frontend state
+            # -> accept call), and is the proof of ownership accept_offer
+            # requires from a non-staff caller.
+            accept_token = secrets.token_urlsafe(32)
+            cur.execute(
+                "UPDATE applications SET accept_token = %s WHERE id = %s",
+                (accept_token, app_id),
+            )
+
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
-        # must not fail the decision that already happened.
+        # must not fail the decision that already happened. Outside the
+        # transaction on purpose -- an external call here must never hold
+        # the coordination lock.
         try:
             disclosure_graph.auto_generate_offer(app_id)
         except Exception as e:  # noqa
             log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
-        # Security fix: accept_offer used to run fully anonymously for a fresh
-        # accept -- fine for the legitimate no-account borrower flow, except
-        # app_id is a sequential, guessable integer, so anyone could accept/
-        # fund a STRANGER's approved application. This one-time token is
-        # minted only now, held by the borrower's own browser (decision
-        # response -> frontend state -> accept call), and is the proof of
-        # ownership accept_offer requires from a non-staff caller.
-        accept_token = secrets.token_urlsafe(32)
-        db.query(
-            "UPDATE applications SET accept_token = %s WHERE id = %s",
-            (accept_token, app_id),
-        )
+
     return DecisionOut(
         app_id=app_id,
         decision=outcome,
@@ -401,6 +441,14 @@ def review_application(
     insert) -- only the request that actually wins the insert proceeds to
     change anything, and a loser is told exactly who decided, what, when,
     and why instead of a generic error.
+
+    Audit fix: the "current outcome is still 'refer'" check is re-verified
+    with a row lock (SELECT ... FOR UPDATE on decisions) inside the
+    transaction below, not just the plain read further down -- that plain
+    read is a fast pre-check only (avoids opening a transaction for the
+    common already-decided case), not the authoritative guard. Without the
+    re-check, a concurrent run_decision rerun changing decisions.outcome in
+    the gap between the pre-check and this transaction would go undetected.
     """
     _require_staff(x_user_role, x_internal_token)
 
@@ -464,6 +512,27 @@ def review_application(
             raise HTTPException(
                 status_code=422,
                 detail="cannot decide on an already-funded application",
+            )
+
+        # Audit fix: the current_outcome == 'refer' check above reads via
+        # db.query() on a separate, autocommitted connection BEFORE this
+        # transaction even opens -- a concurrent run_decision could change
+        # decisions.outcome in the gap between that read and here.
+        # Architecture fix: origination-service is now the SOLE writer of
+        # `decisions` (decision-service only proposes an outcome; see
+        # graph.py::_node_persist), and run_decision's own transaction locks
+        # this SAME applications row (FOR UPDATE) before it ever touches
+        # decisions -- so the lock already held above is sufficient to
+        # serialize the two endpoints; no separate lock on decisions itself
+        # is needed. A plain re-read here (no lock of its own) is enough to
+        # get the value as of this transaction's turn.
+        cur.execute("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+        locked_decision = cur.fetchall()
+        locked_outcome = locked_decision[0]["outcome"] if locked_decision else None
+        if locked_outcome != "refer":
+            raise HTTPException(
+                status_code=422,
+                detail=f"only a 'refer' decision can be reviewed by staff (current outcome: {locked_outcome!r})",
             )
 
         # The real, atomic "first decision wins, forever" guard. ON CONFLICT
