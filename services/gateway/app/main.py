@@ -129,10 +129,19 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
             method, f"{base}{path}", content=body, headers=headers,
             params=request.query_params,
         )
+    # Bug fix: resp.json() decodes via resp.text, which falls back to
+    # httpx's charset auto-detection whenever the upstream response's
+    # Content-Type has no explicit charset param (every backend service here
+    # just sends "application/json" with none). Auto-detection can misguess
+    # short multi-byte sequences as Latin-1/cp1252 -- an en dash or an
+    # accented name came back through this proxy as visible mojibake
+    # ("Jos\xc3\xa9" instead of "Jos\xe9") on every route, not just one.
+    # RFC 8259 mandates JSON is UTF-8 (unless a BOM says otherwise) -- decode
+    # the raw bytes as UTF-8 directly instead of letting httpx guess.
     try:
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
+        return JSONResponse(status_code=resp.status_code, content=json.loads(resp.content.decode("utf-8")))
     except Exception:
-        return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
+        return JSONResponse(status_code=resp.status_code, content={"raw": resp.content.decode("utf-8", errors="replace")})
 
 
 def _require_user(authorization: str | None) -> dict:

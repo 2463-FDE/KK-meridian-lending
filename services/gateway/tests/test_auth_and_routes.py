@@ -30,6 +30,9 @@ class _FakeResponse:
         self.status_code = status_code
         self._json_body = json_body
         self.text = json.dumps(json_body)
+        # _proxy decodes resp.content directly (UTF-8 mojibake fix) rather
+        # than calling resp.json()/resp.text -- mirror a real httpx.Response.
+        self.content = self.text.encode("utf-8")
 
     def json(self):
         return self._json_body
@@ -38,10 +41,14 @@ class _FakeResponse:
 class _FakeAsyncClient:
     """Stands in for httpx.AsyncClient so proxy tests never need a live
     downstream service -- records the request it received and returns a fixed
-    200 body, mirroring test_proxy_security.py's existing fake."""
+    200 body, mirroring test_proxy_security.py's existing fake. Tests that
+    need a specific response body (e.g. the non-ASCII mojibake regression
+    test) can set next_response beforehand; it's reset after each request so
+    it never leaks into an unrelated test."""
 
     last_url = None
     last_headers = None
+    next_response = None
 
     def __init__(self, *args, **kwargs):
         pass
@@ -55,6 +62,9 @@ class _FakeAsyncClient:
     async def request(self, method, url, content=None, headers=None, params=None):
         _FakeAsyncClient.last_url = url
         _FakeAsyncClient.last_headers = headers
+        if _FakeAsyncClient.next_response is not None:
+            resp, _FakeAsyncClient.next_response = _FakeAsyncClient.next_response, None
+            return resp
         return _FakeResponse(200, {"ok": True})
 
 
@@ -612,3 +622,24 @@ def test_proxy_strips_inbound_authorization_header(monkeypatch):
 
     forwarded = httpx.Headers(_FakeAsyncClient.last_headers or {})
     assert "authorization" not in {k.lower() for k in forwarded.keys()}
+
+
+def test_proxy_does_not_mangle_non_ascii_response_text(monkeypatch):
+    """Bug fix: _proxy used to return resp.json() -- httpx decodes via
+    resp.text, which falls back to charset auto-detection whenever the
+    upstream Content-Type has no explicit charset param (every backend
+    service here just sends "application/json" with none). Real live-tested
+    finding: an applicant name with an accent or an em dash came back through
+    this proxy as visible mojibake ("José" -> "JosÃ©") on every
+    proxied route, not just one. JSON is UTF-8 per RFC 8259 -- decode
+    resp.content as UTF-8 directly instead of letting httpx guess."""
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: None)
+    _FakeAsyncClient.next_response = _FakeResponse(
+        200, {"name": "José Muñoz — Test", "address": "5 Café St"},
+    )
+
+    resp = client.get("/los/applications/1")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"name": "José Muñoz — Test", "address": "5 Café St"}

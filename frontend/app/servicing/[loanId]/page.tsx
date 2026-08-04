@@ -375,7 +375,16 @@ function LoanDetailContent() {
                 <tr key={String(p.id)}>
                   <td>{shortDate(p.created_at)}</td>
                   <td style={{ textTransform: "capitalize" }}>{p.method}</td>
-                  <td>{p.masked_pan || "ACH"}</td>
+                  {/* Bug fix: this used to fall back to the literal string
+                      "ACH" whenever masked_pan was empty -- but that's also
+                      true for any CARD payment with no pan on record (every
+                      payment, once Week 5 tokenization ships and no raw PAN
+                      is ever stored again), mislabeling it as an ACH payment
+                      it never was. `method` (shown in the column to the
+                      left) is the actual source of truth for card vs. ACH --
+                      this column only ever shows real card-on-file data, or
+                      an honest "not on file" placeholder, never a guess. */}
+                  <td>{p.masked_pan || "—"}</td>
                   <td className="num">{usd(p.amount)}</td>
                 </tr>
               ))
