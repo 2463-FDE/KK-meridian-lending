@@ -53,10 +53,25 @@ CREATE TABLE IF NOT EXISTS applications (
     -- no-account borrower flow) since app_id is a sequential, guessable
     -- integer. NULL means "no token issued or already spent" -- never
     -- valid to accept with. See routers/applications.py accept_offer.
-    accept_token      TEXT,
+    --
+    -- Security fix (db/migrations/0022, backported here so a fresh volume
+    -- never recreates the vulnerability): the raw token used to be stored
+    -- here in plain text with no expiry -- a plaintext bearer credential
+    -- at rest is itself a live secret. Only its sha256 hash is stored now,
+    -- alongside a server-clock (Postgres now()) expiry and a single-use
+    -- consumed marker. No production environment exists for this
+    -- application, so there is no plaintext value here to "migrate" --
+    -- this fresh-init path and 0022's upgrade path for an EXISTING
+    -- database both converge on this exact same shape.
+    accept_token_hash          TEXT,
+    accept_token_expires_at    TIMESTAMPTZ,
+    accept_token_consumed_at   TIMESTAMPTZ,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
+CREATE INDEX IF NOT EXISTS idx_applications_accept_token_hash
+    ON applications (accept_token_hash)
+    WHERE accept_token_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_applications_applicant ON applications(applicant_id);
 
 -- KYC: CIP only. No sanctions/OFAC, no beneficial owner, no monitoring.

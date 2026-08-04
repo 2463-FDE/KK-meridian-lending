@@ -150,9 +150,9 @@ def make_offer(body: OfferIn):
 @router.get("/applications/{app_id}/offer", response_model=OfferOut)
 def get_offer(
     app_id: int,
-    accept_token: str | None = None,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+    x_offer_accept_token: str | None = Header(default=None, alias="X-Offer-Accept-Token"),
 ):
     # Security fix (borrower-workflow audit): this had NO ownership check at
     # all -- app_id is a sequential, guessable integer, so anyone could read
@@ -164,6 +164,16 @@ def get_offer(
     # is read-only and a borrower re-viewing their own already-accepted
     # offer (token consumed) or an offer whose token has since expired is
     # not a security concern the way accepting/boarding again would be.
+    #
+    # Security fix (follow-up audit): the token used to travel as a
+    # ?accept_token=... query parameter -- proven, with a live canary
+    # value, to leak into this service's own uvicorn access log and the
+    # gateway's access + outbound httpx logs (neither disables access
+    # logging). Query-parameter token auth is removed entirely, no
+    # backward-compatible fallback -- X-Offer-Accept-Token (a header, never
+    # part of a URL, never in a default access-log line) is the only way
+    # this credential travels now, for both this route and accept_offer
+    # below.
     if not _is_staff(x_user_role, x_internal_token):
         rows = db.query(
             "SELECT accept_token_hash FROM applications WHERE id = %s",
@@ -171,7 +181,9 @@ def get_offer(
         )
         if not rows:
             raise HTTPException(status_code=404, detail="application not found")
-        if not decision_state.accept_token_hash_matches(rows[0].get("accept_token_hash"), accept_token):
+        if not decision_state.accept_token_hash_matches(rows[0].get("accept_token_hash"), x_offer_accept_token):
+            # Never echo the caller's supplied token back in the error --
+            # only ever a fixed, generic message.
             raise HTTPException(status_code=403, detail="not authorized to view this offer")
 
     resp = clients.get(clients.DISCLOSURE_URL, f"/applications/{app_id}/offer")

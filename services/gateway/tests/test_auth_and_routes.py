@@ -48,6 +48,7 @@ class _FakeAsyncClient:
 
     last_url = None
     last_headers = None
+    last_params = None
     next_response = None
 
     def __init__(self, *args, **kwargs):
@@ -62,6 +63,7 @@ class _FakeAsyncClient:
     async def request(self, method, url, content=None, headers=None, params=None):
         _FakeAsyncClient.last_url = url
         _FakeAsyncClient.last_headers = headers
+        _FakeAsyncClient.last_params = params
         if _FakeAsyncClient.next_response is not None:
             resp, _FakeAsyncClient.next_response = _FakeAsyncClient.next_response, None
             return resp
@@ -162,6 +164,50 @@ def test_los_proxy_forwards_internal_token(monkeypatch):
 
     assert resp.status_code == 200
     assert _FakeAsyncClient.last_headers["X-Internal-Token"] == main.INTERNAL_SERVICE_TOKEN
+
+
+def test_los_proxy_forwards_the_offer_accept_token_header(monkeypatch):
+    """Security fix (borrower-workflow audit): the offer-view/accept
+    credential travels only as X-Offer-Accept-Token now -- the gateway must
+    actually forward it (it's just another non-X-User-* inbound header,
+    not stripped or specially handled) or origination-service's own
+    ownership check would 403 every real borrower request."""
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+
+    resp = client.get(
+        "/los/applications/1/offer",
+        headers={"X-Offer-Accept-Token": "a-real-borrower-token-value"},
+    )
+
+    assert resp.status_code == 200
+    # HTTP headers are case-insensitive -- ASGI delivers them lowercased
+    # regardless of how the client sent them.
+    forwarded = {k.lower(): v for k, v in _FakeAsyncClient.last_headers.items()}
+    assert forwarded["x-offer-accept-token"] == "a-real-borrower-token-value"
+
+
+def test_los_proxy_never_puts_the_offer_accept_token_in_the_outbound_url_or_params(monkeypatch):
+    """Security fix (follow-up audit): a canary token sent as a header must
+    never end up serialized into the outbound request line/query string --
+    that was the exact mechanism that leaked a prior version of this same
+    credential into this gateway's own access + outbound httpx logs. The
+    fake client records `params` (query string) and `url` (path only, no
+    query appended by httpx.AsyncClient.request when params is passed
+    separately) independently of `headers` -- this proves the header value
+    never crosses into either."""
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    canary = "CANARY_HEADER_ONLY_VALUE_should_never_appear_in_url_or_params"
+
+    resp = client.get(
+        "/los/applications/1/offer",
+        headers={"X-Offer-Accept-Token": canary},
+    )
+
+    assert resp.status_code == 200
+    assert canary not in _FakeAsyncClient.last_url
+    assert canary not in str(_FakeAsyncClient.last_params or "")
+    forwarded = {k.lower(): v for k, v in _FakeAsyncClient.last_headers.items()}
+    assert forwarded["x-offer-accept-token"] == canary
 
 
 def test_lss_requires_authentication(monkeypatch):

@@ -613,18 +613,6 @@ def get_loan_history(
     return history
 
 
-class AcceptIn(BaseModel):
-    # Review fix: the one-time token minted onto the application when it was
-    # approved (run_decision/review_application) -- stands in for a real
-    # session for the legitimate no-account borrower flow. Optional so a
-    # staff-session accept (re-accept of an already-funded application)
-    # needs no token. Only ever compared against its stored sha256 hash --
-    # see decision_state.verify_accept_token. The raw value is never
-    # persisted anywhere; it exists only in the borrower's browser and this
-    # one request.
-    accept_token: str | None = None
-
-
 # Shared by the pre-check read below and the locked re-check inside the
 # transaction -- token_live is evaluated by Postgres's own now(), never
 # Python's, so app-host clock skew can never make a token look valid/
@@ -638,9 +626,22 @@ _ACCEPT_TOKEN_FIELDS = (
 @router.post("/{app_id}/accept")
 def accept_offer(
     app_id: int,
-    body: AcceptIn = AcceptIn(),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+    # Security fix (follow-up audit): the one-time token minted onto the
+    # application when it was approved (run_decision/review_application)
+    # used to travel as a JSON body field -- not itself leaked into any
+    # access log (bodies aren't logged), but the SAME credential also
+    # traveled as a URL query parameter on the sibling GET .../offer route,
+    # which was proven to leak. Both routes now use the identical transport
+    # -- a header, never a query string, never part of a URL -- so this
+    # credential can't drift into an unsafe transport again on one route
+    # while "fixed" on the other. Optional so a staff-session accept (no
+    # token) still works. Only ever compared against its stored sha256
+    # hash -- see decision_state.verify_accept_token. The raw value is
+    # never persisted anywhere; it exists only in the borrower's browser
+    # and this one request.
+    x_offer_accept_token: str | None = Header(default=None, alias="X-Offer-Accept-Token"),
 ):
     # Security fix: this never checked that the application actually has an
     # approved decision on record, and never guarded against re-acceptance --
@@ -710,7 +711,7 @@ def accept_offer(
     # held only by the borrower's own browser session) is now required.
     # Fast-path rejection only -- see the authoritative re-check below.
     if not _is_staff(x_user_role, x_internal_token):
-        ok, status_code, message = decision_state.verify_accept_token(r, body.accept_token)
+        ok, status_code, message = decision_state.verify_accept_token(r, x_offer_accept_token)
         if not ok:
             raise HTTPException(status_code=status_code, detail=message)
 
@@ -757,7 +758,7 @@ def accept_offer(
             )
 
         if not _is_staff(x_user_role, x_internal_token):
-            ok, status_code, message = decision_state.verify_accept_token(locked, body.accept_token)
+            ok, status_code, message = decision_state.verify_accept_token(locked, x_offer_accept_token)
             if not ok:
                 raise HTTPException(status_code=status_code, detail=message)
 

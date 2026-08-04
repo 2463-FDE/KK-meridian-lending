@@ -114,6 +114,17 @@ def me(authorization: str | None = Header(None)):
 async def _proxy(base: str, path: str, request: Request, user: dict | None, extra_headers: dict | None = None):
     method = request.method
     body = await request.body()
+    # Security fix (borrower-workflow audit): the borrower's one-time
+    # accept_token used to travel as a URL query parameter on the offer
+    # GET route -- that leaks into this gateway's own access log AND its
+    # outbound httpx request log below, plus browser history/Referer. It
+    # now travels only as X-Offer-Accept-Token, a plain header -- forwarded
+    # here intentionally, same as every other inbound header that isn't an
+    # identity claim (X-User-*, stripped below) or connection-level
+    # (host/content-length/authorization, replaced by the resolved
+    # session). This proxy never re-serializes any header into the
+    # outbound URL -- headers stay headers (see the httpx call below,
+    # `headers=headers` is separate from `params=request.query_params`).
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "content-length", "authorization")

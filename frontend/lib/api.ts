@@ -119,19 +119,19 @@ async function parse(res: Response) {
   return data;
 }
 
-export async function apiGet(path: string) {
+export async function apiGet(path: string, extraHeaders?: Record<string, string>) {
   const res = await fetch(`${GATEWAY_URL}${path}`, {
     cache: "no-store",
-    headers: { ...authHeaders() },
+    headers: { ...authHeaders(), ...extraHeaders },
   });
   return parse(res);
 }
 
-export async function apiPost(path: string, body?: unknown) {
+export async function apiPost(path: string, body?: unknown, extraHeaders?: Record<string, string>) {
   const res = await fetch(`${GATEWAY_URL}${path}`, {
     method: "POST",
     cache: "no-store",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return parse(res);

@@ -492,7 +492,7 @@ def test_first_accept_rejects_wrong_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": "attacker-guessed-token"})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": "attacker-guessed-token"})
 
     assert resp.status_code == 403
     assert not board_calls
@@ -505,7 +505,7 @@ def test_first_accept_rejects_expired_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", token_live=False)])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
     assert "expired" in resp.json()["detail"]
@@ -521,18 +521,45 @@ def test_first_accept_rejects_already_consumed_token(monkeypatch):
     )
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
     assert "already been used" in resp.json()["detail"]
     assert not board_calls
 
 
+def test_first_accept_rejects_a_revoked_token(monkeypatch):
+    """A rerun/manual-correction away from approve nulls accept_token_hash
+    (decision_state.revoke_accept_token) -- a request still carrying the
+    now-revoked raw token must be rejected exactly like an expired one, not
+    silently accepted because SOME hash used to exist."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", token_hash=None)])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 409
+    assert not board_calls
+
+
+def test_first_accept_error_response_never_echoes_the_raw_token(monkeypatch):
+    """A wrong-token attempt's own error message must never reflect the
+    caller's supplied value back -- always the same fixed, generic text."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
+    _stub_board_to_servicing(monkeypatch)
+
+    supplied = "a-very-distinctive-wrong-token-value"
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": supplied})
+
+    assert resp.status_code == 403
+    assert supplied not in resp.text
+
+
 def test_first_accept_succeeds_with_the_correct_accept_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
     cursor = _stub_transaction(monkeypatch, loan_id=777)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 777
@@ -576,7 +603,7 @@ def test_first_accept_returns_409_when_a_concurrent_accept_already_won(monkeypat
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
     cursor = _stub_transaction(monkeypatch, locked_status="funded")
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
     # Only the FOR UPDATE SELECT ran -- the loser never reaches the board INSERTs.
@@ -591,7 +618,7 @@ def test_first_accept_rejected_when_decision_no_longer_approved_under_lock(monke
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
     cursor = _stub_transaction(monkeypatch, locked_outcome="deny")
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 422
     assert not any(c[0].startswith("UPDATE applications SET status = 'funded'") for c in cursor.executed)
@@ -611,7 +638,7 @@ def test_reaccept_of_an_already_funded_application_is_rejected_with_no_token(mon
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == "This application has already been boarded."
@@ -657,7 +684,7 @@ def test_first_accept_returns_409_when_no_offer_exists_yet(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", apr=None)])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == "Create an offer before boarding this application."
@@ -677,7 +704,7 @@ def test_accept_rejects_a_denied_application_with_its_reason(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query)
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 422
     assert resp.json()["detail"] == (
@@ -693,7 +720,7 @@ def test_accept_rejects_a_still_pending_application(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="in_review", outcome="refer")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 422
     assert resp.json()["detail"] == "This application must receive final approval before it can be boarded."
@@ -711,7 +738,7 @@ def test_accept_reports_409_when_a_loan_already_exists(monkeypatch):
     cursor = _stub_transaction(monkeypatch)
     cursor.raise_on_loan_insert = psycopg2.errors.UniqueViolation("dup")
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == "a loan already exists for this application"

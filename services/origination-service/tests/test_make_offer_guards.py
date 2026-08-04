@@ -209,6 +209,15 @@ def _fake_offer_get(status_code=200, body=None):
     return _fake_get
 
 
+_OFFER_DISCLOSURE_BODY = {
+    "disclosure": {
+        "apr": 5.2, "finance_charge": 500.0, "monthly_payment": 400.0,
+        "amount_financed": 8700.0, "total_of_payments": 9600.0,
+    },
+    "schedule": [],
+}
+
+
 def test_get_offer_rejects_anonymous_caller_with_no_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
 
@@ -220,25 +229,27 @@ def test_get_offer_rejects_anonymous_caller_with_no_token(monkeypatch):
 def test_get_offer_rejects_wrong_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
 
-    resp = client.get("/applications/10/offer", params={"accept_token": "attacker-guessed"})
+    resp = client.get("/applications/10/offer", headers={"X-Offer-Accept-Token": "attacker-guessed"})
 
     assert resp.status_code == 403
 
 
-def test_get_offer_succeeds_with_the_correct_accept_token(monkeypatch):
+def test_get_offer_rejects_a_query_parameter_token(monkeypatch):
+    """Security fix (follow-up audit): query-parameter token auth is removed
+    entirely, no backward-compatible fallback -- a token sent the OLD way
+    must be rejected exactly like no token at all, never silently accepted."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
-    monkeypatch.setattr(
-        clients, "get",
-        _fake_offer_get(200, {
-            "disclosure": {
-                "apr": 5.2, "finance_charge": 500.0, "monthly_payment": 400.0,
-                "amount_financed": 8700.0, "total_of_payments": 9600.0,
-            },
-            "schedule": [],
-        }),
-    )
 
     resp = client.get("/applications/10/offer", params={"accept_token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 403
+
+
+def test_get_offer_succeeds_with_the_correct_header_token(monkeypatch):
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
+    monkeypatch.setattr(clients, "get", _fake_offer_get(200, _OFFER_DISCLOSURE_BODY))
+
+    resp = client.get("/applications/10/offer", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 200
     assert resp.json()["disclosure"]["apr"] == 5.2
@@ -248,16 +259,7 @@ def test_get_offer_succeeds_for_staff_without_a_token(monkeypatch):
     from app import config
 
     monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
-    monkeypatch.setattr(
-        clients, "get",
-        _fake_offer_get(200, {
-            "disclosure": {
-                "apr": 5.2, "finance_charge": 500.0, "monthly_payment": 400.0,
-                "amount_financed": 8700.0, "total_of_payments": 9600.0,
-            },
-            "schedule": [],
-        }),
-    )
+    monkeypatch.setattr(clients, "get", _fake_offer_get(200, _OFFER_DISCLOSURE_BODY))
 
     resp = client.get(
         "/applications/10/offer",
@@ -279,26 +281,42 @@ def test_get_offer_returns_404_when_no_offer_exists(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
     monkeypatch.setattr(clients, "get", _fake_offer_get(404, {"detail": "no offer for this application"}))
 
-    resp = client.get("/applications/10/offer", params={"accept_token": _ACCEPT_TOKEN})
+    resp = client.get("/applications/10/offer", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 404
 
 
 def test_get_offer_never_exposes_the_stored_token_hash(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
-    monkeypatch.setattr(
-        clients, "get",
-        _fake_offer_get(200, {
-            "disclosure": {
-                "apr": 5.2, "finance_charge": 500.0, "monthly_payment": 400.0,
-                "amount_financed": 8700.0, "total_of_payments": 9600.0,
-            },
-            "schedule": [],
-        }),
-    )
+    monkeypatch.setattr(clients, "get", _fake_offer_get(200, _OFFER_DISCLOSURE_BODY))
 
-    resp = client.get("/applications/10/offer", params={"accept_token": _ACCEPT_TOKEN})
+    resp = client.get("/applications/10/offer", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 200
     assert _ACCEPT_TOKEN_HASH not in resp.text
     assert "accept_token_hash" not in resp.text
+
+
+def test_get_offer_rejects_a_token_that_belongs_to_a_different_application(monkeypatch):
+    """A borrower holding a valid token minted for application 10 must not
+    be able to read application 11's offer with it -- app_id 11's own
+    stored hash is different, so the SAME real token that works for 10
+    fails the hash-match here."""
+    other_app_hash = decision_state.hash_accept_token("some-other-applications-own-token")
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": other_app_hash}])
+
+    resp = client.get("/applications/11/offer", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 403
+
+
+def test_get_offer_error_response_never_echoes_the_raw_token(monkeypatch):
+    """A wrong-token attempt's own error message must never reflect the
+    caller's supplied value back -- always the same fixed, generic text."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
+
+    supplied = "a-very-distinctive-wrong-token-value"
+    resp = client.get("/applications/10/offer", headers={"X-Offer-Accept-Token": supplied})
+
+    assert resp.status_code == 403
+    assert supplied not in resp.text

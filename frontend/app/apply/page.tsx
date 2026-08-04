@@ -292,11 +292,17 @@ export default function ApplyPage() {
       // yet, or predates it) -- and even that create is itself idempotent
       // now (returns the same offer if one shows up first in a race),
       // never a 409.
+      //
+      // Security fix: the token travels only as the X-Offer-Accept-Token
+      // header, never a URL query parameter -- a query parameter leaks into
+      // gateway/origination-service access logs, browser history, and a
+      // Referer header; a header does not.
       const token = decision?.accept_token || "";
       let existing: { disclosure: Disclosure } | null = null;
       try {
         existing = (await apiGet(
-          `/los/applications/${app.app_id}/offer?accept_token=${encodeURIComponent(token)}`
+          `/los/applications/${app.app_id}/offer`,
+          { "X-Offer-Accept-Token": token },
         )) as { disclosure: Disclosure };
       } catch (getErr) {
         if (!(getErr instanceof ApiError) || getErr.status !== 404) throw getErr;
@@ -325,9 +331,17 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost(`/los/applications/${app.app_id}/accept`, {
-        accept_token: decision?.accept_token,
-      })) as { loan_id: string | number };
+      // Security fix: same header-only transport as viewOffer above -- the
+      // token used to also be accepted as a JSON body field; the body
+      // itself never leaked into a log, but a single consistent transport
+      // for this credential (never a query string, never re-introduced by
+      // accident on this route) is the actual requirement, not "this one
+      // spot happened to be safe."
+      const res = (await apiPost(
+        `/los/applications/${app.app_id}/accept`,
+        undefined,
+        { "X-Offer-Accept-Token": decision?.accept_token || "" },
+      )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));
