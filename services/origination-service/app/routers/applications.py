@@ -1,6 +1,4 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
-import secrets
-
 import psycopg2.errors
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -376,12 +374,18 @@ def run_decision(
             # This one-time token is minted only now, held by the
             # borrower's own browser (decision response -> frontend state
             # -> accept call), and is the proof of ownership accept_offer
-            # requires from a non-staff caller.
-            accept_token = secrets.token_urlsafe(32)
-            cur.execute(
-                "UPDATE applications SET accept_token = %s WHERE id = %s",
-                (accept_token, app_id),
-            )
+            # requires from a non-staff caller. See decision_state.
+            # issue_accept_token for hashing/expiry.
+            accept_token = decision_state.issue_accept_token(cur, app_id)
+        else:
+            # Security fix (audit finding): a rerun landing on deny/refer
+            # used to leave a PREVIOUSLY minted token (from an earlier
+            # approve) still valid -- review_application already revoked it
+            # on its own non-approve branch, but this path had no
+            # equivalent, so the same application could be approved, then
+            # rerun to deny, while the old accept link still worked. Same
+            # helper both paths use now -- see decision_state.py.
+            decision_state.revoke_accept_token(cur, app_id)
 
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
@@ -567,16 +571,9 @@ def review_application(
             (_DECISION_STATUS.get(body.outcome, body.outcome), app_id),
         )
         if body.outcome == "approve":
-            accept_token = secrets.token_urlsafe(32)
-            cur.execute(
-                "UPDATE applications SET accept_token = %s WHERE id = %s",
-                (accept_token, app_id),
-            )
+            accept_token = decision_state.issue_accept_token(cur, app_id)
         else:
-            cur.execute(
-                "UPDATE applications SET accept_token = NULL WHERE id = %s",
-                (app_id,),
-            )
+            decision_state.revoke_accept_token(cur, app_id)
 
     if body.outcome == "approve":
         # Same auto-offer as the automated approve path in run_decision above
@@ -618,10 +615,24 @@ def get_loan_history(
 
 class AcceptIn(BaseModel):
     # Review fix: the one-time token minted onto the application when it was
-    # approved (run_decision) -- stands in for a real session for the
-    # legitimate no-account borrower flow. Optional so a staff-session accept
-    # (re-accept of an already-funded application) needs no token.
+    # approved (run_decision/review_application) -- stands in for a real
+    # session for the legitimate no-account borrower flow. Optional so a
+    # staff-session accept (re-accept of an already-funded application)
+    # needs no token. Only ever compared against its stored sha256 hash --
+    # see decision_state.verify_accept_token. The raw value is never
+    # persisted anywhere; it exists only in the borrower's browser and this
+    # one request.
     accept_token: str | None = None
+
+
+# Shared by the pre-check read below and the locked re-check inside the
+# transaction -- token_live is evaluated by Postgres's own now(), never
+# Python's, so app-host clock skew can never make a token look valid/
+# invalid to the wrong side of the check (see decision_state.py).
+_ACCEPT_TOKEN_FIELDS = (
+    "accept_token_hash, accept_token_consumed_at, "
+    "(accept_token_expires_at IS NOT NULL AND accept_token_expires_at > now()) AS token_live"
+)
 
 
 @router.post("/{app_id}/accept")
@@ -644,8 +655,15 @@ def accept_offer(
     # anonymously (decision, offer, status), so answering them here isn't a
     # new information disclosure -- only the actual fund-and-board action
     # below still requires real authorization.
+    #
+    # This first read is a FAST PRE-CHECK only (cheap, the common case, and
+    # avoids opening a transaction for an obviously-bad request) -- it is
+    # NOT the authoritative check. Everything it reads is re-verified fresh
+    # under a real row lock inside the transaction below, because all of it
+    # (status, decision outcome, token validity) can change in the gap
+    # between this read and that lock.
     rows = db.query(
-        "SELECT a.amount, a.term_months, a.status, a.accept_token, ap.name, "
+        f"SELECT a.amount, a.term_months, a.status, {_ACCEPT_TOKEN_FIELDS}, ap.name, "
         "o.apr, o.accepted_at, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "
@@ -682,45 +700,90 @@ def accept_offer(
             status_code=409,
             detail="Create an offer before boarding this application.",
         )
-    # Note: an offer existing without accepted_at set is not a reachable
-    # state in this system today -- accepting the offer and boarding the
-    # loan happen as one atomic action below, so there is no separate
-    # "offer created but not yet accepted" window to guard against; see
-    # db/migrations/0021.
 
-    rate = r["apr"]
     name = r.get("name") or "Borrower"
 
     # Security fix: a fresh accept used to run fully anonymously with no
     # ownership check at all -- app_id is a sequential, guessable integer, so
     # anyone could accept/fund a STRANGER's approved application. Staff or
-    # the one-time accept_token (minted in run_decision, held only by the
-    # borrower's own browser session) is now required.
-    is_owner = bool(body.accept_token) and bool(r.get("accept_token")) and body.accept_token == r["accept_token"]
-    if not _is_staff(x_user_role, x_internal_token) and not is_owner:
-        raise HTTPException(status_code=403, detail="not authorized to accept this offer")
+    # the one-time accept_token (minted in run_decision/review_application,
+    # held only by the borrower's own browser session) is now required.
+    # Fast-path rejection only -- see the authoritative re-check below.
+    if not _is_staff(x_user_role, x_internal_token):
+        ok, status_code, message = decision_state.verify_accept_token(r, body.accept_token)
+        if not ok:
+            raise HTTPException(status_code=status_code, detail=message)
 
-    # Security fix: two concurrent accepts on the same not-yet-funded
-    # application both used to pass this same (stale-read) status check and
-    # both board a loan. The UPDATE below is the real, atomic guard --
-    # Postgres row-locks the application for the duration of the UPDATE, so
-    # only ONE concurrent caller's WHERE status <> 'funded' can still be
-    # true; the other gets zero rows back and never boards anything.
-    # Boarding runs in the SAME transaction, so a mid-board failure leaves
-    # status unfunded (safe to retry) instead of stuck funded-with-no-loan.
-    # loans_app_id_key (db/migrations/0015) is the second, database-level
+    # Security fix (audit finding): two concurrent accepts on the same
+    # not-yet-funded application, or two concurrent accepts racing to use
+    # the SAME token, both used to be able to board a loan -- the old code
+    # only re-verified `status <> 'funded'` atomically; the token, decision
+    # outcome, and offer state were all read once, before the transaction,
+    # and trusted stale. Everything that must still be true at the instant
+    # of boarding is now re-verified here under a real row lock:
+    #   - applications.status is still not 'funded' (FOR UPDATE)
+    #   - decisions.outcome is still 'approve' (a rerun/correction could
+    #     have flipped it in the gap above -- and would have revoked the
+    #     token too, but re-checking the outcome directly is the real
+    #     invariant, not just a side effect of the token being gone)
+    #   - the token (if this isn't a staff call) still hashes to the same
+    #     value, is not expired (Postgres's own now()), and is not already
+    #     consumed
+    #   - the offer is still on record with a rate
+    # loans_app_id_key (db/migrations/0015) remains a second, database-level
     # backstop for any other path that ever inserts a loan.
     with db.transaction() as cur:
         cur.execute(
-            "UPDATE applications SET status = 'funded', accept_token = NULL "
-            "WHERE id = %s AND status <> 'funded' RETURNING id",
+            f"SELECT status, {_ACCEPT_TOKEN_FIELDS} FROM applications WHERE id = %s FOR UPDATE",
             (app_id,),
         )
-        if not cur.fetchall():
+        locked_rows = cur.fetchall()
+        if not locked_rows:
+            raise HTTPException(status_code=404, detail="application not found")
+        locked = locked_rows[0]
+        if locked["status"] == "funded":
             raise HTTPException(
                 status_code=409,
                 detail="This application has already been boarded.",
             )
+
+        cur.execute("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+        dec_rows = cur.fetchall()
+        locked_outcome = dec_rows[0]["outcome"] if dec_rows else None
+        if locked_outcome != "approve":
+            raise HTTPException(
+                status_code=422,
+                detail="This application is no longer approved and cannot be boarded.",
+            )
+
+        if not _is_staff(x_user_role, x_internal_token):
+            ok, status_code, message = decision_state.verify_accept_token(locked, body.accept_token)
+            if not ok:
+                raise HTTPException(status_code=status_code, detail=message)
+
+        # Re-read the offer fresh under the lock too -- there is no
+        # offer-edit/cancel endpoint in this system today, so its rate
+        # cannot actually change underneath us, but the accepted_at
+        # condition matters: a second racing request must not board against
+        # an offer this same transaction is about to mark accepted.
+        cur.execute(
+            "SELECT apr FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
+            (app_id,),
+        )
+        offer_rows = cur.fetchall()
+        if not offer_rows or offer_rows[0]["apr"] is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Create an offer before boarding this application.",
+            )
+        rate = offer_rows[0]["apr"]
+
+        cur.execute(
+            "UPDATE applications SET status = 'funded', accept_token_hash = NULL, "
+            "accept_token_expires_at = NULL, accept_token_consumed_at = now() "
+            "WHERE id = %s AND status <> 'funded'",
+            (app_id,),
+        )
         cur.execute(
             "UPDATE offers SET accepted_at = now() WHERE app_id = %s AND accepted_at IS NULL",
             (app_id,),

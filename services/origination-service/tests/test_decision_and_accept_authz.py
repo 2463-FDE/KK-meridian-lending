@@ -42,7 +42,7 @@ import contextlib
 
 import psycopg2.errors
 
-from app import clients, config, db, intake
+from app import clients, config, db, decision_state, intake
 from app.main import app
 from fastapi.testclient import TestClient
 
@@ -182,8 +182,10 @@ def test_approved_decision_mints_an_accept_token(monkeypatch):
     assert resp.status_code == 200
     token = resp.json()["accept_token"]
     assert token  # a real, non-empty token was minted
-    update_calls = [c for c in calls if c[0].startswith("UPDATE applications SET accept_token")]
-    assert update_calls and update_calls[0][1][0] == token  # and persisted onto the app
+    update_calls = [c for c in calls if c[0].startswith("UPDATE applications SET accept_token_hash")]
+    # Only the sha256 hash is ever persisted -- never the raw token itself.
+    assert update_calls and update_calls[0][1][0] == decision_state.hash_accept_token(token)
+    assert token not in update_calls[0][1]
 
 
 def test_denied_decision_mints_no_accept_token(monkeypatch):
@@ -369,13 +371,16 @@ def test_rerun_blocked_when_a_manual_review_commits_during_the_decision_service_
 # --- POST /{app_id}/accept ---------------------------------------------------
 
 _ACCEPT_TOKEN = "real-token-abc123"
+_ACCEPT_TOKEN_HASH = decision_state.hash_accept_token(_ACCEPT_TOKEN)
 
 
-def _accept_row(status="approved", outcome="approve", apr=9.99, accept_token=_ACCEPT_TOKEN):
+def _accept_row(status="approved", outcome="approve", apr=9.99,
+                 token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None):
     return {
         "amount": 9000, "term_months": 24, "status": status,
         "name": "Jane Borrower", "apr": apr, "outcome": outcome,
-        "accept_token": accept_token,
+        "accept_token_hash": token_hash, "accept_token_consumed_at": token_consumed_at,
+        "token_live": token_live,
     }
 
 
@@ -392,17 +397,32 @@ def _stub_board_to_servicing(monkeypatch, loan_id=555, raises=None):
     return calls
 
 
-class _FakeTxCursor:
-    """Stands in for the psycopg2 cursor db.transaction() yields --
-    simulates the atomic conditional UPDATE (claim_succeeds toggles whether
-    a concurrent accept already won the race), the OFFER_ACCEPTED stamp
-    (db/migrations/0021), and the two board_to_servicing_tx INSERTs.
-    raise_on_loan_insert lets a test simulate the loans_app_id_key backstop
-    firing on the INSERT INTO loans specifically."""
+class _FakeAcceptTxCursor:
+    """Stands in for the psycopg2 cursor db.transaction() yields for
+    accept_offer -- the applications row lock (FOR UPDATE, with the hashed
+    token/expiry/consumed columns), the decisions outcome re-check, the
+    offer re-check, the atomic board+consume UPDATE, and the two
+    board_to_servicing_tx INSERTs, all under this one cursor, same as the
+    real single transaction.
 
-    def __init__(self, claim_succeeds, loan_id):
-        self.claim_succeeds = claim_succeeds
+    A concurrent accept that already won the race is now simulated via
+    locked_status="funded" (the FOR UPDATE re-check catches it immediately,
+    before the decisions/offer/board statements ever run) -- not via a
+    conditional UPDATE return value like the pre-hash version of this test.
+    raise_on_loan_insert lets a test simulate the loans_app_id_key backstop
+    firing on the INSERT INTO loans specifically.
+    """
+
+    def __init__(self, loan_id=999, locked_status="approved", locked_outcome="approve",
+                 token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None,
+                 offer_apr=9.99):
         self.loan_id = loan_id
+        self.locked_status = locked_status
+        self.locked_outcome = locked_outcome
+        self.token_hash = token_hash
+        self.token_live = token_live
+        self.token_consumed_at = token_consumed_at
+        self.offer_apr = offer_apr
         self.executed = []
         self.raise_on_loan_insert = None
         self._last = None
@@ -410,8 +430,19 @@ class _FakeTxCursor:
     def execute(self, sql, params=None):
         self.executed.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("UPDATE applications"):
-            self._last = [{"id": params[0]}] if self.claim_succeeds else []
+        if stmt.startswith("SELECT status, accept_token_hash"):
+            self._last = [{
+                "status": self.locked_status,
+                "accept_token_hash": self.token_hash,
+                "accept_token_consumed_at": self.token_consumed_at,
+                "token_live": self.token_live,
+            }]
+        elif stmt.startswith("SELECT outcome FROM decisions"):
+            self._last = [{"outcome": self.locked_outcome}] if self.locked_outcome else []
+        elif stmt.startswith("SELECT apr FROM offers"):
+            self._last = [{"apr": self.offer_apr}] if self.offer_apr is not None else []
+        elif stmt.startswith("UPDATE applications SET status = 'funded'"):
+            self._last = None
         elif stmt.startswith("UPDATE offers SET accepted_at"):
             self._last = None
         elif stmt.startswith("INSERT INTO loans"):
@@ -430,8 +461,12 @@ class _FakeTxCursor:
         return self._last
 
 
-def _stub_transaction(monkeypatch, claim_succeeds=True, loan_id=999):
-    cursor = _FakeTxCursor(claim_succeeds, loan_id)
+def _stub_transaction(monkeypatch, loan_id=999, locked_status="approved", locked_outcome="approve",
+                       token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None,
+                       offer_apr=9.99):
+    cursor = _FakeAcceptTxCursor(
+        loan_id, locked_status, locked_outcome, token_hash, token_live, token_consumed_at, offer_apr,
+    )
 
     @contextlib.contextmanager
     def _fake_tx():
@@ -463,23 +498,54 @@ def test_first_accept_rejects_wrong_token(monkeypatch):
     assert not board_calls
 
 
+def test_first_accept_rejects_expired_token(monkeypatch):
+    """Security fix: expiry is enforced server-side (Postgres's own now(),
+    computed as the token_live boolean) -- an expired token must be
+    rejected with a clear, specific message, not the generic 403."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", token_live=False)])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 409
+    assert "expired" in resp.json()["detail"]
+    assert not board_calls
+
+
+def test_first_accept_rejects_already_consumed_token(monkeypatch):
+    """Security fix: single-use -- a token that already boarded a loan once
+    must not work again, independent of the hash/expiry checks."""
+    monkeypatch.setattr(
+        db, "query",
+        lambda sql, params=None: [_accept_row(status="approved", token_consumed_at="2026-08-01T00:00:00+00:00")],
+    )
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 409
+    assert "already been used" in resp.json()["detail"]
+    assert not board_calls
+
+
 def test_first_accept_succeeds_with_the_correct_accept_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
-    cursor = _stub_transaction(monkeypatch, claim_succeeds=True, loan_id=777)
+    cursor = _stub_transaction(monkeypatch, loan_id=777)
 
     resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 777
-    # The status flip clears accept_token too -- one-time use.
-    update_sql = cursor.executed[0][0]
-    assert "accept_token = NULL" in update_sql
-    assert "status <> 'funded'" in update_sql
+    # The status flip clears the hash and stamps consumed_at too -- one-time use.
+    board_update = next(c for c in cursor.executed if c[0].startswith("UPDATE applications SET status = 'funded'"))
+    assert "accept_token_hash = NULL" in board_update[0]
+    assert "accept_token_consumed_at = now()" in board_update[0]
+    assert "status <> 'funded'" in board_update[0]
 
 
 def test_first_accept_succeeds_for_staff_without_a_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
-    _stub_transaction(monkeypatch, claim_succeeds=True, loan_id=888)
+    _stub_transaction(monkeypatch, loan_id=888)
 
     resp = client.post(
         "/applications/10/accept",
@@ -503,16 +569,32 @@ def test_first_accept_by_staff_without_internal_token_is_forbidden(monkeypatch):
 def test_first_accept_returns_409_when_a_concurrent_accept_already_won(monkeypatch):
     """The review's race-condition finding: two concurrent accepts on the same
     not-yet-funded application both used to pass the same stale-read status
-    check and both board a loan. The atomic UPDATE is the real guard -- a
-    caller who loses the race gets 0 rows back and never boards anything."""
+    check and both board a loan. The FOR UPDATE re-check inside the
+    transaction is the real guard -- a caller who loses the race sees
+    status already 'funded' the instant it acquires the lock, and never
+    reaches the decisions/offer/board statements."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
-    cursor = _stub_transaction(monkeypatch, claim_succeeds=False)
+    cursor = _stub_transaction(monkeypatch, locked_status="funded")
 
     resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
-    # Only the UPDATE ran -- the loser never reaches the board INSERTs.
+    # Only the FOR UPDATE SELECT ran -- the loser never reaches the board INSERTs.
     assert len(cursor.executed) == 1
+
+
+def test_first_accept_rejected_when_decision_no_longer_approved_under_lock(monkeypatch):
+    """Security fix (audit finding): the pre-check read outcome == 'approve'
+    before the transaction opened -- a rerun/correction could flip it in
+    that gap. The authoritative re-check inside the lock must catch this
+    even though the stale pre-check read passed."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
+    cursor = _stub_transaction(monkeypatch, locked_outcome="deny")
+
+    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 422
+    assert not any(c[0].startswith("UPDATE applications SET status = 'funded'") for c in cursor.executed)
 
 
 # test_accept_rejects_application_that_was_never_approved (the review's
@@ -626,7 +708,7 @@ def test_accept_reports_409_when_a_loan_already_exists(monkeypatch):
     funded) accept path -- the already-funded case is hard-blocked before
     ever reaching a board attempt at all (see the already-boarded tests)."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
-    cursor = _stub_transaction(monkeypatch, claim_succeeds=True)
+    cursor = _stub_transaction(monkeypatch)
     cursor.raise_on_loan_insert = psycopg2.errors.UniqueViolation("dup")
 
     resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})

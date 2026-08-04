@@ -266,7 +266,8 @@ def test_review_deny_returns_the_staff_reason_as_adverse_action(monkeypatch):
 
     accept_token_updates = [c for c in calls if "accept_token" in c[0]]
     assert len(accept_token_updates) == 1
-    assert "accept_token = NULL" in accept_token_updates[0][0]
+    assert "accept_token_hash = NULL" in accept_token_updates[0][0]
+    assert "accept_token_expires_at = NULL" in accept_token_updates[0][0]
 
 
 def test_review_falls_back_to_role_when_no_user_id_or_lookup_hit(monkeypatch):

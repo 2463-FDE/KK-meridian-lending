@@ -38,5 +38,12 @@ services/*/combined-ca-bundle.pem
 coverage/
 .idea/
 .vscode/
+*.iml
+
+# runtime log output (docker-compose mounts ./logs and services/*/logs as
+# volumes -- these accumulate locally on every run, never intended to be
+# committed)
+logs/
+services/*/logs/
 
 # NOTE: keep logs/ checked in for now — finance asked us to retain sample logs.
