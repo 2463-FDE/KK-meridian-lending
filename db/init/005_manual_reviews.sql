@@ -12,10 +12,15 @@
 -- forcing a dummy model_version into that table would misrepresent a staff
 -- decision as a model one. This table is its own small, human-decision audit
 -- record instead: who reviewed it, what they decided, and why.
+-- Review fix (db/migrations/0020): once staff decides, it's final -- no
+-- staff member (not even a different one) may change it afterward.
+-- app_id is UNIQUE (at most one manual review per application, ever) and
+-- reviewer_name identifies the actual person, not just their role.
 CREATE TABLE IF NOT EXISTS manual_reviews (
     id            SERIAL PRIMARY KEY,
-    app_id        INTEGER NOT NULL REFERENCES applications(id),
+    app_id        INTEGER NOT NULL REFERENCES applications(id) UNIQUE,
     reviewer_role TEXT NOT NULL,
+    reviewer_name TEXT,
     outcome       TEXT NOT NULL,   -- 'approve' | 'deny'
     reason        TEXT NOT NULL,
     reviewed_at   TIMESTAMPTZ NOT NULL DEFAULT now()

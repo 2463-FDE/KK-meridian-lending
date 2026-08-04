@@ -91,7 +91,11 @@ CREATE TABLE IF NOT EXISTS offers (
     monthly_payment NUMERIC(14,2),      -- D12: was DOUBLE PRECISION
     amount_financed NUMERIC(14,2),      -- D12: was DOUBLE PRECISION
     total_of_payments NUMERIC(14,2),    -- D12: was DOUBLE PRECISION
-    created_at  TIMESTAMPTZ DEFAULT now()
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    -- Review fix (db/migrations/0021): OFFER_ACCEPTED is a real workflow
+    -- state, not just implied by BOARDED -- stamped the moment accept_offer
+    -- boards the loan (same atomic action in this system today).
+    accepted_at TIMESTAMPTZ
 );
 
 -- LSS tables. A funded loan is "boarded" here by a direct insert from origination.

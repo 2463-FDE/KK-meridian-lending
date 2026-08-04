@@ -237,12 +237,20 @@ def test_rerun_of_a_manually_reviewed_application_is_rejected(monkeypatch):
     """Bug found in the field: a rerun after a manual review (routers/
     applications.py's review_application) silently reset the outcome back to
     "refer", making the same application eligible for manual review again --
-    and again, indefinitely (observed: 5 flip-flopped reviews on one app)."""
+    and again, indefinitely (observed: 5 flip-flopped reviews on one app).
+
+    Review fix: the block message used to be generic ("resolved by staff");
+    it now states the actual outcome/staff member/timestamp/reason, and the
+    status code is 409 (a real conflict), not 422."""
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return [{"app_id": 10}]
         if "FROM manual_reviews" in sql:
-            return [{"id": 1}]  # this application has a review on record
+            return [{
+                "outcome": "deny", "reason": "DTI too high after manual re-verification",
+                "reviewer_name": "Sam Okafor", "reviewer_role": "underwriter",
+                "reviewed_at": "2026-08-01T12:00:00+00:00",
+            }]
         return [_APPLICATION_ROW]
 
     monkeypatch.setattr(db, "query", _fake_query)
@@ -253,8 +261,13 @@ def test_rerun_of_a_manually_reviewed_application_is_rejected(monkeypatch):
         headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
     )
 
-    assert resp.status_code == 422
+    assert resp.status_code == 409
     assert not calls
+    detail = resp.json()["detail"]
+    assert "manually DENIED" in detail
+    assert "Sam Okafor" in detail
+    assert "DTI too high after manual re-verification" in detail
+    assert "cannot be rerun" in detail
 
 
 # --- POST /{app_id}/accept ---------------------------------------------------
@@ -286,13 +299,16 @@ def _stub_board_to_servicing(monkeypatch, loan_id=555, raises=None):
 class _FakeTxCursor:
     """Stands in for the psycopg2 cursor db.transaction() yields --
     simulates the atomic conditional UPDATE (claim_succeeds toggles whether
-    a concurrent accept already won the race) and the two board_to_
-    servicing_tx INSERTs."""
+    a concurrent accept already won the race), the OFFER_ACCEPTED stamp
+    (db/migrations/0021), and the two board_to_servicing_tx INSERTs.
+    raise_on_loan_insert lets a test simulate the loans_app_id_key backstop
+    firing on the INSERT INTO loans specifically."""
 
     def __init__(self, claim_succeeds, loan_id):
         self.claim_succeeds = claim_succeeds
         self.loan_id = loan_id
         self.executed = []
+        self.raise_on_loan_insert = None
         self._last = None
 
     def execute(self, sql, params=None):
@@ -300,7 +316,11 @@ class _FakeTxCursor:
         stmt = sql.strip()
         if stmt.startswith("UPDATE applications"):
             self._last = [{"id": params[0]}] if self.claim_succeeds else []
+        elif stmt.startswith("UPDATE offers SET accepted_at"):
+            self._last = None
         elif stmt.startswith("INSERT INTO loans"):
+            if self.raise_on_loan_insert:
+                raise self.raise_on_loan_insert
             self._last = {"id": self.loan_id}
         elif stmt.startswith("INSERT INTO balances"):
             self._last = None
@@ -399,48 +419,54 @@ def test_first_accept_returns_409_when_a_concurrent_accept_already_won(monkeypat
     assert len(cursor.executed) == 1
 
 
-def test_accept_rejects_application_that_was_never_approved(monkeypatch):
-    """The other half of the review finding: accept never checked the
-    decision outcome at all -- a denied or still-pending application could be
-    boarded/funded like any other."""
-    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="submitted", outcome="deny")])
-    board_calls = _stub_board_to_servicing(monkeypatch)
-
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
-
-    assert resp.status_code == 422
-    assert not board_calls  # never boards/funds a loan for a non-approved application
+# test_accept_rejects_application_that_was_never_approved (the review's
+# original finding: accept never checked the decision outcome at all) is now
+# covered more precisely by test_accept_rejects_a_denied_application_with_
+# its_reason and test_accept_rejects_a_still_pending_application below.
 
 
-def test_reaccept_of_an_already_funded_application_requires_staff(monkeypatch):
+def test_reaccept_of_an_already_funded_application_is_rejected_with_no_token(monkeypatch):
+    """Requirement: 'This application has already been boarded.' -- a hard
+    block, not a staff-only re-board path (that path is removed: the atomic
+    funding transaction already prevents the partial state -- funded status
+    with no loan -- it used to exist to recover from)."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
     resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
 
-    assert resp.status_code == 403
-    assert not board_calls  # never re-boards/re-funds
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "This application has already been boarded."
+    assert not board_calls
 
 
-def test_reaccept_of_an_already_funded_application_succeeds_for_staff(monkeypatch):
+def test_reaccept_of_an_already_funded_application_is_rejected_for_staff_too(monkeypatch):
+    """Requirement: already-boarded blocks EVERYONE, staff included -- there
+    is no more re-board escape hatch."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
-    _stub_board_to_servicing(monkeypatch)
+    board_calls = _stub_board_to_servicing(monkeypatch)
 
     resp = client.post(
         "/applications/10/accept",
         headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "This application has already been boarded."
+    assert not board_calls
 
 
-def test_reaccept_of_an_already_funded_application_by_staff_without_internal_token_is_forbidden(monkeypatch):
+def test_reaccept_of_an_already_funded_application_by_staff_without_internal_token_is_still_rejected(monkeypatch):
+    """The already-boarded check fires before the auth check now (it's the
+    same status/decision/offer info GET already exposes anonymously) -- a
+    staff caller with no internal token gets the same 409, not a 403."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
     resp = client.post("/applications/10/accept", headers={"X-User-Role": "underwriter"})
 
-    assert resp.status_code == 403
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "This application has already been boarded."
     assert not board_calls
 
 
@@ -449,42 +475,65 @@ def test_first_accept_returns_409_when_no_offer_exists_yet(monkeypatch):
     an approved application can reach accept_offer with no linked offer row
     at all. This used to fall back to a hardcoded 7.99 APR and board the
     borrower at a rate/terms nobody ever showed them -- no TILA disclosure on
-    record. Must fail closed (409) instead of ever silently making up a rate."""
+    record. Must fail closed (409) with a specific, actionable message."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", apr=None)])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
     resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
+    assert resp.json()["detail"] == "Create an offer before boarding this application."
     assert not board_calls
 
 
-def test_reaccept_of_an_already_funded_application_returns_409_when_no_offer_exists(monkeypatch):
-    """Same guard on the staff re-accept-of-a-funded-application path -- a
-    funded-with-no-offer row (exactly the gap this review flagged) must not
-    board a second loan off a made-up rate either."""
-    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded", apr=None)])
+def test_accept_rejects_a_denied_application_with_its_reason(monkeypatch):
+    """Requirement: 'This application cannot be boarded because it was
+    denied. Reason: [decision reason].'"""
+    def _fake_query(sql, params=None):
+        if "FROM decision_events" in sql:
+            return [{"reason_codes": ["Low credit bureau score relative to lending criteria"]}]
+        if "FROM manual_reviews" in sql:
+            return []  # automated-only deny -- no staff review on record
+        return [_accept_row(status="denied", outcome="deny")]
+
+    monkeypatch.setattr(db, "query", _fake_query)
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post(
-        "/applications/10/accept",
-        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
-    )
+    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
 
-    assert resp.status_code == 409
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "This application cannot be boarded because it was denied. "
+        "Reason: Low credit bureau score relative to lending criteria."
+    )
     assert not board_calls
 
 
-def test_reaccept_reports_409_when_a_loan_already_exists(monkeypatch):
-    """loans_app_id_key (db/migrations/0015) is the database-level backstop --
-    if a staff re-accept somehow races a loan that already exists for this
-    app_id, surface a clean 409 instead of a raw 500."""
-    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
-    _stub_board_to_servicing(monkeypatch, raises=psycopg2.errors.UniqueViolation("dup"))
+def test_accept_rejects_a_still_pending_application(monkeypatch):
+    """Requirement: 'This application must receive final approval before it
+    can be boarded.' -- covers 'refer' and no-decision-yet alike."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="in_review", outcome="refer")])
+    board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post(
-        "/applications/10/accept",
-        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
-    )
+    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "This application must receive final approval before it can be boarded."
+    assert not board_calls
+
+
+def test_accept_reports_409_when_a_loan_already_exists(monkeypatch):
+    """loans_app_id_key (db/migrations/0015) is the database-level backstop --
+    if the loans INSERT somehow races a loan that already exists for this
+    app_id (e.g. the legacy direct-board endpoint), surface a clean 409
+    instead of a raw 500. This is now exercised on the NORMAL (not-yet-
+    funded) accept path -- the already-funded case is hard-blocked before
+    ever reaching a board attempt at all (see the already-boarded tests)."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
+    cursor = _stub_transaction(monkeypatch, claim_succeeds=True)
+    cursor.raise_on_loan_insert = psycopg2.errors.UniqueViolation("dup")
+
+    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
+    assert resp.json()["detail"] == "a loan already exists for this application"

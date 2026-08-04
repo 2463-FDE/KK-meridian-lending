@@ -157,6 +157,16 @@ class ApplicationDetail(BaseModel):
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
     offer: Optional[Disclosure] = None
+    # Review fix: once staff decides (review_application), that decision is
+    # final -- the frontend needs to know this to disable the Approve/Deny
+    # controls, not just rely on the backend's own 409 after a doomed retry.
+    decision_final: bool = False
+    # Bug fix: without these, the finalized-decision panel had nothing real
+    # to show -- staff could only see the original reason/who/when by
+    # deliberately attempting (and being blocked by) a second decision.
+    decision_reason: Optional[str] = None
+    decision_by: Optional[str] = None
+    decision_at: Optional[str] = None
 
 
 # income/employment_years are underwriting inputs, not borrower-facing status data.
