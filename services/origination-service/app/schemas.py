@@ -143,6 +143,11 @@ class Disclosure(BaseModel):
 class OfferOut(BaseModel):
     app_id: int
     disclosure: Disclosure
+    # Idempotency fix: a repeat/racing POST /offer for an application that
+    # already has one (e.g. auto-generated the instant the decision came
+    # back approve) now returns that SAME offer instead of a 409 -- this
+    # tells the caller which happened without parsing anything.
+    created: bool = True
 
 
 class ApplicationDetail(BaseModel):

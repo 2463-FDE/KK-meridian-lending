@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
-import { apiPost } from "../../lib/api";
+import { apiGet, apiPost, ApiError } from "../../lib/api";
 import { usd, pct } from "../../lib/format";
 
 const STEPS: Step[] = [
@@ -282,13 +282,37 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost("/los/offer", {
+      // Bug fix: run_decision auto-generates an offer server-side the
+      // instant a decision comes back approve (best-effort) -- this used
+      // to always try to CREATE one instead, which always found that
+      // auto-generated offer already there and always failed. Request the
+      // existing offer first (the borrower's own accept_token, already in
+      // hand from the decision response, proves ownership); only fall back
+      // to creating one on a genuine 404 (auto-generation hasn't landed
+      // yet, or predates it) -- and even that create is itself idempotent
+      // now (returns the same offer if one shows up first in a race),
+      // never a 409.
+      const token = decision?.accept_token || "";
+      let existing: { disclosure: Disclosure } | null = null;
+      try {
+        existing = (await apiGet(
+          `/los/applications/${app.app_id}/offer?accept_token=${encodeURIComponent(token)}`
+        )) as { disclosure: Disclosure };
+      } catch (getErr) {
+        if (!(getErr instanceof ApiError) || getErr.status !== 404) throw getErr;
+        // 404 -- genuinely no offer yet; fall through to create one below.
+      }
+      if (existing) {
+        setDisclosure(existing.disclosure);
+        return;
+      }
+      const created = (await apiPost("/los/offer", {
         app_id: app.app_id,
         principal: form.amount,
         annual_rate_pct: OFFER_RATE_PCT,
         term_months: parseInt(form.term_months, 10),
       })) as { app_id: string | number; disclosure: Disclosure };
-      setDisclosure(res.disclosure);
+      setDisclosure(created.disclosure);
     } catch (err) {
       setApiError(errMsg(err, "Could not generate your offer."));
     } finally {

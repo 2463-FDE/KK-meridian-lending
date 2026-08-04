@@ -7,19 +7,33 @@ over HTTP and maps its response into the OfferOut shape the frontend already exp
 Review fix: make_offer used to have no guard of its own at all -- any outcome
 (denied, still-refer, no decision yet) proxied straight through to
 disclosure-service, which only ever returned a generic "no approved decision
-on record" 422 with no reason, and silently returned 200 with the existing
-offer on a repeat call, giving the caller no way to tell "just created" from
-"already existed". Guards now live here, with a specific, honest message per
-state (see workflow rules: an offer can only ever be created once a
-decision's current outcome is APPROVED).
+on record" 422 with no reason. Guards live here, with a specific, honest
+message per state (see workflow rules: an offer can only ever be created
+once a decision's current outcome is APPROVED).
+
+Bug fix (borrower-workflow audit): this used to ALSO reject with a 409 the
+moment ANY offer already existed for the application -- including the
+completely normal case where run_decision's/review_application's own
+best-effort auto-generation had already created one (see disclosure_graph.
+auto_generate_offer). disclosure-service's own INSERT ... ON CONFLICT
+(decision_id) DO NOTHING + read-back was ALREADY idempotent and safe for
+this; the 409 here was a redundant, incorrectly-blocking guard on top of it
+that broke the public /apply page's own borrower self-service flow (a
+retried/first call always found an offer already there and always 409'd).
+Removed -- make_offer is now itself idempotent, distinguishing "just
+created" (created=True) from "already existed" (created=False) via the
+response body, never a 409, for the normal case. A genuine conflict
+(application no longer approved, already boarded) still gets a specific,
+structured error -- see _conflict() below.
 """
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import clients, config, db, decision_state
 from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferOut, ScheduleRow
+from .applications import _is_staff
 
 log = get_logger("offers")
 router = APIRouter(tags=["offers"])
@@ -30,6 +44,14 @@ class OfferIn(BaseModel):
     principal: float = Field(gt=0, le=50000)
     annual_rate_pct: float = Field(default=7.99, gt=0, le=35)
     term_months: int = Field(default=48, ge=12, le=60)
+
+
+def _conflict(status_code: int, code: str, message: str) -> HTTPException:
+    """A structured, machine-readable conflict -- callers (the frontend)
+    switch on `code`, never on parsing `message`'s human text. `message`
+    stays present for anything that still just logs/displays it directly
+    (existing convention throughout this codebase)."""
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
 
 def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
@@ -43,46 +65,53 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
         total_of_payments=d.get("total_of_payments", 0),
         schedule=[ScheduleRow(**row) for row in rows],
     )
-    return OfferOut(app_id=app_id, disclosure=disclosure)
+    return OfferOut(app_id=app_id, disclosure=disclosure, created=resp.get("created", True))
 
 
 @router.post("/offer", response_model=OfferOut)
 def make_offer(body: OfferIn):
-    # Same-row check-then-write race as everywhere else in this router set is
-    # acceptable here: disclosure-service's own INSERT ... ON CONFLICT
-    # (decision_id) DO NOTHING is still the real atomic guard against two
-    # concurrent make_offer calls both creating a row; this pre-check exists
-    # purely to give a specific, honest message instead of a generic one.
-    existing = db.query("SELECT id FROM offers WHERE app_id = %s", (body.app_id,))
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail="An offer has already been created for this application.",
+    app_rows = db.query("SELECT status FROM applications WHERE id = %s", (body.app_id,))
+    if not app_rows:
+        raise HTTPException(status_code=404, detail="application not found")
+    # Bug fix: an already-boarded application must never mint/return a
+    # "fresh" offer flow -- boarding only ever happens after acceptance, so
+    # reaching this with status == 'funded' means either a stale client
+    # retry or the legacy direct-/board path (no offer ever existed for
+    # that one). Either way, this is a real, structured conflict, not the
+    # normal already-exists case handled below.
+    if app_rows[0]["status"] == "funded":
+        raise _conflict(
+            409, "APPLICATION_ALREADY_BOARDED",
+            "This application has already been boarded; an offer can no longer be created or changed.",
         )
 
     dec = db.query("SELECT outcome FROM decisions WHERE app_id = %s", (body.app_id,))
     if not dec:
-        raise HTTPException(
-            status_code=422,
-            detail="An offer cannot be created until the application receives a final approval.",
+        raise _conflict(
+            422, "APPLICATION_NOT_APPROVED",
+            "An offer cannot be created until the application receives a final approval.",
         )
     outcome = dec[0]["outcome"]
     if outcome == "deny":
         reason = decision_state.get_deny_reason(body.app_id)
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "An offer cannot be created because this application was denied. "
-                f"Decision reason: {reason or 'not on record'}."
-            ),
+        raise _conflict(
+            422, "APPLICATION_NOT_APPROVED",
+            "An offer cannot be created because this application was denied. "
+            f"Decision reason: {reason or 'not on record'}.",
         )
     if outcome != "approve":
         # 'refer' or any other non-terminal outcome -- no final approval yet.
-        raise HTTPException(
-            status_code=422,
-            detail="An offer cannot be created until the application receives a final approval.",
+        raise _conflict(
+            422, "APPLICATION_NOT_APPROVED",
+            "An offer cannot be created until the application receives a final approval.",
         )
 
+    # Idempotency fix: no more pre-check-then-409 here -- disclosure-service's
+    # own INSERT ... ON CONFLICT (decision_id) DO NOTHING + read-back is the
+    # real, database-enforced "exactly one offer per decision" guarantee
+    # (offers.decision_id / offers.app_id are both UNIQUE). This call is
+    # safe to make whether or not an offer already exists: it returns the
+    # SAME offer either way, with `created` telling the two cases apart.
     try:
         resp = clients.post(clients.DISCLOSURE_URL, "/offers", {
             "application_id": body.app_id,
@@ -107,19 +136,44 @@ def make_offer(body: OfferIn):
         ) from exc
     except Exception as exc:  # noqa
         # Network failure, timeout, etc. -- log the technical detail
-        # server-side; the caller never sees anything but a clear, generic
-        # message (never an internal error string, a URL, or a stack trace).
+        # server-side with a correlation id (app_id); the caller never sees
+        # anything but a clear, generic, recoverable message.
         log.error("make_offer failed app_id=%s: %s", body.app_id, exc)
-        raise HTTPException(
-            status_code=502,
-            detail="Could not create the offer -- please try again.",
+        raise _conflict(
+            502, "OFFER_SERVICE_UNAVAILABLE",
+            "Could not create the offer -- please try again.",
         ) from exc
 
     return _to_offer_out(body.app_id, resp)
 
 
 @router.get("/applications/{app_id}/offer", response_model=OfferOut)
-def get_offer(app_id: int):
+def get_offer(
+    app_id: int,
+    accept_token: str | None = None,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    # Security fix (borrower-workflow audit): this had NO ownership check at
+    # all -- app_id is a sequential, guessable integer, so anyone could read
+    # a STRANGER's loan amount/APR/payment schedule. Staff or the SAME
+    # accept_token minted onto this application on approval (the borrower's
+    # own browser already holds it, from the decision response) is now
+    # required -- same credential accept_offer already uses, just a lighter
+    # check: hash-match only, no expiry/consumed-state gate, since viewing
+    # is read-only and a borrower re-viewing their own already-accepted
+    # offer (token consumed) or an offer whose token has since expired is
+    # not a security concern the way accepting/boarding again would be.
+    if not _is_staff(x_user_role, x_internal_token):
+        rows = db.query(
+            "SELECT accept_token_hash FROM applications WHERE id = %s",
+            (app_id,),
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="application not found")
+        if not decision_state.accept_token_hash_matches(rows[0].get("accept_token_hash"), accept_token):
+            raise HTTPException(status_code=403, detail="not authorized to view this offer")
+
     resp = clients.get(clients.DISCLOSURE_URL, f"/applications/{app_id}/offer")
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="no offer for this application")

@@ -44,3 +44,9 @@ class OfferResponse(BaseModel):
     total_of_payments: float
     disclosure: Disclosure
     schedule: list[ScheduleRow] = []
+    # Idempotency fix: create_offer() is safe to call again for an
+    # application that already has one (ON CONFLICT DO NOTHING, then read
+    # back the original row) -- callers need to tell "just created" from
+    # "already existed" apart without parsing anything, since the latter is
+    # the normal case whenever server-side auto-generation already ran.
+    created: bool = True

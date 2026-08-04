@@ -4,6 +4,7 @@ Write path (POST /offers) builds the offer + amortization schedule with float ma
 persists an offers row via raw psycopg2 (matches the LOS write path). Read path
 (GET /applications/{id}/offer) goes through SQLAlchemy.
 """
+import psycopg2.errors
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -76,17 +77,34 @@ def create_offer(
     # would silently change underneath them. DO NOTHING instead, then fall
     # back to reading the already-stored row below -- a retry always gets
     # back the ORIGINAL terms, never a recomputed set.
-    inserted = db.query(
-        "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-        "monthly_payment, amount_financed, total_of_payments) "
-        "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s "
-        "FROM decisions d WHERE d.app_id = %s AND d.outcome = 'approve' "
-        "ON CONFLICT (decision_id) DO NOTHING "
-        "RETURNING id, app_id, decision_id, fee_pct_used, apr, finance_charge, "
-        "monthly_payment, amount_financed, total_of_payments",
-        (fee_pct_used, o["apr"], o["finance_charge"], o["monthly_payment"],
-         o["amount_financed"], o["total_of_payments"], body.application_id),
-    )
+    # Concurrency fix (borrower-workflow audit, found by a real-Postgres
+    # test, not by inspection alone): offers.decision_id and offers.app_id
+    # are TWO SEPARATE UNIQUE constraints (migrations 0009/0011), even
+    # though this INSERT always sets them to the same value. ON CONFLICT
+    # (decision_id) only suppresses a conflict on THAT constraint -- two
+    # genuinely concurrent inserts for the same application can instead
+    # collide on offers_app_id_key first, which this ON CONFLICT clause
+    # does not target, raising an unhandled UniqueViolation (a raw 500)
+    # instead of falling through to the read-back below. Caught explicitly
+    # here and treated identically to the ON CONFLICT DO NOTHING case --
+    # the constraint (whichever one fired) is still what guarantees
+    # exactly one row; this just makes sure BOTH of its constraints are
+    # handled gracefully, not just one.
+    try:
+        inserted = db.query(
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
+            "monthly_payment, amount_financed, total_of_payments) "
+            "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s "
+            "FROM decisions d WHERE d.app_id = %s AND d.outcome = 'approve' "
+            "ON CONFLICT (decision_id) DO NOTHING "
+            "RETURNING id, app_id, decision_id, fee_pct_used, apr, finance_charge, "
+            "monthly_payment, amount_financed, total_of_payments",
+            (fee_pct_used, o["apr"], o["finance_charge"], o["monthly_payment"],
+             o["amount_financed"], o["total_of_payments"], body.application_id),
+        )
+    except psycopg2.errors.UniqueViolation:
+        inserted = []
+    created = bool(inserted)
     if inserted:
         row = inserted[0]
     else:
@@ -118,6 +136,7 @@ def create_offer(
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
         monthly_payment=float(row["monthly_payment"]), total_of_payments=float(row["total_of_payments"]),
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],
+        created=created,
     )
 
 

@@ -66,10 +66,19 @@ export function roleHome(role: string | null | undefined): string {
 export class ApiError extends Error {
   status: number;
   detail: string;
-  constructor(status: number, detail: string) {
+  // Bug fix (borrower offer workflow): some endpoints now return a
+  // structured {"code", "message"} detail instead of a plain string, so a
+  // caller can switch on a stable machine-readable reason instead of
+  // parsing human text (e.g. offers.py's APPLICATION_NOT_APPROVED /
+  // APPLICATION_ALREADY_BOARDED). Optional and additive -- every endpoint
+  // that still returns a plain string detail behaves exactly as before;
+  // `code` is simply undefined for those.
+  code?: string;
+  constructor(status: number, detail: string, code?: string) {
     super(detail || `Request failed (${status})`);
     this.status = status;
     this.detail = detail;
+    this.code = code;
   }
 }
 
@@ -89,13 +98,23 @@ async function parse(res: Response) {
     }
   }
   if (!res.ok) {
-    const detail =
-      data && typeof data === "object" && "detail" in data
-        ? String((data as { detail: unknown }).detail)
-        : typeof data === "string" && data
-          ? data
-          : `Request failed (${res.status})`;
-    throw new ApiError(res.status, detail);
+    let detail: string;
+    let code: string | undefined;
+    if (data && typeof data === "object" && "detail" in data) {
+      const d = (data as { detail: unknown }).detail;
+      if (d && typeof d === "object" && "message" in d) {
+        // Structured {"code", "message"} detail -- see ApiError.code above.
+        detail = String((d as { message: unknown }).message);
+        code = "code" in d ? String((d as { code: unknown }).code) : undefined;
+      } else {
+        detail = String(d);
+      }
+    } else if (typeof data === "string" && data) {
+      detail = data;
+    } else {
+      detail = `Request failed (${res.status})`;
+    }
+    throw new ApiError(res.status, detail, code);
   }
   return data;
 }

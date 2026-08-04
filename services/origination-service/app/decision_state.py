@@ -86,9 +86,24 @@ def verify_accept_token(row: dict, raw_token: str | None) -> tuple[bool, int, st
             "This acceptance link has expired. Request a new decision to "
             "get a new one."
         )
-    if not raw_token or not secrets.compare_digest(row["accept_token_hash"], hash_accept_token(raw_token)):
+    if not accept_token_hash_matches(row["accept_token_hash"], raw_token):
         return False, 403, "not authorized to accept this offer"
     return True, 200, ""
+
+
+def accept_token_hash_matches(stored_hash: str | None, raw_token: str | None) -> bool:
+    """Constant-time hash comparison only -- no expiry/consumed-state check.
+
+    Used where the only thing that needs proving is "you hold the token
+    this application minted" (e.g. viewing an already-created offer before
+    accepting it), as opposed to verify_accept_token's full accept/board
+    gate (expiry + single-use). A consumed or expired token still proves
+    the caller is the legitimate borrower for read-only purposes; nothing
+    is written by a read.
+    """
+    if not stored_hash or not raw_token:
+        return False
+    return secrets.compare_digest(stored_hash, hash_accept_token(raw_token))
 
 
 def format_outcome_label(outcome: str) -> str:
