@@ -390,11 +390,10 @@ def run_decision(
     except httpx.TimeoutException as e:
         # Ambiguous: decision-service may never have started, may still be
         # running, or may have finished with the response lost in transit --
-        # this cannot be told apart. The only safe action is to release the
-        # attempt and let a retry create a fresh one; decision-service has
-        # no idempotency key of its own, so a retry here CAN cause a second,
-        # independent bureau pull (documented limitation, not silently
-        # avoided -- see PR #6 review discussion).
+        # this cannot be told apart. Release the attempt and let a retry create
+        # a fresh one. Recording 'timeout' is what makes the retry reuse this
+        # attempt's bureau_request_key (Gap A), so the retry recovers the
+        # original pull instead of billing a second one.
         decision_state.mark_attempt_failed(attempt_id, "timeout")
         log.error("decision-service timed out app_id=%s attempt_id=%s: %s", app_id, attempt_id, e)
         raise HTTPException(status_code=502, detail="decision-service timed out -- please try again") from e

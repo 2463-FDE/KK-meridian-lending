@@ -31,3 +31,6 @@ class Offer(Base):
     amount_financed: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     total_of_payments: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # db/migrations/0021. Non-NULL means the borrower is bound to these terms:
+    # the offer is immutable from that point, including to the repair path.
+    accepted_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

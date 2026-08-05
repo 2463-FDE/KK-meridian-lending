@@ -196,6 +196,107 @@ def _unique_columns(conn, schema, table):
         return {r[0] for r in cur.fetchall()}
 
 
+def _checks(conn, schema, table):
+    """CHECK constraints as {name: (normalized expression, convalidated)}.
+
+    Review finding: comparing only columns and UNIQUE constraints let two real
+    divergences through. A CHECK present on one path and absent on another is a
+    rule the database enforces for some operators and not others; and a CHECK
+    that is VALIDATED on a fresh volume but NOT VALID after a replay is a
+    *silently weaker* database that looks identical to a column-level diff --
+    exactly the downgrade 0026's conditional add exists to prevent.
+
+    NOT NULL is excluded: it surfaces as `is_nullable` in _columns() already.
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT c.conname, pg_get_constraintdef(c.oid) AS def, c.convalidated "
+            "FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "JOIN pg_namespace n ON n.oid = t.relnamespace "
+            "WHERE n.nspname = %s AND t.relname = %s AND c.contype = 'c'",
+            (schema, table),
+        )
+        # pg_get_constraintdef appends " NOT VALID" for unvalidated constraints;
+        # convalidated already carries that, so strip it to compare the RULE and
+        # its validation state as two independent facts.
+        return {
+            r["conname"]: (r["def"].replace(" NOT VALID", ""), r["convalidated"])
+            for r in cur.fetchall()
+        }
+
+
+def _foreign_keys(conn, schema, table):
+    """FKs keyed by (referencing columns, referenced table) -- not by name, for
+    the same reason UNIQUEs are not: the names are auto-generated and a rename
+    is not a schema difference. The referenced table is compared unqualified so
+    a schema-qualified definition still matches."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT pg_get_constraintdef(c.oid) AS def, ft.relname AS ref_table, "
+            "       (SELECT array_agg(a.attname ORDER BY a.attname) "
+            "          FROM pg_attribute a "
+            "         WHERE a.attrelid = t.oid AND a.attnum = ANY(c.conkey)) AS cols "
+            "FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "JOIN pg_namespace n ON n.oid = t.relnamespace "
+            "JOIN pg_class ft ON ft.oid = c.confrelid "
+            "WHERE n.nspname = %s AND t.relname = %s AND c.contype = 'f'",
+            (schema, table),
+        )
+        return {(tuple(r["cols"]), r["ref_table"]) for r in cur.fetchall()}
+
+
+def _indexes(conn, schema, table):
+    """Index definitions with the schema qualifier and index name stripped, so
+    two paths that built the same index under different auto-generated names
+    still compare equal. A missing partial unique index (payments'
+    idempotency_key, for one) is a lost guarantee, not a cosmetic difference."""
+    import re
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = %s AND tablename = %s",
+            (schema, table),
+        )
+        out = set()
+        for (indexdef,) in cur.fetchall():
+            normalized = re.sub(r"^CREATE (UNIQUE )?INDEX \S+ ON \S+", r"CREATE \1INDEX ON", indexdef)
+            out.add(normalized.replace(f"{schema}.", ""))
+        return out
+
+
+def _defaults(conn, schema, table):
+    """Column defaults. A DEFAULT that exists on one path and not another means
+    rows written through the same code end up different depending on how the
+    operator's database was built. Sequence defaults are normalized: nextval()
+    embeds the schema-qualified sequence name, which differs by construction."""
+    import re
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT column_name, column_default FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s AND column_default IS NOT NULL",
+            (schema, table),
+        )
+        return {
+            r["column_name"]: re.sub(r"nextval\('[^']+'", "nextval('<seq>'", r["column_default"])
+            for r in cur.fetchall()
+        }
+
+
+def _shape(conn, schema, table):
+    """Everything compared for a table, as one value."""
+    return {
+        "columns": _columns(conn, schema, table),
+        "unique_columns": _unique_columns(conn, schema, table),
+        "checks": _checks(conn, schema, table),
+        "foreign_keys": _foreign_keys(conn, schema, table),
+        "indexes": _indexes(conn, schema, table),
+        "defaults": _defaults(conn, schema, table),
+    }
+
+
 # --- the four paths -----------------------------------------------------------
 
 def test_path_1_fresh_init_only_succeeds(conn):
@@ -264,11 +365,12 @@ _CONVERGENCE_TABLES = (
     "decision_events", "decision_attempts", "payments", "payment_applications",
 )
 
+# Same tables, for the legacy-upgrade comparison. Kept as its own name so that
+# narrowing one comparison can never silently narrow the other.
+_LEGACY_CONVERGENCE_TABLES = _CONVERGENCE_TABLES
 
-def test_all_three_init_based_paths_converge(conn):
-    """Fresh init, fresh init + migrations, and fresh init + migrations twice
-    must produce the same columns and the same single-column UNIQUE sets on
-    every table this PR touches."""
+
+def _build_all_paths(conn):
     _build_fresh_init(conn, SCHEMAS["fresh"])
 
     _build_fresh_init(conn, SCHEMAS["replay"])
@@ -278,17 +380,59 @@ def test_all_three_init_based_paths_converge(conn):
     _apply_all_migrations(conn, SCHEMAS["twice"])
     _apply_all_migrations(conn, SCHEMAS["twice"])
 
+    _build_legacy_schema(conn, SCHEMAS["legacy"])
+    _apply_all_migrations(conn, SCHEMAS["legacy"])
+
+
+@pytest.mark.parametrize("aspect", ["columns", "unique_columns", "checks",
+                                    "foreign_keys", "indexes", "defaults"])
+@pytest.mark.parametrize("other", ["replay", "twice"])
+def test_init_based_paths_converge_on_every_aspect(conn, other, aspect):
+    """Fresh init, fresh init + migrations, and fresh init + migrations twice
+    must agree on columns, UNIQUEs, CHECKs (rule AND validation state), foreign
+    keys, indexes and defaults -- one parametrized case per aspect so a failure
+    names which kind of divergence it is."""
+    _build_all_paths(conn)
     for table in _CONVERGENCE_TABLES:
-        fresh_cols = _columns(conn, SCHEMAS["fresh"], table)
-        assert fresh_cols, f"{table} missing from the fresh-init schema"
-        for other in ("replay", "twice"):
-            assert _columns(conn, SCHEMAS[other], table) == fresh_cols, (
-                f"{table} columns diverge between fresh-init and {other}"
-            )
-            assert _unique_columns(conn, SCHEMAS[other], table) == \
-                   _unique_columns(conn, SCHEMAS["fresh"], table), (
-                f"{table} UNIQUE columns diverge between fresh-init and {other}"
-            )
+        expected = _shape(conn, SCHEMAS["fresh"], table)[aspect]
+        actual = _shape(conn, SCHEMAS[other], table)[aspect]
+        assert actual == expected, f"{table}.{aspect} diverges between fresh-init and {other}"
+
+
+def test_a_replay_never_downgrades_a_validated_check_to_not_valid(conn):
+    """0026 adds offers_canonical_terms_present NOT VALID for an operator who
+    may still hold damaged rows. On a fresh volume the same constraint is
+    already VALIDATED, and a replay must leave it that way -- a drop-and-re-add
+    would silently weaken that database while every column still matched."""
+    _build_all_paths(conn)
+    for path in ("fresh", "replay", "twice"):
+        checks = _checks(conn, SCHEMAS[path], "offers")
+        assert "offers_canonical_terms_present" in checks, f"missing on the {path} path"
+        _, validated = checks["offers_canonical_terms_present"]
+        assert validated is True, f"downgraded to NOT VALID on the {path} path"
+
+
+@pytest.mark.parametrize("aspect", ["columns", "unique_columns", "checks",
+                                    "foreign_keys", "indexes", "defaults"])
+def test_legacy_upgrade_reaches_the_same_shape_as_a_fresh_install(conn, aspect):
+    """The path an existing operator actually takes, compared against the path a
+    new one gets. This is the comparison that matters most and was missing: an
+    upgraded database that is merely "close" to a fresh one is a database where
+    a rule holds for some deployments and not others.
+
+    Scoped to the tables the migrations are responsible for bringing up to date.
+    Tables the legacy fixture never had (payment_applications, decision_events,
+    manual_reviews, decision_attempts) are created wholesale by migrations, so
+    they are in scope too -- if a migration builds one differently from db/init,
+    that is exactly the drift being looked for.
+    """
+    _build_all_paths(conn)
+    for table in _LEGACY_CONVERGENCE_TABLES:
+        expected = _shape(conn, SCHEMAS["fresh"], table)[aspect]
+        actual = _shape(conn, SCHEMAS["legacy"], table)[aspect]
+        assert actual == expected, (
+            f"{table}.{aspect} diverges between a fresh install and a legacy upgrade"
+        )
 
 
 def test_the_four_previously_colliding_constraints_are_guarded(conn):

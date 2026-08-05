@@ -24,6 +24,27 @@ jobs:
     strategy:
       matrix:
         service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service, loan-assistant]
+    # Review fix: the real-Postgres tests (origination's decision-attempt
+    # lock-order and TXN-B rollback proofs, disclosure's offer-repair proofs)
+    # are all guarded by `skipif(not DATABASE_URL)`. No DATABASE_URL was set
+    # here, so every one of them SKIPPED in CI and had only ever run on a
+    # developer machine. They run here now.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meridian
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: meridian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meridian -d meridian"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://meridian:postgres@localhost:5432/meridian
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
