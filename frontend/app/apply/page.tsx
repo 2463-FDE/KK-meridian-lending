@@ -148,6 +148,13 @@ function formatPhoneInput(raw: string): string {
 
 export default function ApplyPage() {
   const [step, setStep] = useState(1);
+  // Review-step edit affordance. The trainer could not correct anything from
+  // the review screen: Back existed and preserved answers, but reaching a
+  // Step 1 field meant three Back clicks and then three Next clicks to get
+  // home again, so in practice nobody used it. Each summary group now has its
+  // own Edit control; this flag is what lets the edited step offer a direct
+  // way back instead of making the user walk the wizard forward again.
+  const [returningToReview, setReturningToReview] = useState(false);
   const [form, setForm] = useState<FormState>({
     name: "",
     dob: "",
@@ -224,12 +231,32 @@ export default function ApplyPage() {
   function next() {
     if (validateStep(step)) {
       setErrors({});
+      // Reaching the review the normal way ends the edit round-trip.
+      if (step + 1 >= 4) setReturningToReview(false);
       setStep((s) => Math.min(5, s + 1));
     }
   }
   function back() {
     setErrors({});
     setStep((s) => Math.max(1, s - 1));
+  }
+
+  /** Jump straight from the review to the step that owns a field. */
+  function editStep(target: number) {
+    setErrors({});
+    setReturningToReview(true);
+    setStep(target);
+  }
+
+  /** Return to the review, but only if what was just edited is still valid --
+   * otherwise an edit could put the application back into review carrying a
+   * value the wizard would never have accepted going forward. */
+  function returnToReview() {
+    if (validateStep(step)) {
+      setErrors({});
+      setReturningToReview(false);
+      setStep(4);
+    }
   }
 
   async function submitApplication() {
@@ -621,7 +648,7 @@ export default function ApplyPage() {
               title="Review your application"
               desc="Double check everything below before you submit."
             />
-            <SummaryGroup title="Personal">
+            <SummaryGroup title="Personal" onEdit={() => editStep(1)}>
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
               <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
@@ -632,7 +659,7 @@ export default function ApplyPage() {
               <SummaryRow label="State" value={form.state} />
               <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
-            <SummaryGroup title="Employment & income">
+            <SummaryGroup title="Employment & income" onEdit={() => editStep(2)}>
               <SummaryRow label="Employer" value={form.employer} />
               <SummaryRow label="Job title" value={form.job_title} />
               <SummaryRow
@@ -644,7 +671,7 @@ export default function ApplyPage() {
                 value={form.employment_years}
               />
             </SummaryGroup>
-            <SummaryGroup title="Loan details">
+            <SummaryGroup title="Loan details" onEdit={() => editStep(3)}>
               <SummaryRow label="Amount" value={usd(form.amount)} />
               <SummaryRow
                 label="Term"
@@ -772,7 +799,13 @@ export default function ApplyPage() {
             >
               Back
             </button>
-            <button onClick={next}>Next</button>
+            {returningToReview ? (
+              // Came here from the review: offer the one-click way home rather
+              // than making the user press Next through the remaining steps.
+              <button onClick={returnToReview}>Save and return to review</button>
+            ) : (
+              <button onClick={next}>Next</button>
+            )}
           </div>
         )}
         {step === 4 && (
@@ -932,14 +965,38 @@ function Field({
 function SummaryGroup({
   title,
   children,
+  onEdit,
 }: {
   title: string;
   children: React.ReactNode;
+  onEdit?: () => void;
 }) {
   return (
     <div style={{ marginBottom: 18 }}>
-      <div className="card-title" style={{ marginBottom: 6 }}>
-        {title}
+      <div
+        className="card-title"
+        style={{
+          marginBottom: 6,
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 12,
+        }}
+      >
+        <span>{title}</span>
+        {onEdit && (
+          // Named for a screen reader too: four identical "Edit" buttons on one
+          // screen are indistinguishable without the section name.
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={onEdit}
+            aria-label={`Edit ${title}`}
+            style={{ fontSize: "0.85rem", padding: "2px 10px" }}
+          >
+            Edit
+          </button>
+        )}
       </div>
       <div className="dl">{children}</div>
     </div>
