@@ -164,13 +164,23 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments. No PAN and no CVV: card capture is tokenized in the browser and
--- this service only ever sees a processor token plus display fields (ADR 0008,
--- supersedes ADR 0003). db/migrations/0029 drops the legacy columns from an
--- existing database; a fresh volume never creates them.
+-- Payments. Card capture is tokenized in the browser, so no code path writes a
+-- PAN or a CVV any more (ADR 0008, supersedes ADR 0003) -- new rows carry only
+-- last4/brand from the processor's token response.
+--
+-- pan/cvv still exist here on purpose, for one release. Removing them from a
+-- fresh install while db/migrations has only reached the EXPAND step (0029,
+-- back-fill last4) would make a fresh database and a migrated one disagree,
+-- and db/tests/test_migration_paths_converge.py compares exactly that. They go
+-- in the CONTRACT step, db/migrations/0031, and come out of this file in the
+-- same release.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
+    -- Legacy, write-path-dead, dropped by db/migrations/0031. No application
+    -- code reads or writes either column as of this release.
+    pan         TEXT,
+    cvv         TEXT,
     last4       TEXT,                 -- display only; never enough to reconstruct a PAN
     brand       TEXT,                 -- e.g. "visa", "mastercard" -- display only
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION
