@@ -111,6 +111,13 @@ class DecisionOut(BaseModel):
     # the one-time proof of ownership an anonymous, no-account borrower needs
     # to accept their own offer. See routers/applications.py accept_offer.
     accept_token: Optional[str] = None
+    # PR #8 review: an approval whose auto-disclosure failed used to be
+    # indistinguishable from a healthy one -- the failure was a log line and
+    # nothing else, and the caller only found out at accept time. False means
+    # no complete offer exists yet, so accept_offer will refuse until one is
+    # generated (POST /los/offer, idempotent). None on paths that do not
+    # generate an offer at all (deny, refer).
+    offer_ready: Optional[bool] = None
 
 
 class ReviewIn(BaseModel):

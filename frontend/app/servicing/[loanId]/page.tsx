@@ -7,6 +7,7 @@ import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost, getUser } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
+import { tokenizeCard } from "../../../lib/tokenize";
 
 interface Loan {
   id: string | number;
@@ -155,10 +156,17 @@ function LoanDetailContent() {
     setActionErr(null);
     setActionMsg(null);
     try {
+      // ADR 0008 (Week 5 tokenization): the card never leaves the browser as
+      // a raw PAN/CVV -- tokenizeCard() (a mock standing in for a real
+      // processor SDK) returns only an opaque token + display fields, which
+      // is all payment-service's own schema even accepts anymore.
+      const card = "4111111111111111"; // hardcoded test card (texture)
+      const token = tokenizeCard(card, "123");
       const resp = (await apiPost("/payments", {
         loan_id: loanId,
-        pan: "4111111111111111", // hardcoded test card PAN (texture)
-        cvv: "123", // hardcoded test CVV (texture)
+        processor_token: token.processor_token,
+        last4: token.last4,
+        brand: token.brand,
         amount: parseFloat(payAmount || "0"),
         method: "card",
         idempotency_key: payIdempotencyKey,

@@ -1,11 +1,16 @@
 # Meridian Lending Platform
 
-> **NOT PCI-DSS compliant.** `payment-service` stores the full PAN and CVV in plaintext
-> (`payments.pan`/`payments.cvv`, unencrypted `TEXT` columns) and logs both at INFO —
-> CVV/SAD storage is an absolute PCI-DSS prohibition regardless of encryption. This is
-> inherited vendor debt (see `adr/0003`), not remediated. Credit decisions are audited
-> (Week 3's append-only `decision_events`); the rest of the compliance banner below is
-> the original vendor's unverified claim, not a verified status.
+> **Still NOT PCI-DSS compliant, but the capture path no longer stores card data.**
+> `payment-service` used to store the full PAN and CVV in plaintext
+> (`payments.pan`/`payments.cvv`, unencrypted `TEXT`) and log both at INFO — CVV/SAD
+> storage is an absolute PCI-DSS prohibition regardless of encryption. PR #8 tokenizes
+> capture in the browser (`adr/0008`, supersedes `adr/0003`): the service now receives a
+> processor token plus last4/brand and never a raw PAN, CVV or SSN. **What remains:**
+> `payments.pan`/`cvv` are still nullable columns holding whatever pre-tokenization rows
+> already wrote, and nothing purges them yet. A compliance claim needs that purge, a
+> QSA/SAQ assessment and a real processor — none of which exist here. Credit decisions
+> are audited (Week 3's append-only `decision_events`); the rest of the compliance banner
+> below is the original vendor's unverified claim, not a verified status.
 
 The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
 Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,

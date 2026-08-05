@@ -164,14 +164,37 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV (still open, PCI debt -- unrelated to the fix below).
+-- Payments. pan/cvv are legacy-only columns now -- see the tokenization note below.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
-    pan         TEXT,                 -- full PAN stored
-    cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
+    -- Week 5 tokenization fix (ADR 0008, supersedes ADR 0003): pan/cvv are
+    -- legacy columns, kept nullable for rows that predate tokenization --
+    -- never written to by any code path anymore (payment-service never
+    -- receives a raw PAN/CVV to store in the first place). New rows use
+    -- last4/brand instead, populated from the processor's own token
+    -- response, never from a raw card number.
+    pan         TEXT,                 -- full PAN stored (legacy rows only)
+    cvv         TEXT,                 -- CVV stored (legacy rows only, SAD — flat PCI prohibition)
+    last4       TEXT,                 -- display only; never enough to reconstruct a PAN
+    brand       TEXT,                 -- e.g. "visa", "mastercard" -- display only
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION
     method      TEXT DEFAULT 'card',
+    -- Review fix: charge() used to treat a processor_token as proof of a real
+    -- charge without ever calling a processor -- 'pending' is written first
+    -- (before authorization is confirmed), then flipped to 'captured' or
+    -- 'failed' once services/payment-service/app/processor.py::authorize_
+    -- charge() actually returns. A row stuck at 'pending' means the process
+    -- died mid-authorization, not that anything was approved. Historical
+    -- rows (before this column existed) default to 'captured' -- they really
+    -- were, just without a formal record of it.
+    auth_status TEXT NOT NULL DEFAULT 'captured',
+    -- Review fix (db/migrations/0019): the processor's own authorization id,
+    -- persisted in the SAME UPDATE that flips auth_status to 'captured' --
+    -- a pending retry asks the processor for this via get_authorization()
+    -- before ever calling authorize_charge() again, instead of blindly
+    -- re-charging. See services/payment-service/app/payments.py.
+    authorization_id TEXT,
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
@@ -182,10 +205,24 @@ CREATE TABLE IF NOT EXISTS payments (
     -- apply succeeded. A retry on the same idempotency_key checks this and
     -- retries the apply instead of blindly reporting "captured" again.
     applied_at  TIMESTAMPTZ,
+    -- db/migrations/0028: a captured-but-unapplied row is a durable work item
+    -- the reconciler drains (payment-service/app/reconcile.py). Nothing used
+    -- to look for these at all, so a borrower who closed the tab left money
+    -- captured and the balance uncredited, permanently. apply_next_attempt_at
+    -- doubles as the claim marker: a worker claims a row by pushing it into
+    -- the future in the same statement that selects it, so two replicas can
+    -- never work the same payment at once. apply_last_error holds the
+    -- exception TYPE only -- never a message, which can embed request values.
+    apply_attempts INTEGER NOT NULL DEFAULT 0,
+    apply_next_attempt_at TIMESTAMPTZ,
+    apply_last_error TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_key
     ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payments_unapplied
+    ON payments (apply_next_attempt_at)
+    WHERE auth_status = 'captured' AND applied_at IS NULL;
 
 -- Review fix: guards servicing-service's apply-payment endpoint against
 -- applying the same captured payment twice (a payment-service retry after a

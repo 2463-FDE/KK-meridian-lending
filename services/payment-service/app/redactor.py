@@ -11,7 +11,8 @@ Rules:
   - CVV (3-4 digits mentioned near cvv/cvc/security code/card verification value,
     any phrasing) → [CVV-REDACTED]
   - SSN (ddd-dd-dddd, ddd dd dddd, or ddddddddd with no separator) → [SSN-REDACTED]
-  - Dict keys named pan/cvv/ssn/card_number/card_no: value replaced inline
+  - Dict keys named pan/cvv/ssn/card_number/card_no/processor_token: value
+    replaced inline (a vaulted processor token is opaque but still sensitive)
 
 Fail closed: an ambiguous 9-digit run, or a cvv/cvc/security-code mention near any
 3-4 digit number, is treated as PII and masked, even if it might be something else.
@@ -32,7 +33,8 @@ _CVV_RE = re.compile(
 )
 
 _SENSITIVE_KEYS = frozenset(
-    {"pan", "cvv", "ssn", "card_number", "card_no", "social_security_number"}
+    {"pan", "cvv", "ssn", "card_number", "card_no", "social_security_number",
+     "processor_token"}
 )
 
 

@@ -1,7 +1,12 @@
 """Payment handling (moved verbatim from servicing-service's payments.py).
 
-Stores the FULL PAN and the CVV on the payments row (D5 — still open; that's the
-persisted-storage half, unrelated to logging and not fixed here).
+Review fix (ADR 0008, Week 5 tokenization): this used to store the FULL PAN
+and CVV on the payments row (D5). Card capture now tokenizes at the processor
+(see frontend/lib/tokenize.ts) -- this service never receives a raw PAN/CVV
+at all anymore, only an opaque processor_token plus last4/brand for display.
+The token itself is never persisted either (a vaulted token is itself
+sensitive) -- only last4/brand reach the `payments` row. See
+specs/0001-online-payments-idempotency-tokenization.md Part 2.
 
 D12 note: unlike disclosure-service/servicing-service, this service does no
 repeated arithmetic on amount (no accumulation loop), so there's no float-drift
@@ -36,13 +41,39 @@ Review fix: `amount` is range-constrained in schemas.PaymentIn (0, 1_000_000] --
 a negative value used to credit the borrower's balance instead of charging
 them (servicing computes new_balance = current - amount), and NaN/Infinity
 passed through uncaught too.
+
+Review fix: `charge()` used to treat receiving a `processor_token` as proof
+the card was actually charged -- the token was only shape/length-checked,
+never sent to a processor for real authorization. A borrower could POST any
+made-up token and last4, and this code would write a captured payment and
+tell servicing-service to reduce their loan balance for real. Every charge
+now goes through `processor.authorize_charge()` first (fail-closed outside
+dev/test, same convention as decision-service's bureau/AI-scorer calls) --
+a row is written `auth_status='pending'` before that call, then flipped to
+`'captured'` or `'failed'` once it actually returns (db/migrations/0017), so
+a crash mid-authorization is never silently mistaken for success.
+
+Review fix (double-charge on retry): flipping `auth_status` to 'captured'
+used to be a SEPARATE write from the processor call itself, with no record
+of the processor's own authorization id at all -- a crash between the
+processor approving the charge and that UPDATE running left a payment
+row stuck 'pending' with a real authorization already issued, and a same-
+key retry then called authorize_charge() again with no way to know that.
+Two things close this: (1) `authorization_id` (db/migrations/0019) is now
+persisted in the SAME UPDATE statement that flips auth_status to
+'captured' -- one atomic write, not two; (2) a pending retry calls
+`processor.get_authorization()` FIRST to ask the processor whether it
+already has a record of this idempotency_key, and only calls
+`authorize_charge()` (now itself passed the idempotency_key, so the
+processor also dedupes on its end) if the processor genuinely has none.
 """
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
 
 from .logging_config import get_logger
-from . import db
+from . import db, processor
 from .config import SERVICING_URL
+from .processor import ChargeDeclinedError
 from .redactor import redact_dict
 
 log = get_logger("payment")   # writes to logs/payment-service.log
@@ -69,39 +100,60 @@ def _to_cents(amount) -> float:
     return float(d.quantize(_CENTS, rounding=ROUND_HALF_UP))
 
 
-def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str,
-           ssn: str = None, name: str = None, method: str = "card") -> dict:
+def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempotency_key: str,
+           brand: str = None, name: str = None, method: str = "card") -> dict:
     amount = _to_cents(amount)
 
-    # D5 fix: the log line used to write full PAN/CVV/SSN at INFO with zero
-    # redaction. Storage in the payments table (below) is a separate, still-open
-    # gap -- this only closes the logging half.
+    # Review fix: the log line used to write full PAN/CVV/SSN at INFO with zero
+    # redaction (D5). There's no raw PAN/CVV/SSN to log anymore (ADR 0008) --
+    # redact_dict still guards processor_token, since a vaulted token is
+    # itself sensitive even though it's opaque.
     safe_req = redact_dict({
-        "pan": pan, "cvv": cvv, "ssn": ssn, "amount": amount,
-        "loan_id": loan_id, "name": name, "idempotency_key": idempotency_key,
+        "processor_token": processor_token, "last4": last4, "brand": brand,
+        "amount": amount, "loan_id": loan_id, "name": name,
+        "idempotency_key": idempotency_key,
     })
     log.info("POST /payments charge req=%s -> ok", safe_req)
 
     # Review fix: atomic check-and-write, same ON CONFLICT DO NOTHING + read-
     # back pattern disclosure-service's create_offer uses. A duplicate request
-    # (retry, double-click) never inserts a second row or re-applies the
-    # balance, even if it races the original request.
+    # (retry, double-click) never inserts a second row, even if it races the
+    # original request. auth_status starts 'pending' -- authorization is NOT
+    # yet confirmed at this point, on purpose (see below).
     inserted = db.query(
-        "INSERT INTO payments (loan_id, pan, cvv, amount, method, idempotency_key) "
-        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "INSERT INTO payments (loan_id, last4, brand, amount, method, idempotency_key, auth_status) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'pending') "
         "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
         "RETURNING id, loan_id, amount",
-        (loan_id, pan, cvv, amount, method, idempotency_key),   # full PAN + CVV persisted
+        (loan_id, last4, brand, amount, method, idempotency_key),
     )
     if inserted:
         row = inserted[0]
         payment_id = row["id"]
-        # Apply the captured amount to the balance via servicing-service --
-        # only for the request that actually inserted the row.
+        # Review fix: this is the actual authorization call -- a made-up
+        # processor_token is declined here, not silently trusted. Only a
+        # confirmed approval reaches _apply_via_servicing; a decline never
+        # touches the loan balance at all.
+        try:
+            auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
+        except ChargeDeclinedError as exc:
+            db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
+            log.warning("charge declined payment_id=%s: %s", payment_id, exc)
+            return {
+                "payment_id": payment_id, "loan_id": row["loan_id"],
+                "status": "failed", "applied_amount": float(row["amount"]),
+            }
+        # Review fix: auth_status and authorization_id used to be written in
+        # two separate statements -- a crash between them left 'captured'
+        # with no authorization id on record. One UPDATE, one atomic write.
+        db.query(
+            "UPDATE payments SET auth_status = 'captured', authorization_id = %s WHERE id = %s",
+            (auth_id, payment_id),
+        )
         applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
     else:
         row = db.query(
-            "SELECT id, loan_id, amount, applied_at FROM payments WHERE idempotency_key = %s",
+            "SELECT id, loan_id, amount, applied_at, auth_status FROM payments WHERE idempotency_key = %s",
             (idempotency_key,),
         )[0]
         payment_id = row["id"]
@@ -116,6 +168,55 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str
                 f"loan_id={row['loan_id']} amount={row['amount']} -- this "
                 f"request is loan_id={loan_id} amount={amount}"
             )
+
+        if row["auth_status"] == "failed":
+            # Already declined for this key -- stays declined. A borrower who
+            # wants to actually retry the charge needs a new idempotency_key
+            # (a genuinely new attempt), not a replay of a declined one.
+            return {
+                "payment_id": payment_id, "loan_id": row["loan_id"],
+                "status": "failed", "applied_amount": float(row["amount"]),
+            }
+
+        if row["auth_status"] == "pending":
+            # The original request's authorization call never ran, never
+            # confirmed, or confirmed but the process died before persisting
+            # that fact (process died mid-flight, any of the three). Review
+            # fix: ask the processor whether it ALREADY has an authorization
+            # on record for this idempotency_key before charging again -- a
+            # blind re-authorize here risked a second real charge in exactly
+            # the "processor approved, then we crashed" case.
+            log.info(
+                "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
+                "still pending authorization, checking processor before retrying",
+                idempotency_key, payment_id,
+            )
+            existing_auth_id = processor.get_authorization(idempotency_key)
+            if existing_auth_id:
+                log.info(
+                    "processor already has an authorization on record for "
+                    "idempotency_key=%s -> payment_id=%s, reusing it instead of "
+                    "re-charging", idempotency_key, payment_id,
+                )
+                auth_id = existing_auth_id
+            else:
+                # This retry's own processor_token since the token itself is
+                # never persisted (ADR 0008); idempotency_key is passed along
+                # so the processor also dedupes on its end.
+                try:
+                    auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
+                except ChargeDeclinedError as exc:
+                    db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
+                    log.warning("charge declined on retry payment_id=%s: %s", payment_id, exc)
+                    return {
+                        "payment_id": payment_id, "loan_id": row["loan_id"],
+                        "status": "failed", "applied_amount": float(row["amount"]),
+                    }
+            db.query(
+                "UPDATE payments SET auth_status = 'captured', authorization_id = %s WHERE id = %s",
+                (auth_id, payment_id),
+            )
+
         if row["applied_at"] is None:
             # Review fix: the original request's apply either never ran or
             # never confirmed -- this retry is the reconciliation opportunity,
@@ -146,6 +247,8 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str
         # just that the card was charged and the row written. "pending" means
         # the charge is captured but the balance apply hasn't been confirmed yet
         # -- a retry with the same idempotency_key will keep trying to reconcile it.
+        # "failed" means the processor declined the authorization -- no balance
+        # was ever touched.
         "status": "captured" if applied else "pending",
         "applied_amount": float(row["amount"]),
     }
@@ -161,13 +264,13 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     success, so a same-key retry can tell the difference and retry the apply
     instead of repeating a false "captured".
 
-    E2E bug found in the field: `amount` here is read back from the
-    payments row's RETURNING/SELECT (the caller's row["amount"]), and
-    psycopg2 hands back a NUMERIC column as Decimal regardless of what type
-    was inserted -- httpx's json= can't serialize Decimal, so this raised on
-    every single real (non-mocked) call and every payment silently reported
-    "pending" forever. float() here makes the JSON boundary correct
-    regardless of what type the caller passes.
+    E2E bug found in the field (same fix as kalab-week4-disclosure-automation):
+    `amount` here is read back from the payments row's RETURNING/SELECT
+    (row["amount"]), and psycopg2 hands back a NUMERIC column as Decimal
+    regardless of what type was inserted -- httpx's json= can't serialize
+    Decimal, so this raised on every real (non-mocked) call and every
+    payment silently reported "pending" forever. float() at the JSON
+    boundary fixes it regardless of what type the caller passes.
     """
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
@@ -184,11 +287,22 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     except Exception as exc:
         # Servicing unreachable / errored — the card was already charged and the row
         # written, so we still report the charge captured, but as "pending" (not yet
-        # applied) rather than falsely claiming the balance moved. Reconciled by the
-        # next same-key retry, or by an out-of-band job (not yet built) for a charge
-        # that's never retried.
+        # applied) rather than falsely claiming the balance moved.
+        #
+        # Review fix (PR #8): "or by an out-of-band job (not yet built)" used to be
+        # the end of this comment, and that job really did not exist -- a charge the
+        # client never retried stayed captured-and-uncredited forever. app/reconcile.py
+        # is that job now; leaving applied_at NULL is what enqueues this row for it.
+        # apply_next_attempt_at stays NULL here, which means "due immediately".
+        #
+        # Exception TYPE only: a servicing error message can embed the request
+        # parameters, and this column is for triage, not for reconstructing the call.
+        db.query(
+            "UPDATE payments SET apply_last_error = %s WHERE id = %s",
+            (type(exc).__name__, payment_id),
+        )
         log.error(
-            "apply-payment call to servicing failed loan_id=%s payment_id=%s: %s",
-            loan_id, payment_id, exc,
+            "apply-payment call to servicing failed loan_id=%s payment_id=%s error_type=%s",
+            loan_id, payment_id, type(exc).__name__,
         )
         return False
