@@ -75,10 +75,12 @@ orchestrates the LOS flow and calls them over HTTP.
 
 ## Known operational pain (unresolved)
 
-- **Payment retries.** The processor occasionally times out; clients retry. `payment-service`
-  has no idempotency key, so retried payments insert a second row and apply twice (the second
-  `apply-payment` call posts again). We field "double charge" support tickets a few times a
-  month. (No fix yet — moved with the code into `payment-service`.)
+- **Payment retries — FIXED, keep watching.** The processor occasionally times out and
+  clients retry. This used to insert a second `payments` row and apply the charge twice.
+  `payment-service` now requires an `idempotency_key` (`db/migrations/0007`) and a partial
+  unique index enforces it, with apply-once protection on the servicing side (`payment_applications`). If a
+  "double charge" ticket still arrives, it is a new bug, not this one: check whether the
+  caller sent a *different* key for the same retry, which defeats the control by design.
 - **Decision/disclosure/KYC stalls block applicants.** Origination calls these over
   synchronous HTTP with no timeout or retry. If `decision-service`'s credit pull hangs, the
   applicant-facing origination request hangs with it. Watch `decision-service` latency when

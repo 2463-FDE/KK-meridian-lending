@@ -115,19 +115,18 @@ jobs:
   # repeatable -- see frontend/e2e/README.md). Blocking: no continue-on-error.
   #
   # Migration note: this job does NOT replay db/migrations on top of the
-  # fresh db/init schema docker-compose.yml auto-applies. db/init is this
-  # repo's own convention for what a fresh volume gets (several migrations,
-  # including 0021's offers.accepted_at and 0022's accept_token hash/expiry/
-  # consumed columns, are already backported directly into
-  # db/init/001_schema.sql) -- db/migrations exists to upgrade an EXISTING,
-  # already-deployed database, not to be replayed against a brand new one.
-  # Replaying it here would hit a real, pre-existing, unrelated collision:
-  # 001_schema.sql's manual_reviews.app_id already carries an inline UNIQUE
-  # (auto-named manual_reviews_app_id_key by Postgres's own convention),
-  # and 0020_manual_reviews_finality.sql's ADD CONSTRAINT of the identical
-  # name would then fail on a fresh volume. That drift is out of scope for
-  # this job (unrelated to the token-transport/E2E/schema-parity fixes this
-  # job exists to verify) -- flagged for separate cleanup.
+  # fresh db/init schema docker-compose.yml auto-applies -- db/init is this
+  # repo's convention for what a fresh volume gets, and db/migrations exists
+  # to upgrade an EXISTING database. That replay IS now exercised, in the
+  # db-migrations job, by db/tests/test_migration_paths_converge.py: it runs
+  # all four construction paths (fresh init; legacy schema + migrations;
+  # fresh init + migrations; migrations twice) against real Postgres and
+  # asserts they converge.
+  #
+  # The collision this comment used to describe -- 0020's bare ADD CONSTRAINT
+  # of manual_reviews_app_id_key against the identically auto-named inline
+  # UNIQUE in db/init -- is fixed (Gap D). The same guard was applied to the
+  # three other migrations with the same defect: 0009, 0011 and 0015.
   e2e:
     runs-on: ubuntu-latest
     steps:

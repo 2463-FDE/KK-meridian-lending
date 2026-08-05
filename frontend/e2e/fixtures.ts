@@ -92,3 +92,45 @@ export async function countRows(client: Client, table: string, whereCol: string,
   const res = await client.query(`SELECT count(*)::int AS n FROM ${table} WHERE ${whereCol} = $1`, [appId]);
   return res.rows[0].n;
 }
+
+/** Income that lands an odd-SSN applicant in the manual-review (REFER) band.
+ * decision-service's stub model score is int(bureau_score * 0.9 + income/1000);
+ * an odd last SSN digit gives bureau_score 612, so 612*0.9 + 60 = 610 -- above
+ * the 600 deny cutoff and below the 660 approve cutoff (see
+ * decision-service/app/decision.py::_run_model). */
+export const REFER_BAND_INCOME = 60_000;
+
+/** Seeded staff logins (db/init/002_seed.sql) -- demo credentials in a local
+ * training repo, never real. */
+export async function signInAsStaff(page: Page, username = "underwriter"): Promise<void> {
+  await page.goto("/login");
+  await page.locator("#username").fill(username);
+  await page.locator("#password").fill("password");
+  await page.getByRole("button", { name: /Sign in/ }).click();
+  // The app redirects away from /login once the session is established.
+  await expect(page).not.toHaveURL(/\/login$/, { timeout: 15_000 });
+}
+
+/** Resolve a REFER from the staff underwriting screen. `reason` is required by
+ * the UI -- the Record button stays disabled until it is non-empty, which the
+ * callers assert. */
+export async function resolveReferAsStaff(
+  page: Page,
+  appId: string,
+  outcome: "approve" | "deny",
+  reason: string,
+): Promise<void> {
+  await page.goto(`/underwriting/${appId}`);
+  await expect(page.getByText(/manual-review band/i)).toBeVisible({ timeout: 15_000 });
+
+  const record = page.getByRole("button", { name: /^Record (approval|denial)$/ });
+  // A reason is mandatory: the control is disabled until one is typed.
+  await expect(record).toBeDisabled();
+
+  await page.locator("select").filter({ hasText: "Approve" }).first().selectOption(outcome);
+  await page.locator("textarea").fill(reason);
+
+  await expect(record).toBeEnabled();
+  await record.click();
+  await expect(page.getByText("Decision finalized")).toBeVisible({ timeout: 15_000 });
+}

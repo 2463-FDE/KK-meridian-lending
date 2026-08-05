@@ -4,6 +4,28 @@
 > Software Group (dissolved) and has been extended in-place since. Treat this as the
 > current best understanding, not a clean-room design.
 
+## Status legend
+
+Every capability claim in this document, in `README.md`, and in `docs/model_card.md`
+carries one of these labels, or is stated plainly enough not to need one. Read an
+unlabelled claim as a description of code that exists, not as evidence that it works in
+production — there is no production environment.
+
+| Label | Means |
+|---|---|
+| **Implemented and tested** | Code exists and is covered by tests that run in CI (`.github/workflows/ci.yml`). |
+| **Local/training-only** | Runs only against `docker compose up` with seeded fictional data. Never run against real applicants, real bureau, real card rails, or real volume. |
+| **Deferred** | Deliberately not built. A decision, not an oversight — usually recorded in an ADR or `ROADMAP.md`. |
+| **Not production-ready** | Code exists and may pass tests, but a known defect, missing control, or missing operational requirement makes it unsafe to run for real. |
+| **Fixed in PR #6** | Was a defect; the fix is on `kalab-week4-disclosure-automation` with a test that fails without it. |
+| **Still open for PR #8** | A known defect or gap that PR #6 deliberately did not close. |
+
+Scope limit: this repo is a **local training/demo build**. Nothing here is an assertion of
+regulatory compliance. Where a regulation is named (TILA/Reg Z, ECOA, BSA/CIP, PCI-DSS) it
+identifies the rule a control is *modelled on* — no control in this repo has been reviewed
+by counsel, audited, or certified, and several are explicitly non-compliant (see the PCI
+banner in `README.md`).
+
 ## System shape
 
 Meridian is a consumer **personal-installment-loan** platform: two domains (origination
@@ -42,27 +64,31 @@ paths below.
  prometheus (9090) + grafana (3001) scrape /metrics off all 8 backend services (W7).
 ```
 
-decision-service, disclosure-service, and payment-service have **no host port mapping** —
-only the gateway and same-network service-to-service callers can reach them (review
-finding: all three used to be host-published alongside the gateway's own authz, which made
-the gateway's staff-only/ownership checks skippable entirely by hitting the service
-directly). Each also checks a shared `X-Internal-Token` on its write route as defense in
-depth for the case that boundary is ever reopened by mistake — see "Auth & roles" below.
-origination-service, servicing-service, and kyc-service are still host-published (`8001`-`8003`);
-that gap hasn't been closed for those three yet.
+Only `gateway` (8000), `kyc-service` (8003) and `frontend` (3000) publish a host port in
+`docker-compose.yml`; every other backend service is reachable only by the gateway and
+same-network callers (review finding: services used to be host-published alongside the
+gateway's own authz, which made its staff-only/ownership checks skippable by hitting the
+service directly). Defense in depth on top of that boundary is a shared `X-Internal-Token`,
+enforced by origination, decision, disclosure, payment and loan-assistant — see "Auth &
+roles" below.
+
+**Still open (not fixed in PR #6):** `kyc-service` is the one service that is *both*
+host-published *and* does not check `X-Internal-Token`, so `POST localhost:8003` bypasses
+the gateway entirely. `servicing-service` doesn't check the token either, but it is not
+host-published. Both are tracked for PR #8.
 
 ## Services
 
 | Service | Port | Tech | Owns / Responsibility |
 |---------|------|------|-----------------------|
 | `gateway` | 8000 | FastAPI + httpx + Redis | Session auth (`/auth/*`), role/ownership enforcement, reverse-proxy. Per-client-IP rate limiting (fixed window, fails open on a Redis outage). Forwards the resolved identity as `X-User-Id`/`X-User-Role`, stripping any inbound `X-User-*` the caller sent itself. See "Auth & roles" for the per-route tiers. |
-| `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (still logs full PII), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the fair-lending ZIP screen. |
+| `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (**PII debt, D5, still open:** the request-logging middleware in `logging_config.py` logs the full POST body unredacted; PR #6 fixed the hand-written intake and KYC log statements, not the middleware), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the fair-lending ZIP screen. |
 | `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge to the balance — still a single mutable column, no ledger. |
-| `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR. |
-| `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`), persisting both the outcome-only `decisions` row and an append-only `decision_events` audit row (inputs, model score/version, reason codes). Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
+| `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR. Host-published **and** does not check `X-Internal-Token` — see the boundary note above. |
+| `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`). **Compute-only — persists nothing.** Origination is the sole writer of both `decisions` and the append-only `decision_events` audit row, written atomically after its own finality recheck (PR #6). The bureau call goes through a `BureauClient` seam that forwards an idempotency key so a retry after an ambiguous timeout recovers the original pull. Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
 | `disclosure-service` | 8005 | FastAPI + SQLAlchemy + psycopg2 | TILA/Reg-Z offer + APR + amortization (Decimal internally, float at the API boundary). `POST /offers` atomically checks decision approval and inserts (`INSERT ... SELECT ... FROM decisions WHERE outcome='approve'`) and is non-mutating on conflict (`ON CONFLICT DO NOTHING` + read-back) — a retry can never rewrite an already-disclosed loan's terms, even across a fee-rule change. `fee_pct_used` is snapshotted per offer. No host port; requires `X-Internal-Token`. |
-| `payment-service` | 8006 | FastAPI + SQLAlchemy + psycopg2 | Card/ACH charge. **No idempotency** (a retried POST double-charges — documented debt, untested on purpose); logs + stores the full PAN/CVV in the clear (PCI debt, ADR 0003). After inserting the `payments` row it calls servicing's `apply-payment`. No host port; requires `X-Internal-Token`. |
-| `loan-assistant` | 8007 | FastAPI + LangGraph/RAG + Anthropic or Bedrock | Two capabilities behind guardrails (redaction, corpus hygiene, cost guard on input tokens, fail-closed on a missing/unreachable model): `POST /applications/{id}/summary` (officer-facing risk tier + flags, **staff-only** at the gateway) and `POST /policy-chat` (generic lending-policy Q&A, **open to any caller including anonymous**, same pattern as `/los/*`). Optional LangSmith tracing (PII-scrubbed by the same guardrails before a trace is ever sent). No host port. |
+| `payment-service` | 8006 | FastAPI + SQLAlchemy + psycopg2 | Card/ACH charge. **Idempotent** since PR #6: `idempotency_key` is required at the API boundary and backed by a partial unique index, so a retried POST no longer double-charges (`db/migrations/0007`, re-asserted by `0010`; tests in `payment-service/tests/test_charge_flow.py`). *Implemented and tested.*. Still logs + stores the full PAN/CVV in the clear — open PCI debt, ADR 0003, targeted by PR #8. After inserting the `payments` row it calls servicing's `apply-payment`. No host port; requires `X-Internal-Token`. |
+| `loan-assistant` | 8007 | FastAPI + LangGraph/RAG + Anthropic or Bedrock | Two capabilities behind guardrails (redaction, corpus hygiene, cost guard on input tokens, fail-closed on a missing/unreachable model): `POST /applications/{id}/summary` (officer-facing risk tier + flags, **staff-only** at the gateway) and `POST /policy-chat` (generic lending-policy Q&A, **open to any caller including anonymous**, same pattern as `/los/*`). Optional LangSmith tracing (PII-scrubbed by the same guardrails before a trace is ever sent). No host port; requires `X-Internal-Token`. |
 | `frontend` | 3000 | Next.js 15 (App Router) | Borrower application wizard, offer/disclosure screen, servicing dashboard + loan detail. |
 | `prometheus` / `grafana` | 9090 / 3001 | Prometheus + Grafana | Scrapes `/metrics` (request count, latency histograms, in-progress requests) off all 8 backend services. No cross-service metrics existed before this (W7); LangSmith only ever covered loan-assistant's own LLM calls. |
 
@@ -144,8 +170,11 @@ constraint, making offer creation idempotent per decision and closing a leaked-d
 path where a caller-supplied `decision_id` for an unrelated application used to be trusted
 verbatim. `applicants.zip` (Week 8) backs the ZIP3-level four-fifths-rule disparate-impact
 screen (`fair_lending.py`) — no field existed to check this against before. `payments`
-still carries the full PAN + CVV and has no idempotency key (retried POST double-charges,
-D2 — documented debt, deliberately untested).
+still carries the full PAN + CVV (open PCI debt, ADR 0003, targeted by PR #8). The
+retried-POST double-charge that D2 described is CLOSED: `payments.idempotency_key` is
+required at the API boundary (`ChargeIn.idempotency_key`, `min_length=1`) and enforced by
+a partial unique index (`db/migrations/0007`), with servicing-side apply-once protection in
+`payment_applications` (`db/migrations/0013`, `servicing-service/app/balance.py`).
 
 ## The LOS↔LSS seam
 

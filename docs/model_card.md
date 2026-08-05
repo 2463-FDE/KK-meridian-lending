@@ -1,6 +1,6 @@
 # Model Card — Licensed AI Credit Scorer
 
-**Status:** first version, written to close a real gap: nothing in this repo
+**Status:** Local/training-only. First version, written to close a real gap: nothing in this repo
 documented which model, version, or inputs drive a lending decision before
 this. See ROADMAP.md Week 8 finding — "no model card, no record of which
 features/model version produced any given decision, no fairness testing ever
@@ -20,8 +20,13 @@ outcome:
 
 This is one step in a larger pipeline, not a standalone decision: a credit
 bureau pull happens first, and every run — inputs, score, outcome — is
-persisted to the append-only `decision_events` table before a result is
-returned.
+recorded in the append-only `decision_events` table. Since PR #6 the scorer
+itself persists nothing: `decision-service` computes and returns, and
+`origination-service` writes the `decisions` row and the `decision_events`
+row together in one transaction after re-checking that the application is
+still decidable. A computed score that loses that race is discarded rather
+than audited, so `decision_events` contains only scores that actually became
+decisions.
 
 ## Vendor / version
 
@@ -39,7 +44,7 @@ returned.
 
 | Field | Source |
 |---|---|
-| `bureau_score` | Credit bureau pull (Experian, or its dev stub) — the step immediately before this one |
+| `bureau_score` | Credit bureau pull via the `BureauClient` seam (`app/bureau.py`) — an HTTP client for a real provider, or `StubBureauClient` in dev/test. No real bureau integration has ever been exercised; the idempotency-key contract is verified against our own stub only. |
 | `requested_amount` | Applicant-submitted |
 | `term_months` | Applicant-submitted |
 | `income` | Applicant-submitted |
@@ -49,7 +54,8 @@ those fields are in the payload built in `_call_ai_scorer()`.
 
 ## Output / audit record
 
-Every run persists to `decision_events`:
+Every run that is accepted as a decision is written to `decision_events` (by
+origination — see above):
 
 - `model_score`, `model_version`, `bureau_score`, `requested_amount`,
   `term_months`, `annual_income`
@@ -67,8 +73,23 @@ Every run persists to `decision_events`:
 ## Known limitations (open, not yet closed)
 
 - **No fairness/disparate-impact testing has ever been run against this
-  model.** Not because it passed one — because the schema doesn't have the
-  field a geography-based fairness check would need. See "ZIP field" below.
+  model.** Still true, and worth stating precisely, because a related control
+  now exists and must not be mistaken for this one:
+  - What EXISTS (PR #6, implemented and unit-tested): a **portfolio-level**
+    ZIP3 four-fifths-rule screen over recorded *approval outcomes*
+    (`origination-service/app/fair_lending.py`, staff-only
+    `GET /applications/fair-lending/zip-analysis`,
+    `tests/test_fair_lending.py`). `applicants.zip_code`
+    (`db/migrations/0014`) is the field that made it possible.
+  - What does NOT exist: any fairness evaluation of **the model itself** — no
+    protected-class or proxy analysis of its scores, no disparate-impact
+    testing of `creditai-2026.1`, no adverse-impact ratio computed on model
+    output as distinct from final outcomes, and no vendor fairness
+    documentation.
+  - The screen is therefore an outcome monitor, **not** model validation, and
+    it is local/training-only: it has never been run against production data,
+    because no production environment exists. No compliance conclusion should
+    be drawn from it.
 - **No model documentation from the vendor is stored in this repo** beyond
   the version string — no card, no methodology, from `creditai-2026.1`
   itself. This card documents how *Meridian* uses the model, not how the
@@ -83,8 +104,10 @@ Every run persists to `decision_events`:
 ## Monitoring
 
 - Every run of the decision graph (`app/graph.py`, a LangGraph `StateGraph`)
-  is traced via LangSmith (project `2463-fde`) — bureau pull, scoring call,
-  and persistence are each individually visible.
+  is traced via LangSmith (project `2463-fde`) — bureau pull and scoring call
+  are each individually visible. Persistence is no longer part of this graph;
+  it happens in origination. Local/training-only: tracing is opt-in and has
+  only ever run against seeded fictional applicants.
 - `decision_events` itself is the long-term audit record — append-only,
   DB-trigger-enforced, queryable for any past decision.
 - **Not yet built:** aggregate monitoring of the model's own behavior over

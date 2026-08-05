@@ -11,6 +11,14 @@ The Meridian Lending Co. loan origination + servicing platform. Originally deliv
 Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,
 `origination-service` (LOS), `servicing-service` (LSS); maintained in-house since 2024-Q4.
 
+> **Local training/demo build.** Everything here runs against `docker compose up` with
+> seeded fictional data — no production environment, no real applicants, no real bureau or
+> card rails. Capability claims in this README and in `ARCHITECTURE.md` use the status
+> labels defined in [ARCHITECTURE.md § Status legend](ARCHITECTURE.md#status-legend)
+> (Implemented and tested / Local/training-only / Deferred / Not production-ready / Fixed
+> in PR #6 / Still open for PR #8). Naming a regulation identifies the rule a control is
+> modelled on, not a compliance status.
+
 This is a brownfield monorepo: a **Loan Origination System (LOS)** and a **Loan Servicing
 System (LSS)** bolted together behind a single API gateway, with a Next.js borrower +
 servicing portal. (Lending Ops keeps asking for an "AI underwriting assistant" — that
@@ -83,7 +91,7 @@ and a borrower login `maria`.
 | `services/origination-service/` | FastAPI (LOS) | 8001 | intake + LOS→LSS boarding orchestrator; calls KYC/decision/disclosure over HTTP |
 | `services/servicing-service/` | FastAPI (LSS) | 8002 | balances, schedule, delinquency, reconciliation, `apply-payment` |
 | `services/kyc-service/` | FastAPI | 8003 | CIP identity check; persists `kyc_checks` |
-| `services/decision-service/` | FastAPI | 8004 | synchronous credit pull + scorecard; persists `decisions` (outcome only) |
+| `services/decision-service/` | FastAPI | 8004 | async credit pull + AI scorecard; **compute-only — persists nothing** (origination writes `decisions` and `decision_events`) |
 | `services/disclosure-service/` | FastAPI | 8005 | TILA/Reg-Z offer + APR + amortization |
 | `services/payment-service/` | FastAPI | 8006 | card/ACH charge; posts to servicing via `apply-payment` |
 | `db/` | Postgres init + seed | 5432 | schema, migrations, seed data (shared by all services) |
