@@ -8,7 +8,9 @@
 > processor token plus last4/brand and never a raw PAN, CVV or SSN. **What remains:**
 > `payments.pan`/`cvv` are still nullable columns holding whatever pre-tokenization rows
 > already wrote, and nothing purges them yet. A compliance claim needs that purge, a
-> QSA/SAQ assessment and a real processor — none of which exist here.
+> QSA/SAQ assessment and a real processor — none of which exist here. Credit decisions
+> are audited (Week 3's append-only `decision_events`); the rest of the compliance banner
+> below is the original vendor's unverified claim, not a verified status.
 
 The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
 Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,
