@@ -16,6 +16,12 @@ CREATE TABLE IF NOT EXISTS decision_attempts (
     completed_at     TIMESTAMPTZ,
     failure_code     TEXT,
     failure_detail   VARCHAR(200),
+    -- Gap A (db/migrations/0024): origination's stable bureau idempotency key
+    -- for one logical decision request, and the provider's non-sensitive
+    -- reference for the resulting operation. Never the SSN, never the raw
+    -- provider response.
+    bureau_request_key  TEXT,
+    bureau_reference_id TEXT,
 
     CONSTRAINT decision_attempts_state_allowed
         CHECK (state IN ('in_progress', 'completed', 'discarded', 'failed', 'expired')),
@@ -42,6 +48,8 @@ CREATE TABLE IF NOT EXISTS decision_attempts (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_attempts_one_active
     ON decision_attempts (app_id) WHERE state = 'in_progress';
 CREATE INDEX IF NOT EXISTS idx_decision_attempts_app_id ON decision_attempts (app_id);
+CREATE INDEX IF NOT EXISTS idx_decision_attempts_app_id_id
+    ON decision_attempts (app_id, id DESC);
 
 ALTER TABLE decision_events ADD COLUMN IF NOT EXISTS attempt_id INTEGER REFERENCES decision_attempts(id);
 

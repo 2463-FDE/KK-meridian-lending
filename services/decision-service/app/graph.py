@@ -36,13 +36,21 @@ log = get_logger("decision.graph")
 class DecisionState(TypedDict, total=False):
     application: dict
     bureau_score: int
+    bureau_reference_id: str
     result: dict
     final: dict
 
 
 async def _node_pull_credit(state: DecisionState) -> dict:
-    bureau_score = await decision._pull_credit(state["application"].get("ssn", ""))
-    return {"bureau_score": bureau_score}
+    """PR #6 review (Gap A): carries origination's stable idempotency key to
+    the bureau boundary so a retry after an ambiguous timeout recovers the
+    original pull instead of starting a second one, and surfaces the
+    provider's non-sensitive reference id for origination to persist."""
+    application = state["application"]
+    result = await decision._pull_credit(
+        application.get("ssn", ""), application["bureau_request_key"]
+    )
+    return {"bureau_score": result.score, "bureau_reference_id": result.reference_id}
 
 
 async def _node_score(state: DecisionState) -> dict:
@@ -87,6 +95,7 @@ def _node_finalize(state: DecisionState) -> dict:
             "reason_codes": result["reason_codes"],
             "adverse_action_reason": result["reason_codes"][0] if result["reason_codes"] else None,
             "bureau_score": bureau_score,
+            "bureau_reference_id": state.get("bureau_reference_id"),
             "model_version": result["model_version"],
             "top_features": result["top_features"],
         }

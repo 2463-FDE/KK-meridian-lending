@@ -27,6 +27,7 @@ def _payload(application_id=10, **overrides):
     body = {
         "application_id": application_id,
         "attempt_id": 1,
+        "bureau_request_key": "router-test-key",
         "applicant_id": 5,
         "name": "Attacker Supplied Name",
         "ssn": "000000000",

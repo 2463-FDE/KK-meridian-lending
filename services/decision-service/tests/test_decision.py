@@ -24,8 +24,19 @@ import importlib
 
 import pytest
 
-from app import config, decision
+from app import bureau, config, decision
 from app.decision import CreditBureauUnavailableError, decide
+
+
+@pytest.fixture(autouse=True)
+def _reset_bureau_stub():
+    """The stub bureau deduplicates by request_key and is module-level (it has
+    to be, for the idempotency contract to hold across requests in a process).
+    Reset it between tests so one test's cached result can never be handed to
+    another."""
+    bureau.stub_client.reset()
+    yield
+    bureau.stub_client.reset()
 
 
 class _FakeResponse:
@@ -67,14 +78,14 @@ def _fake_async_client(response):
 
 async def test_clear_approve():
     # SSN ends in an even digit -> stub bureau score 680; high income clears the scorecard.
-    result = await decide({"app_id": 1, "ssn": "123456782", "income": 100000})
+    result = await decide({"app_id": 1, "ssn": "123456782", "income": 100000, "bureau_request_key": "test-key-decide-1"})
     assert result["decision"] == "approve"
     assert result["score"] >= 660
 
 
 async def test_clear_deny():
     # SSN ends in an odd digit -> stub bureau score 612; zero income sinks the scorecard.
-    result = await decide({"app_id": 2, "ssn": "123456781", "income": 0})
+    result = await decide({"app_id": 2, "ssn": "123456781", "income": 0, "bureau_request_key": "test-key-decide-2"})
     assert result["decision"] == "deny"
     assert result["score"] < 600
 
@@ -86,15 +97,16 @@ async def test_missing_bureau_key_stubs_in_dev(monkeypatch):
     monkeypatch.setattr(decision, "EXPERIAN_KEY", "")
     monkeypatch.setattr(decision, "ALLOW_CREDIT_STUB", True)
     # must not raise — dev/test is allowed to fall back to the deterministic stub
-    score = await decision._pull_credit("123456782")
-    assert score == 680
+    result = await decision._pull_credit("123456782", "test-key-stub-in-dev")
+    assert result.score == 680
+    assert result.reference_id
 
 
 async def test_missing_bureau_key_fails_closed_outside_dev(monkeypatch):
     monkeypatch.setattr(decision, "EXPERIAN_KEY", "")
     monkeypatch.setattr(decision, "ALLOW_CREDIT_STUB", False)
     with pytest.raises(CreditBureauUnavailableError):
-        await decision._pull_credit("123456782")
+        await decision._pull_credit("123456782", "test-key-fails-closed")
 
 
 async def test_unset_environment_and_key_defaults_closed_not_open(monkeypatch):
@@ -110,7 +122,7 @@ async def test_unset_environment_and_key_defaults_closed_not_open(monkeypatch):
     try:
         assert config.ALLOW_CREDIT_STUB is False
         with pytest.raises(decision.CreditBureauUnavailableError):
-            await decision._pull_credit("123456782")
+            await decision._pull_credit("123456782", "test-key-unset-env")
     finally:
         # Explicitly restore the test-suite baseline (conftest.py) before reloading --
         # monkeypatch's own teardown only restores env vars *after* this test function
@@ -294,14 +306,14 @@ def test_reason_codes_empty_when_both_healthy():
 
 
 async def test_decide_returns_empty_reason_codes_on_approve():
-    result = await decide({"app_id": 3, "ssn": "123456782", "income": 100000})
+    result = await decide({"app_id": 3, "ssn": "123456782", "income": 100000, "bureau_request_key": "test-key-decide-3"})
     assert result["decision"] == "approve"
     assert result["reason_codes"] == []
     assert result["adverse_action_reason"] is None
 
 
 async def test_decide_returns_specific_reason_code_on_deny():
-    result = await decide({"app_id": 4, "ssn": "123456781", "income": 0})
+    result = await decide({"app_id": 4, "ssn": "123456781", "income": 0, "bureau_request_key": "test-key-decide-4"})
     assert result["decision"] == "deny"
     assert result["reason_codes"]
     assert result["adverse_action_reason"] == result["reason_codes"][0]
@@ -321,7 +333,7 @@ async def test_decide_never_touches_the_database(monkeypatch):
         decision.db, "transaction",
         lambda statements: calls.append(statements) or [[]],
     )
-    result = await decide({"app_id": 6, "ssn": "123456782", "income": 100000})
+    result = await decide({"app_id": 6, "ssn": "123456782", "income": 100000, "bureau_request_key": "test-key-decide-5"})
 
     assert calls == [], "decide() must persist nothing -- origination-service writes decisions/decision_events now"
     # Everything origination needs to write decision_events itself must still

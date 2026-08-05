@@ -365,6 +365,7 @@ def test_migration_0023_adds_decision_attempts_and_preserves_history(conn):
     assert "attempt_id" not in events_before  # sanity: the pre-fix shape really existed
 
     _run_sql_file(conn, MIGRATED_SCHEMA, MIGRATIONS_DIR / "0023_decision_attempts.sql")
+    _run_sql_file(conn, MIGRATED_SCHEMA, MIGRATIONS_DIR / "0024_decision_attempt_bureau_key.sql")
 
     events_after = _columns(conn, MIGRATED_SCHEMA, "decision_events")
     assert "attempt_id" in events_after
@@ -390,6 +391,7 @@ def test_fresh_init_and_migrated_schemas_agree_on_decision_attempts(conn):
     _build_fresh_init(conn)
     _build_pre_0023_schema_with_history(conn)
     _run_sql_file(conn, MIGRATED_SCHEMA, MIGRATIONS_DIR / "0023_decision_attempts.sql")
+    _run_sql_file(conn, MIGRATED_SCHEMA, MIGRATIONS_DIR / "0024_decision_attempt_bureau_key.sql")
 
     fresh_cols = _columns(conn, FRESH_SCHEMA, "decision_attempts")
     migrated_cols = _columns(conn, MIGRATED_SCHEMA, "decision_attempts")

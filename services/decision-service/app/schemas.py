@@ -15,6 +15,12 @@ class DecisionIn(BaseModel):
     # awareness of decision_attempts as a table; this is purely a
     # request/response correlation id, not a persisted foreign key here.
     attempt_id: int
+    # PR #6 review (Gap A): origination's idempotency key for this logical
+    # decision request. Stable across a retry after an ambiguous timeout,
+    # regenerated for a genuinely new decision request -- forwarded to the
+    # bureau so a retry recovers the original pull instead of billing a
+    # second hard inquiry. See app/bureau.py.
+    bureau_request_key: str = Field(min_length=1)
     applicant_id: int
     name: str = Field(min_length=1)
     ssn: str
@@ -43,3 +49,8 @@ class DecisionOut(BaseModel):
     bureau_score: Optional[int] = None
     model_version: Optional[str] = None
     top_features: Optional[dict] = None
+    # Non-sensitive provider handle for the bureau operation. Persisted by
+    # origination (decision_attempts.bureau_reference_id) so a real provider
+    # implementation could later look the operation up by reference instead
+    # of re-pulling. Never the SSN, never the raw provider response.
+    bureau_reference_id: Optional[str] = None

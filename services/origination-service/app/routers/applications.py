@@ -330,12 +330,15 @@ def run_decision(
     # request already blocked by finality performs no bureau/model work at
     # all. See decision_state.start_decision_attempt and
     # db/migrations/0023_decision_attempts.sql.
-    attempt_id = decision_state.start_decision_attempt(app_id, requested_by)
+    attempt_id, bureau_request_key = decision_state.start_decision_attempt(app_id, requested_by)
 
     try:
         resp = clients.post(clients.DECISION_URL, "/decisions", {
             "application_id": app_id,
             "attempt_id": attempt_id,
+            # Gap A: stable across an ambiguous-timeout retry, so the bureau
+            # returns the original operation instead of pulling again.
+            "bureau_request_key": bureau_request_key,
             "applicant_id": r.get("applicant_id"),
             "name": r.get("name"),
             "ssn": r.get("ssn") or "",
@@ -481,9 +484,10 @@ def run_decision(
                     # helper both paths use now -- see decision_state.py.
                     decision_state.revoke_accept_token(cur, app_id)
                 cur.execute(
-                    "UPDATE decision_attempts SET state = 'completed', completed_at = now() "
+                    "UPDATE decision_attempts SET state = 'completed', completed_at = now(), "
+                    "bureau_reference_id = %s "
                     "WHERE id = %s AND state = 'in_progress'",
-                    (attempt_id,),
+                    (resp.get("bureau_reference_id"), attempt_id),
                 )
     except Exception as e:
         # PR #6 review, lease-invariant follow-up: a caught TXN-B

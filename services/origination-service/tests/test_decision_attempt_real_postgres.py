@@ -29,13 +29,14 @@ import os
 import threading
 from pathlib import Path
 
+import httpx
 import psycopg2
 import psycopg2.extras
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import clients, db, decision_state, disclosure_graph
+from app import clients, config, db, decision_state, disclosure_graph
 from app.main import app
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -138,6 +139,7 @@ def real_db(monkeypatch):
     with setup_conn.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute((MIGRATIONS_DIR / "0023_decision_attempts.sql").read_text())
+        cur.execute((MIGRATIONS_DIR / "0024_decision_attempt_bureau_key.sql").read_text())
     setup_conn.commit()
 
     schema_url = DATABASE_URL + ("&" if "?" in DATABASE_URL else "?") + f"options=-csearch_path%3D{SCHEMA}"
@@ -208,7 +210,7 @@ def test_two_concurrent_reruns_result_in_exactly_one_bureau_call(real_db, monkey
     loser = {}
 
     def _winner_thread():
-        attempt_id = decision_state.start_decision_attempt(app_id, "borrower")
+        attempt_id, _key = decision_state.start_decision_attempt(app_id, "borrower")
         winner["attempt_id"] = attempt_id
         resp = clients.post(clients.DECISION_URL, "/decisions", {
             "application_id": app_id, "attempt_id": attempt_id,
@@ -369,7 +371,7 @@ def test_txn_b_failure_after_a_write_rolls_back_decision_event_and_attempt_toget
     # Retry is available immediately -- the attempt is already terminal
     # ('failed'), so a fresh start_decision_attempt call succeeds right
     # away, with no sleep/lease-wait required at all.
-    new_attempt_id = decision_state.start_decision_attempt(app_id, "borrower")
+    new_attempt_id, _ = decision_state.start_decision_attempt(app_id, "borrower")
     assert new_attempt_id != attempt_id
 
     with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -652,3 +654,138 @@ def test_removed_board_route_creates_no_loan_or_balance_rows(real_db):
     assert resp.status_code in (404, 405), "POST /board must not be routable"
     assert "loan_id" not in resp.text
     assert _counts() == before, "a loan or balance row was written by the removed route"
+
+
+# --- Test 6 (Gap A): ambiguous timeout + retry => ONE bureau pull -----------
+
+def test_ambiguous_timeout_retry_reuses_the_key_and_commits_one_event(real_db, monkeypatch):
+    """The exact Gap A scenario, end to end against real Postgres:
+
+      1. the bureau operation COMPLETES,
+      2. origination loses the response to a timeout (the ambiguous case --
+         indistinguishable from "the bureau never ran"),
+      3. the borrower retries,
+      4. the bureau operation is performed exactly ONCE,
+      5. the original result is recovered via the stable request key,
+      6. exactly one permanent decision_events row is committed.
+
+    The fake below stands in for decision-service AND the bureau behind it: it
+    records a pull per distinct bureau_request_key, exactly as
+    decision-service's StubBureauClient does (see
+    decision-service/tests/test_bureau_idempotency.py for that half). The first
+    call records the pull and THEN raises a timeout -- modelling "the bureau ran
+    and the response was lost", not "the bureau never ran"."""
+    app_id = 505
+    _seed_application(real_db, app_id)
+    monkeypatch.setattr(disclosure_graph, "auto_generate_offer", lambda app_id: None)
+
+    pulls_by_key: dict[str, dict] = {}
+    keys_seen: list[str] = []
+    calls = {"n": 0}
+
+    def _fake_post(base_url, path, payload, headers=None):
+        key = payload["bureau_request_key"]
+        keys_seen.append(key)
+        # Bureau-side idempotency: one real pull per distinct key.
+        if key not in pulls_by_key:
+            pulls_by_key[key] = {
+                "bureau_score": 680,
+                "bureau_reference_id": f"stub-{key}",
+            }
+        pulled = pulls_by_key[key]
+
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The bureau finished (recorded above) but we never see the answer.
+            raise httpx.ReadTimeout("simulated ambiguous timeout")
+
+        return {
+            "outcome": "approve", "score": 700, "reason": None,
+            "attempt_id": payload["attempt_id"],
+            "bureau_score": pulled["bureau_score"],
+            "bureau_reference_id": pulled["bureau_reference_id"],
+            "model_version": "v1-stub", "top_features": None, "reason_codes": [],
+        }
+
+    monkeypatch.setattr(clients, "post", _fake_post)
+
+    # 1-2. First request: bureau ran, response lost.
+    first = client.post(f"/applications/{app_id}/decision", json={"access_token": "real-access-token"})
+    assert first.status_code == 502
+    assert "timed out" in first.json()["detail"]
+
+    with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT state, failure_code, bureau_request_key FROM decision_attempts WHERE app_id = %s", (app_id,))
+        timed_out = cur.fetchone()
+        assert timed_out["state"] == "failed"
+        assert timed_out["failure_code"] == "timeout"
+        original_key = timed_out["bureau_request_key"]
+        assert original_key, "the attempt must record the key it presented to the bureau"
+
+    # 3. Retry.
+    second = client.post(f"/applications/{app_id}/decision", json={"access_token": "real-access-token"})
+    assert second.status_code == 200
+    assert second.json()["decision"] == "approve"
+
+    # 4-5. Same key both times => exactly one bureau operation, original result.
+    assert len(keys_seen) == 2, "decision-service should have been called twice"
+    assert keys_seen[0] == keys_seen[1] == original_key, (
+        "the retry must present the SAME bureau_request_key so the provider "
+        "returns the original operation instead of pulling again"
+    )
+    assert len(pulls_by_key) == 1, "the bureau was pulled more than once"
+
+    # 6. Exactly one permanent decision event, carrying the recovered reference.
+    with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) AS n FROM decision_events WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 1
+        cur.execute("SELECT count(*) AS n FROM decisions WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 1
+        cur.execute(
+            "SELECT state, bureau_reference_id FROM decision_attempts "
+            "WHERE app_id = %s ORDER BY id DESC LIMIT 1", (app_id,)
+        )
+        completed = cur.fetchone()
+        assert completed["state"] == "completed"
+        assert completed["bureau_reference_id"] == f"stub-{original_key}"
+
+
+def test_a_genuinely_new_decision_request_gets_a_fresh_bureau_key(real_db, monkeypatch):
+    """Guard against the fix degenerating into a credit-data cache. A staff
+    rerun after a COMPLETED decision is a genuinely new request and must mint a
+    new key, so it performs a real new pull rather than replaying a stale
+    score."""
+    app_id = 506
+    _seed_application(real_db, app_id)
+    monkeypatch.setattr(disclosure_graph, "auto_generate_offer", lambda app_id: None)
+
+    keys_seen: list[str] = []
+
+    def _fake_post(base_url, path, payload, headers=None):
+        keys_seen.append(payload["bureau_request_key"])
+        return {
+            "outcome": "approve", "score": 700, "reason": None,
+            "attempt_id": payload["attempt_id"],
+            "bureau_score": 680, "bureau_reference_id": f"stub-{payload['bureau_request_key']}",
+            "model_version": "v1-stub", "top_features": None, "reason_codes": [],
+        }
+
+    monkeypatch.setattr(clients, "post", _fake_post)
+
+    first = client.post(f"/applications/{app_id}/decision", json={"access_token": "real-access-token"})
+    assert first.status_code == 200
+
+    # Staff rerun -- a new logical decision request, not a retry.
+    second = client.post(
+        f"/applications/{app_id}/decision",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
+    assert second.status_code == 200
+
+    assert len(keys_seen) == 2
+    assert keys_seen[0] != keys_seen[1], (
+        "a completed predecessor means a NEW decision request -- reusing the key "
+        "would serve stale credit data"
+    )

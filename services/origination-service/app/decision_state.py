@@ -138,7 +138,46 @@ def verify_attempt_still_active_locked(cur, attempt_id: int) -> bool:
     return True
 
 
-def start_decision_attempt(app_id: int, requested_by: str) -> int:
+def _bureau_request_key_for(cur, app_id: int) -> str:
+    """The idempotency key this attempt should present at the bureau boundary.
+
+    PR #6 review (Gap A). Origination cannot tell "the bureau never ran" from
+    "the bureau ran and we lost the response" when its own HTTP client times
+    out -- so a retry after that ambiguous outcome must reuse the SAME key,
+    letting the provider return the original operation instead of performing a
+    second billable hard inquiry.
+
+    Reuse is deliberately narrow: ONLY when the immediately preceding attempt
+    for this application ended in exactly that ambiguous state
+    (state='failed', failure_code='timeout'). Every other predecessor --
+    completed, discarded, expired, or failed for any other reason -- means
+    this is a genuinely NEW decision request, which mints a fresh key and
+    performs a real new pull. That boundary is what keeps this an idempotency
+    key and not a credit-data cache: a staff rerun can never be served a
+    stale score.
+
+    Must run on a cursor already holding this application's row lock (see
+    start_decision_attempt), so two concurrent callers cannot both inherit
+    the same key and then diverge.
+    """
+    cur.execute(
+        "SELECT state, failure_code, bureau_request_key FROM decision_attempts "
+        "WHERE app_id = %s ORDER BY id DESC LIMIT 1",
+        (app_id,),
+    )
+    rows = cur.fetchall()
+    if rows:
+        prev = rows[0]
+        if (
+            prev["state"] == "failed"
+            and prev["failure_code"] == "timeout"
+            and prev["bureau_request_key"]
+        ):
+            return prev["bureau_request_key"]
+    return secrets.token_urlsafe(24)
+
+
+def start_decision_attempt(app_id: int, requested_by: str) -> tuple[int, str]:
     """TXN A: lock the application, recheck funded/manual finality, atomically
     recover a stale (lease-expired) attempt if one exists, then create a
     fresh 'in_progress' attempt -- all in one short transaction, committed
@@ -149,6 +188,10 @@ def start_decision_attempt(app_id: int, requested_by: str) -> int:
     `requested_by` is a role string only ('borrower' | 'csr' | 'underwriter'
     | 'admin') -- sourced server-side from the same staff/ownership check
     run_decision already performs, never from unvalidated client input.
+
+    Returns (attempt_id, bureau_request_key) -- see _bureau_request_key_for
+    for when the key is inherited from a timed-out predecessor rather than
+    freshly minted.
 
     Raises HTTPException (404/422/409) if blocked: application missing,
     already funded, already manually decided, or another attempt is still
@@ -186,13 +229,15 @@ def start_decision_attempt(app_id: int, requested_by: str) -> int:
                 (sanitize_failure_detail("expired_lease"), existing[0]["id"]),
             )
 
+        bureau_request_key = _bureau_request_key_for(cur, app_id)
         cur.execute(
-            "INSERT INTO decision_attempts (app_id, state, requested_by, lease_expires_at) "
-            "VALUES (%s, 'in_progress', %s, now() + (%s || ' seconds')::interval) "
+            "INSERT INTO decision_attempts "
+            "(app_id, state, requested_by, lease_expires_at, bureau_request_key) "
+            "VALUES (%s, 'in_progress', %s, now() + (%s || ' seconds')::interval, %s) "
             "RETURNING id",
-            (app_id, requested_by, config.DECISION_ATTEMPT_LEASE_SECONDS),
+            (app_id, requested_by, config.DECISION_ATTEMPT_LEASE_SECONDS, bureau_request_key),
         )
-        return cur.fetchall()[0]["id"]
+        return cur.fetchall()[0]["id"], bureau_request_key
 
 
 def mark_attempt_failed(attempt_id: int, failure_code: str) -> None:

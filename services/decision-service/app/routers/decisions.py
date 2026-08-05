@@ -69,6 +69,11 @@ async def run_decision(
         "income": float(r["income"]) if r.get("income") is not None else 0,
         "requested_amount": float(r["amount"]) if r.get("amount") is not None else None,
         "term_months": r.get("term_months"),
+        # Caller-supplied idempotency key for the bureau boundary (Gap A).
+        # Trusted from the body on purpose -- unlike the financials above, it
+        # is not scoring input; it is origination's own correlation handle,
+        # and origination is the only caller (X-Internal-Token enforced above).
+        "bureau_request_key": body.bureau_request_key,
     }
     result = await decision.decide(application)
     return DecisionOut(
@@ -81,4 +86,5 @@ async def run_decision(
         bureau_score=result.get("bureau_score"),
         model_version=result.get("model_version"),
         top_features=result.get("top_features"),
+        bureau_reference_id=result.get("bureau_reference_id"),
     )

@@ -42,7 +42,7 @@ from .config import (
     EXPERIAN_KEY,
 )
 from .logging_config import get_logger
-from . import db
+from . import bureau, db
 
 log = get_logger("decision")
 
@@ -94,9 +94,20 @@ def _stub_score(ssn: str) -> int:
     return 680 if ssn and ssn[-1] in "02468" else 612
 
 
-async def _pull_credit(ssn: str) -> int:
-    """Async bureau call (see module docstring's async-rework note). No real
-    timeout budget beyond the client's own 30s."""
+async def _pull_credit(ssn: str, request_key: str) -> bureau.BureauResult:
+    """Async bureau call, through the bureau.BureauClient seam.
+
+    PR #6 review (Gap A): `request_key` is origination's idempotency key for
+    this logical decision request. It is stable across a retry that follows an
+    ambiguous timeout and different for a genuinely new decision request, so a
+    retry recovers the original pull instead of billing a second hard inquiry
+    against the applicant. The SSN travels in a POST body, never a query
+    string -- see bureau.py for the full contract and its honest limitation.
+
+    Returns a BureauResult (score + non-sensitive provider reference id)
+    rather than a bare int, so the reference can be persisted for later
+    lookup without keeping any part of the raw provider response.
+    """
     if not EXPERIAN_KEY:
         if not ALLOW_CREDIT_STUB:
             raise CreditBureauUnavailableError(
@@ -104,22 +115,16 @@ async def _pull_credit(ssn: str) -> int:
                 "decide from a fake credit score outside development/test."
             )
         log.warning("EXPERIAN_KEY not set — using deterministic dev stub score")
-        return _stub_score(ssn)
+        return await bureau.stub_client.pull_score(ssn, request_key)
 
     try:
-        # structured like a real call; in dev there's no live bureau so we fall back.
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{EXPERIAN_BASE_URL}/score",
-                params={"ssn": ssn},
-                headers={"Authorization": f"Bearer {EXPERIAN_KEY}"},
-            )
-        return resp.json().get("score", 680)
+        return await bureau.HttpBureauClient().pull_score(ssn, request_key)
     except Exception:
         if not ALLOW_CREDIT_STUB:
             raise
-        # deterministic stub so the demo runs without a live bureau
-        return _stub_score(ssn)
+        # Deterministic stub so the demo runs without a live bureau. Same
+        # request_key, so a retry still collapses onto one stub operation.
+        return await bureau.stub_client.pull_score(ssn, request_key)
 
 
 def _stub_model_score(bureau_score: int, income: float) -> int:
