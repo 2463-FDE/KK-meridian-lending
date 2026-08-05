@@ -64,18 +64,22 @@ INSERT INTO balances (loan_id, balance, past_due) VALUES
   (6011, 13135.64, 0),
   (6014, 49000.0, 0);
 
--- Payments: full PAN + CVV stored. 5582 has TWO rows for one retried charge (double-charge).
-INSERT INTO payments (loan_id, pan, cvv, amount, method, created_at) VALUES
-  (4471, '4111111111111111', '123', 250.00, 'card', '2026-06-01 09:14:11'),
-  (5582, '5500005555555559', '887', 410.50, 'card', '2026-06-01 09:31:04'),
-  (5582, '5500005555555559', '887', 410.50, 'card', '2026-06-01 09:31:06'),  -- duplicate
-  (4471, '340000000000009',  '4021', 99.99, 'card', '2026-06-01 11:18:45'),
-  (6011, NULL, NULL, 432.18, 'ach', '2026-06-02 08:00:00'),
-  (4471, '4111111111111111', '123', 250.00, 'card', '2026-06-03 09:00:00'),
-  (6011, NULL, NULL, 432.18, 'ach', '2026-06-03 08:00:00');
+-- Payments. Seeds last4/brand only: there is nowhere to put a PAN or a CVV
+-- any more (ADR 0008, db/migrations/0029), and seeding card numbers into a
+-- demo database is how one ended up committed in a log file in the first place.
+-- 5582 still has TWO rows for one retried charge -- that double-charge is the
+-- Week 7 reconciliation scenario and is deliberately preserved.
+INSERT INTO payments (loan_id, last4, brand, amount, method, created_at) VALUES
+  (4471, '1111', 'visa',       250.00, 'card', '2026-06-01 09:14:11'),
+  (5582, '5559', 'mastercard', 410.50, 'card', '2026-06-01 09:31:04'),
+  (5582, '5559', 'mastercard', 410.50, 'card', '2026-06-01 09:31:06'),  -- duplicate
+  (4471, '0009', 'amex',        99.99, 'card', '2026-06-01 11:18:45'),
+  (6011, NULL,   NULL,         432.18, 'ach',  '2026-06-02 08:00:00'),
+  (4471, '1111', 'visa',       250.00, 'card', '2026-06-03 09:00:00'),
+  (6011, NULL,   NULL,         432.18, 'ach',  '2026-06-03 08:00:00');
 
 -- "audit" entries that are really app logging, not an actor->action->time control trail.
 INSERT INTO audit_logs (actor, action, detail) VALUES
-  ('system', 'payment', 'charge req pan=4111111111111111 amount=250.00'),
+  ('system', 'payment', 'charge req last4=1111 amount=250.00'),
   ('rep_jordan', 'waive_fee', 'loan 5582 waived 35.00'),
   ('system', 'decision', 'app 6012 deny');

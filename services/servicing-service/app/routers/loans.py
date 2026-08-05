@@ -19,15 +19,16 @@ router = APIRouter(prefix="/loans", tags=["loans"])
 
 
 def _display_last4(payment) -> str | None:
-    # ADR 0008 (Week 5 tokenization): new rows carry last4 directly (the
-    # processor's own token response, never a raw PAN) -- prefer it. Legacy
-    # rows that predate tokenization still have a full pan; mask it the same
-    # way this always displayed, so payment history for old rows doesn't
-    # regress.
+    # ADR 0008: rows carry last4 directly, from the processor's token response
+    # rather than from a card number this service never sees.
+    #
+    # This used to fall back to `payment.pan[-4:]` for pre-tokenization rows.
+    # db/migrations/0029 dropped that column, having first back-filled `last4`
+    # from it -- storing and displaying the last four digits is permitted under
+    # PCI-DSS, storing the PAN is what was not. So legacy rows still display,
+    # and there is no longer a code path that can reach a full card number.
     if payment.last4:
         return "•••• " + payment.last4
-    if payment.pan:
-        return "•••• " + payment.pan[-4:]
     return None
 
 

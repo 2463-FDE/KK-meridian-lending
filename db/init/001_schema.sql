@@ -164,18 +164,13 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments. pan/cvv are legacy-only columns now -- see the tokenization note below.
+-- Payments. No PAN and no CVV: card capture is tokenized in the browser and
+-- this service only ever sees a processor token plus display fields (ADR 0008,
+-- supersedes ADR 0003). db/migrations/0029 drops the legacy columns from an
+-- existing database; a fresh volume never creates them.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
-    -- Week 5 tokenization fix (ADR 0008, supersedes ADR 0003): pan/cvv are
-    -- legacy columns, kept nullable for rows that predate tokenization --
-    -- never written to by any code path anymore (payment-service never
-    -- receives a raw PAN/CVV to store in the first place). New rows use
-    -- last4/brand instead, populated from the processor's own token
-    -- response, never from a raw card number.
-    pan         TEXT,                 -- full PAN stored (legacy rows only)
-    cvv         TEXT,                 -- CVV stored (legacy rows only, SAD — flat PCI prohibition)
     last4       TEXT,                 -- display only; never enough to reconstruct a PAN
     brand       TEXT,                 -- e.g. "visa", "mastercard" -- display only
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION

@@ -9,7 +9,9 @@ caller that reads these columns.
 
 The `balances` table is still a single mutable balance column (no ledger).
 
-ADR 0008 (Week 5 tokenization): `pan`/`cvv` are legacy, nullable, dead-
+ADR 0008 (Week 5 tokenization) removed card storage entirely; `pan`/`cvv`
+were dropped by db/migrations/0029 after `last4` was back-filled from them.
+What follows is the historical note on why they were dead-
 going-forward columns for rows that predate tokenization -- payment-service
 never receives a raw PAN/CVV to write here anymore. New rows populate
 `last4`/`brand` instead.
@@ -53,8 +55,6 @@ class Payment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     loan_id: Mapped[int | None] = mapped_column(ForeignKey("loans.id"), nullable=True)
-    pan: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
-    cvv: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
     last4: Mapped[str | None] = mapped_column(String, nullable=True)
     brand: Mapped[str | None] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
