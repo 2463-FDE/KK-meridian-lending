@@ -69,8 +69,32 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
 
 
 @router.post("/offer", response_model=OfferOut)
-def make_offer(body: OfferIn):
-    app_rows = db.query("SELECT status FROM applications WHERE id = %s", (body.app_id,))
+def make_offer(
+    body: OfferIn,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+    x_offer_accept_token: str | None = Header(default=None, alias="X-Offer-Accept-Token"),
+):
+    # Security fix (PR #6 review): this had NO auth check at all -- only
+    # app_id (attacker-supplied, sequential/guessable) gated everything, so
+    # a stranger could retrieve another applicant's real offer terms (this
+    # route is idempotent -- ON CONFLICT DO NOTHING + read-back -- so a
+    # bogus principal/rate/term in the request body doesn't matter, the
+    # EXISTING offer for that decision is returned regardless), or learn a
+    # denied applicant's specific denial reason via the 422 below. Same gate
+    # as GET /applications/{app_id}/offer: staff, or the accept_token
+    # (hash-match only) minted onto this application when it was approved.
+    # Checked FIRST, before any state is revealed -- a non-staff/non-owner
+    # caller gets the same 403 whether the app doesn't exist, isn't
+    # approved, or was denied.
+    app_rows = db.query(
+        "SELECT status, accept_token_hash FROM applications WHERE id = %s", (body.app_id,)
+    )
+    if not _is_staff(x_user_role, x_internal_token):
+        if not app_rows or not decision_state.accept_token_hash_matches(
+            app_rows[0].get("accept_token_hash"), x_offer_accept_token
+        ):
+            raise HTTPException(status_code=403, detail="not authorized to create or view this offer")
     if not app_rows:
         raise HTTPException(status_code=404, detail="application not found")
     # Bug fix: an already-boarded application must never mint/return a
@@ -174,16 +198,22 @@ def get_offer(
     # part of a URL, never in a default access-log line) is the only way
     # this credential travels now, for both this route and accept_offer
     # below.
+    # Security fix (follow-up, PR #6 review): the branch below used to raise
+    # a distinct 404 ("application not found") vs 403 ("not authorized") --
+    # an existence oracle letting a caller with no credential at all
+    # distinguish "no such app_id" from "exists but not mine" by enumerating
+    # ids. Both now collapse to the same generic 403 for a non-staff caller.
     if not _is_staff(x_user_role, x_internal_token):
         rows = db.query(
             "SELECT accept_token_hash FROM applications WHERE id = %s",
             (app_id,),
         )
-        if not rows:
-            raise HTTPException(status_code=404, detail="application not found")
-        if not decision_state.accept_token_hash_matches(rows[0].get("accept_token_hash"), x_offer_accept_token):
+        if not rows or not decision_state.accept_token_hash_matches(
+            rows[0].get("accept_token_hash"), x_offer_accept_token
+        ):
             # Never echo the caller's supplied token back in the error --
-            # only ever a fixed, generic message.
+            # only ever a fixed, generic message, regardless of whether
+            # app_id exists at all.
             raise HTTPException(status_code=403, detail="not authorized to view this offer")
 
     resp = clients.get(clients.DISCLOSURE_URL, f"/applications/{app_id}/offer")

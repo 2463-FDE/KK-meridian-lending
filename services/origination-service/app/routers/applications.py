@@ -40,14 +40,17 @@ _STAFF_ROLES = {"csr", "underwriter", "admin"}
 _DECISION_STATUS = {"approve": "approved", "refer": "in_review", "deny": "denied"}
 
 # NOTE: the gateway's /los/{path:path} route (gateway/app/main.py) proxies to this
-# router with NO auth check — an applicant can check their own status without an
-# account, so anyone who guesses an app_id can hit any GET route here anonymously.
-# Before adding a new field to ApplicationDetail, ApplicationListItem, or any other
-# response model returned by a route in this file, ask:
+# router with NO auth check by default — a route here is anonymously reachable
+# unless it explicitly gates itself (see _require_staff below). GET /{app_id}
+# (ApplicationDetail) used to be exactly this kind of anonymous route despite
+# returning applicant PII, decision outcome, offer terms, and manual-review
+# rationale -- it is now staff-only (get_application, below). Before adding a
+# new field to ApplicationListItem or any other response model in a route that
+# is NOT staff-gated, ask:
 #   1. Would this be sensitive if read by someone who only knows the app_id?
 #      (income, SSN, DOB, credit score, decision reasoning, etc. -> yes)
-#   2. If yes, put it on a separate endpoint gated by _STAFF_ROLES (see
-#      get_application_financials below), not on the public response.
+#   2. If yes, put it on a route gated by _require_staff (see
+#      get_application_financials below), not on the anonymous response.
 
 
 def _is_staff(x_user_role: str | None, x_internal_token: str | None) -> bool:
@@ -161,7 +164,24 @@ def get_zip_disparate_impact_report(
 
 
 @router.get("/{app_id}", response_model=ApplicationDetail)
-def get_application(app_id: int, session: Session = Depends(get_session)):
+def get_application(
+    app_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    # Security fix (PR #6 review): this route used to be reachable anonymously
+    # via the gateway's /los/* passthrough with no check at all -- app_id is
+    # sequential/guessable, and the response includes applicant PII (name,
+    # email, phone, address), loan amount/purpose, decision outcome, offer
+    # terms, and (until this fix) staff manual-review rationale/reviewer
+    # identity. Every real consumer of this route (frontend/app/underwriting/
+    # [appId]/page.tsx, loan-assistant's /summary call) is already staff-only
+    # -- the borrower-facing /apply flow never calls this route at all (it
+    # gets its own status from POST /decision, /offer, /accept responses).
+    # Staff check runs FIRST, before any DB lookup, so a non-staff caller gets
+    # the same 403 whether or not app_id even exists -- no existence oracle.
+    _require_staff(x_user_role, x_internal_token)
     a = session.get(models.Application, app_id)
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
@@ -649,13 +669,13 @@ def accept_offer(
     # application that was denied, still pending, or belongs to a stranger,
     # or re-board an already-funded one a second time.
     #
-    # Review fix: each failure state below now gets its own specific,
-    # honest message (workflow rules: SUBMITTED -> REVIEWED -> APPROVED ->
-    # OFFER_CREATED -> OFFER_ACCEPTED -> BOARDED, or ... -> DENIED). These
-    # checks read the same fields GET /applications/{id} already exposes
-    # anonymously (decision, offer, status), so answering them here isn't a
-    # new information disclosure -- only the actual fund-and-board action
-    # below still requires real authorization.
+    # Review fix: each failure state below gets its own specific, honest
+    # message (workflow rules: SUBMITTED -> REVIEWED -> APPROVED ->
+    # OFFER_CREATED -> OFFER_ACCEPTED -> BOARDED, or ... -> DENIED) -- but
+    # only for a caller who already proved ownership (or is staff) via the
+    # gate immediately above. GET /applications/{id} is staff-only now too
+    # (see get_application), so this is no longer "the same fields anonymous
+    # elsewhere" -- these specific messages are themselves gated.
     #
     # This first read is a FAST PRE-CHECK only (cheap, the common case, and
     # avoids opening a transaction for an obviously-bad request) -- it is
@@ -672,6 +692,23 @@ def accept_offer(
         "WHERE a.id = %s ORDER BY o.id DESC",
         (app_id,),
     )
+    # Security fix (PR #6 review, follow-up): the state-revealing branches
+    # below (funded / denied+reason / not-approved / no-offer) used to run
+    # before ANY ownership check -- a stranger with just a guessed app_id and
+    # no token at all could learn an application's full workflow state,
+    # including another applicant's specific denial reason. Ownership
+    # (hash-match only, existence check folded in) is now proven FIRST, for
+    # a non-staff caller, before anything about this app_id is revealed --
+    # same 403 whether the app doesn't exist, was never approved (so never
+    # had a token), or belongs to someone else. This is intentionally just a
+    # hash-match (not the full expiry/consumed verify_accept_token below) --
+    # a caller who once legitimately held this application's token is not a
+    # stranger, even if that token has since expired or been consumed.
+    if not _is_staff(x_user_role, x_internal_token):
+        if not rows or not decision_state.accept_token_hash_matches(
+            rows[0].get("accept_token_hash"), x_offer_accept_token
+        ):
+            raise HTTPException(status_code=403, detail="not authorized to accept this offer")
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]

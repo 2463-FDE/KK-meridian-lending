@@ -60,8 +60,19 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     # too, not just a staff X-User-Role (review fix closing a role-spoofing
     # gap) -- this call never sent it, so every summary request 403'd
     # regardless of caller role. See config.py's INTERNAL_SERVICE_TOKEN.
+    #
+    # Security fix (PR #6 review): GET /applications/{app_id} on
+    # origination-service is now staff-only (same reasoning as the
+    # /financials call just below) -- this call used to send neither header
+    # at all, only /financials did. Send both here too, or every summary
+    # request now 403s.
+    main_headers = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
+    if x_user_role:
+        main_headers["X-User-Role"] = x_user_role
     try:
-        resp = httpx.get(f"{ORIGINATION_URL}/applications/{app_id}", timeout=_FETCH_TIMEOUT)
+        resp = httpx.get(
+            f"{ORIGINATION_URL}/applications/{app_id}", headers=main_headers, timeout=_FETCH_TIMEOUT
+        )
     except httpx.HTTPError as exc:
         log.error("origination-service unreachable app_id=%s: %s", app_id, exc)
         raise HTTPException(status_code=502, detail="origination-service unreachable") from exc

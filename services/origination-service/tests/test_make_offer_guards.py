@@ -22,6 +22,15 @@ either way, with `created` telling "just created" from "already existed"
 apart. These tests cover that fix, plus GET /applications/{app_id}/offer's
 new ownership check (previously had none at all -- app_id is a guessable
 sequential integer).
+
+Security fix (PR #6 review): make_offer itself had NO auth check at all --
+any caller with a guessed app_id could retrieve a stranger's real offer
+terms (idempotent, so a bogus principal/rate/term in the body doesn't
+matter) or learn a denied applicant's specific denial reason via the 422.
+It now requires the same staff-or-accept_token gate GET .../offer already
+used, checked before any state is revealed. Every existing test below now
+sends the borrower's own valid token so it keeps exercising the
+outcome-branching logic it always tested, past this new gate.
 """
 import httpx
 import pytest
@@ -36,12 +45,13 @@ _OFFER_BODY = {"app_id": 10, "principal": 9000, "term_months": 24}
 
 _ACCEPT_TOKEN = "borrower-own-token-xyz"
 _ACCEPT_TOKEN_HASH = decision_state.hash_accept_token(_ACCEPT_TOKEN)
+_AUTH_HEADERS = {"X-Offer-Accept-Token": _ACCEPT_TOKEN}
 
 
-def _fake_query_factory(status="approved", outcome="approve", offer_created=False):
+def _fake_query_factory(status="approved", outcome="approve", offer_created=False, accept_token_hash=_ACCEPT_TOKEN_HASH):
     def _fake_query(sql, params=None):
-        if "SELECT status FROM applications" in sql:
-            return [{"status": status}]
+        if "SELECT status, accept_token_hash FROM applications" in sql:
+            return [{"status": status, "accept_token_hash": accept_token_hash}]
         if "FROM decisions" in sql:
             return [{"outcome": outcome}] if outcome else []
         if "FROM manual_reviews" in sql:
@@ -72,7 +82,7 @@ def test_make_offer_returns_the_existing_offer_when_one_already_exists(monkeypat
 
     monkeypatch.setattr(clients, "post", _fake_post)
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -84,7 +94,7 @@ def test_make_offer_returns_the_existing_offer_when_one_already_exists(monkeypat
 def test_make_offer_rejects_an_already_boarded_application(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query_factory(status="funded"))
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 409
     detail = resp.json()["detail"]
@@ -92,17 +102,40 @@ def test_make_offer_rejects_an_already_boarded_application(monkeypatch):
 
 
 def test_make_offer_rejects_when_application_not_found(monkeypatch):
+    from app import config
+
     monkeypatch.setattr(db, "query", lambda sql, params=None: [])
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    # Staff session: a truly-missing app_id still gets a real, specific 404
+    # -- the generic-403-for-non-staff behavior (no existence oracle) is
+    # covered separately below, since a non-staff caller with no token now
+    # gets 403 here regardless of whether app_id exists.
+    resp = client.post(
+        "/offer", json=_OFFER_BODY,
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
 
     assert resp.status_code == 404
+
+
+def test_make_offer_rejects_anonymous_caller_regardless_of_whether_app_id_exists(monkeypatch):
+    """Security fix (PR #6 review): no existence oracle -- a non-staff
+    caller with no valid token gets the identical 403 whether app_id is a
+    real (but not theirs) application or doesn't exist at all."""
+    monkeypatch.setattr(db, "query", _fake_query_factory())
+    real = client.post("/offer", json=_OFFER_BODY)
+
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [])
+    fake = client.post("/offer", json={**_OFFER_BODY, "app_id": 999999999})
+
+    assert real.status_code == fake.status_code == 403
+    assert real.json() == fake.json()
 
 
 def test_make_offer_rejects_when_no_decision_exists_yet(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query_factory(outcome=None))
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 422
     detail = resp.json()["detail"]
@@ -112,7 +145,7 @@ def test_make_offer_rejects_when_no_decision_exists_yet(monkeypatch):
 def test_make_offer_rejects_a_still_pending_application(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query_factory(outcome="refer"))
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 422
     assert resp.json()["detail"]["code"] == "APPLICATION_NOT_APPROVED"
@@ -121,7 +154,7 @@ def test_make_offer_rejects_a_still_pending_application(monkeypatch):
 def test_make_offer_rejects_a_denied_application_with_its_reason(monkeypatch):
     monkeypatch.setattr(db, "query", _fake_query_factory(outcome="deny"))
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 422
     detail = resp.json()["detail"]
@@ -146,7 +179,7 @@ def test_make_offer_succeeds_for_an_approved_application(monkeypatch):
 
     monkeypatch.setattr(clients, "post", _fake_post)
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -170,7 +203,7 @@ def test_make_offer_surfaces_disclosure_services_own_message_on_rejection(monkey
 
     monkeypatch.setattr(clients, "post", _fake_post)
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 422
     assert resp.json()["detail"] == "no approved decision on record for application_id=10"
@@ -190,7 +223,7 @@ def test_make_offer_logs_technical_failure_without_exposing_it(monkeypatch, capl
 
     monkeypatch.setattr(clients, "post", _fake_post)
 
-    resp = client.post("/offer", json=_OFFER_BODY)
+    resp = client.post("/offer", json=_OFFER_BODY, headers=_AUTH_HEADERS)
 
     assert resp.status_code == 502
     detail = resp.json()["detail"]
@@ -232,6 +265,20 @@ def test_get_offer_rejects_wrong_token(monkeypatch):
     resp = client.get("/applications/10/offer", headers={"X-Offer-Accept-Token": "attacker-guessed"})
 
     assert resp.status_code == 403
+
+
+def test_get_offer_rejects_anonymous_caller_regardless_of_whether_app_id_exists(monkeypatch):
+    """Security fix (PR #6 review): this used to return a distinct 404 for a
+    missing app_id vs 403 for a wrong token -- an existence oracle. Both now
+    collapse to the same generic 403 for a non-staff caller."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [{"accept_token_hash": _ACCEPT_TOKEN_HASH}])
+    real = client.get("/applications/10/offer", headers={"X-Offer-Accept-Token": "attacker-guessed"})
+
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [])
+    fake = client.get("/applications/999999999/offer", headers={"X-Offer-Accept-Token": "attacker-guessed"})
+
+    assert real.status_code == fake.status_code == 403
+    assert real.json() == fake.json()
 
 
 def test_get_offer_rejects_a_query_parameter_token(monkeypatch):

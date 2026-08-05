@@ -312,12 +312,20 @@ export default function ApplyPage() {
         setDisclosure(existing.disclosure);
         return;
       }
-      const created = (await apiPost("/los/offer", {
-        app_id: app.app_id,
-        principal: form.amount,
-        annual_rate_pct: OFFER_RATE_PCT,
-        term_months: parseInt(form.term_months, 10),
-      })) as { app_id: string | number; disclosure: Disclosure };
+      // Security fix (PR #6 review): POST /offer now requires the same
+      // ownership proof as the GET above (staff or a matching
+      // X-Offer-Accept-Token) -- send the same token here too, or a
+      // legitimate borrower's own first-offer creation would 403.
+      const created = (await apiPost(
+        "/los/offer",
+        {
+          app_id: app.app_id,
+          principal: form.amount,
+          annual_rate_pct: OFFER_RATE_PCT,
+          term_months: parseInt(form.term_months, 10),
+        },
+        { "X-Offer-Accept-Token": token },
+      )) as { app_id: string | number; disclosure: Disclosure };
       setDisclosure(created.disclosure);
     } catch (err) {
       setApiError(errMsg(err, "Could not generate your offer."));

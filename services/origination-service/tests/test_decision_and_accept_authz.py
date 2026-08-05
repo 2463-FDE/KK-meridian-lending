@@ -531,14 +531,21 @@ def test_first_accept_rejects_already_consumed_token(monkeypatch):
 def test_first_accept_rejects_a_revoked_token(monkeypatch):
     """A rerun/manual-correction away from approve nulls accept_token_hash
     (decision_state.revoke_accept_token) -- a request still carrying the
-    now-revoked raw token must be rejected exactly like an expired one, not
-    silently accepted because SOME hash used to exist."""
+    now-revoked raw token must be rejected, not silently accepted because
+    SOME hash used to exist.
+
+    Security fix (PR #6 review): the ownership gate now runs BEFORE any
+    state is revealed (hash-match only -- no hash at all can never match),
+    so this now returns the same generic 403 "not authorized" every other
+    non-owner gets, rather than the specific 409 "expired" message -- a
+    caller with a revoked token is not meaningfully different from a
+    stranger with no token at all."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", token_hash=None)])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
     resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
-    assert resp.status_code == 409
+    assert resp.status_code == 403
     assert not board_calls
 
 
@@ -662,16 +669,17 @@ def test_reaccept_of_an_already_funded_application_is_rejected_for_staff_too(mon
 
 
 def test_reaccept_of_an_already_funded_application_by_staff_without_internal_token_is_still_rejected(monkeypatch):
-    """The already-boarded check fires before the auth check now (it's the
-    same status/decision/offer info GET already exposes anonymously) -- a
-    staff caller with no internal token gets the same 409, not a 403."""
+    """Security fix (PR #6 review): the ownership/staff gate now runs BEFORE
+    any state (including funded) is revealed -- an X-User-Role claim with no
+    X-Internal-Token is not trusted (same as everywhere else _is_staff is
+    used) and, with no accept_token either, gets the same generic 403
+    "not authorized" as any other non-owner, not the specific 409."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
     resp = client.post("/applications/10/accept", headers={"X-User-Role": "underwriter"})
 
-    assert resp.status_code == 409
-    assert resp.json()["detail"] == "This application has already been boarded."
+    assert resp.status_code == 403
     assert not board_calls
 
 
