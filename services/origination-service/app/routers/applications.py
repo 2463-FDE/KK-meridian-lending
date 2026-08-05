@@ -1023,7 +1023,8 @@ def accept_offer(
         # condition matters: a second racing request must not board against
         # an offer this same transaction is about to mark accepted.
         cur.execute(
-            "SELECT apr, finance_charge, monthly_payment, amount_financed, total_of_payments "
+            "SELECT note_rate_pct, apr, finance_charge, monthly_payment, amount_financed, "
+            "total_of_payments "
             "FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
             (app_id,),
         )
@@ -1051,7 +1052,31 @@ def accept_offer(
                     f"disclosure terms: {', '.join(incomplete)}. Generate a new offer."
                 ),
             )
-        rate = offer_rows[0]["apr"]
+        # Review fix (PR #10): this used to board `offers.apr`. Once apr became
+        # the true actuarial rate that meant servicing amortized the loan at the
+        # DISCLOSED rate instead of the contractual one, billing 452.94 a month
+        # against a disclosure that said 439.35 -- 652 more over a 48-month term,
+        # against the borrower. It was wrong before that change too (it boarded
+        # the old add-on ratio and billed under), so this is not a regression the
+        # APR fix introduced so much as one it made harmful.
+        #
+        # Board the note rate: the contractual rate the payment schedule was
+        # actually calculated on (db/migrations/0030). servicing amortizes
+        # whatever it is given, so this is the number that decides what the
+        # borrower is billed.
+        rate = offer_rows[0]["note_rate_pct"]
+        if rate is None:
+            # Refuse rather than fall back to apr. A pre-0030 row that escaped
+            # the back-fill has no recorded contractual rate, and guessing one
+            # is how the borrower ends up on terms nobody disclosed.
+            log.error("refusing to board an offer with no note_rate_pct app_id=%s", app_id)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This offer does not record the contractual rate it was written at "
+                    "and cannot be boarded. Generate a new offer."
+                ),
+            )
 
         cur.execute(
             "UPDATE applications SET status = 'funded', accept_token_hash = NULL, "

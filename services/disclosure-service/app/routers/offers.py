@@ -24,7 +24,7 @@ CANONICAL_TERMS = (
 )
 
 _OFFER_COLUMNS = (
-    "id", "app_id", "decision_id", "fee_pct_used", "apr", "finance_charge",
+    "id", "app_id", "decision_id", "fee_pct_used", "note_rate_pct", "apr", "finance_charge",
     "monthly_payment", "amount_financed", "total_of_payments", "accepted_at",
 )
 _OFFER_FIELDS = ", ".join(_OFFER_COLUMNS)
@@ -76,7 +76,7 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
     repaired = db.query(
         "WITH repaired AS ("
         "  UPDATE offers o"
-        "     SET fee_pct_used = %s, apr = %s, finance_charge = %s,"
+        "     SET fee_pct_used = %s, note_rate_pct = %s, apr = %s, finance_charge = %s,"
         "         monthly_payment = %s, amount_financed = %s, total_of_payments = %s"
         "    FROM decisions d"
         "   WHERE o.decision_id = d.app_id AND d.app_id = %s AND d.outcome = 'approve'"
@@ -92,9 +92,9 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
         "    FROM repaired r"
         ")"
         "SELECT * FROM repaired",
-        (fee_pct_used, terms["apr"], terms["finance_charge"], terms["monthly_payment"],
-         terms["amount_financed"], terms["total_of_payments"], application_id,
-         ",".join(missing)),
+        (fee_pct_used, float(fees.NOTE_RATE_PCT), terms["apr"], terms["finance_charge"],
+         terms["monthly_payment"], terms["amount_financed"], terms["total_of_payments"],
+         application_id, ",".join(missing)),
     )
     if repaired:
         log.warning(
@@ -155,7 +155,10 @@ def create_offer(
         )
     principal = float(app_rows[0]["amount"])
     term_months = app_rows[0]["term_months"]
-    annual_rate = 7.99
+    # One source of truth (fees.py). This is the CONTRACTUAL rate the payment
+    # is calculated on, and it is persisted on the offer so boarding does not
+    # have to infer it from the disclosed APR -- which is a different number.
+    annual_rate = float(fees.NOTE_RATE_PCT)
 
     o = offer_mod.build_offer(principal, annual_rate, term_months)
     rows = schedule.amortization(principal, annual_rate, term_months)
@@ -199,13 +202,13 @@ def create_offer(
     # handled gracefully, not just one.
     try:
         inserted = db.query(
-            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-            "monthly_payment, amount_financed, total_of_payments) "
-            "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s "
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+            "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+            "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s, %s "
             "FROM decisions d WHERE d.app_id = %s AND d.outcome = 'approve' "
             "ON CONFLICT (decision_id) DO NOTHING "
             f"RETURNING {_OFFER_FIELDS}",
-            (fee_pct_used, o["apr"], o["finance_charge"], o["monthly_payment"],
+            (fee_pct_used, annual_rate, o["apr"], o["finance_charge"], o["monthly_payment"],
              o["amount_financed"], o["total_of_payments"], body.application_id),
         )
     except psycopg2.errors.UniqueViolation:

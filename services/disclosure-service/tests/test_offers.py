@@ -34,6 +34,7 @@ from app import config, db
 from app import offer as offer_mod
 from app.database import get_session
 from app.main import app
+import pytest
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
@@ -73,12 +74,16 @@ class _FakeDb:
             return self.application_rows
         if "INSERT INTO offers" in sql:
             if self.decision_approved and self.stored_offer is None:
-                fee_pct_used, apr, finance_charge, monthly_payment, amount_financed, total_of_payments, application_id = params
+                # PR #10 review: the offer now records the CONTRACTUAL note rate
+                # alongside the disclosed APR, because boarding reads the former.
+                (fee_pct_used, note_rate_pct, apr, finance_charge, monthly_payment,
+                 amount_financed, total_of_payments, application_id) = params
                 self.stored_offer = {
                     "id": self.insert_id, "app_id": application_id, "decision_id": application_id,
-                    "fee_pct_used": fee_pct_used, "apr": apr, "finance_charge": finance_charge,
+                    "fee_pct_used": fee_pct_used, "note_rate_pct": note_rate_pct,
+                    "apr": apr, "finance_charge": finance_charge,
                     "monthly_payment": monthly_payment, "amount_financed": amount_financed,
-                    "total_of_payments": total_of_payments,
+                    "total_of_payments": total_of_payments, "accepted_at": None,
                 }
                 return [self.stored_offer]
             return []
@@ -227,11 +232,19 @@ def test_create_offer_ignores_client_supplied_principal_and_term(monkeypatch):
 
     assert resp.status_code == 200
     expected = offer_mod.build_offer(12000, 7.99, 36)
+    # The point of this test is that caller-supplied principal/term/rate are
+    # ignored in favour of the application's own record -- so compare against
+    # what build_offer produces for THAT, not against the rate the caller sent.
     assert resp.json()["apr"] == expected["apr"]
     assert resp.json()["monthly_payment"] == expected["monthly_payment"]
 
     insert_call = next(c for c in fake_db.calls if "INSERT INTO offers" in c[0])
-    assert insert_call[1][1] == expected["apr"]  # apr positional param -- not derived from principal=49999
+    # Positional params are (fee_pct_used, note_rate_pct, apr, ...) since PR #10
+    # split the contractual rate out of the disclosed APR. Both are checked:
+    # neither may be derived from the caller-supplied principal=49999/rate=35.
+    assert insert_call[1][1] == pytest.approx(7.99)          # note rate, from fees.NOTE_RATE_PCT
+    assert insert_call[1][2] == expected["apr"]              # disclosed APR
+    assert insert_call[1][1] != insert_call[1][2], "note rate and APR must not be the same value"
 
 
 def test_repeated_create_offer_with_different_body_values_leaves_offer_unchanged(monkeypatch):

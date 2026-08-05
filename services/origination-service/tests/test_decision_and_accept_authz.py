@@ -462,6 +462,10 @@ def _accept_row(status="approved", outcome="approve", apr=9.99,
         "name": "Jane Borrower", "outcome": outcome,
         "offer_id": offer_id if apr is not None else None,
         "apr": apr,
+        # PR #10 review: boarding reads the CONTRACTUAL note rate, not the
+        # disclosed APR -- the two diverge once a prepaid fee exists, and
+        # boarding the APR billed the borrower above their own disclosure.
+        "note_rate_pct": 7.99 if apr is not None else None,
         "finance_charge": 500.0 if apr is not None else None,
         "monthly_payment": 400.0 if apr is not None else None,
         "amount_financed": 8700.0 if apr is not None else None,
@@ -526,9 +530,13 @@ class _FakeAcceptTxCursor:
             }]
         elif stmt.startswith("SELECT outcome FROM decisions"):
             self._last = [{"outcome": self.locked_outcome}] if self.locked_outcome else []
-        elif stmt.startswith("SELECT apr, finance_charge, monthly_payment"):
+        elif stmt.startswith("SELECT note_rate_pct, apr, finance_charge, monthly_payment"):
             # Gap F: all five canonical terms are re-read under the lock now.
             self._last = [{
+                # PR #10 review: boarding reads the contractual note rate, and
+                # it is deliberately different from the disclosed apr here so a
+                # test cannot pass by confusing the two.
+                "note_rate_pct": 7.99,
                 "apr": self.offer_apr, "finance_charge": 500.0,
                 "monthly_payment": 400.0, "amount_financed": 8700.0,
                 "total_of_payments": 9600.0,

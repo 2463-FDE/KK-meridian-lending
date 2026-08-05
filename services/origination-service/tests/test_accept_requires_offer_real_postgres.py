@@ -36,8 +36,13 @@ pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set -
 
 client = TestClient(app)
 
+# Internally consistent for principal 9000 at a 7.99% note rate over 24
+# months: 407.00/mo, 3% prepaid fee, and an ACTUARIAL apr of 11.029 --
+# deliberately different from the note rate, so a test that confuses the two
+# fails instead of passing by coincidence.
+_NOTE_RATE_PCT = 7.99
 _COMPLETE_TERMS = {
-    "apr": 5.946, "finance_charge": 768.11, "monthly_payment": 407.0,
+    "apr": 11.029, "finance_charge": 768.11, "monthly_payment": 407.0,
     "amount_financed": 8730.0, "total_of_payments": 9768.11,
 }
 
@@ -83,9 +88,9 @@ def _approved_application(conn, *, with_offer: bool):
 
     if with_offer:
         _sql(conn,
-             "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-             "monthly_payment, amount_financed, total_of_payments) "
-             "VALUES (1, 1, 0.030, %s, %s, %s, %s, %s)",
+             "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+             "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+             "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s)",
              tuple(_COMPLETE_TERMS[k] for k in
                    ("apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments")))
     return raw_token
@@ -133,9 +138,9 @@ def test_the_refusal_is_recoverable_once_the_offer_exists(real_db):
     assert _accept(token).status_code == 409
 
     _sql(real_db,
-         "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-         "monthly_payment, amount_financed, total_of_payments) "
-         "VALUES (1, 1, 0.030, %s, %s, %s, %s, %s)",
+         "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+         "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+         "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s)",
          tuple(_COMPLETE_TERMS[k] for k in
                ("apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments")))
 
@@ -144,7 +149,81 @@ def test_the_refusal_is_recoverable_once_the_offer_exists(real_db):
 
     loans = _sql(real_db, "SELECT id, apr FROM loans WHERE app_id = 1")
     assert len(loans) == 1
-    # Never the old hardcoded 7.99 -- the boarded rate is the disclosed rate.
-    assert float(loans[0]["apr"]) == pytest.approx(_COMPLETE_TERMS["apr"], abs=1e-3)
+    # The boarded rate is the CONTRACTUAL note rate, not the disclosed APR --
+    # servicing amortizes what it is given, so this is what the borrower is
+    # billed at (PR #10 review). Asserting the disclosed APR here is precisely
+    # the confusion that shipped a schedule 13.59/month above the disclosure.
+    assert float(loans[0]["apr"]) == pytest.approx(_NOTE_RATE_PCT, abs=1e-3)
+    assert float(loans[0]["apr"]) != pytest.approx(_COMPLETE_TERMS["apr"], abs=1e-3)
     assert _sql(real_db, "SELECT count(*)::int AS n FROM balances WHERE loan_id = %s",
                 (loans[0]["id"],))[0]["n"] == 1
+
+
+# --- PR #10 review: the boarded loan must bill what the disclosure promised ---
+
+def _amortized_payment(principal: float, annual_rate_pct: float, term_months: int) -> float:
+    """The payment servicing will bill, computed the way servicing computes it
+    (`servicing-service/app/schedule.py` amortizes `loans.apr`). Written out
+    here rather than imported, so this test does not pass just because two
+    services share one helper."""
+    r = annual_rate_pct / 100 / 12
+    if r == 0:
+        return principal / term_months
+    f = (1 + r) ** term_months
+    return principal * r * f / (f - 1)
+
+
+def test_the_boarded_loan_bills_the_disclosed_monthly_payment(real_db):
+    """The defect PR #10's review caught, as an end-to-end assertion.
+
+    `offers.apr` became the true actuarial APR, but accept still boarded that
+    column as the servicing rate -- so servicing amortized 9.584% while the
+    disclosure said 439.35/month at 7.99%. The borrower would have been billed
+    452.94: 13.59 a month, 652 over the term, against them.
+
+    This asserts the property that actually matters and would have caught it
+    either way round: whatever rate reaches `loans`, amortizing it must
+    reproduce the payment on the accepted disclosure.
+    """
+    token = _approved_application(real_db, with_offer=True)
+    disclosed = _sql(real_db, "SELECT monthly_payment, apr, note_rate_pct FROM offers WHERE app_id = 1")[0]
+
+    assert _accept(token).status_code == 200
+
+    loan = _sql(real_db, "SELECT principal, apr, term_months FROM loans WHERE app_id = 1")[0]
+    billed = _amortized_payment(float(loan["principal"]), float(loan["apr"]), loan["term_months"])
+
+    assert billed == pytest.approx(float(disclosed["monthly_payment"]), abs=0.01), (
+        f"boarded loan bills {billed:.2f}/month against a disclosure of "
+        f"{float(disclosed['monthly_payment']):.2f} -- servicing is amortizing "
+        f"{loan['apr']} where the contractual rate is {disclosed['note_rate_pct']}"
+    )
+
+
+def test_boarding_uses_the_note_rate_not_the_disclosed_apr(real_db):
+    """Pins which column is boarded, so the two can never be swapped back. They
+    are deliberately different values in this fixture -- if they were equal the
+    test above would pass for the wrong reason."""
+    token = _approved_application(real_db, with_offer=True)
+    offer = _sql(real_db, "SELECT apr, note_rate_pct FROM offers WHERE app_id = 1")[0]
+    assert float(offer["apr"]) != float(offer["note_rate_pct"]), "fixture must keep them distinct"
+
+    assert _accept(token).status_code == 200
+
+    loan = _sql(real_db, "SELECT apr FROM loans WHERE app_id = 1")[0]
+    assert float(loan["apr"]) == pytest.approx(float(offer["note_rate_pct"]), abs=1e-3)
+    assert float(loan["apr"]) != pytest.approx(float(offer["apr"]), abs=1e-3)
+
+
+def test_an_offer_with_no_recorded_note_rate_is_refused_rather_than_guessed(real_db):
+    """A pre-0030 row that escaped the back-fill has no contractual rate on
+    record. Falling back to `apr` would put the borrower on terms nobody
+    disclosed, so accept refuses instead."""
+    token = _approved_application(real_db, with_offer=True)
+    _sql(real_db, "UPDATE offers SET note_rate_pct = NULL WHERE app_id = 1")
+
+    resp = _accept(token)
+
+    assert resp.status_code == 409
+    assert "contractual rate" in resp.json()["detail"]
+    assert _sql(real_db, "SELECT count(*)::int AS n FROM loans")[0]["n"] == 0

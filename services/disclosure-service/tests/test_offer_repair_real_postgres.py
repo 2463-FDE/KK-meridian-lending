@@ -67,6 +67,7 @@ def _schema_sql():
             app_id INTEGER REFERENCES applications(id) UNIQUE,
             decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,
             fee_pct_used NUMERIC(5,4),
+            note_rate_pct NUMERIC(7,3),
             apr NUMERIC(7,3),
             finance_charge NUMERIC(14,2),
             monthly_payment NUMERIC(14,2),

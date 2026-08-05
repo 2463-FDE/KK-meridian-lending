@@ -109,6 +109,7 @@ def _full_schema_sql():
             app_id INTEGER REFERENCES applications(id) UNIQUE,
             decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,
             fee_pct_used NUMERIC(5,4),
+            note_rate_pct NUMERIC(7,3),
             apr NUMERIC(7,3),
             finance_charge NUMERIC(14,2),
             monthly_payment NUMERIC(14,2),
@@ -846,9 +847,9 @@ def test_incomplete_offer_terms_never_board_a_loan(real_db, monkeypatch, missing
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (%s, 'approve')", (app_id,))
         cur.execute(
-            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-            "monthly_payment, amount_financed, total_of_payments) "
-            "VALUES (%s, %s, 0.03, %s, %s, %s, %s, %s)",
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+            "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+            "VALUES (%s, %s, 0.03, 7.990, %s, %s, %s, %s, %s)",
             (app_id, app_id, terms["apr"], terms["finance_charge"], terms["monthly_payment"],
              terms["amount_financed"], terms["total_of_payments"]),
         )
@@ -889,9 +890,9 @@ def test_a_complete_offer_still_boards_exactly_one_loan_and_balance(real_db, mon
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (%s, 'approve')", (app_id,))
         cur.execute(
-            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-            "monthly_payment, amount_financed, total_of_payments) "
-            "VALUES (%s, %s, 0.03, 5.946, 768.11, 407.0, 8730.0, 9768.11)",
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+            "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+            "VALUES (%s, %s, 0.03, 7.990, 5.946, 768.11, 407.0, 8730.0, 9768.11)",
             (app_id, app_id),
         )
         cur.execute(
