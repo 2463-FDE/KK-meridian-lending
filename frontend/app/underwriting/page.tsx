@@ -47,7 +47,7 @@ function prettyPurpose(p: string): string {
 
 export default function UnderwritingPage() {
   return (
-    <RequireRole allow={["underwriter", "admin"]}>
+    <RequireRole allow={["underwriter", "admin", "csr"]}>
       <UnderwritingContent />
     </RequireRole>
   );

@@ -40,6 +40,7 @@ from .config import (
     PAYMENT_URL,
     SERVICING_URL,
 )
+from .rate_limit import RateLimitMiddleware
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("gateway")
@@ -52,6 +53,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Middleware runs in reverse-add order (last added runs first) -- rate limiting
+# added after CORS so it's the first check a request actually hits.
+app.add_middleware(RateLimitMiddleware)
+
+# W7: exposes GET /metrics in Prometheus text format -- request count, latency
+# histograms, in-progress requests, broken down by route/method/status. No
+# service in this repo had any cross-service metrics before this; LangSmith
+# only ever covered the LLM calls, not the other seven services.
+Instrumentator().instrument(app).expose(app)
 
 # W7: exposes GET /metrics in Prometheus text format -- request count, latency
 # histograms, in-progress requests, broken down by route/method/status. No
@@ -104,6 +114,17 @@ def me(authorization: str | None = Header(None)):
 async def _proxy(base: str, path: str, request: Request, user: dict | None, extra_headers: dict | None = None):
     method = request.method
     body = await request.body()
+    # Security fix (borrower-workflow audit): the borrower's one-time
+    # accept_token used to travel as a URL query parameter on the offer
+    # GET route -- that leaks into this gateway's own access log AND its
+    # outbound httpx request log below, plus browser history/Referer. It
+    # now travels only as X-Offer-Accept-Token, a plain header -- forwarded
+    # here intentionally, same as every other inbound header that isn't an
+    # identity claim (X-User-*, stripped below) or connection-level
+    # (host/content-length/authorization, replaced by the resolved
+    # session). This proxy never re-serializes any header into the
+    # outbound URL -- headers stay headers (see the httpx call below,
+    # `headers=headers` is separate from `params=request.query_params`).
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "content-length", "authorization")
@@ -119,10 +140,19 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
             method, f"{base}{path}", content=body, headers=headers,
             params=request.query_params,
         )
+    # Bug fix: resp.json() decodes via resp.text, which falls back to
+    # httpx's charset auto-detection whenever the upstream response's
+    # Content-Type has no explicit charset param (every backend service here
+    # just sends "application/json" with none). Auto-detection can misguess
+    # short multi-byte sequences as Latin-1/cp1252 -- an en dash or an
+    # accented name came back through this proxy as visible mojibake
+    # ("Jos\xc3\xa9" instead of "Jos\xe9") on every route, not just one.
+    # RFC 8259 mandates JSON is UTF-8 (unless a BOM says otherwise) -- decode
+    # the raw bytes as UTF-8 directly instead of letting httpx guess.
     try:
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
+        return JSONResponse(status_code=resp.status_code, content=json.loads(resp.content.decode("utf-8")))
     except Exception:
-        return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
+        return JSONResponse(status_code=resp.status_code, content={"raw": resp.content.decode("utf-8", errors="replace")})
 
 
 def _require_user(authorization: str | None) -> dict:
@@ -136,8 +166,21 @@ def _require_user(authorization: str | None) -> dict:
 async def los(path: str, request: Request, authorization: str | None = Header(None)):
     # Origination is borrower-facing; an applicant can apply without an account.
     # If a session is present we forward it, otherwise we proxy anonymously.
+    #
+    # Review fix: origination-service's own staff-only routes (financials,
+    # rerun-decision, history, accept/re-accept) trust X-User-Role alone --
+    # docker-compose.yml no longer publishes its host port, but that's network
+    # topology, not an application-level check. X-Internal-Token (the same
+    # shared secret already forwarded to decision-service/disclosure-service/
+    # payment-service above) proves this request actually came through the
+    # gateway; a caller who reaches origination-service directly (e.g. if the
+    # port is ever mistakenly reopened) can still fake X-User-Role but doesn't
+    # know this secret, so it fails origination-service's own staff check too.
     user = auth.get_session(auth.bearer_token(authorization))
-    return await _proxy(ORIGINATION_URL, f"/{path}", request, user)
+    return await _proxy(
+        ORIGINATION_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 def _borrower_loans(applicant_id: int) -> dict:
@@ -246,12 +289,16 @@ async def kyc(path: str, request: Request, authorization: str | None = Header(No
 @app.api_route("/decision/{path:path}", methods=["GET", "POST"])
 async def decision(path: str, request: Request, authorization: str | None = Header(None)):
     # Security fix: this used to forward with an optional session -- an anonymous
-    # caller could POST /decision/decisions directly with an SSN, triggering a
-    # real credit pull and overwriting the decision for any existing application
-    # via the upsert. The normal decision flow never comes through this route at
-    # all -- origination-service calls decision-service server-to-server over the
-    # internal network -- so this proxy only exists for staff/ops tooling to
-    # inspect or re-run a decision directly. Staff-only, no exceptions.
+    # caller could POST /decision/decisions directly (bypassing origination-service
+    # entirely) with a guessed application_id and fabricated income/SSN, and
+    # decision-service's ON CONFLICT DO UPDATE would overwrite the real underwriting
+    # outcome + its audit trail. The normal decision flow never comes through this
+    # route at all -- origination-service calls decision-service server-to-server
+    # over the internal network -- so this proxy only exists for staff/ops tooling
+    # to inspect or re-run a decision directly. Staff-only, no exceptions.
+    # decision-service itself now requires X-Internal-Token on every call (see
+    # routers/decisions.py) -- this proxy has to forward it too, or a staff
+    # session hitting decision-service through the gateway gets 401'd.
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="staff only")
@@ -263,8 +310,21 @@ async def decision(path: str, request: Request, authorization: str | None = Head
 
 @app.api_route("/disclosure/{path:path}", methods=["GET", "POST"])
 async def disclosure(path: str, request: Request, authorization: str | None = Header(None)):
-    user = auth.get_session(auth.bearer_token(authorization))
-    return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
+    # Security fix: same gap as /decision/* above -- an anonymous caller could POST
+    # /disclosure/offers directly with an approved application_id and any
+    # principal/rate/term, overwriting the canonical TILA disclosure. The normal
+    # auto-offer flow never comes through this route -- origination-service's
+    # disclosure_graph calls disclosure-service server-to-server. Staff-only.
+    # (disclosure-service's own create_offer also now derives principal/term
+    # server-side rather than trusting the body -- see offers.py -- so this is
+    # defense in depth, not the only fix.)
+    user = _require_user(authorization)
+    if not auth.is_staff(user):
+        raise HTTPException(status_code=403, detail="staff only")
+    return await _proxy(
+        DISCLOSURE_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 # Review fix: payment-service is the authoritative amount check (schemas.PaymentIn
@@ -290,6 +350,7 @@ async def payments(path: str, request: Request, authorization: str | None = Head
     user = _require_user(authorization)
 
     if path == "" and request.method == "POST":
+        payment_headers = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
         # request.body() is cached by Starlette after the first read, so _proxy's
         # own await request.body() below still gets the same bytes.
         try:
@@ -305,19 +366,33 @@ async def payments(path: str, request: Request, authorization: str | None = Head
             raise HTTPException(status_code=400, detail="amount must be a positive number")
 
         if auth.is_staff(user):
-            return await _proxy(PAYMENT_URL, "/payments", request, user)
+            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         # Borrower: only allowed to charge a loan their own applicant_id owns.
         loan_id = payload.get("loan_id")
         if loan_id is not None and auth.owns_loan(user, loan_id):
-            return await _proxy(PAYMENT_URL, "/payments", request, user)
+            return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         raise HTTPException(status_code=403, detail="forbidden")
 
     raise HTTPException(status_code=404, detail="not found")
 
 
+@app.post("/assistant/policy-chat")
+async def assistant_policy_chat(request: Request, authorization: str | None = Header(None)):
+    # Registered before the /assistant/{path:path} catch-all below so this literal
+    # path wins the match. Policy Q&A is generic lending-policy content -- no
+    # per-applicant financials or risk_tier -- so it doesn't need the staff-only
+    # gate that protects /assistant/applications/*/summary; a borrower can ask
+    # without an account, same anonymous-allowed pattern as /los/*.
+    # loan-assistant's own cost guard (MAX_INPUT_TOKENS) and this gateway's
+    # per-IP rate limiter both already apply regardless of caller identity.
+    user = auth.get_session(auth.bearer_token(authorization))
+    return await _proxy(LOAN_ASSISTANT_URL, "/policy-chat", request, user)
+
+
 @app.api_route("/assistant/{path:path}", methods=["GET", "POST"])
 async def assistant(path: str, request: Request, authorization: str | None = Header(None)):
-    # AI summary returns risk tier + internal flags — staff only, not the borrower.
+    # AI summary returns risk tier + internal flags — staff only, not the
+    # borrower. (Policy Q&A is split out above -- no per-applicant financials there.)
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="Forbidden")

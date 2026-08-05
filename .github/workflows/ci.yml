@@ -24,6 +24,27 @@ jobs:
     strategy:
       matrix:
         service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service, loan-assistant]
+    # Review fix: the real-Postgres tests (origination's decision-attempt
+    # lock-order and TXN-B rollback proofs, disclosure's offer-repair proofs)
+    # are all guarded by `skipif(not DATABASE_URL)`. No DATABASE_URL was set
+    # here, so every one of them SKIPPED in CI and had only ever run on a
+    # developer machine. They run here now.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meridian
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: meridian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meridian -d meridian"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://meridian:postgres@localhost:5432/meridian
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,6 +72,51 @@ jobs:
           cd services/${{ matrix.service }}
           python -m pytest -q --cov=app --cov-report=term-missing
 
+  # Review finding: every backend Dockerfile unconditionally COPYed
+  # combined-ca-bundle.pem, which .gitignore excludes and which isn't in the
+  # repo -- `docker build` failed on any clean checkout. This runner has no
+  # such file either, so it exercises the exact same clean-checkout path the
+  # Dockerfiles now fall back on (see each service's Dockerfile).
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose build
+        run: docker compose build
+
+  # Review fix: db/migrations/*.sql were never actually run anywhere in CI --
+  # 0010's backfill-before-dedup ordering bug (aborted on exactly the
+  # duplicate-legacy-offer data it was meant to repair) could only have been
+  # caught by actually applying it to a real Postgres. This job does that
+  # against a real database instead of mocking SQL.
+  db-migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meridian
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: meridian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meridian -d meridian"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://meridian:postgres@localhost:5432/meridian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r db/tests/requirements.txt
+      - name: Migration tests
+        run: python -m pytest db/tests -q
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -63,6 +129,73 @@ jobs:
           cd frontend
           npm ci || npm install
           npm run build
+
+  # Committed, repeatable replacement for the interactive borrower-workflow
+  # browser verification done during the offer-workflow/token-security audit
+  # (that verification was never checked in, so it wasn't independently
+  # repeatable -- see frontend/e2e/README.md). Blocking: no continue-on-error.
+  #
+  # Migration note: this job does NOT replay db/migrations on top of the
+  # fresh db/init schema docker-compose.yml auto-applies -- db/init is this
+  # repo's convention for what a fresh volume gets, and db/migrations exists
+  # to upgrade an EXISTING database. That replay IS now exercised, in the
+  # db-migrations job, by db/tests/test_migration_paths_converge.py: it runs
+  # all four construction paths (fresh init; legacy schema + migrations;
+  # fresh init + migrations; migrations twice) against real Postgres and
+  # asserts they converge.
+  #
+  # The collision this comment used to describe -- 0020's bare ADD CONSTRAINT
+  # of manual_reviews_app_id_key against the identically auto-named inline
+  # UNIQUE in db/init -- is fixed (Gap D). The same guard was applied to the
+  # three other migrations with the same defect: 0009, 0011 and 0015.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Start the full stack (fresh Postgres via db/init)
+        run: docker compose up -d --build
+      - name: Wait for gateway + frontend health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/health >/dev/null && curl -sf http://localhost:3000/apply >/dev/null; then
+              echo "stack ready"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "stack never became healthy" >&2
+          docker compose ps
+          docker compose logs --tail=200
+          exit 1
+      - name: Install frontend deps
+        run: |
+          cd frontend
+          npm ci || npm install
+      - name: Install Playwright browser
+        run: cd frontend && npx playwright install --with-deps chromium
+      - name: Run borrower-workflow E2E
+        env:
+          DATABASE_URL: postgresql://meridian:postgres@localhost:5432/meridian
+          E2E_BASE_URL: http://localhost:3000
+        run: cd frontend && npm run test:e2e
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          # Screenshots only (only-on-failure) -- traces are off in
+          # playwright.config.ts specifically so no artifact here can ever
+          # contain the X-Offer-Accept-Token header value; the raw token
+          # is never rendered as visible page text either. See
+          # frontend/e2e/README.md.
+          path: frontend/playwright-report/
+          retention-days: 7
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs --tail=500
 
   # Dependency vulnerability scan -- no SAST/dependency audit existed at all before this.
   # Non-blocking for now: this repo has never been scanned, so the first run's findings

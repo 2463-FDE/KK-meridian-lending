@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost, getUser } from "../../../lib/api";
@@ -72,17 +72,18 @@ function LoanDetailContent() {
 
   // action panels
   const [payAmount, setPayAmount] = useState("250.00");
-  // Review fix: same key reused across retries of the SAME attempted payment
-  // (e.g. resubmitting after a timeout) so payment-service's idempotency
-  // check can recognize it as a replay instead of a second charge. A new key
-  // is only minted when the user actually changes the amount -- see
-  // setPayAmount below.
-  const payIdempotencyKey = useRef(crypto.randomUUID());
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [newBalance, setNewBalance] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
+  // POST /payments now requires an idempotency_key (review fix -- a retry or
+  // a double-click used to double-charge). Minted once and reused across
+  // retries of the SAME submit attempt; a fresh one is minted only after the
+  // server confirms the balance was actually applied ("captured"), so a
+  // "pending" response (charged, balance apply not yet confirmed) keeps the
+  // same key on the next retry instead of starting a new, undetectable charge.
+  const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => crypto.randomUUID());
 
   // Only CSR/admin SEE the money-moving rep actions (adjust balance / waive
   // fee). This is now backed by a real server-side gate too (gateway/app/
@@ -154,16 +155,29 @@ function LoanDetailContent() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      await apiPost("/payments", {
+      const resp = (await apiPost("/payments", {
         loan_id: loanId,
         pan: "4111111111111111", // hardcoded test card PAN (texture)
         cvv: "123", // hardcoded test CVV (texture)
         amount: parseFloat(payAmount || "0"),
         method: "card",
-        idempotency_key: payIdempotencyKey.current,
-      });
-      setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
-      payIdempotencyKey.current = crypto.randomUUID();
+        idempotency_key: payIdempotencyKey,
+      })) as { status?: string };
+
+      // Review fix: payment-service deliberately returns HTTP 200 with
+      // status: "pending" when the charge captured but applying it to the
+      // balance failed/hasn't been confirmed yet -- that is NOT success. Only
+      // rotate the key once the server confirms "captured"; on "pending" keep
+      // the same key so a retry reconciles the SAME payment instead of the
+      // server having no way to tell it apart from a brand-new charge.
+      if (resp?.status === "captured") {
+        setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+        setPayIdempotencyKey(crypto.randomUUID());
+      } else {
+        setActionMsg(
+          `Payment of ${usd(payAmount)} is pending -- click "Pay with card on file" again to retry.`
+        );
+      }
       await refreshBalanceAndHistory();
     } catch (err) {
       setActionErr(errMsg(err, "Payment failed."));
@@ -361,7 +375,16 @@ function LoanDetailContent() {
                 <tr key={String(p.id)}>
                   <td>{shortDate(p.created_at)}</td>
                   <td style={{ textTransform: "capitalize" }}>{p.method}</td>
-                  <td>{p.masked_pan || "ACH"}</td>
+                  {/* Bug fix: this used to fall back to the literal string
+                      "ACH" whenever masked_pan was empty -- but that's also
+                      true for any CARD payment with no pan on record (every
+                      payment, once Week 5 tokenization ships and no raw PAN
+                      is ever stored again), mislabeling it as an ACH payment
+                      it never was. `method` (shown in the column to the
+                      left) is the actual source of truth for card vs. ACH --
+                      this column only ever shows real card-on-file data, or
+                      an honest "not on file" placeholder, never a guess. */}
+                  <td>{p.masked_pan || "—"}</td>
                   <td className="num">{usd(p.amount)}</td>
                 </tr>
               ))
@@ -387,7 +410,7 @@ function LoanDetailContent() {
               value={payAmount}
               onChange={(e) => {
                 setPayAmount(e.target.value);
-                payIdempotencyKey.current = crypto.randomUUID();
+                setPayIdempotencyKey(crypto.randomUUID());
               }}
             />
           </div>

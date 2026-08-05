@@ -1,9 +1,9 @@
 """Payment service — FastAPI.
 
 Standalone card/ACH charge capture extracted from servicing-service. Stores the full PAN
-and CVV on the payments row, logs the full charge request (PAN/CVV/SSN) at INFO, and has
-NO idempotency key — a retried POST double-charges. The captured amount is applied to the
-loan balance by calling servicing-service over HTTP. (D2, D5, D13 — kept on purpose)
+and CVV on the payments row (D5, D13 — still open, kept on purpose). A required
+idempotency_key + the amount range check below close the double-charge (D2) and
+negative/NaN-amount gaps -- see payments.py for the current charge() flow.
 """
 import logging
 import math

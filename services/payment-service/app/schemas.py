@@ -20,11 +20,11 @@ class PaymentIn(BaseModel):
     ssn: Optional[str] = None
     name: Optional[str] = None
     method: str = "card"
-    # Review fix: caller-supplied, optional so existing callers aren't broken.
-    # When present, a retry with the same key is a safe no-op (see
-    # payments.charge) instead of a second charge -- backed by the partial
-    # unique index in db/migrations/0007_payments_idempotency_key.sql.
-    idempotency_key: Optional[str] = Field(default=None, max_length=200)
+    # Review fix: required so a retry/double-click can be recognized as the
+    # SAME request instead of charging twice -- see payments.py::charge() and
+    # db/migrations/0007's partial unique index. Caller-generated (e.g. a
+    # UUID minted once per submit attempt, reused on retry).
+    idempotency_key: str = Field(min_length=1, max_length=255)
 
 
 class PaymentOut(BaseModel):

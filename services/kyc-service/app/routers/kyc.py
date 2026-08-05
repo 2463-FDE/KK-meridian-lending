@@ -18,7 +18,15 @@ router = APIRouter(prefix="/kyc", tags=["kyc"])
 @router.post("/check", response_model=CipCheckOut)
 def kyc_check(body: CipCheckIn):
     payload = body.model_dump()
-    log.info("POST /kyc/check req=%s", payload)  # full PII in the log (D5)
+    # Gap C (PR #6 review): this used to log the whole CIP payload -- name, DOB,
+    # SSN and address -- at INFO on every identity check. Identifiers only now.
+    # Not "redacted": the request body simply never reaches a log line, which is
+    # the stronger guarantee. The verification RESULT below is the audit record
+    # that legitimately needs keeping, and it holds booleans, not identity data.
+    log.info(
+        "POST /kyc/check application_id=%s applicant_id=%s",
+        body.application_id, body.applicant_id,
+    )
     cip = kyc.run_cip(payload)  # CIP only — no sanctions / UBO / monitoring (debt D11)
 
     # CIP "passes" if name + address verified. Entity applicants (no dob/ssn) still pass —

@@ -3,21 +3,6 @@
 Stores the FULL PAN and the CVV on the payments row (D5 — still open; that's the
 persisted-storage half, unrelated to logging and not fixed here).
 
-Review fix (D2): a retried POST used to unconditionally insert a second payments
-row and apply the amount twice (double-charge). `charge()` now takes an optional
-caller-supplied `idempotency_key`; when present, the INSERT is `ON CONFLICT
-(idempotency_key) DO NOTHING` against the partial unique index added in
-db/migrations/0007_payments_idempotency_key.sql. A conflict means this exact key
-was already charged -- the original row is looked up and its result replayed
-verbatim, and servicing-service is never called a second time. No key means no
-way to recognize a retry, so two identical calls with no key are still two
-separate (legitimate, caller's choice) charges -- see
-test_retried_post_payment_double_charges.
-
-The amount is applied to the balance by calling servicing-service over HTTP (the
-servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
-charge is still reported captured so this service stands alone.
-
 D12 note: unlike disclosure-service/servicing-service, this service does no
 repeated arithmetic on amount (no accumulation loop), so there's no float-drift
 scenario to fix here in that sense. What WAS missing: the incoming amount was
@@ -26,6 +11,31 @@ never validated or normalized at all -- a malformed float from a client (e.g.
 now quantizes to exactly 2 decimal places via Decimal before it touches the DB
 row or the servicing call, so every downstream consumer sees the same, correct
 cents value instead of whatever precision happened to arrive.
+
+Review fix: a timeout retry or a double-click on submit used to insert a
+second payments row and apply the balance twice via servicing-service -- there
+was no idempotency key at all. `idempotency_key` is now required at the API
+boundary (see routers/payments.py / schemas.PaymentIn) and enforced by a
+partial unique index (db/migrations/0007, redundantly also 0010 -- see that
+file). The insert's own ON CONFLICT ... DO NOTHING makes the check-and-write
+atomic (same pattern disclosure-service's create_offer uses): a duplicate
+request is detected even if it races the original, and returns the ORIGINAL
+payment result without charging or calling servicing-service again.
+
+Review fix (follow-up): the above closed the double-CHARGE gap, but a
+charge could still silently never reach the loan balance -- if
+_apply_via_servicing failed, the exception was swallowed and charge() still
+reported "captured". `applied_at` (db/migrations/0012) tracks that
+separately from "the card was charged": NULL is a pending/outbox record. A
+retry on the same idempotency_key now checks it and retries the apply instead
+of blindly repeating "captured". servicing-service's apply-payment is now
+idempotent by payment_id itself (db/migrations/0013,
+services/servicing-service/app/balance.py), so retrying it is always safe.
+
+Review fix: `amount` is range-constrained in schemas.PaymentIn (0, 1_000_000] --
+a negative value used to credit the borrower's balance instead of charging
+them (servicing computes new_balance = current - amount), and NaN/Infinity
+passed through uncaught too.
 """
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
@@ -40,13 +50,27 @@ log = get_logger("payment")   # writes to logs/payment-service.log
 _CENTS = Decimal("0.01")
 
 
+class IdempotencyKeyConflict(Exception):
+    """Raised when a repeated idempotency_key arrives attached to a DIFFERENT
+    loan_id or amount than the request that originally used that key.
+
+    Review fix: silently honoring the stored row would either misapply the
+    ORIGINAL amount to a caller who thinks they're charging a different
+    loan/amount, or -- before this check existed -- risk reconciling against
+    whichever loan_id happened to be passed on the retry. A key collision like
+    this means the caller reused a key for a genuinely different payment,
+    which is a client bug (or an attempted key-guessing attack), not a safe
+    retry -- surfaced as 409 rather than silently doing either thing.
+    """
+
+
 def _to_cents(amount) -> float:
     d = amount if isinstance(amount, Decimal) else Decimal(str(amount))
     return float(d.quantize(_CENTS, rounding=ROUND_HALF_UP))
 
 
-def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
-           name: str = None, method: str = "card", idempotency_key: str = None) -> dict:
+def charge(loan_id: int, pan: str, cvv: str, amount: float, idempotency_key: str,
+           ssn: str = None, name: str = None, method: str = "card") -> dict:
     amount = _to_cents(amount)
 
     # D5 fix: the log line used to write full PAN/CVV/SSN at INFO with zero
@@ -58,64 +82,113 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
     })
     log.info("POST /payments charge req=%s -> ok", safe_req)
 
-    if idempotency_key:
-        rows = db.query(
-            "INSERT INTO payments (loan_id, pan, cvv, amount, method, idempotency_key) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (idempotency_key) DO NOTHING RETURNING id",
-            (loan_id, pan, cvv, amount, method, idempotency_key),
-        )
-        if not rows:
-            existing = db.query(
-                "SELECT id, loan_id, amount FROM payments WHERE idempotency_key = %s",
-                (idempotency_key,),
-            )
-            if existing:
-                e = existing[0]
-                log.info(
-                    "duplicate POST /payments idempotency_key=%s -> replaying payment_id=%s",
-                    idempotency_key, e["id"],
-                )
-                return {
-                    "payment_id": e["id"],
-                    "loan_id": e["loan_id"],
-                    "status": "captured",
-                    "applied_amount": float(e["amount"]),
-                }
+    # Review fix: atomic check-and-write, same ON CONFLICT DO NOTHING + read-
+    # back pattern disclosure-service's create_offer uses. A duplicate request
+    # (retry, double-click) never inserts a second row or re-applies the
+    # balance, even if it races the original request.
+    inserted = db.query(
+        "INSERT INTO payments (loan_id, pan, cvv, amount, method, idempotency_key) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
+        "RETURNING id, loan_id, amount",
+        (loan_id, pan, cvv, amount, method, idempotency_key),   # full PAN + CVV persisted
+    )
+    if inserted:
+        row = inserted[0]
+        payment_id = row["id"]
+        # Apply the captured amount to the balance via servicing-service --
+        # only for the request that actually inserted the row.
+        applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
     else:
-        rows = db.query(
-            "INSERT INTO payments (loan_id, pan, cvv, amount, method) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (loan_id, pan, cvv, amount, method),   # full PAN + CVV persisted
-        )
-    payment_id = rows[0]["id"] if rows else None
+        row = db.query(
+            "SELECT id, loan_id, amount, applied_at FROM payments WHERE idempotency_key = %s",
+            (idempotency_key,),
+        )[0]
+        payment_id = row["id"]
+        # Review fix: row["amount"] comes back from Postgres as a Decimal
+        # (psycopg2 NUMERIC mapping) while `amount` here is a plain float --
+        # Decimal('10.99') != 10.99 under Python's float/Decimal comparison,
+        # so an identical retry was misjudged as a conflict and 409'd instead
+        # of returning the original result. Compare both sides as Decimal.
+        if row["loan_id"] != loan_id or row["amount"] != Decimal(str(amount)):
+            raise IdempotencyKeyConflict(
+                f"idempotency_key={idempotency_key!r} was already used for "
+                f"loan_id={row['loan_id']} amount={row['amount']} -- this "
+                f"request is loan_id={loan_id} amount={amount}"
+            )
+        if row["applied_at"] is None:
+            # Review fix: the original request's apply either never ran or
+            # never confirmed -- this retry is the reconciliation opportunity,
+            # not just a read-back. Safe to call again: servicing-service's
+            # apply-payment is idempotent by payment_id (db/migrations/0013).
+            log.info(
+                "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
+                "not yet applied, retrying apply",
+                idempotency_key, payment_id,
+            )
+            # Review fix: reconcile against the ORIGINALLY stored loan_id, not
+            # the retry request's own loan_id parameter -- a retry that (by
+            # bug or bad-faith) sends a different loan_id with the same
+            # idempotency_key must never misapply the payment to that loan.
+            applied = _apply_via_servicing(row["loan_id"], row["amount"], payment_id)
+        else:
+            applied = True
+            log.info(
+                "duplicate POST /payments for idempotency_key=%s -> returning original "
+                "payment_id=%s (already applied)",
+                idempotency_key, payment_id,
+            )
 
-    # Apply the captured amount to the balance via servicing-service.
-    _apply_via_servicing(loan_id, amount, payment_id)
     return {
         "payment_id": payment_id,
-        "loan_id": loan_id,
-        "status": "captured",
-        "applied_amount": amount,
+        "loan_id": row["loan_id"],
+        # Review fix: "captured" now means the balance is confirmed applied, not
+        # just that the card was charged and the row written. "pending" means
+        # the charge is captured but the balance apply hasn't been confirmed yet
+        # -- a retry with the same idempotency_key will keep trying to reconcile it.
+        "status": "captured" if applied else "pending",
+        "applied_amount": float(row["amount"]),
     }
 
 
-def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> None:
-    """Tell servicing-service to apply this payment to the loan balance."""
+def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
+    """Tell servicing-service to apply this payment to the loan balance.
+
+    Returns whether the apply was confirmed. Review fix: this used to swallow
+    the exception and let charge() report "captured" regardless -- the card
+    was charged but the balance never moved, with no record anything was left
+    undone. Now records applied_at (db/migrations/0012) only on confirmed
+    success, so a same-key retry can tell the difference and retry the apply
+    instead of repeating a false "captured".
+
+    E2E bug found in the field: `amount` here is read back from the
+    payments row's RETURNING/SELECT (the caller's row["amount"]), and
+    psycopg2 hands back a NUMERIC column as Decimal regardless of what type
+    was inserted -- httpx's json= can't serialize Decimal, so this raised on
+    every single real (non-mocked) call and every payment silently reported
+    "pending" forever. float() here makes the JSON boundary correct
+    regardless of what type the caller passes.
+    """
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
-            url, json={"amount": amount, "payment_id": payment_id}, timeout=5.0
+            url, json={"amount": float(amount), "payment_id": payment_id}, timeout=5.0
         )
         resp.raise_for_status()
+        db.query("UPDATE payments SET applied_at = now() WHERE id = %s", (payment_id,))
         log.info(
             "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
             loan_id, payment_id, amount,
         )
+        return True
     except Exception as exc:
         # Servicing unreachable / errored — the card was already charged and the row
-        # written, so we still report the charge captured. (apply reconciled later)
+        # written, so we still report the charge captured, but as "pending" (not yet
+        # applied) rather than falsely claiming the balance moved. Reconciled by the
+        # next same-key retry, or by an out-of-band job (not yet built) for a charge
+        # that's never retried.
         log.error(
             "apply-payment call to servicing failed loan_id=%s payment_id=%s: %s",
             loan_id, payment_id, exc,
         )
+        return False

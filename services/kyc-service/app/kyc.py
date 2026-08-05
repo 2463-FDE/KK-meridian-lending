@@ -28,5 +28,9 @@ def run_cip(applicant: dict) -> dict:
         "ssn_verified": bool(applicant.get("ssn")),
     }
     # NOTE: entity applicants (LLC) have no dob/ssn — they still "pass" CIP here.
-    log.info("CIP check applicant=%s result=%s", applicant.get("name"), result)
+    # Gap C (PR #6 review): this used to log the applicant's NAME. The four
+    # booleans are the CIP outcome and carry no identity data; the name does,
+    # and correlation is the caller's application_id/applicant_id (see
+    # routers/kyc.py), not a person's name.
+    log.info("CIP check result=%s", result)
     return result

@@ -184,6 +184,10 @@ def _has_risk_grounding_data(app_data: dict) -> bool:
     return all(app_data.get(field) is not None for field in _RISK_GROUNDING_FIELDS)
 
 
+def _missing_risk_grounding_fields(app_data: dict) -> list[str]:
+    return [field for field in _RISK_GROUNDING_FIELDS if app_data.get(field) is None]
+
+
 def _build_prompt(app_data: dict) -> str:
     allowed = {k: app_data.get(k) for k in _PROMPT_ALLOWED_FIELDS if app_data.get(k) is not None}
     safe = redact_dict(allowed)
@@ -260,10 +264,16 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     Raises: LLMCostGuardError, LLMTimeoutError, LLMResponseError, LLMInsufficientDataError
     """
     if not _has_risk_grounding_data(app_data):
+        # Bug fix: this used to always name BOTH _RISK_GROUNDING_FIELDS
+        # regardless of which one was actually missing -- a staff reviewer
+        # reading "is missing ('income', 'employment_years')" when income was
+        # right there in the application would reasonably believe income
+        # data was lost, not just employment_years. Name only what's
+        # actually absent.
         raise LLMInsufficientDataError(
             f"app_id={app_data.get('id', 'unknown')} is missing "
-            f"{_RISK_GROUNDING_FIELDS} — refusing to let the model assign a "
-            "risk_tier it has no data to support."
+            f"{_missing_risk_grounding_fields(app_data)} — refusing to let the "
+            "model assign a risk_tier it has no data to support."
         )
 
     prompt = _build_prompt(app_data)

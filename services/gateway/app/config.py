@@ -19,6 +19,12 @@ LOAN_ASSISTANT_URL = os.getenv("LOAN_ASSISTANT_URL", "http://loan-assistant:8007
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "28800"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# Per-client-IP fixed-window rate limit -- the gateway is the single front door
+# for every request into the platform, including anonymous /los/* traffic, and
+# had no rate limiting of any kind before this.
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "120"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+
 # Sent as X-Internal-Token on the staff-ops /decision/* proxy (see main.py) --
 # must match decision-service's own copy (docker-compose.yml wires both from
 # the same var).

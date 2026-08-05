@@ -11,6 +11,15 @@ ORIGINATION_FEE_PCT = Decimal("0.030")   # policy: 3.0%
 LATE_FEE_FLAT = Decimal("35.0")
 NSF_FEE = Decimal("25.0")
 
+# Frozen, NOT policy. Offers created before fee_pct_used existed carry no
+# snapshot; db/migrations/0011 back-fills those rows with exactly this value.
+# A read path reconstructing such a row must use this constant and never
+# ORIGINATION_FEE_PCT above -- reading the live rate is what makes a legacy
+# offer's recovered principal drift the next time the fee policy changes, which
+# is the whole reason fee_pct_used exists. Changing ORIGINATION_FEE_PCT must
+# not change this number.
+LEGACY_PRE_SNAPSHOT_FEE_PCT = Decimal("0.030")
+
 
 def origination_fee(amount) -> float:
     p = amount if isinstance(amount, Decimal) else Decimal(str(amount))

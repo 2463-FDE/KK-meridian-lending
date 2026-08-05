@@ -5,13 +5,14 @@ Both `decide()` tests use the deterministic stub bureau AND model paths: there i
 live Experian or licensed AI scorer in the test environment, so both calls fall back to
 their deterministic stubs.
 
-Persistence used to be best-effort and swallowed when no DB was present -- that was
-itself the review finding this PR fixes (a decision could be returned with no
-matching audit row). `decide()` now requires its `decisions` + `decision_events`
-transaction to succeed. The `_stub_persistence` fixture below stubs `db.transaction`
-to succeed by default so the scoring-chain tests below don't need a live Postgres;
-`test_decide_raises_when_audit_persistence_fails` overrides that stub to prove
-`decide()` actually fails closed when persistence breaks.
+PR #6 review (Finding 2): decide() used to require its `decisions` +
+`decision_events` transaction to succeed, persisting decision_events itself
+before ever returning. decision-service is now fully compute-only -- it
+persists nothing at all; origination-service is the sole writer of both
+tables, atomically, only after its own attempt/finality recheck confirms
+the request wins (see routers/applications.py::run_decision on the
+origination-service side). `test_decide_never_touches_the_database` below
+proves decide() makes zero db.transaction calls.
 
 Async rework: decide()/_pull_credit()/_call_ai_scorer()/_run_model() are all async
 now (see decision.py's module docstring) -- every test below that calls one of them
@@ -23,13 +24,19 @@ import importlib
 
 import pytest
 
-from app import config, decision
+from app import bureau, config, decision
 from app.decision import CreditBureauUnavailableError, decide
 
 
 @pytest.fixture(autouse=True)
-def _stub_persistence(monkeypatch):
-    monkeypatch.setattr(decision.db, "transaction", lambda statements: [[], []])
+def _reset_bureau_stub():
+    """The stub bureau deduplicates by request_key and is module-level (it has
+    to be, for the idempotency contract to hold across requests in a process).
+    Reset it between tests so one test's cached result can never be handed to
+    another."""
+    bureau.stub_client.reset()
+    yield
+    bureau.stub_client.reset()
 
 
 class _FakeResponse:
@@ -71,14 +78,14 @@ def _fake_async_client(response):
 
 async def test_clear_approve():
     # SSN ends in an even digit -> stub bureau score 680; high income clears the scorecard.
-    result = await decide({"app_id": 1, "ssn": "123456782", "income": 100000})
+    result = await decide({"app_id": 1, "ssn": "123456782", "income": 100000, "bureau_request_key": "test-key-decide-1"})
     assert result["decision"] == "approve"
     assert result["score"] >= 660
 
 
 async def test_clear_deny():
     # SSN ends in an odd digit -> stub bureau score 612; zero income sinks the scorecard.
-    result = await decide({"app_id": 2, "ssn": "123456781", "income": 0})
+    result = await decide({"app_id": 2, "ssn": "123456781", "income": 0, "bureau_request_key": "test-key-decide-2"})
     assert result["decision"] == "deny"
     assert result["score"] < 600
 
@@ -90,15 +97,16 @@ async def test_missing_bureau_key_stubs_in_dev(monkeypatch):
     monkeypatch.setattr(decision, "EXPERIAN_KEY", "")
     monkeypatch.setattr(decision, "ALLOW_CREDIT_STUB", True)
     # must not raise — dev/test is allowed to fall back to the deterministic stub
-    score = await decision._pull_credit("123456782")
-    assert score == 680
+    result = await decision._pull_credit("123456782", "test-key-stub-in-dev")
+    assert result.score == 680
+    assert result.reference_id
 
 
 async def test_missing_bureau_key_fails_closed_outside_dev(monkeypatch):
     monkeypatch.setattr(decision, "EXPERIAN_KEY", "")
     monkeypatch.setattr(decision, "ALLOW_CREDIT_STUB", False)
     with pytest.raises(CreditBureauUnavailableError):
-        await decision._pull_credit("123456782")
+        await decision._pull_credit("123456782", "test-key-fails-closed")
 
 
 async def test_unset_environment_and_key_defaults_closed_not_open(monkeypatch):
@@ -114,7 +122,7 @@ async def test_unset_environment_and_key_defaults_closed_not_open(monkeypatch):
     try:
         assert config.ALLOW_CREDIT_STUB is False
         with pytest.raises(decision.CreditBureauUnavailableError):
-            await decision._pull_credit("123456782")
+            await decision._pull_credit("123456782", "test-key-unset-env")
     finally:
         # Explicitly restore the test-suite baseline (conftest.py) before reloading --
         # monkeypatch's own teardown only restores env vars *after* this test function
@@ -298,14 +306,14 @@ def test_reason_codes_empty_when_both_healthy():
 
 
 async def test_decide_returns_empty_reason_codes_on_approve():
-    result = await decide({"app_id": 3, "ssn": "123456782", "income": 100000})
+    result = await decide({"app_id": 3, "ssn": "123456782", "income": 100000, "bureau_request_key": "test-key-decide-3"})
     assert result["decision"] == "approve"
     assert result["reason_codes"] == []
     assert result["adverse_action_reason"] is None
 
 
 async def test_decide_returns_specific_reason_code_on_deny():
-    result = await decide({"app_id": 4, "ssn": "123456781", "income": 0})
+    result = await decide({"app_id": 4, "ssn": "123456781", "income": 0, "bureau_request_key": "test-key-decide-4"})
     assert result["decision"] == "deny"
     assert result["reason_codes"]
     assert result["adverse_action_reason"] == result["reason_codes"][0]
@@ -313,31 +321,23 @@ async def test_decide_returns_specific_reason_code_on_deny():
     assert result["adverse_action_reason"] != "purchasing history"
 
 
-# --- Review finding: decisions + decision_events must commit or fail together --
-# a decision was previously returned to the caller even when its audit row failed
-# to write, since each insert was wrapped in its own try/except that only logged.
+# --- PR #6 review (Finding 2): decision-service is now fully compute-only --
+# it must never touch the database at all. origination-service is the sole
+# writer of both `decisions` and `decision_events`, atomically, only after its
+# own attempt/finality recheck confirms the request wins (see
+# routers/applications.py::run_decision).
 
-async def test_decide_raises_when_audit_persistence_fails(monkeypatch):
-    def _boom(statements):
-        raise RuntimeError("simulated DB failure")
-
-    monkeypatch.setattr(decision.db, "transaction", _boom)
-    with pytest.raises(decision.DecisionPersistenceError):
-        await decide({"app_id": 5, "ssn": "123456782", "income": 100000})
-
-
-async def test_decide_persists_decision_and_event_in_one_transaction_call(monkeypatch):
-    """Both rows must go through the SAME db.transaction() call (one atomic
-    commit/rollback), not two separate db.query() calls that could partially
-    succeed."""
+async def test_decide_never_touches_the_database(monkeypatch):
     calls = []
     monkeypatch.setattr(
         decision.db, "transaction",
-        lambda statements: calls.append(statements) or [[], []],
+        lambda statements: calls.append(statements) or [[]],
     )
-    await decide({"app_id": 6, "ssn": "123456782", "income": 100000})
-    assert len(calls) == 1
-    statements = calls[0]
-    assert len(statements) == 2
-    assert "INSERT INTO decisions" in statements[0][0]
-    assert "INSERT INTO decision_events" in statements[1][0]
+    result = await decide({"app_id": 6, "ssn": "123456782", "income": 100000, "bureau_request_key": "test-key-decide-5"})
+
+    assert calls == [], "decide() must persist nothing -- origination-service writes decisions/decision_events now"
+    # Everything origination needs to write decision_events itself must still
+    # come back in the result.
+    assert result["bureau_score"] is not None
+    assert result["model_version"]
+    assert "top_features" in result

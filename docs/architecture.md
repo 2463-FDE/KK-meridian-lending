@@ -59,8 +59,9 @@ the one shared Postgres.
   balances, payments, audit_logs. **Shared by all seven services** — the decomposition did
   not split the schema; the extracted services reach into the same tables (kyc → kyc_checks,
   decision → decisions, disclosure → offers, payment → payments).
-- **Redis** — login sessions (gateway). Also intended for idempotency keys / jobs —
-  never wired up (so `payment-service` still has no idempotency).
+- **Redis** — login sessions (gateway). Also intended for background jobs — never wired
+  up. Payment idempotency did not wait for it: it is enforced in Postgres instead, by a
+  required `payments.idempotency_key` behind a partial unique index.
 
 ## Auth
 

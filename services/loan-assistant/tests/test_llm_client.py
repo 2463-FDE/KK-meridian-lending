@@ -81,6 +81,23 @@ def test_summarize_application_refuses_without_employment_years(monkeypatch):
         summarize_application(incomplete)
 
 
+def test_insufficient_data_error_names_only_the_actually_missing_field(monkeypatch):
+    """Bug fix: this used to always name BOTH risk-grounding fields in the
+    error regardless of which one was actually missing -- income=85000 right
+    there in APP_DATA, but the message still claimed 'income' was missing
+    too. A staff reviewer reading that would reasonably believe income data
+    was lost, not just employment_years."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    incomplete = {**APP_DATA, "employment_years": None}
+
+    with pytest.raises(LLMInsufficientDataError) as exc_info:
+        summarize_application(incomplete)
+
+    message = str(exc_info.value)
+    assert "employment_years" in message
+    assert "income" not in message
+
+
 def test_summarize_application_fills_applicant_name_from_trusted_data(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
 
