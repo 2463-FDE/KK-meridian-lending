@@ -2,12 +2,27 @@
 
 The borrower -> application -> decision -> offer -> disclosure chain the KG
 schema doc describes is already FK-linked relational data in the one shared
-Postgres instance every service reads/writes (ADR 0002) -- there is no separate
-graph database backing this, on purpose (see docs/ROADMAP.md's Week 4 entry): the
-data already IS a graph shape, so standing up a second store would just be a
-second source of truth for the same five tables. This module is the traversal
-layer -- it reads the same rows the rest of origination-service already reads,
-framed as graph nodes/edges instead of ad hoc joins scattered across routers.
+Postgres instance every service reads/writes (ADR 0002). There is no separate
+graph database backing it, on purpose -- but NOT for the reason this docstring
+used to give ("the data already IS a graph shape"). That argument is
+unfalsifiable: every schema with foreign keys is a graph shape, so it refuses a
+graph store in every case, including the cases where one is correct.
+
+The real reason is measured, in adr/0009: both traversals below are fixed-depth
+tree walks from a single root along declared foreign keys, which is what
+relational joins are good at. The traversal that would justify a graph store --
+"find every applicant reachable from this one through any shared identity
+attribute, to unbounded depth" (fraud rings, beneficial ownership) -- cannot be
+written here at all, because there is no depth to hard-code. PostgreSQL can
+express it with a recursive CTE; that CTE answers in under two seconds to depth
+3 on 10k applicants, takes 44 seconds at depth 4, and does not return at depth
+5. Nothing in production needs depth > 3 today, so this stays relational. ADR
+0009 records the trigger to revisit (Week 9's beneficial-ownership work is the
+likely one).
+
+This module is the traversal layer -- it reads the same rows the rest of
+origination-service already reads, framed as graph nodes/edges instead of ad hoc
+joins scattered across routers.
 
 Edges walked here:
   applicant --(applicant_id)--> application

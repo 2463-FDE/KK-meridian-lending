@@ -48,7 +48,7 @@ not lost between weeks:
 
 | Question | Status |
 |---|---|
-| What a graph database would buy the disclosure chain that foreign keys do not | ⬜ **Open.** The refusal is recorded (`ARCHITECTURE.md`, `kg.py`) but the justification given — "the data already is a graph shape" — is not an answer. Owed: the specific traversal `kg.py`'s two queries cannot express, and the point at which the answer flips |
+| What a graph database would buy the disclosure chain that foreign keys do not | ✅ **Answered** — [`adr/0009`](../adr/0009-graph-store-for-identity-traversal.md). The traversal `kg.py` cannot express: *every applicant reachable from one applicant through any shared identity attribute, to unbounded depth* (fraud rings, beneficial ownership) — it breaks all three assumptions the two existing queries rely on (known depth, FK edges, no cycles). PostgreSQL **can** express it with a recursive CTE; measured on 10k applicants it answers in <2s to depth 3, takes **43.8s at depth 4**, and does not return at depth 5. The refusal stands because nothing in production needs depth > 3 — with a written trigger to revisit, most likely Week 9's beneficial-ownership work. The old justification ("the data already is a graph shape") is replaced in `kg.py` as unfalsifiable |
 | An independent source for the TILA expected values | ⬜ **Open.** `test_apr.py` has one vector, and its `_decimal_apr()` reference re-implements the same closed-form as `apr.py` — it can catch a precision regression but not a wrong formula. Owed: expected values from a source that is not this code, and more than one vector |
 | The roadmap and debt register the ADRs keep citing | ✅ **Landed.** This file, plus [`DEBT.md`](DEBT.md) — the `D`/`RF` register, which had never existed in any form. All 16 citations in the tracked tree now resolve |
 
@@ -728,6 +728,9 @@ Not on any brief; came out of the review cycles on the Week 4 branch.
   origination monolith) predate the week structure and are referenced from
   `ARCHITECTURE.md` rather than from any week here.
 - `adr/0007` — see the DTI/fraud finding under Week 2.
+- `adr/0009` — the graph-store answer owed from the Week 1–4 review. Written
+  against a measurement rather than an opinion: the recursive CTE that expresses
+  the traversal `kg.py` cannot, and the depth at which it stops being usable.
 
 ## Keeping this file honest
 
