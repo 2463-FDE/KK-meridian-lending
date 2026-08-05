@@ -192,15 +192,12 @@ def test_legacy_board_endpoint_cannot_be_reached_with_a_forged_staff_role():
         assert "loan_id" not in resp.text
 
 
-def test_removed_board_route_writes_no_loan_or_balance():
-    """The rejected call must not reach the boarding sink at all -- asserted
-    against the real function, not a status code."""
-    with patch.object(intake, "board_to_servicing") as sink:
-        client.post("/board", json={
-            "app_id": 10, "applicant_name": "Attacker", "principal": 50000,
-        })
-
-    assert not sink.called, "no loans/balances write may be attempted"
+# "the removed route writes no loan or balance" is proven against REAL table
+# counts in tests/test_decision_attempt_real_postgres.py::
+# test_removed_board_route_creates_no_loan_or_balance_rows. A spy on
+# intake.board_to_servicing was deliberately NOT used here: it would only
+# catch a verbatim restoration of the old route, and would pass for a /board
+# re-added against board_to_servicing_tx or raw SQL.
 
 
 def test_accept_offer_remains_the_supported_boarding_path():

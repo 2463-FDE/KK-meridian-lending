@@ -95,6 +95,25 @@ def _full_schema_sql():
             reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
             attempt_id INTEGER
         );
+        -- Boarding sink (db/init/001_schema.sql:117-138). Present so the A3
+        -- route-removal test can assert on REAL row counts rather than on a
+        -- spy for one particular implementation of boarding.
+        CREATE TABLE loans (
+            id SERIAL PRIMARY KEY,
+            app_id INTEGER UNIQUE,
+            applicant_name TEXT,
+            principal NUMERIC(14,2) NOT NULL,
+            apr NUMERIC(7,3) NOT NULL,
+            term_months INTEGER NOT NULL,
+            status TEXT DEFAULT 'current',
+            opened_at TIMESTAMPTZ DEFAULT now()
+        );
+        CREATE TABLE balances (
+            loan_id INTEGER PRIMARY KEY REFERENCES loans(id),
+            balance NUMERIC(14,2) NOT NULL,
+            past_due NUMERIC(14,2) DEFAULT 0,
+            updated_at TIMESTAMPTZ DEFAULT now()
+        );
     """
 
 
@@ -538,3 +557,98 @@ def test_txn_b_and_concurrent_txn_a_do_not_deadlock(real_db, monkeypatch):
         assert cur.fetchone()["n"] == 1
         cur.execute("SELECT count(*) AS n FROM decision_events WHERE app_id = %s", (app_id,))
         assert cur.fetchone()["n"] == 1
+
+
+# --- Test 4: TXN-B failure logging is type-only (no DB text, no values) ------
+
+_CANARY = "CANARY-7f3a9d21-SHOULD-NOT-BE-LOGGED"
+
+
+def test_txn_b_persistence_failure_logs_only_the_error_type(real_db, monkeypatch, caplog):
+    """A database error's message carries the failing SQL, the constraint name
+    AND the offending parameter values, so logging the exception object puts
+    decision inputs into the service log.
+
+    Injection: decision-service returns `bureau_score` = a recognizable canary
+    string. decision_events.bureau_score is INTEGER, so Postgres raises
+    `invalid input syntax for type integer: "CANARY-..."` -- a real DB error
+    whose text embeds a value this service did not author. That is exactly the
+    leak class under test, and it reaches TXN B's own except clause."""
+    import logging
+
+    app_id = 504
+    _seed_application(real_db, app_id)
+    monkeypatch.setattr(disclosure_graph, "auto_generate_offer", lambda app_id: None)
+
+    def _fake_post(base_url, path, payload, headers=None):
+        return {
+            "outcome": "approve", "score": 700, "reason": None,
+            "attempt_id": payload["attempt_id"],
+            "bureau_score": _CANARY,          # <-- the injected canary
+            "model_version": "v1-stub", "top_features": None, "reason_codes": [],
+        }
+
+    monkeypatch.setattr(clients, "post", _fake_post)
+
+    caplog.set_level(logging.ERROR)
+    resp = client.post(f"/applications/{app_id}/decision", json={"access_token": "real-access-token"})
+
+    # Caller sees only the generic message -- never the DB text.
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "could not persist the decision -- please retry"
+    assert _CANARY not in resp.text
+
+    logged = caplog.text
+    # 1. The canary never reaches the log.
+    assert _CANARY not in logged, "raw parameter value leaked into the log"
+    # 2. Nor does any SQL / constraint / column detail from the DB message.
+    for fragment in ("invalid input syntax", "INSERT INTO", "bureau_score", "LINE ", "DETAIL:"):
+        assert fragment not in logged, f"database detail {fragment!r} leaked into the log"
+    # 3. The error TYPE is still recorded, so the failure stays diagnosable.
+    assert "error_type=" in logged
+    assert "TXN B failed to persist" in logged
+    assert f"app_id={app_id}" in logged
+
+    # 4. Rollback and cleanup are unaffected by the logging change.
+    with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) AS n FROM decisions WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT count(*) AS n FROM decision_events WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT state, failure_code FROM decision_attempts WHERE app_id = %s", (app_id,))
+        row = cur.fetchone()
+        assert row["state"] == "failed"
+        assert row["failure_code"] == "persistence_error"
+        cur.execute("SELECT status, accept_token_hash FROM applications WHERE id = %s", (app_id,))
+        app_row = cur.fetchone()
+        assert app_row["status"] == "submitted"
+        assert app_row["accept_token_hash"] is None
+
+
+# --- Test 5 (A3): the removed /board route writes no loan or balance --------
+
+def test_removed_board_route_creates_no_loan_or_balance_rows(real_db):
+    """A3 proven against real table state rather than a spy on one particular
+    boarding helper. The previous version patched intake.board_to_servicing,
+    which would catch only a verbatim restoration of the old route -- a /board
+    re-added calling board_to_servicing_tx, or raw SQL, would have passed it.
+    Counting rows fails for ANY implementation that boards."""
+    def _counts():
+        with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SET search_path TO {SCHEMA}")
+            cur.execute("SELECT count(*) AS n FROM loans")
+            loans = cur.fetchone()["n"]
+            cur.execute("SELECT count(*) AS n FROM balances")
+            return loans, cur.fetchone()["n"]
+
+    before = _counts()
+
+    resp = client.post("/board", json={
+        "app_id": 9001, "applicant_name": "Attacker", "principal": 50000,
+        "annual_rate_pct": 0.01, "term_months": 48,
+    })
+
+    assert resp.status_code in (404, 405), "POST /board must not be routable"
+    assert "loan_id" not in resp.text
+    assert _counts() == before, "a loan or balance row was written by the removed route"

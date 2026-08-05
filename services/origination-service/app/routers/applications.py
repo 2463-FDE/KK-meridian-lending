@@ -496,8 +496,23 @@ def run_decision(
         # expires -- a retry can proceed immediately instead of waiting.
         # Lease expiry remains the fallback for the case this code can't
         # even reach (the process itself dying mid-transaction).
-        log.error("TXN B failed to persist app_id=%s attempt_id=%s: %s", app_id, attempt_id, e)
-        decision_state.mark_attempt_failed(attempt_id, "persistence_error")
+        # Type only: a database error's message carries the failing SQL, the
+        # constraint name and the offending parameter VALUES, so logging the
+        # exception itself would put decision inputs into the service log.
+        log.error(
+            "TXN B failed to persist app_id=%s attempt_id=%s error_type=%s",
+            app_id, attempt_id, type(e).__name__,
+        )
+        try:
+            decision_state.mark_attempt_failed(attempt_id, "persistence_error")
+        except Exception as cleanup_exc:  # noqa
+            # Cleanup is best-effort -- the lease is the fallback. Never let a
+            # cleanup failure replace the generic 500 below, and log it
+            # type-only for the same reason as above.
+            log.error(
+                "attempt cleanup failed app_id=%s attempt_id=%s error_type=%s",
+                app_id, attempt_id, type(cleanup_exc).__name__,
+            )
         raise HTTPException(status_code=500, detail="could not persist the decision -- please retry") from e
 
     if discard_error:
