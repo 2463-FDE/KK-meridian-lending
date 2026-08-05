@@ -1,12 +1,68 @@
 # Meridian Lending — Roadmap
 
-Week-by-week: what the client asked for, what was actually found, what got
-fixed, why it mattered. Short, scannable, one row per finding. Built up week by
-week as each brief comes in.
+What the client asked for, what was actually found, what got fixed, why it
+mattered. One row per finding.
 
 **Domains:** Finance · Origination · KYC · Decisioning · Disclosures · Payments · Servicing
 
-**Status key:** ✅ Fixed · 🟡 Partially fixed · ⬜ Open / not yet built
+## Definition of done
+
+From the Week 1–4 client review: **on `main`, reachable, reviewed.** Anything
+short of that is inventory, not delivery. So the status key distinguishes them:
+
+| | Means |
+|---|---|
+| ✅ **Landed** | Merged to `main`, reachable in the running app, with a test that fails without it |
+| 🔵 **Built, not landed** | Real working code with tests, on an open PR. Not delivered yet — this is inventory |
+| 🟡 **Partial** | Some conditions met, named individually so the gap is visible |
+| ⬜ **Open** | Not built. Either not started, or deliberately deferred with a reason |
+
+Every `D<n>` / `RF-<n>` citation in the tables below is defined in
+[`DEBT.md`](DEBT.md) — the debt register.
+
+Week numbers below are the curriculum's, not feature boundaries — the review
+called that out, so each heading now carries the **feature** it delivered.
+Several weeks' work also shipped out of order (Week 7 and Week 8 pieces landed
+during Week 4); those are marked where they occur.
+
+## Status at a glance
+
+| Week | Feature | Status |
+|---|---|---|
+| 1 | Safe LLM engine (client, redactor, secrets cleanup) | ✅ Landed |
+| 2 | RAG retrieval + corpus hygiene | ✅ Landed |
+| 3 | AI scorer wrapper + append-only decision memory | ✅ Landed |
+| 4 | Auto-disclosure on approval + KG traversal | ✅ Landed |
+| 5 | Card tokenization + payment reconciliation | 🔵 Built, not landed (PR #8) |
+| 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC landed; ledger + maker-checker open |
+| 7 | Trace ID + scoped reconciliation control | ⬜ Open (Prometheus/Grafana landed early) |
+| 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
+| 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
+| 10 | Retention-aware redaction + handoff package | ⬜ Open |
+
+## Owed to the client
+
+Three answers outstanding from the Week 1–4 review, tracked here so they are
+not lost between weeks:
+
+| Question | Status |
+|---|---|
+| What a graph database would buy the disclosure chain that foreign keys do not | ⬜ **Open.** The refusal is recorded (`ARCHITECTURE.md`, `kg.py`) but the justification given — "the data already is a graph shape" — is not an answer. Owed: the specific traversal `kg.py`'s two queries cannot express, and the point at which the answer flips |
+| An independent source for the TILA expected values | ⬜ **Open.** `test_apr.py` has one vector, and its `_decimal_apr()` reference re-implements the same closed-form as `apr.py` — it can catch a precision regression but not a wrong formula. Owed: expected values from a source that is not this code, and more than one vector |
+| The roadmap and debt register the ADRs keep citing | ✅ **Landed.** This file, plus [`DEBT.md`](DEBT.md) — the `D`/`RF` register, which had never existed in any form. All 16 citations in the tracked tree now resolve |
+
+## Verification baseline
+
+Counts below are as of **2026-08-05** on `main` plus the repo-hygiene commit.
+Reproduce with `python -m pytest -q` per service, `python -m pytest db/tests -q`,
+and `npm run test:e2e` in `frontend/`.
+
+- **441** backend tests across all eight services
+- **76** db migration tests against real PostgreSQL
+- **5** Playwright end-to-end specs driving the browser
+
+Per-week test counts appear below as they were at the time that week shipped;
+they are historical, not current, and are labelled as such.
 
 ---
 
@@ -19,7 +75,7 @@ week as each brief comes in.
 |---|---|
 | **gateway** | Session auth (login → Redis token), role-based proxy to everything else. Strips inbound `X-User-*` headers, sets its own trusted ones from the verified session. |
 | **origination-service (LOS)** | Application intake, KYC trigger, decision trigger, staff manual-review resolution, offer accept/fund. System of record for applications/applicants/offers/loans-at-birth. |
-| **decision-service** | Credit pull (stubbed) + AI scoring model (LangGraph, 3 nodes). Persists approve/refer/deny. |
+| **decision-service** | Credit pull (via the `BureauClient` seam) + AI scoring model (LangGraph, 3 nodes). **Compute-only — persists nothing** since PR #6; it returns a proposed outcome and origination writes `decisions` + `decision_events` together. |
 | **disclosure-service** | Auto-generates the loan offer/disclosure (APR, fee schedule) the instant an application is approved (automated or manually-reviewed). |
 | **kyc-service** | Identity verification stub. |
 | **servicing-service (LSS)** | Post-funding: balance, payments, adjustments, fee waivers, reconciliation. |
@@ -50,7 +106,7 @@ Stack must be up (`docker compose up -d`). All 3 confirmed live-working this ses
 
 | Agent | Week built | Where | Steps | Expect |
 |---|---|---|---|---|
-| **Decision Graph** (LangGraph, 3 nodes: pull credit → score → persist) | Week 3 | `/apply` (public, no login) or staff `/underwriting/[appId]` → "Run decision" | Submit an application, income + amount matter (score ≈ `bureau_score*0.9 + income/1000`) | Weak profile → `refer`/`deny` with a real reason code. Strong profile (income ≥100k, modest amount) → `approve` |
+| **Decision Graph** (LangGraph, 3 nodes: pull credit → score → finalize; `finalize` returns the proposed outcome, it does not persist) | Week 3 | `/apply` (public, no login) or staff `/underwriting/[appId]` → "Run decision" | Submit an application, income + amount matter (score ≈ `bureau_score*0.9 + income/1000`) | Weak profile → `refer`/`deny` with a real reason code. Strong profile (income ≥100k, modest amount) → `approve` |
 | **Disclosure Graph** (2-agent hand-off: read record → build offer) | Week 4 | Same app, `/underwriting/[appId]` "Offer" card | Nothing to click — fires automatically the instant Decision Graph returns `approve` | Real APR/finance-charge/monthly-payment numbers appear with no manual step, `decision_id` links back to the exact decision |
 | **Assistant Agent** (retrieval + Bedrock LLM) | Week 2 (retrieval) / Week 3 (agent wrap) | Log in `csr`/`underwriter`/`admin` → `/policy-chat` | Ask a policy question | See catch-fast questions below |
 
@@ -77,9 +133,9 @@ PAN/CVV/SSN. Float-based money math. A README claiming PCI-DSS compliance.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | ✅ Fixed — `charge()` now redacts via a ported copy of `loan-assistant/redactor.py` before logging (`test_post_payment_log_line_redacts_pan_cvv_ssn`). **Storage in the `payments` table is a separate, still-open half of D5** — the DB row still keeps the full PAN/CVV | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
+| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | 🟡 **Partial — three halves, one closed.** ✅ `payment-service.charge()` redacts via a ported copy of `loan-assistant/redactor.py` before logging. ⬜ `servicing-service/app/payments.py` still formats PAN/CVV/SSN into a log line on the legacy `POST /payments`, and origination's request middleware still logs full POST bodies unredacted (D5a). ⬜ Storage: the DB row still keeps the full PAN/CVV on `main` (D5b/D13). **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
 | 2 | Origination / Decisioning | Bureau + core-banking + processor keys hardcoded in `config.py`, also committed in root `.env` | ✅ Effectively closed — `.env` untracked, hardcoded fallbacks removed from all 7 services. **Confirmed with the project owner: these were training placeholders (`EXAMPLE-LEAKED-KEY-rotate-me`), never real provider accounts** — so there's no live credential to rotate, and the old values still in git history aren't a real security exposure, just cosmetic (a reviewer seeing placeholder-labeled strings in `git log`). A history rewrite remains available on request but isn't fixing an actual vulnerability here | For a *real* deployment this would be a genuine breach risk (a leaked bureau key pulling real credit data under Meridian's name) — confirmed not the case for this training instance specifically |
-| 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
+| 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
 | 4 | Payments | README claims "PCI-DSS compliant," schema has plaintext `pan`/`cvv` columns | ✅ Fixed:<br>• Removed the false "PCI-DSS compliant" claim<br>• README now states plainly it's **not** compliant and names the specific gaps (raw PAN/CVV storage, plaintext logging half still open) | a false claim is worse than an honest gap |
 
 **Built this week (the actual deliverable):**
@@ -165,7 +221,7 @@ quality.
 - Round 1 — non-transactional audit write (decision could commit without its audit row), reason-code authority unclear, a missing migration file.
 - Round 2 — a shared-DB-connection concurrency bug that could let one request's rollback erase another request's already-committed decision; an `LLM_PROVIDER` config typo silently picking the wrong vendor; policy chat trusting an unvalidated model response.
 - Round 3 (self-initiated adversarial pass) — a real scorer response with an *empty* reason list was silently falling back to a locally-guessed reason (fabricating exactly the kind of ungrounded reason this week exists to eliminate) — fixed to fail closed instead; the audit record's `top_features` field was also being fabricated from a local formula for real vendor responses that never actually reported feature attributions — now recorded as `null` for a real response rather than a guessed number.
-- Current total: 102 tests passing (31 decision-service + 71 loan-assistant). PR #5 — **merged to `main`** (2026-07-30), after a final review pass found and fixed three more money/credit-path bugs on the same branch: anonymous-caller credit pull on the FIRST decision call (not just reruns), negative/NaN/Infinity payment amounts, and un-deduped payment retries.
+- Total at the time: 102 tests passing (31 decision-service + 71 loan-assistant). PR #5 — **merged to `main`** (2026-07-30), after a final review pass found and fixed three more money/credit-path bugs on the same branch: anonymous-caller credit pull on the FIRST decision call (not just reruns), negative/NaN/Infinity payment amounts, and un-deduped payment retries.
 
 ---
 
@@ -186,7 +242,7 @@ origination-fee % copy-pasted into three files, drifted: `apr.py` 0.025,
 |---|---|---|---|---|
 | 1 | Disclosures | The fee constant is copy-pasted into 3 files and has drifted — `apr.py` (0.025) doesn't match `fees.py`/`offer.py` (0.030) or the published `policies/fee_schedule.md` | ✅ Fixed — `apr.py` and `offer.py` now import `ORIGINATION_FEE_PCT` from `fees.py` (one source of truth) instead of redeclaring it; `compute_apr(18000, 7.99, 48)` now correctly returns 5.196% (was 5.041% with the wrong 0.025 fee), confirmed against `test_apr.py`'s own Decimal reference | `apr.py`'s wrong value is the one that computes the number that ships on the real TILA disclosure — a real Reg Z tolerance breach, not a rounding nit |
 | 2 | Disclosures | No link from a disclosure back to the exact decision + fee-constant version that produced it (`offers` has no `decision_id`, no snapshot of which rule version ran) | ✅ Fixed:<br>• `offers.decision_id` — real FK to `decisions(app_id)` (`db/migrations/0008_offer_decision_link.sql` — renumbered after merging with Week 3's own `0006`/`0007`), not a loose reference; an offer can't be linked to a decision that doesn't exist<br>• `offers.fee_pct_used` — snapshots `ORIGINATION_FEE_PCT` at offer-creation time, so a later change to the constant can never retroactively change what an existing offer is proven to have used<br>• Both origination-service's manual `POST /los/offer` and the new auto-generated path (see #3) populate them | If `ORIGINATION_FEE_PCT` changes next quarter, there's now a real record of what fee was actually used for a loan originated today |
-| 3 | Disclosures | Auto-generating the offer + disclosure on approval is still fully manual | ✅ Fixed:<br>• `run_decision()` now calls disclosure-service's `/offers` automatically the moment `decision-service` returns `approve`, using the application's own requested amount/term<br>• Best-effort — a disclosure-service hiccup logs a warning and doesn't fail the decision that already happened; the loan officer can still build it manually via `POST /los/offer`<br>• Verified live end-to-end: application 7302 (approve, score 672) auto-produced offer id 186 with `decision_id=7302`, `fee_pct_used=0.0300`, correct APR/schedule<br>• All 182 backend tests still pass | Directly answers the automation ask — the offer + TILA disclosure now exist the moment underwriting approves, with an auditable link back to that exact decision |
+| 3 | Disclosures | Auto-generating the offer + disclosure on approval is still fully manual | ✅ Fixed:<br>• `run_decision()` now calls disclosure-service's `/offers` automatically the moment `decision-service` returns `approve`, using the application's own requested amount/term<br>• Best-effort — a disclosure-service hiccup logs a warning and doesn't fail the decision that already happened; the loan officer can still build it manually via `POST /los/offer`<br>• Verified live end-to-end: application 7302 (approve, score 672) auto-produced offer id 186 with `decision_id=7302`, `fee_pct_used=0.0300`, correct APR/schedule<br>• All 182 backend tests still pass *(at the time)* | Directly answers the automation ask — the offer + TILA disclosure now exist the moment underwriting approves, with an auditable link back to that exact decision |
 
 **A correction worth stating plainly — the client's own attached numbers don't
 match what the code actually computes:** re-running `apr.compute_apr(18000,
@@ -228,7 +284,7 @@ explicitly deferred to the roadmap, not this week).
 - Live-verified end to end: app 7307 (approve/672) → `kg_reader` found the
   persisted decision → `assemble_disclosure` produced offer 188 with
   `decision_id=7307`, `fee_pct_used=0.03`; `/history` returned the full graph
-  in one call. All 191 backend tests pass.
+  in one call. All 191 backend tests pass *(at the time — see Verification baseline)*.
 
 **Found live-testing this week's build, no client brief prompted these — all
 fixed:**
@@ -249,10 +305,21 @@ fixed:**
   failed with a bare "not authenticated" instead of a login redirect. It now
   calls `GET /auth/me` on mount and redirects to login on any failure.
 
-**Status (2026-07-30):** PR #6 (`kalab-week4-disclosure-automation` → `main`)
-is **open, CI-green, mergeable, not yet merged.** Re-verified directly against
-the current code, not just the claims above — all four table rows and all
-three "found live-testing" fixes are still true today.
+**Status (2026-08-05): ✅ Landed.** PR #6
+(`kalab-week4-disclosure-automation` → `main`) **merged**, merge commit
+`ca1dbf9`, CI 22/22 green on its final head. All four table rows and all three
+"found live-testing" fixes re-verified against the merged code.
+
+Landing it took eight review cycles. The last three closed defects this week's
+own table does not cover, because they were found in the review rather than the
+brief: decision reruns performing bureau and audit side effects before losing a
+finality race (fixed with a leased `decision_attempts` reservation), an
+anonymous manual-review/PII disclosure, a plaintext submission token, PII in
+intake and KYC logs, incomplete offer terms rendering as a real disclosure, four
+migrations that could not replay onto a fresh database, and no browser coverage
+at all for the manual-review path. Details in the PR; the point for this file is
+that the week's *brief* shipped in week four and the week's *quality bar* took
+until week five.
 
 **Review rounds on this branch, all fixed:** the same three findings the
 Week 3 PR needed (anonymous first-decision credit pull, negative/NaN/Infinity
@@ -296,8 +363,8 @@ log showing a slow (2.4s) `POST /payments`, a client retry, and a second POST
 |---|---|---|---|---|
 | 1 | Payments | "Charged twice" is real, not confusion — `payments.py` has zero dedupe; a retried POST unconditionally inserts a second row and applies the amount a second time | ✅ Fixed, past the spec stage — `idempotency_key` is now required at the API boundary, enforced by a partial unique index + `INSERT ... ON CONFLICT`, with the original result replayed on a repeat request (`services/payment-service/app/payments.py::charge()`) | The client's own framing ("people are just confused") was wrong — this is a real, reproducible double-charge bug, not a support-ticket misunderstanding |
 | 2 | Payments | No idempotency-key contract exists — nothing tells the server a retried request is the same request | ✅ Fixed — atomic DB-level dedupe: `Idempotency-Key` required in `PaymentIn`, `UNIQUE` partial index (`db/migrations/0007`), `INSERT ... ON CONFLICT ... RETURNING` is the atomic check-and-write. A same-key retry with a *different* `loan_id`/`amount` gets a 409, not silently honored either way. A charge that captures but never confirms applying to the balance is tracked separately (`applied_at`, `db/migrations/0012`) and reconciled by the next retry — `servicing-service`'s own apply-payment is idempotent by `payment_id` too (`payment_applications`, `db/migrations/0013`), with the marker + balance update committed atomically | A safe retry needs to be dedup'd atomically at the database layer — check-then-insert in application code has its own race condition |
-| 3 | Payments | Full PAN/CVV stored in the `payments` table; an unrelated SSN field accepted on the payment endpoint at all | ✅ Fixed (`kalab-week5-payment-tokenization`, ADR 0008) — `PaymentIn` no longer has `pan`/`cvv`/`ssn` fields at all; the payment form tokenizes the card client-side (`frontend/lib/tokenize.ts`, a mock standing in for a real processor SDK) before it ever reaches a Meridian server. `pan`/`cvv` columns stay nullable/dead-going-forward for historical rows (not dropped — retroactive tokenization is its own project, same shape as the Week 10 retention question) | CVV storage is an absolute PCI-DSS violation, no exceptions; SSN had no functional reason to be on a payment-capture endpoint at all — that was GLBA-covered data creeping into a PCI-scoped flow for nothing |
-| 4 | Payments | No design for shrinking PCI scope — the current design touches raw PAN/CVV directly, maximizing scope | ✅ Fixed — `payment-service` accepts only `processor_token` + `last4` + `brand`; the token is used transiently and never persisted (only `last4`/`brand` reach the `payments` row, `db/migrations/0016`). No real processor is integrated in this training app, so the tokenization boundary itself is mocked — the contract (opaque token in, only display fields ever stored) is real and is what a real processor integration would slot behind | Moves the service toward the lightest PCI SAQ tier instead of the current design, which did the opposite |
+| 3 | Payments | Full PAN/CVV stored in the `payments` table; an unrelated SSN field accepted on the payment endpoint at all | 🔵 **Built, not landed** (`kalab-week5-payment-tokenization`, PR #8 — open; ADR 0008 exists on that branch only) — `PaymentIn` no longer has `pan`/`cvv`/`ssn` fields at all; the payment form tokenizes the card client-side (`frontend/lib/tokenize.ts`, a mock standing in for a real processor SDK) before it ever reaches a Meridian server. `pan`/`cvv` columns stay nullable/dead-going-forward for historical rows (not dropped — retroactive tokenization is its own project, same shape as the Week 10 retention question) | CVV storage is an absolute PCI-DSS violation, no exceptions; SSN had no functional reason to be on a payment-capture endpoint at all — that was GLBA-covered data creeping into a PCI-scoped flow for nothing |
+| 4 | Payments | No design for shrinking PCI scope — the current design touches raw PAN/CVV directly, maximizing scope | 🔵 **Built, not landed** (PR #8) — `payment-service` accepts only `processor_token` + `last4` + `brand`; the token is used transiently and never persisted (only `last4`/`brand` reach the `payments` row, `db/migrations/0016`). No real processor is integrated in this training app, so the tokenization boundary itself is mocked — the contract (opaque token in, only display fields ever stored) is real and is what a real processor integration would slot behind | Moves the service toward the lightest PCI SAQ tier instead of the current design, which did the opposite |
 
 **Original deliverable, as originally described:** a spec package
 (`specs/0001-online-payments-idempotency-tokenization.md`) — idempotency-key
@@ -316,17 +383,40 @@ that spec, if it ever existed — landed via later security-review passes on
 (idempotency) retroactively as-built, and Part 2 (tokenization) as a design
 with acceptance criteria.
 
-**Status (2026-07-30):** Part 2 built on `kalab-week5-payment-tokenization` —
-rows 3 and 4 above are now fixed too, closing out all four rows for real.
-`payment-service`'s `PaymentIn` dropped `pan`/`cvv`/`ssn` entirely; card
-capture tokenizes client-side (`frontend/lib/tokenize.ts`, mocked — no real
-processor integrated in this training app) before anything reaches a
-Meridian server. `payments.pan`/`.cvv` stay as nullable, dead-going-forward
-columns for historical rows (ADR 0008, supersedes ADR 0003) — not dropped,
-since retroactively tokenizing old rows needs the processor per row, out of
-scope here. New rows store only `last4`/`brand` (`db/migrations/0016`); the
-processor token itself is never persisted. All 8 backend suites + frontend
-typecheck green.
+**Status (2026-08-05): 🔵 Built, not landed.** Rows 1 and 2 landed on `main`
+via earlier merged PRs. Rows 3 and 4 are real, tested, CI-green code on
+**PR #8, which is still open** — so by this file's own definition of done they
+are inventory, not delivery. An earlier version of this paragraph said they
+"closed out all four rows for real"; that was the overstatement this review
+pass exists to remove.
+
+What is on that branch: `payment-service`'s `PaymentIn` dropped `pan`/`cvv`/`ssn`
+entirely; card capture tokenizes client-side (`frontend/lib/tokenize.ts`, mocked
+— no real processor integrated in this training app) before anything reaches a
+Meridian server; new rows store only `last4`/`brand` (`db/migrations/0016`) and
+the processor token is never persisted. `payments.pan`/`.cvv` stay nullable and
+dead-going-forward for historical rows (ADR 0008, supersedes ADR 0003) — not
+dropped, since retroactively tokenizing old rows needs the processor per row.
+
+**On `main` today, none of that is true yet:** both `payment-service` and
+`servicing-service` still INSERT `pan`/`cvv`, and servicing's legacy
+`POST /payments` still logs PAN/CVV/SSN in the clear. The client review asked
+for the columns to be dropped without waiting for this PR; that is blocked on
+deciding whether to land PR #8 first or duplicate its code changes on `main`
+(see `DEBT.md` D5b/D13).
+
+**Also on PR #8, beyond this week's original scope** — added during review, not
+from the brief: a captured payment could be authorized on the card and never
+credited to the loan balance, recoverable only if the client happened to retry
+the same idempotency key. `applied_at IS NULL` was queried nowhere in the
+repository. `payment-service/app/reconcile.py` + `db/migrations/0028` make that
+row a durable, self-draining work item with claim-safe concurrency, capped
+backoff, an operator report and two Prometheus gauges.
+
+Head `53ca666`, base `main`, CI 22/22, mergeable. Two documents this file cites
+— `specs/0001-online-payments-idempotency-tokenization.md` and
+`adr/0008-tokenize-card-data-stop-storing-pan-cvv.md` — exist **only on that
+branch**, not on `main`.
 
 ---
 
@@ -404,7 +494,22 @@ job correctly scoped to `settlement.csv`'s actual date range and loan set,
 producing a break-report, plus one alert on a reconciliation break). Run
 against a sampled month (matching the settlement file), not full history —
 per the brief's own quota note. **One path, one control — not full
-observability. Not yet started — plan only, pending go-ahead to build.**
+observability.**
+
+**Status (2026-08-05): 🟡 Partial — and the partial piece is not the piece this
+week scoped.** A Prometheus + Grafana stack landed early (`monitoring/`,
+scraping `/metrics` off all eight services) during the Week 4 branch, so this
+week is no longer "not started". But metrics are not what the four rows above
+ask for. Both of Week 7's own deliverables are still **⬜ Open**: there is no
+shared trace/correlation ID connecting `payment-service.charge()` to
+`servicing-service.apply_payment`, and `reconciliation.py`'s `ledger_total()` /
+`settlement_total()` still take no date or loan filter — re-verified today — so
+rows 1 to 4 all stand exactly as written.
+
+One row moved for a different reason: PR #8's reconciler now detects and reports
+captured-but-unapplied payments, which is a real partial answer to row 3's
+"nothing flags it". It flags the *unapplied* case, not the *double-charge*
+case, and it is not on `main` yet.
 
 ---
 
@@ -424,14 +529,14 @@ approval-rate breakdown showing a pattern.
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
 | 1 | Decisioning | Client's claim: every denial gets one of two hardcoded strings regardless of the real driver | ✅ **Already fixed — checked directly against the current code, the client's own attached logs are stale.** `decision.py` no longer has `GENERIC_REASONS` anywhere; Week 3's real fix already replaced it with an input-driven mapping (bureau-score shortfall vs. income shortfall). The still-real gap: that mapping only ever picks between **two** categories, and it isn't fixture-tested against known cases yet — that's this week's actual remaining work | Citing a stale finding as current would be its own credibility problem — the fix already shipped, the remaining gap is narrower than the brief assumes |
-| 2 | Decisioning | Does the ZIP-level approval-rate pattern warrant a disparate-impact look? | ⬜ Can't be checked at all — confirmed **no ZIP field exists anywhere in the schema**; `applicants.address` is one free-text column | "Can't check" is itself a reason to pause before "wider," not a reason to proceed — the attached breakdown isn't reproducible from this repo's actual data |
-| 3 | Decisioning | No model card, no record of which features/model version produced any given decision, no fairness testing ever performed | ⬜ Open | If a regulator asked how this model decides and whether it's fair, the honest answer today is "nothing documents that" |
+| 2 | Decisioning | Does the ZIP-level approval-rate pattern warrant a disparate-impact look? | ✅ **Now checkable — the blocker is gone.** When this row was written no ZIP field existed anywhere; `applicants.zip_code` was added (`db/migrations/0014`) and `fair_lending.py` computes a ZIP3-level four-fifths-rule screen over recorded approval outcomes, staff-only at `GET /applications/fair-lending/zip-analysis`. Local/training-only — never run against real applicants | "Can't check" was itself a reason to pause before "wider." That reason no longer holds, which means the screen's *output* now has to be looked at rather than the check being unavailable |
+| 3 | Decisioning | No model card, no record of which features/model version produced any given decision, no fairness testing ever performed | 🟡 **Two of three closed.** `docs/model_card.md` documents the model, its inputs, its bands and its limits; `decision_events` records the exact model version and score behind every decision (Week 3). **Still fully open: no fairness testing of the model itself** — no protected-class or proxy analysis of its scores, no vendor fairness documentation. The ZIP screen in row 2 is an *outcome* monitor, not model validation, and the model card says so explicitly | Two thirds of the answer now exists. The remaining third is the one a regulator would actually press on, so it is called out rather than folded into a green tick |
 | 4 | Decisioning | What "responsible AI" requires beyond a marketing page | ⬜ Open — reason accuracy is partially there (see #1), a model card and a monitoring spec are not | A marketing claim of "advanced underwriting" with zero governance behind it is the same pattern as the README's earlier false PCI claim — a claim not backed by what the system can prove |
 
 **This week's real deliverable, stated honestly:** a reason-code →
 specific-reason mapping, **fixture-tested only** (per the brief's own quota
 note — no live-model spam), a model card
-(`docs/model-card-credit-scorecard.md`) documenting the 2-input model, its
+(shipped as `docs/model_card.md`) documenting the model, its
 decision bands, and its known limitations, and a fair-lending monitoring spec
 (denial-reason accuracy + disparity-check design, explicitly naming the
 missing-ZIP-field prerequisite). **Governance artifacts — not a model
@@ -497,14 +602,18 @@ against the current repo, not just repeated from the plan's own words** (the
 same check applied to Week 8's stale claim above, now applied to this week's
 own central task): the assumption that "Weeks 3/6/7 are all spec-only, not
 built" is **not fully accurate**, checked today:
-- **Week 3** — `decision_events` is real, tested, shipped code, sitting in PR
-  #5 (open, CI-green, mergeable, **not yet merged to `main`**) — further along
-  than spec-only.
+- **Week 3** — `decision_events` is real, tested, shipped code, **merged to
+  `main`** (PR #5, 2026-07-30). Landed, not spec.
 - **Week 6** — the RBAC/ownership half of the ADR's proposed fix shipped,
-  self-directed, at the gateway (41 tests, live-verified). The maker-checker
-  step and the append-only ledger are still genuinely unbuilt.
-- **Week 7** — genuinely untouched; "spec/ADR only, not built" is fully
-  accurate here.
+  self-directed, at the gateway (41 tests at the time, live-verified). The
+  maker-checker step and the append-only ledger are still genuinely unbuilt.
+- **Week 7** — no longer untouched: the Prometheus/Grafana stack landed early.
+  But neither thing Week 7 actually scoped (a cross-service trace ID, a scoped
+  reconciliation control) exists, so its own rows are all still open.
+- **Week 4** — merged to `main` (PR #6, 2026-08-05), including the
+  auto-disclosure chain this capstone depends on.
+- **Week 5** — built and CI-green on PR #8, **not merged**. A showcase must not
+  present tokenization as delivered while it sits on an open branch.
 
 A showcase that just repeats "Weeks 3/6/7 are specs" would understate real,
 verifiable progress — the honest version says exactly which piece of each
@@ -521,6 +630,21 @@ started — plan only, pending go-ahead to build.**
 
 ---
 
-*All 10 weeks logged. Update any week's status line above as its real build
-status changes (e.g. when PR #5 merges, or when Week 6/7's own scope actually
-ships).*
+## Keeping this file honest
+
+All 10 weeks logged. When a PR merges or a status changes, update **two**
+places: the week's own status line, and the **Status at a glance** table at the
+top. The at-a-glance table is the one thing that must never be stale — it is
+what anyone skimming this file reads, and a wrong tick there is worse than no
+table at all.
+
+Two rules that this file has broken before, and which this pass fixed:
+
+1. **Never mark a row ✅ for work on an unmerged branch.** Use 🔵 Built, not
+   landed. Week 5 claimed all four rows closed while two of them sat on an open
+   PR.
+2. **Never cite a file as delivered without checking it is on `main`.** Week 5
+   cited a spec and an ADR that exist only on a feature branch, and an earlier
+   version cited a spec that had never been committed anywhere at all.
+
+Last full accuracy pass: **2026-08-05**, against `main` at `ca1dbf9`.
