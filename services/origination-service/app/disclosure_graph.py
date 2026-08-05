@@ -3,7 +3,7 @@
 Two-node LangGraph replacing the old direct auto-generate call: one node reads
 the knowledge graph (kg.py) for an approved decision's inputs, a second
 assembles the disclosure from them -- the exact two-agent shape Week 4's own
-prototype design called for (ROADMAP.md: "one agent traverses the KG for an
+prototype design called for (docs/ROADMAP.md: "one agent traverses the KG for an
 approved app's decision/offer inputs, a second assembles the disclosure from
 them").
 

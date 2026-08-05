@@ -15,7 +15,7 @@ production — there is no production environment.
 |---|---|
 | **Implemented and tested** | Code exists and is covered by tests that run in CI (`.github/workflows/ci.yml`). |
 | **Local/training-only** | Runs only against `docker compose up` with seeded fictional data. Never run against real applicants, real bureau, real card rails, or real volume. |
-| **Deferred** | Deliberately not built. A decision, not an oversight — usually recorded in an ADR or `ROADMAP.md`. |
+| **Deferred** | Deliberately not built. A decision, not an oversight — usually recorded in an ADR, `docs/ROADMAP.md`, or `docs/DEBT.md`. |
 | **Not production-ready** | Code exists and may pass tests, but a known defect, missing control, or missing operational requirement makes it unsafe to run for real. |
 | **Fixed in PR #6** | Was a defect; the fix is on `kalab-week4-disclosure-automation` with a test that fails without it. |
 | **Still open for PR #8** | A known defect or gap that PR #6 deliberately did not close. |

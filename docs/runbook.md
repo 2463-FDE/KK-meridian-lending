@@ -102,5 +102,5 @@ make test    # runs pytest in both backend services (non-blocking)
 
 `test_apr.py` (disclosure-service) and `test_money.py` (servicing-service) used to
 FAIL by design, encoding float-rounding defects (D12/D6). Both are fixed now — a
-real Decimal migration, not a weakened test (see `kal_docs/ROADMAP.md`, Week 1). CI
+real Decimal migration, not a weakened test (see `docs/ROADMAP.md`, Week 1). CI
 no longer runs any service `continue-on-error`; every service's tests are blocking.

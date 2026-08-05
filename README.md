@@ -115,6 +115,13 @@ unverified — do not represent them as confirmed without a real compliance revi
 Compliance contact: Dana (VP Lending Ops). For SOX/reconciliation questions: Sam
 (Controller). For fair-lending/BSA: Priya (Compliance Officer).
 
+## Planning and debt
+
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — the ten-week plan the ADRs and code comments cite.
+- [`docs/DEBT.md`](docs/DEBT.md) — the `D`/`RF` register. Every `(debt D7)`-style
+  citation in the source resolves here; it was being cited for weeks before it
+  was written down anywhere.
+
 ## Known follow-ups (from the Halcyon handoff note)
 
 > "Platform is secure and compliant. A few TODOs left in servicing but nothing

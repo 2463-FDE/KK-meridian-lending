@@ -2,7 +2,7 @@
 
 **Status:** Local/training-only. First version, written to close a real gap: nothing in this repo
 documented which model, version, or inputs drive a lending decision before
-this. See ROADMAP.md Week 8 finding — "no model card, no record of which
+this. See [ROADMAP.md](ROADMAP.md) Week 8 finding — "no model card, no record of which
 features/model version produced any given decision, no fairness testing ever
 performed."
 
