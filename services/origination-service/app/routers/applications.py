@@ -129,7 +129,12 @@ def list_applications(
     status: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
+    # Staff only: this returns applicant PII and decision status for every
+    # application. Gate before any query so there is no existence oracle.
+    _require_staff(x_user_role, x_internal_token)
     stmt = select(models.Application, models.Applicant.name).join(
         models.Applicant, models.Application.applicant_id == models.Applicant.id, isouter=True
     )
@@ -369,15 +374,15 @@ def run_decision(
 
     outcome = resp["outcome"]
 
-    # PR #6 review (Finding 2): TXN B -- lock again, first confirm THIS
-    # attempt is still the live, active reservation (state='in_progress'
-    # AND its lease has not passed -- see decision_state.
-    # verify_attempt_still_active_locked), then recheck finality one more
-    # time (the one genuinely-concurrent race that can't be closed without
-    # holding a lock across the network call above -- staff finalizing or
-    # funding landing in the exact window while decision-service was
-    # computing), and only THEN persist decisions + decision_events + mark
-    # the attempt completed, all atomically. A late/duplicate computation
+    # PR #6 review (Finding 2): TXN B -- lock again, recheck finality (the
+    # one genuinely-concurrent race that can't be closed without holding a
+    # lock across the network call above -- staff finalizing or funding
+    # landing in the exact window while decision-service was computing),
+    # confirm THIS attempt is still the live, active reservation
+    # (state='in_progress' AND its lease has not passed -- see
+    # decision_state.verify_attempt_still_active_locked), and only THEN
+    # persist decisions + decision_events + mark the attempt completed, all
+    # atomically. A late/duplicate computation
     # for an attempt that already expired-and-was-replaced (recovery ran
     # while this call was still in flight) is discarded here too -- it must
     # never overwrite whatever the replacement attempt already committed.
@@ -391,14 +396,14 @@ def run_decision(
     discard_error = None
     try:
         with db.transaction() as cur:
+            # Global lock order: applications -> decision_attempts. Keep the
+            # finality recheck first; reversing these two deadlocks TXN A.
+            funded, manual = decision_state.recheck_finality_locked(cur, app_id)
             if not decision_state.verify_attempt_still_active_locked(cur, attempt_id):
                 discard_error = (
                     409,
                     "this decision attempt is no longer active (expired or superseded) -- please retry",
                 )
-                funded, manual = None, None
-            else:
-                funded, manual = decision_state.recheck_finality_locked(cur, app_id)
 
             if discard_error is not None:
                 pass  # already set above -- attempt itself is no longer active

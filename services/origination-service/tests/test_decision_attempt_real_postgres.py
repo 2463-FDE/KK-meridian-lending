@@ -12,6 +12,12 @@ cannot prove, requiring real PostgreSQL:
      accept-token mint -- proven by forcing a real constraint violation
      (decision_events.model_version NOT NULL) via a deliberately malformed
      decision-service response, not by changing any production code.
+  3. TXN B and a concurrent TXN A take their two row locks in the SAME
+     order (applications -> decision_attempts) and therefore cannot
+     deadlock -- the A2 regression. This one is written specifically to
+     FAIL against the previous lock order, not merely to pass; see its
+     docstring for why the interleaving is deterministic in both
+     directions.
 
 Both tests point the REAL app.db module at a throwaway Postgres schema
 (dropped/recreated per test) instead of the mocked db.transaction()/
@@ -355,3 +361,180 @@ def test_txn_b_failure_after_a_write_rolls_back_decision_event_and_attempt_toget
         assert still_failed["failure_code"] == "persistence_error"
         cur.execute("SELECT state FROM decision_attempts WHERE id = %s", (new_attempt_id,))
         assert cur.fetchone()["state"] == "in_progress"
+
+
+# --- Test 3 (A2): TXN B vs a concurrent TXN A cannot deadlock ----------------
+
+def test_txn_b_and_concurrent_txn_a_do_not_deadlock(real_db, monkeypatch):
+    """A2 regression. Deliberately builds the interleaving that USED to
+    deadlock, and asserts Postgres never raises DeadlockDetected.
+
+    Global lock order under test: applications -> decision_attempts.
+
+    How the interleaving is forced deterministically, in BOTH directions:
+
+      * Thread 1 runs the REAL POST /{app_id}/decision endpoint. Both TXN B
+        helpers are wrapped so that whichever one runs FIRST (i.e. whichever
+        takes TXN B's first row lock) signals `t1_holds_first` and then waits
+        on `t2_holds_first` before TXN B is allowed to take its second lock.
+        The wrapper is order-agnostic on purpose -- it instruments "the first
+        lock", not a specific table -- so the same test body exercises the
+        old order and the new one.
+      * Thread 2 replays TXN A's real statement sequence from
+        decision_state.start_decision_attempt (applications FOR UPDATE at
+        decision_state.py:80, then the in_progress decision_attempts
+        FOR UPDATE at :166-171) on its own connection, signalling
+        `t2_holds_first` once it holds ITS first lock.
+
+    Old order (decision_attempts -> applications):
+      T1 locks the attempt row and signals. T2 is free to take `applications`
+      (T1 doesn't hold it), so T2 signals immediately. T1 then reaches for
+      `applications` (held by T2) and T2 reaches for the attempt row (held by
+      T1) -> genuine ABBA cycle -> Postgres aborts one side with
+      DeadlockDetected and this test FAILS.
+
+    New order (applications -> decision_attempts):
+      T1 locks `applications` first. T2's very first statement wants the same
+      row, so T2 blocks and never signals; T1's wait simply times out after
+      _SIGNAL_TIMEOUT and it proceeds to take the attempt row (free) and
+      commit. T2 then unblocks and runs to completion. No cycle is ever
+      possible, because neither thread can hold `decision_attempts` while
+      waiting on `applications`.
+    """
+    app_id = 503
+    _seed_application(real_db, app_id)
+
+    _SIGNAL_TIMEOUT = 3.0
+    t1_holds_first = threading.Event()
+    t2_holds_first = threading.Event()
+
+    post_calls = []
+    monkeypatch.setattr(disclosure_graph, "auto_generate_offer", lambda app_id: None)
+
+    def _fake_post(base_url, path, payload, headers=None):
+        post_calls.append(payload)
+        return {
+            "outcome": "approve", "score": 700, "reason": None,
+            "attempt_id": payload["attempt_id"],
+            "bureau_score": 680, "model_version": "v1-stub", "top_features": None,
+            "reason_codes": [],
+        }
+
+    monkeypatch.setattr(clients, "post", _fake_post)
+
+    # Instrument TXN B's two lock-taking helpers. `first_done` makes the
+    # signal+wait fire exactly once -- after TXN B's FIRST lock, whichever
+    # helper that happens to be under the ordering being tested.
+    #
+    # `phase` is load-bearing: start_decision_attempt (TXN A) calls
+    # recheck_finality_locked as a BARE NAME from inside decision_state, and
+    # monkeypatching the module attribute rebinds that global too -- so
+    # without this guard the instrumentation fires on TXN A's applications
+    # lock instead of TXN B's first lock, the intended interleaving never
+    # happens, and the test passes against BOTH orderings (verified: it did).
+    real_start = decision_state.start_decision_attempt
+    real_recheck = decision_state.recheck_finality_locked
+    real_verify = decision_state.verify_attempt_still_active_locked
+    phase = {"txn_b": False}
+    first_done = []
+
+    def _wrapped_start(aid, requested_by):
+        result = real_start(aid, requested_by)
+        phase["txn_b"] = True   # TXN A has committed; the next locks are TXN B's
+        return result
+
+    def _after_first_lock():
+        if not phase["txn_b"] or first_done:
+            return
+        first_done.append(True)
+        t1_holds_first.set()
+        t2_holds_first.wait(timeout=_SIGNAL_TIMEOUT)
+
+    def _wrapped_recheck(cur, aid):
+        result = real_recheck(cur, aid)
+        _after_first_lock()
+        return result
+
+    def _wrapped_verify(cur, aid):
+        result = real_verify(cur, aid)
+        _after_first_lock()
+        return result
+
+    monkeypatch.setattr(decision_state, "start_decision_attempt", _wrapped_start)
+    monkeypatch.setattr(decision_state, "recheck_finality_locked", _wrapped_recheck)
+    monkeypatch.setattr(decision_state, "verify_attempt_still_active_locked", _wrapped_verify)
+
+    t1_result, t2_result = {}, {}
+
+    def _thread1_real_endpoint():
+        try:
+            resp = client.post(
+                f"/applications/{app_id}/decision", json={"access_token": "real-access-token"}
+            )
+            t1_result["status_code"] = resp.status_code
+        except Exception as e:  # noqa -- recorded, asserted on below
+            t1_result["exception"] = e
+
+    def _thread2_txn_a_replica():
+        """Replays start_decision_attempt's real statement order."""
+        if not t1_holds_first.wait(timeout=_SIGNAL_TIMEOUT):
+            t2_result["outcome"] = "t1_never_signalled"
+            return
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"SET search_path TO {SCHEMA}")
+                # TXN A lock #1 -- applications (decision_state.py:80)
+                cur.execute("SELECT status FROM applications WHERE id = %s FOR UPDATE", (app_id,))
+                cur.fetchall()
+                t2_holds_first.set()
+                # TXN A lock #2 -- decision_attempts (decision_state.py:166-171)
+                cur.execute(
+                    "SELECT id, (lease_expires_at > now()) AS live FROM decision_attempts "
+                    "WHERE app_id = %s AND state = 'in_progress' FOR UPDATE",
+                    (app_id,),
+                )
+                cur.fetchall()
+            conn.commit()
+            t2_result["outcome"] = "completed"
+        except psycopg2.errors.DeadlockDetected as e:
+            conn.rollback()
+            t2_result["deadlock"] = str(e)
+        finally:
+            t2_holds_first.set()  # never strand thread 1
+            conn.close()
+
+    t1 = threading.Thread(target=_thread1_real_endpoint)
+    t2 = threading.Thread(target=_thread2_txn_a_replica)
+    t1.start(); t2.start()
+    t1.join(timeout=30); t2.join(timeout=30)
+    assert not t1.is_alive() and not t2.is_alive(), "threads did not finish -- lock cycle never broke"
+
+    # --- The A2 assertion: neither side deadlocked. ---
+    assert "deadlock" not in t2_result, f"TXN A deadlocked against TXN B: {t2_result.get('deadlock')}"
+    t1_exc = t1_result.get("exception")
+    assert not isinstance(t1_exc, psycopg2.errors.DeadlockDetected), f"TXN B deadlocked: {t1_exc}"
+    assert t1_exc is None, f"TXN B raised unexpectedly: {t1_exc!r}"
+    # A deadlock inside TXN B is swallowed by run_decision's own
+    # `except Exception` and surfaces as 500 persistence_error -- so the
+    # status code has to be checked too, not just the raised exception.
+    assert t1_result.get("status_code") == 200, t1_result
+
+    # Deterministic outcome for the other side.
+    assert t2_result.get("outcome") == "completed", t2_result
+
+    # Exactly one bureau/model call, and no duplicated rows.
+    assert len(post_calls) == 1
+
+    with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) AS n FROM decision_attempts WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 1
+        cur.execute("SELECT state, failure_code FROM decision_attempts WHERE app_id = %s", (app_id,))
+        row = cur.fetchone()
+        assert row["state"] == "completed" and row["failure_code"] is None
+        cur.execute("SELECT count(*) AS n FROM decisions WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 1
+        cur.execute("SELECT count(*) AS n FROM decision_events WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 1
