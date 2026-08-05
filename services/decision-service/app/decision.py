@@ -42,7 +42,7 @@ from .config import (
     EXPERIAN_KEY,
 )
 from .logging_config import get_logger
-from . import db
+from . import bureau, db
 
 log = get_logger("decision")
 
@@ -64,15 +64,6 @@ class CreditBureauUnavailableError(RuntimeError):
 
 class ModelUnavailableError(RuntimeError):
     """Licensed AI scorer not configured/reachable and stubbing isn't allowed here."""
-
-
-class DecisionPersistenceError(RuntimeError):
-    """Could not durably record the decision + its audit event (decision_events).
-
-    Raised instead of swallowed: a decision that can't be proven to have happened
-    is exactly the gap the append-only audit trail exists to close, so returning
-    a decision to the caller anyway would defeat the point of recording one at all.
-    """
 
 
 class _ScorerResponse(BaseModel):
@@ -103,9 +94,20 @@ def _stub_score(ssn: str) -> int:
     return 680 if ssn and ssn[-1] in "02468" else 612
 
 
-async def _pull_credit(ssn: str) -> int:
-    """Async bureau call (see module docstring's async-rework note). No real
-    timeout budget beyond the client's own 30s."""
+async def _pull_credit(ssn: str, request_key: str) -> bureau.BureauResult:
+    """Async bureau call, through the bureau.BureauClient seam.
+
+    PR #6 review (Gap A): `request_key` is origination's idempotency key for
+    this logical decision request. It is stable across a retry that follows an
+    ambiguous timeout and different for a genuinely new decision request, so a
+    retry recovers the original pull instead of billing a second hard inquiry
+    against the applicant. The SSN travels in a POST body, never a query
+    string -- see bureau.py for the full contract and its honest limitation.
+
+    Returns a BureauResult (score + non-sensitive provider reference id)
+    rather than a bare int, so the reference can be persisted for later
+    lookup without keeping any part of the raw provider response.
+    """
     if not EXPERIAN_KEY:
         if not ALLOW_CREDIT_STUB:
             raise CreditBureauUnavailableError(
@@ -113,22 +115,16 @@ async def _pull_credit(ssn: str) -> int:
                 "decide from a fake credit score outside development/test."
             )
         log.warning("EXPERIAN_KEY not set — using deterministic dev stub score")
-        return _stub_score(ssn)
+        return await bureau.stub_client.pull_score(ssn, request_key)
 
     try:
-        # structured like a real call; in dev there's no live bureau so we fall back.
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{EXPERIAN_BASE_URL}/score",
-                params={"ssn": ssn},
-                headers={"Authorization": f"Bearer {EXPERIAN_KEY}"},
-            )
-        return resp.json().get("score", 680)
+        return await bureau.HttpBureauClient().pull_score(ssn, request_key)
     except Exception:
         if not ALLOW_CREDIT_STUB:
             raise
-        # deterministic stub so the demo runs without a live bureau
-        return _stub_score(ssn)
+        # Deterministic stub so the demo runs without a live bureau. Same
+        # request_key, so a retry still collapses onto one stub operation.
+        return await bureau.stub_client.pull_score(ssn, request_key)
 
 
 def _stub_model_score(bureau_score: int, income: float) -> int:
@@ -296,20 +292,23 @@ async def _run_model(bureau_score: int, application: dict) -> dict:
 
 
 async def decide(application: dict) -> dict:
-    """Full decisioning chain (async -- see module docstring). Persists the legacy
-    outcome-only `decisions` row and the append-only `decision_events` row (inputs,
-    model score/version, top features, reason codes) as ONE transaction — both land
-    or neither does, so a decision is never returned to the caller without the audit
-    row that proves it happened (review finding: the two used to be written
-    separately with each failure only logged, letting a decision commit with no
-    matching audit event when the second insert failed silently).
+    """Full decisioning chain (async -- see module docstring). Compute-only:
+    pulls the bureau score, runs the scoring model, and returns the result
+    (score, decision, reason_codes, bureau_score, model_version,
+    top_features) -- it persists nothing to the database at all (PR #6
+    review, Finding 2). origination-service is the sole writer of both
+    `decisions` and `decision_events`, atomically, only after its own
+    lock+recheck confirms the request that triggered this call actually
+    wins its finality race (see routers/applications.py::run_decision on
+    the origination-service side).
 
-    Week 3: the pull-credit / score / persist steps are now an explicit LangGraph
-    graph (app/graph.py) instead of inline code here -- same three calls, same
-    fail-closed exceptions, now individually traceable. Deferred import: graph.py
-    imports this module at its own load time, so importing it up top would be
-    circular; by the time decide() is actually called, this module has finished
-    loading and the import below is just a sys.modules lookup.
+    Week 3: the pull-credit / score / finalize steps are an explicit
+    LangGraph graph (app/graph.py) instead of inline code here -- same
+    three calls, same fail-closed exceptions, now individually traceable.
+    Deferred import: graph.py imports this module at its own load time, so
+    importing it up top would be circular; by the time decide() is
+    actually called, this module has finished loading and the import below
+    is just a sys.modules lookup.
     """
     from .graph import run as _run_graph
 

@@ -63,6 +63,12 @@ app.add_middleware(RateLimitMiddleware)
 # only ever covered the LLM calls, not the other seven services.
 Instrumentator().instrument(app).expose(app)
 
+# W7: exposes GET /metrics in Prometheus text format -- request count, latency
+# histograms, in-progress requests, broken down by route/method/status. No
+# service in this repo had any cross-service metrics before this; LangSmith
+# only ever covered the LLM calls, not the other seven services.
+Instrumentator().instrument(app).expose(app)
+
 
 @app.get("/health")
 def health():
@@ -108,6 +114,17 @@ def me(authorization: str | None = Header(None)):
 async def _proxy(base: str, path: str, request: Request, user: dict | None, extra_headers: dict | None = None):
     method = request.method
     body = await request.body()
+    # Security fix (borrower-workflow audit): the borrower's one-time
+    # accept_token used to travel as a URL query parameter on the offer
+    # GET route -- that leaks into this gateway's own access log AND its
+    # outbound httpx request log below, plus browser history/Referer. It
+    # now travels only as X-Offer-Accept-Token, a plain header -- forwarded
+    # here intentionally, same as every other inbound header that isn't an
+    # identity claim (X-User-*, stripped below) or connection-level
+    # (host/content-length/authorization, replaced by the resolved
+    # session). This proxy never re-serializes any header into the
+    # outbound URL -- headers stay headers (see the httpx call below,
+    # `headers=headers` is separate from `params=request.query_params`).
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "content-length", "authorization")
@@ -123,10 +140,19 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
             method, f"{base}{path}", content=body, headers=headers,
             params=request.query_params,
         )
+    # Bug fix: resp.json() decodes via resp.text, which falls back to
+    # httpx's charset auto-detection whenever the upstream response's
+    # Content-Type has no explicit charset param (every backend service here
+    # just sends "application/json" with none). Auto-detection can misguess
+    # short multi-byte sequences as Latin-1/cp1252 -- an en dash or an
+    # accented name came back through this proxy as visible mojibake
+    # ("Jos\xc3\xa9" instead of "Jos\xe9") on every route, not just one.
+    # RFC 8259 mandates JSON is UTF-8 (unless a BOM says otherwise) -- decode
+    # the raw bytes as UTF-8 directly instead of letting httpx guess.
     try:
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
+        return JSONResponse(status_code=resp.status_code, content=json.loads(resp.content.decode("utf-8")))
     except Exception:
-        return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
+        return JSONResponse(status_code=resp.status_code, content={"raw": resp.content.decode("utf-8", errors="replace")})
 
 
 def _require_user(authorization: str | None) -> dict:

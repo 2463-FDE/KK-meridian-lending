@@ -1,9 +1,28 @@
 """Credit decisioning endpoint.
 
 Runs the decisioning chain (async -- see decision.py's module docstring for the
-async rework). Persists both the legacy outcome-only `decisions` row and an
-append-only `decision_events` row (inputs, model score/version, top features,
-reason codes) via decision.decide().
+async rework) via decision.decide() and returns the computed result. This
+endpoint persists nothing at all.
+
+Architecture fix: this used to persist the authoritative `decisions` row
+(outcome-only, unconditional ON CONFLICT DO UPDATE) -- that write is gone.
+
+PR #6 review (Finding 2): this also used to persist decision-service's OWN
+append-only audit trail (decision_events) unconditionally, before knowing
+whether the request that triggered it would even win its finality race on
+the origination-service side -- a blocked/discarded rerun still left a
+permanent-looking audit row behind it. decision-service is now fully
+compute-only: this endpoint only PROPOSES an outcome (plus the
+bureau_score/model_version/top_features origination needs to write the
+audit row itself). origination-service is the sole writer of both
+`decisions` and `decision_events`, atomically, under a lock, only after
+its own attempt/finality recheck confirms this specific attempt wins. See
+routers/applications.py::run_decision and app/graph.py::_node_finalize.
+
+`attempt_id` is an opaque correlation id minted by origination-service
+before this call is made -- decision-service does nothing with it except
+echo it back on DecisionOut, so origination can reject a response that
+doesn't match the attempt it's currently waiting on.
 """
 from fastapi import APIRouter, Header, HTTPException
 
@@ -50,12 +69,22 @@ async def run_decision(
         "income": float(r["income"]) if r.get("income") is not None else 0,
         "requested_amount": float(r["amount"]) if r.get("amount") is not None else None,
         "term_months": r.get("term_months"),
+        # Caller-supplied idempotency key for the bureau boundary (Gap A).
+        # Trusted from the body on purpose -- unlike the financials above, it
+        # is not scoring input; it is origination's own correlation handle,
+        # and origination is the only caller (X-Internal-Token enforced above).
+        "bureau_request_key": body.bureau_request_key,
     }
     result = await decision.decide(application)
     return DecisionOut(
         application_id=body.application_id,
+        attempt_id=body.attempt_id,
         outcome=result["decision"],
         score=result["score"],
         reason=result.get("adverse_action_reason"),
         reason_codes=result.get("reason_codes") or [],
+        bureau_score=result.get("bureau_score"),
+        model_version=result.get("model_version"),
+        top_features=result.get("top_features"),
+        bureau_reference_id=result.get("bureau_reference_id"),
     )

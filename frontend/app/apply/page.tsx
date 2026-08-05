@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
-import { apiPost } from "../../lib/api";
+import { apiGet, apiPost, ApiError } from "../../lib/api";
 import { usd, pct } from "../../lib/format";
 
 const STEPS: Step[] = [
@@ -282,13 +282,51 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost("/los/offer", {
-        app_id: app.app_id,
-        principal: form.amount,
-        annual_rate_pct: OFFER_RATE_PCT,
-        term_months: parseInt(form.term_months, 10),
-      })) as { app_id: string | number; disclosure: Disclosure };
-      setDisclosure(res.disclosure);
+      // Bug fix: run_decision auto-generates an offer server-side the
+      // instant a decision comes back approve (best-effort) -- this used
+      // to always try to CREATE one instead, which always found that
+      // auto-generated offer already there and always failed. Request the
+      // existing offer first (the borrower's own accept_token, already in
+      // hand from the decision response, proves ownership); only fall back
+      // to creating one on a genuine 404 (auto-generation hasn't landed
+      // yet, or predates it) -- and even that create is itself idempotent
+      // now (returns the same offer if one shows up first in a race),
+      // never a 409.
+      //
+      // Security fix: the token travels only as the X-Offer-Accept-Token
+      // header, never a URL query parameter -- a query parameter leaks into
+      // gateway/origination-service access logs, browser history, and a
+      // Referer header; a header does not.
+      const token = decision?.accept_token || "";
+      let existing: { disclosure: Disclosure } | null = null;
+      try {
+        existing = (await apiGet(
+          `/los/applications/${app.app_id}/offer`,
+          { "X-Offer-Accept-Token": token },
+        )) as { disclosure: Disclosure };
+      } catch (getErr) {
+        if (!(getErr instanceof ApiError) || getErr.status !== 404) throw getErr;
+        // 404 -- genuinely no offer yet; fall through to create one below.
+      }
+      if (existing) {
+        setDisclosure(existing.disclosure);
+        return;
+      }
+      // Security fix (PR #6 review): POST /offer now requires the same
+      // ownership proof as the GET above (staff or a matching
+      // X-Offer-Accept-Token) -- send the same token here too, or a
+      // legitimate borrower's own first-offer creation would 403.
+      const created = (await apiPost(
+        "/los/offer",
+        {
+          app_id: app.app_id,
+          principal: form.amount,
+          annual_rate_pct: OFFER_RATE_PCT,
+          term_months: parseInt(form.term_months, 10),
+        },
+        { "X-Offer-Accept-Token": token },
+      )) as { app_id: string | number; disclosure: Disclosure };
+      setDisclosure(created.disclosure);
     } catch (err) {
       setApiError(errMsg(err, "Could not generate your offer."));
     } finally {
@@ -301,9 +339,17 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost(`/los/applications/${app.app_id}/accept`, {
-        accept_token: decision?.accept_token,
-      })) as { loan_id: string | number };
+      // Security fix: same header-only transport as viewOffer above -- the
+      // token used to also be accepted as a JSON body field; the body
+      // itself never leaked into a log, but a single consistent transport
+      // for this credential (never a query string, never re-introduced by
+      // accident on this route) is the actual requirement, not "this one
+      // spot happened to be safe."
+      const res = (await apiPost(
+        `/los/applications/${app.app_id}/accept`,
+        undefined,
+        { "X-Offer-Accept-Token": decision?.accept_token || "" },
+      )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));

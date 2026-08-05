@@ -1,13 +1,14 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
-import secrets
+import json
 
+import httpx
 import psycopg2.errors
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, config, db, disclosure_graph, fair_lending, intake, kg, models
+from .. import clients, config, db, decision_state, disclosure_graph, fair_lending, intake, kg, models
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -42,14 +43,17 @@ _STAFF_ROLES = {"csr", "underwriter", "admin"}
 _DECISION_STATUS = {"approve": "approved", "refer": "in_review", "deny": "denied"}
 
 # NOTE: the gateway's /los/{path:path} route (gateway/app/main.py) proxies to this
-# router with NO auth check — an applicant can check their own status without an
-# account, so anyone who guesses an app_id can hit any GET route here anonymously.
-# Before adding a new field to ApplicationDetail, ApplicationListItem, or any other
-# response model returned by a route in this file, ask:
+# router with NO auth check by default — a route here is anonymously reachable
+# unless it explicitly gates itself (see _require_staff below). GET /{app_id}
+# (ApplicationDetail) used to be exactly this kind of anonymous route despite
+# returning applicant PII, decision outcome, offer terms, and manual-review
+# rationale -- it is now staff-only (get_application, below). Before adding a
+# new field to ApplicationListItem or any other response model in a route that
+# is NOT staff-gated, ask:
 #   1. Would this be sensitive if read by someone who only knows the app_id?
 #      (income, SSN, DOB, credit score, decision reasoning, etc. -> yes)
-#   2. If yes, put it on a separate endpoint gated by _STAFF_ROLES (see
-#      get_application_financials below), not on the public response.
+#   2. If yes, put it on a route gated by _require_staff (see
+#      get_application_financials below), not on the anonymous response.
 
 
 def _is_staff(x_user_role: str | None, x_internal_token: str | None) -> bool:
@@ -72,6 +76,36 @@ def _is_staff(x_user_role: str | None, x_internal_token: str | None) -> bool:
 def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> None:
     if not _is_staff(x_user_role, x_internal_token):
         raise HTTPException(status_code=403, detail="staff only")
+
+
+# The five canonical TILA amounts. An offers row missing any of them is not a
+# disclosure -- see _offer_disclosure_or_none and Gap F.
+_CANONICAL_OFFER_FIELDS = (
+    "apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments",
+)
+
+
+def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
+    """Render an offers row as a Disclosure, or None if it is incomplete.
+
+    Gap F (PR #6 review): this read used to be `offer.apr or 0` per field, so a
+    row with a NULL amount was presented as a real disclosure quoting 0.00 --
+    invented terms indistinguishable from genuine ones. Missing terms now
+    render as "no offer", never as a number nobody calculated."""
+    if offer is None:
+        return None
+    missing = [f for f in _CANONICAL_OFFER_FIELDS if getattr(offer, f, None) is None]
+    if missing:
+        log.error(
+            "incomplete offer row app_id=%s offer_id=%s missing=%s",
+            app_id, getattr(offer, "id", None), ",".join(missing),
+        )
+        return None
+    return Disclosure(
+        apr=offer.apr, finance_charge=offer.finance_charge,
+        monthly_payment=offer.monthly_payment, amount_financed=offer.amount_financed,
+        total_of_payments=offer.total_of_payments,
+    )
 
 
 @router.post("", response_model=ApplicationCreated)
@@ -125,7 +159,12 @@ def list_applications(
     status: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
+    # Staff only: this returns applicant PII and decision status for every
+    # application. Gate before any query so there is no existence oracle.
+    _require_staff(x_user_role, x_internal_token)
     stmt = select(models.Application, models.Applicant.name).join(
         models.Applicant, models.Application.applicant_id == models.Applicant.id, isouter=True
     )
@@ -163,7 +202,24 @@ def get_zip_disparate_impact_report(
 
 
 @router.get("/{app_id}", response_model=ApplicationDetail)
-def get_application(app_id: int, session: Session = Depends(get_session)):
+def get_application(
+    app_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    # Security fix (PR #6 review): this route used to be reachable anonymously
+    # via the gateway's /los/* passthrough with no check at all -- app_id is
+    # sequential/guessable, and the response includes applicant PII (name,
+    # email, phone, address), loan amount/purpose, decision outcome, offer
+    # terms, and (until this fix) staff manual-review rationale/reviewer
+    # identity. Every real consumer of this route (frontend/app/underwriting/
+    # [appId]/page.tsx, loan-assistant's /summary call) is already staff-only
+    # -- the borrower-facing /apply flow never calls this route at all (it
+    # gets its own status from POST /decision, /offer, /accept responses).
+    # Staff check runs FIRST, before any DB lookup, so a non-staff caller gets
+    # the same 403 whether or not app_id even exists -- no existence oracle.
+    _require_staff(x_user_role, x_internal_token)
     a = session.get(models.Application, app_id)
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
@@ -176,6 +232,15 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
     offer = session.scalar(
         select(models.Offer).where(models.Offer.app_id == app_id).order_by(models.Offer.id.desc())
     )
+    # Review fix: the frontend needs to know a staff decision is already
+    # final (manual_reviews.app_id is UNIQUE, db/migrations/0020) so it can
+    # disable Approve/Deny up front, not just discover it via a 409 on
+    # submit. Bug fix: exposing only a bool left staff with no way to see
+    # the ORIGINAL decision's reason/who/when without deliberately attempting
+    # (and being blocked by) a second decision -- fetch the actual row. No
+    # ORM model for manual_reviews exists -- a raw query is simpler than
+    # adding one for this single read.
+    mr = decision_state.get_manual_review(app_id)
     return ApplicationDetail(
         id=a.id,
         applicant=ApplicantOut(
@@ -189,11 +254,18 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
             address_verified=bool(kyc_row.address_verified), ssn_verified=bool(kyc_row.ssn_verified),
         ) if kyc_row else None,
         decision=dec.outcome if dec else None,
-        offer=Disclosure(
-            apr=offer.apr or 0, finance_charge=offer.finance_charge or 0,
-            monthly_payment=offer.monthly_payment or 0, amount_financed=offer.amount_financed or 0,
-            total_of_payments=offer.total_of_payments or 0,
-        ) if offer else None,
+        decision_final=mr is not None,
+        decision_reason=mr["reason"] if mr else None,
+        decision_by=(mr["reviewer_name"] or mr["reviewer_role"]) if mr else None,
+        decision_at=mr["reviewed_at"].isoformat() if mr and hasattr(mr["reviewed_at"], "isoformat") else None,
+        # Gap F (PR #6 review): these five used to be `offer.<field> or 0`, so
+        # an incomplete offer row was rendered to the staff console as a real
+        # disclosure showing 0.00 terms. An offer missing any canonical amount
+        # is not a disclosure -- surface nothing rather than invented numbers.
+        # (disclosure-service's own read path returns an explicit 409; this is
+        # a staff detail view, so it degrades to "no offer yet" instead of
+        # failing the whole application page.)
+        offer=_offer_disclosure_or_none(offer, a.id),
     )
 
 
@@ -248,7 +320,8 @@ def run_decision(
     # stranger's stored SSN. A first call now also requires either a staff
     # session or the access_token minted onto this application at submission.
     rows = db.query(
-        "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, a.access_token, "
+        f"SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, "
+        f"{decision_state.ACCESS_TOKEN_FIELDS}, "
         "a.status, ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
@@ -258,8 +331,9 @@ def run_decision(
     r = rows[0]
 
     existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
+    is_staff = _is_staff(x_user_role, x_internal_token)
     if existing:
-        if not _is_staff(x_user_role, x_internal_token):
+        if not is_staff:
             raise HTTPException(status_code=403, detail="staff only to rerun a decision")
         # Bug fix: reruns had no guard beyond staff-only -- since scoring is
         # deterministic (same SSN/income -> same score), rerunning after the
@@ -270,65 +344,240 @@ def run_decision(
         # bad: it silently overwrote a staff decision with a fresh automated
         # one, and since that reset the outcome back to "refer" it made the
         # application eligible for manual review AGAIN, letting the same app
-        # get reviewed and reversed indefinitely.
-        if r.get("status") == "funded":
-            raise HTTPException(
-                status_code=422,
-                detail="cannot rerun a decision on an already-funded application",
-            )
-        manual = db.query("SELECT id FROM manual_reviews WHERE app_id = %s", (app_id,))
-        if manual:
-            raise HTTPException(
-                status_code=422,
-                detail="this application's decision was manually resolved by staff -- "
-                "rerunning the automated model would silently overwrite that",
-            )
+        # get reviewed and reversed indefinitely. (The funded/manual-final
+        # checks that used to run here, unlocked, now live inside
+        # decision_state.start_decision_attempt below -- locked, and run
+        # immediately before decision-service is ever called instead of
+        # only after it returns.)
+        requested_by = x_user_role
     else:
-        is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
-        if not _is_staff(x_user_role, x_internal_token) and not is_owner:
+        # Gap B: constant-time hash comparison against the stored sha256, plus
+        # Postgres-clock expiry and single-use state -- never a plain `==` on a
+        # plaintext column. Every failure mode (wrong / expired / already used /
+        # never issued) collapses into the same generic 403 so an anonymous
+        # caller learns nothing about the application from the response.
+        is_owner = decision_state.verify_access_token(r, body.access_token)
+        if not is_staff and not is_owner:
             raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
+        requested_by = x_user_role if is_staff else "borrower"
 
-    # Decisioning moved to decision-service; it persists the (outcome-only) decisions row.
-    resp = clients.post(clients.DECISION_URL, "/decisions", {
-        "application_id": app_id,
-        "applicant_id": r.get("applicant_id"),
-        "name": r.get("name"),
-        "ssn": r.get("ssn") or "",
-        "requested_amount": float(r.get("amount")),
-        "term_months": r.get("term_months"),
-        "annual_income": float(r.get("income") or 0),
-        "monthly_debt": 0,            # not captured in the LOS today
-        "credit_score": None,         # pulled downstream by decision-service
-    }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+    # PR #6 review (Finding 2): TXN A -- lock the application, recheck
+    # funded/manual finality (the authoritative check -- everything above
+    # is not), atomically recover a stale (crashed-process) attempt if one
+    # exists, and create a fresh 'in_progress' attempt, all in one short
+    # transaction, released BEFORE decision-service is ever called. A
+    # request already blocked by finality performs no bureau/model work at
+    # all. See decision_state.start_decision_attempt and
+    # db/migrations/0023_decision_attempts.sql.
+    attempt_id, bureau_request_key = decision_state.start_decision_attempt(app_id, requested_by)
+
+    try:
+        resp = clients.post(clients.DECISION_URL, "/decisions", {
+            "application_id": app_id,
+            "attempt_id": attempt_id,
+            # Gap A: stable across an ambiguous-timeout retry, so the bureau
+            # returns the original operation instead of pulling again.
+            "bureau_request_key": bureau_request_key,
+            "applicant_id": r.get("applicant_id"),
+            "name": r.get("name"),
+            "ssn": r.get("ssn") or "",
+            "requested_amount": float(r.get("amount")),
+            "term_months": r.get("term_months"),
+            "annual_income": float(r.get("income") or 0),
+            "monthly_debt": 0,            # not captured in the LOS today
+            "credit_score": None,         # pulled downstream by decision-service
+        }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+    except httpx.TimeoutException as e:
+        # Ambiguous: decision-service may never have started, may still be
+        # running, or may have finished with the response lost in transit --
+        # this cannot be told apart. Release the attempt and let a retry create
+        # a fresh one. Recording 'timeout' is what makes the retry reuse this
+        # attempt's bureau_request_key (Gap A), so the retry recovers the
+        # original pull instead of billing a second one.
+        decision_state.mark_attempt_failed(attempt_id, "timeout")
+        log.error("decision-service timed out app_id=%s attempt_id=%s: %s", app_id, attempt_id, e)
+        raise HTTPException(status_code=502, detail="decision-service timed out -- please try again") from e
+    except httpx.HTTPError as e:
+        decision_state.mark_attempt_failed(attempt_id, "unavailable")
+        log.error("decision-service unavailable app_id=%s attempt_id=%s: %s", app_id, attempt_id, e)
+        raise HTTPException(status_code=502, detail="decision-service is unavailable -- please try again") from e
+
+    # Security/correctness fix: decision-service must answer the SAME
+    # attempt this request is currently waiting on -- a response that
+    # doesn't match is never trusted enough to persist anything from.
+    if resp.get("attempt_id") != attempt_id:
+        decision_state.mark_attempt_failed(attempt_id, "invalid_response")
+        log.error(
+            "decision-service attempt_id mismatch app_id=%s expected=%s got=%s",
+            app_id, attempt_id, resp.get("attempt_id"),
+        )
+        raise HTTPException(status_code=502, detail="decision-service returned an inconsistent response")
+
     outcome = resp["outcome"]
+
+    # PR #6 review (Finding 2): TXN B -- lock again, recheck finality (the
+    # one genuinely-concurrent race that can't be closed without holding a
+    # lock across the network call above -- staff finalizing or funding
+    # landing in the exact window while decision-service was computing),
+    # confirm THIS attempt is still the live, active reservation
+    # (state='in_progress' AND its lease has not passed -- see
+    # decision_state.verify_attempt_still_active_locked), and only THEN
+    # persist decisions + decision_events + mark the attempt completed, all
+    # atomically. A late/duplicate computation
+    # for an attempt that already expired-and-was-replaced (recovery ran
+    # while this call was still in flight) is discarded here too -- it must
+    # never overwrite whatever the replacement attempt already committed.
+    # If finality now blocks this attempt, it is marked discarded and
+    # NEITHER decisions NOR decision_events is written -- a discarded
+    # attempt can never appear as a permanent decision event. Every discard
+    # branch below exits the `with` block normally (not by raising inside
+    # it) so its own discard-marking UPDATE actually commits; the
+    # HTTPException is raised only after that commit succeeds.
     accept_token = None
-    # Bug fix: reflect the outcome onto applications.status -- guarded so a
-    # staff rerun on an already-funded application (run_decision has no
-    # funded check of its own) can never regress a funded row backward.
-    db.query(
-        "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
-        (_DECISION_STATUS.get(outcome, outcome), app_id),
-    )
+    discard_error = None
+    try:
+        with db.transaction() as cur:
+            # Global lock order: applications -> decision_attempts. Keep the
+            # finality recheck first; reversing these two deadlocks TXN A.
+            funded, manual = decision_state.recheck_finality_locked(cur, app_id)
+            if not decision_state.verify_attempt_still_active_locked(cur, attempt_id):
+                discard_error = (
+                    409,
+                    "this decision attempt is no longer active (expired or superseded) -- please retry",
+                )
+
+            if discard_error is not None:
+                pass  # already set above -- attempt itself is no longer active
+            elif funded:
+                cur.execute(
+                    "UPDATE decision_attempts SET state = 'discarded', completed_at = now(), "
+                    "failure_code = 'funded', failure_detail = %s WHERE id = %s AND state = 'in_progress'",
+                    (decision_state.sanitize_failure_detail("funded"), attempt_id),
+                )
+                discard_error = (422, "cannot rerun a decision on an already-funded application")
+            elif manual:
+                cur.execute(
+                    "UPDATE decision_attempts SET state = 'discarded', completed_at = now(), "
+                    "failure_code = 'superseded_by_staff', failure_detail = %s WHERE id = %s AND state = 'in_progress'",
+                    (decision_state.sanitize_failure_detail("superseded_by_staff"), attempt_id),
+                )
+                discard_error = (409, decision_state.format_rerun_blocked_message(manual))
+            else:
+                cur.execute(
+                    "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
+                    "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
+                    (app_id, outcome),
+                )
+                # Bug fix: reflect the outcome onto applications.status -- guarded so a
+                # staff rerun on an already-funded application can never regress a
+                # funded row backward (redundant with the funded check above now
+                # that both live in the same transaction, kept as defense in depth).
+                cur.execute(
+                    "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+                    (_DECISION_STATUS.get(outcome, outcome), app_id),
+                )
+                # PR #6 review (Finding 2): decision-service no longer writes this
+                # row itself (see decision-service/app/graph.py::_node_finalize) --
+                # origination writes it here, in the SAME transaction as
+                # `decisions`, only on the winning branch. attempt_id ties this
+                # permanent audit row to the exact attempt that produced it
+                # (db/migrations/0023_decision_attempts.sql).
+                cur.execute(
+                    "INSERT INTO decision_events "
+                    "(app_id, requested_amount, term_months, annual_income, bureau_score, "
+                    " model_score, model_version, top_features, decision, reason_codes, attempt_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        app_id,
+                        r.get("amount"),
+                        r.get("term_months"),
+                        r.get("income"),
+                        resp.get("bureau_score"),
+                        resp.get("score"),
+                        resp.get("model_version"),
+                        json.dumps(resp.get("top_features")),
+                        outcome,
+                        json.dumps(resp.get("reason_codes") or []),
+                        attempt_id,
+                    ),
+                )
+                if outcome == "approve":
+                    # Security fix: accept_offer used to run fully anonymously for a
+                    # fresh accept -- fine for the legitimate no-account borrower
+                    # flow, except app_id is a sequential, guessable integer, so
+                    # anyone could accept/fund a STRANGER's approved application.
+                    # This one-time token is minted only now, held by the
+                    # borrower's own browser (decision response -> frontend state
+                    # -> accept call), and is the proof of ownership accept_offer
+                    # requires from a non-staff caller. See decision_state.
+                    # issue_accept_token for hashing/expiry.
+                    accept_token = decision_state.issue_accept_token(cur, app_id)
+                else:
+                    # Security fix (audit finding): a rerun landing on deny/refer
+                    # used to leave a PREVIOUSLY minted token (from an earlier
+                    # approve) still valid -- review_application already revoked it
+                    # on its own non-approve branch, but this path had no
+                    # equivalent, so the same application could be approved, then
+                    # rerun to deny, while the old accept link still worked. Same
+                    # helper both paths use now -- see decision_state.py.
+                    decision_state.revoke_accept_token(cur, app_id)
+                # Gap B: single-use. Consumed HERE, in the same transaction as
+                # the decision it authorised -- so a rolled-back decision (or
+                # the ambiguous-timeout retry path from Gap A, which never got
+                # this far) leaves the token usable and the borrower is not
+                # locked out of a decision they never received.
+                decision_state.consume_access_token(cur, app_id)
+                cur.execute(
+                    "UPDATE decision_attempts SET state = 'completed', completed_at = now(), "
+                    "bureau_reference_id = %s "
+                    "WHERE id = %s AND state = 'in_progress'",
+                    (resp.get("bureau_reference_id"), attempt_id),
+                )
+    except Exception as e:
+        # PR #6 review, lease-invariant follow-up: a caught TXN-B
+        # persistence failure (anything unexpected reaching here -- e.g. a
+        # constraint violation) has already been rolled back by
+        # db.transaction()'s own except/rollback by the time it propagates
+        # out of the `with` block above. Mark the attempt failed in a
+        # SEPARATE short transaction right away, rather than leaving it
+        # 'in_progress' to be discovered only when its lease eventually
+        # expires -- a retry can proceed immediately instead of waiting.
+        # Lease expiry remains the fallback for the case this code can't
+        # even reach (the process itself dying mid-transaction).
+        # Type only: a database error's message carries the failing SQL, the
+        # constraint name and the offending parameter VALUES, so logging the
+        # exception itself would put decision inputs into the service log.
+        log.error(
+            "TXN B failed to persist app_id=%s attempt_id=%s error_type=%s",
+            app_id, attempt_id, type(e).__name__,
+        )
+        try:
+            decision_state.mark_attempt_failed(attempt_id, "persistence_error")
+        except Exception as cleanup_exc:  # noqa
+            # Cleanup is best-effort -- the lease is the fallback. Never let a
+            # cleanup failure replace the generic 500 below, and log it
+            # type-only for the same reason as above.
+            log.error(
+                "attempt cleanup failed app_id=%s attempt_id=%s error_type=%s",
+                app_id, attempt_id, type(cleanup_exc).__name__,
+            )
+        raise HTTPException(status_code=500, detail="could not persist the decision -- please retry") from e
+
+    if discard_error:
+        raise HTTPException(status_code=discard_error[0], detail=discard_error[1])
+
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
-        # must not fail the decision that already happened.
+        # must not fail the decision that already happened. Outside the
+        # transaction on purpose -- an external call here must never hold
+        # the coordination lock, and this only runs after TXN B has already
+        # committed the permanent decision + audit event.
         try:
             disclosure_graph.auto_generate_offer(app_id)
         except Exception as e:  # noqa
             log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
-        # Security fix: accept_offer used to run fully anonymously for a fresh
-        # accept -- fine for the legitimate no-account borrower flow, except
-        # app_id is a sequential, guessable integer, so anyone could accept/
-        # fund a STRANGER's approved application. This one-time token is
-        # minted only now, held by the borrower's own browser (decision
-        # response -> frontend state -> accept call), and is the proof of
-        # ownership accept_offer requires from a non-staff caller.
-        accept_token = secrets.token_urlsafe(32)
-        db.query(
-            "UPDATE applications SET accept_token = %s WHERE id = %s",
-            (accept_token, app_id),
-        )
+
     return DecisionOut(
         app_id=app_id,
         decision=outcome,
@@ -338,24 +587,56 @@ def run_decision(
     )
 
 
+def _already_decided_message(prior: dict) -> str:
+    label = decision_state.format_outcome_label(prior["outcome"])
+    reviewed_at = prior["reviewed_at"]
+    when = reviewed_at.isoformat() if hasattr(reviewed_at, "isoformat") else str(reviewed_at)
+    name = prior.get("reviewer_name") or prior.get("reviewer_role") or "a staff member"
+    return (
+        f"This application has already been {label} by {name} on {when}. "
+        f"Reason: {prior['reason']}. The decision cannot be overwritten."
+    )
+
+
 @router.post("/{app_id}/review", response_model=DecisionOut)
 def review_application(
     app_id: int,
     body: ReviewIn,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
-    """Feature: staff tool to resolve a "refer" decision (policies/
-    underwriting_guidelines.md's manual-review band, score 600-659 or DTI
-    43-50%). Nothing let staff actually turn a refer into an approve/deny
-    before this -- accept_offer already correctly blocked self-accept on
-    anything but "approve", but a refer just sat there forever with no way
-    to move it. Staff-only, no borrower path at all -- this isn't a decision
-    the applicant can make for themselves.
+    """Staff tool to resolve a "refer" decision (policies/underwriting_
+    guidelines.md's manual-review band, score 600-659 or DTI 43-50%) into a
+    real approve/deny. Staff-only, no borrower path at all -- this isn't a
+    decision the applicant can make for themselves.
+
+    Review fix: scoped to resolving an actual "refer" -- staff cannot use
+    this to override a clean automated approve/deny (an application that
+    never needed manual review in the first place).
+
+    Review fix: once staff decides (approve or deny, with a reason), that
+    decision is FINAL -- no staff member, not even a different one, may
+    change it afterward, and no request that arrives after the first one
+    ever writes anything, even if it races the first. manual_reviews.app_id
+    is UNIQUE (db/migrations/0020); the INSERT below is an atomic
+    check-and-write on it (same ON CONFLICT DO NOTHING + read-back pattern
+    used throughout this codebase, e.g. payments.py's idempotency-key
+    insert) -- only the request that actually wins the insert proceeds to
+    change anything, and a loser is told exactly who decided, what, when,
+    and why instead of a generic error.
+
+    Audit fix: the "current outcome is still 'refer'" check is re-verified
+    with a row lock (SELECT ... FOR UPDATE on decisions) inside the
+    transaction below, not just the plain read further down -- that plain
+    read is a fast pre-check only (avoids opening a transaction for the
+    common already-decided case), not the authoritative guard. Without the
+    re-check, a concurrent run_decision rerun changing decisions.outcome in
+    the gap between the pre-check and this transaction would go undetected.
     """
     _require_staff(x_user_role, x_internal_token)
 
-    rows = db.query("SELECT id FROM applications WHERE id = %s", (app_id,))
+    rows = db.query("SELECT id, status FROM applications WHERE id = %s", (app_id,))
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
 
@@ -363,38 +644,105 @@ def review_application(
     if not existing:
         raise HTTPException(status_code=422, detail="no decision exists yet for this application")
     current_outcome = existing[0]["outcome"]
+
+    # Fast pre-check (cheap, the common case) -- the atomic INSERT inside the
+    # transaction below is what actually enforces finality; this just avoids
+    # opening a transaction for an application that's obviously already
+    # decided, with the exact same message either way.
+    prior = db.query(
+        "SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
+        "FROM manual_reviews WHERE app_id = %s",
+        (app_id,),
+    )
+    if prior:
+        raise HTTPException(status_code=409, detail=_already_decided_message(prior[0]))
+
+    # Review fix: this endpoint resolves a refer -- it must not become a
+    # backdoor to override an automated approve/deny that was never
+    # eligible for manual review at all. Checked AFTER the already-decided
+    # check above so a refer that staff already resolved (outcome is no
+    # longer 'refer') still gets the more specific "already decided by X"
+    # message instead of this more generic one.
     if current_outcome != "refer":
         raise HTTPException(
             status_code=422,
-            detail=f"only a 'refer' decision can be manually reviewed (current outcome: {current_outcome!r})",
+            detail=f"only a 'refer' decision can be reviewed by staff (current outcome: {current_outcome!r})",
         )
 
-    # Review fix: the outcome update, audit insert, status change, and token
-    # mint used to run as separate autocommit statements -- a failure mid-way
-    # left a changed decision with no audit trail, and two concurrent
-    # reviewers could both pass the stale `current_outcome != "refer"` check
-    # above and both act on the same refer. The UPDATE below is the real,
-    # atomic guard (same RETURNING-gated pattern as accept_offer's funded
-    # check): only one concurrent reviewer's `outcome = 'refer'` can still be
-    # true, and everything else commits together with it or not at all.
+    # Best-effort: resolve the actual staff member's name for the audit
+    # record and for a future "already decided by X" message -- falls back
+    # to the role (still recorded either way) if this lookup can't resolve.
+    reviewer_name = None
+    if x_user_id:
+        user_rows = db.query("SELECT display_name, username FROM users WHERE id = %s", (x_user_id,))
+        if user_rows:
+            reviewer_name = user_rows[0]["display_name"] or user_rows[0]["username"]
+
     accept_token = None
     with db.transaction() as cur:
-        cur.execute(
-            "UPDATE decisions SET outcome = %s WHERE app_id = %s AND outcome = 'refer' "
-            "RETURNING app_id",
-            (body.outcome, app_id),
-        )
-        if not cur.fetchall():
+        # Bug fix: an application that got funded WITHOUT ever going through
+        # a manual review (e.g. an automated approve accepted directly) has
+        # no manual_reviews row yet, so the pre-check above wouldn't catch
+        # it -- staff recording a decision now would change decisions.outcome
+        # on a loan that's already been boarded. SELECT ... FOR UPDATE takes
+        # a row lock on applications for the rest of this transaction --
+        # accept_offer's own `UPDATE applications ... WHERE status <>
+        # 'funded'` targets the same row, so whichever of the two gets there
+        # first now genuinely serializes the other instead of both reading a
+        # stale "not funded" snapshot.
+        cur.execute("SELECT status FROM applications WHERE id = %s FOR UPDATE", (app_id,))
+        locked = cur.fetchall()
+        if locked and locked[0]["status"] == "funded":
             raise HTTPException(
-                status_code=409,
-                detail="this decision was already resolved by another reviewer",
+                status_code=422,
+                detail="cannot decide on an already-funded application",
             )
-        # Human-decision audit record -- kept separate from decision_events (the
-        # model's own append-only trail), see db/migrations/0018.
+
+        # Audit fix: the current_outcome == 'refer' check above reads via
+        # db.query() on a separate, autocommitted connection BEFORE this
+        # transaction even opens -- a concurrent run_decision could change
+        # decisions.outcome in the gap between that read and here.
+        # Architecture fix: origination-service is now the SOLE writer of
+        # `decisions` (decision-service only proposes an outcome; see
+        # graph.py::_node_persist), and run_decision's own transaction locks
+        # this SAME applications row (FOR UPDATE) before it ever touches
+        # decisions -- so the lock already held above is sufficient to
+        # serialize the two endpoints; no separate lock on decisions itself
+        # is needed. A plain re-read here (no lock of its own) is enough to
+        # get the value as of this transaction's turn.
+        cur.execute("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+        locked_decision = cur.fetchall()
+        locked_outcome = locked_decision[0]["outcome"] if locked_decision else None
+        if locked_outcome != "refer":
+            raise HTTPException(
+                status_code=422,
+                detail=f"only a 'refer' decision can be reviewed by staff (current outcome: {locked_outcome!r})",
+            )
+
+        # The real, atomic "first decision wins, forever" guard. ON CONFLICT
+        # DO NOTHING means a losing concurrent request writes nothing at all
+        # -- not a redundant row, not a second audit entry, nothing.
         cur.execute(
-            "INSERT INTO manual_reviews (app_id, reviewer_role, outcome, reason) "
-            "VALUES (%s, %s, %s, %s)",
-            (app_id, x_user_role, body.outcome, body.reason),
+            "INSERT INTO manual_reviews (app_id, reviewer_role, reviewer_name, outcome, reason) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (app_id) DO NOTHING "
+            "RETURNING outcome, reason, reviewer_name, reviewer_role, reviewed_at",
+            (app_id, x_user_role, reviewer_name, body.outcome, body.reason),
+        )
+        won = cur.fetchall()
+        if not won:
+            # Lost the race -- read back whichever request's decision
+            # actually landed (inside this same transaction, so it's exactly
+            # what committed) and report it the same way the pre-check does.
+            cur.execute(
+                "SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
+                "FROM manual_reviews WHERE app_id = %s",
+                (app_id,),
+            )
+            raise HTTPException(status_code=409, detail=_already_decided_message(cur.fetchall()[0]))
+
+        cur.execute(
+            "UPDATE decisions SET outcome = %s WHERE app_id = %s",
+            (body.outcome, app_id),
         )
         # Same guard as run_decision's own status write: never regress an
         # already-funded application's status backward.
@@ -403,11 +751,9 @@ def review_application(
             (_DECISION_STATUS.get(body.outcome, body.outcome), app_id),
         )
         if body.outcome == "approve":
-            accept_token = secrets.token_urlsafe(32)
-            cur.execute(
-                "UPDATE applications SET accept_token = %s WHERE id = %s",
-                (accept_token, app_id),
-            )
+            accept_token = decision_state.issue_accept_token(cur, app_id)
+        else:
+            decision_state.revoke_accept_token(cur, app_id)
 
     if body.outcome == "approve":
         # Same auto-offer as the automated approve path in run_decision above
@@ -447,82 +793,237 @@ def get_loan_history(
     return history
 
 
-class AcceptIn(BaseModel):
-    # Review fix: the one-time token minted onto the application when it was
-    # approved (run_decision) -- stands in for a real session for the
-    # legitimate no-account borrower flow. Optional so a staff-session accept
-    # (re-accept of an already-funded application) needs no token.
-    accept_token: str | None = None
+# Shared by the pre-check read below and the locked re-check inside the
+# transaction -- token_live is evaluated by Postgres's own now(), never
+# Python's, so app-host clock skew can never make a token look valid/
+# invalid to the wrong side of the check (see decision_state.py).
+_ACCEPT_TOKEN_FIELDS = (
+    "accept_token_hash, accept_token_consumed_at, "
+    "(accept_token_expires_at IS NOT NULL AND accept_token_expires_at > now()) AS token_live"
+)
 
 
 @router.post("/{app_id}/accept")
 def accept_offer(
     app_id: int,
-    body: AcceptIn = AcceptIn(),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+    # Security fix (follow-up audit): the one-time token minted onto the
+    # application when it was approved (run_decision/review_application)
+    # used to travel as a JSON body field -- not itself leaked into any
+    # access log (bodies aren't logged), but the SAME credential also
+    # traveled as a URL query parameter on the sibling GET .../offer route,
+    # which was proven to leak. Both routes now use the identical transport
+    # -- a header, never a query string, never part of a URL -- so this
+    # credential can't drift into an unsafe transport again on one route
+    # while "fixed" on the other. Optional so a staff-session accept (no
+    # token) still works. Only ever compared against its stored sha256
+    # hash -- see decision_state.verify_accept_token. The raw value is
+    # never persisted anywhere; it exists only in the borrower's browser
+    # and this one request.
+    x_offer_accept_token: str | None = Header(default=None, alias="X-Offer-Accept-Token"),
 ):
     # Security fix: this never checked that the application actually has an
     # approved decision on record, and never guarded against re-acceptance --
     # anyone who guessed an app_id could board/fund a real loan for an
     # application that was denied, still pending, or belongs to a stranger,
-    # or re-board an already-funded one a second time. Once the application
-    # is already funded, accepting again requires staff.
+    # or re-board an already-funded one a second time.
+    #
+    # Review fix: each failure state below gets its own specific, honest
+    # message (workflow rules: SUBMITTED -> REVIEWED -> APPROVED ->
+    # OFFER_CREATED -> OFFER_ACCEPTED -> BOARDED, or ... -> DENIED) -- but
+    # only for a caller who already proved ownership (or is staff) via the
+    # gate immediately above. GET /applications/{id} is staff-only now too
+    # (see get_application), so this is no longer "the same fields anonymous
+    # elsewhere" -- these specific messages are themselves gated.
+    #
+    # This first read is a FAST PRE-CHECK only (cheap, the common case, and
+    # avoids opening a transaction for an obviously-bad request) -- it is
+    # NOT the authoritative check. Everything it reads is re-verified fresh
+    # under a real row lock inside the transaction below, because all of it
+    # (status, decision outcome, token validity) can change in the gap
+    # between this read and that lock.
     rows = db.query(
-        "SELECT a.amount, a.term_months, a.status, a.accept_token, ap.name, o.apr, d.outcome "
+        f"SELECT a.amount, a.term_months, a.status, {_ACCEPT_TOKEN_FIELDS}, ap.name, "
+        "o.id AS offer_id, o.apr, o.finance_charge, o.monthly_payment, "
+        "o.amount_financed, o.total_of_payments, o.accepted_at, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
         "WHERE a.id = %s ORDER BY o.id DESC",
         (app_id,),
     )
+    # Security fix (PR #6 review, follow-up): the state-revealing branches
+    # below (funded / denied+reason / not-approved / no-offer) used to run
+    # before ANY ownership check -- a stranger with just a guessed app_id and
+    # no token at all could learn an application's full workflow state,
+    # including another applicant's specific denial reason. Ownership
+    # (hash-match only, existence check folded in) is now proven FIRST, for
+    # a non-staff caller, before anything about this app_id is revealed --
+    # same 403 whether the app doesn't exist, was never approved (so never
+    # had a token), or belongs to someone else. This is intentionally just a
+    # hash-match (not the full expiry/consumed verify_accept_token below) --
+    # a caller who once legitimately held this application's token is not a
+    # stranger, even if that token has since expired or been consumed.
+    if not _is_staff(x_user_role, x_internal_token):
+        if not rows or not decision_state.accept_token_hash_matches(
+            rows[0].get("accept_token_hash"), x_offer_accept_token
+        ):
+            raise HTTPException(status_code=403, detail="not authorized to accept this offer")
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]
-    if r.get("outcome") != "approve":
-        raise HTTPException(status_code=422, detail="application is not approved")
-
-    rate = r.get("apr") or 7.99
-    name = r.get("name") or "Borrower"
+    outcome = r.get("outcome")
 
     if r.get("status") == "funded":
-        if not _is_staff(x_user_role, x_internal_token):
-            raise HTTPException(status_code=403, detail="staff only to re-accept a funded application")
-        try:
-            loan_id = intake.board_to_servicing(app_id, name, r["amount"], rate, r["term_months"])
-        except psycopg2.errors.UniqueViolation:
-            # loans_app_id_key (db/migrations/0015) -- a loan already exists
-            # for this application; surface that instead of a raw 500.
-            raise HTTPException(status_code=409, detail="a loan already exists for this application")
-        db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
-        return {"loan_id": loan_id}
+        raise HTTPException(
+            status_code=409,
+            detail="This application has already been boarded.",
+        )
+    if outcome == "deny":
+        reason = decision_state.get_deny_reason(app_id)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This application cannot be boarded because it was denied. "
+                f"Reason: {reason or 'not on record'}."
+            ),
+        )
+    if outcome != "approve":
+        raise HTTPException(
+            status_code=422,
+            detail="This application must receive final approval before it can be boarded.",
+        )
+    if r.get("offer_id") is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Create an offer before boarding this application.",
+        )
+    # Gap F: an offer row that EXISTS but is missing canonical terms is a
+    # different problem from having no offer at all, and deserves a different
+    # answer -- the borrower needs a regenerated offer, not a first one. The
+    # authoritative check is the locked re-read below; this fast path just
+    # avoids opening a transaction for a row already known to be unusable.
+    incomplete_precheck = [f for f in _CANONICAL_OFFER_FIELDS if r.get(f) is None]
+    if incomplete_precheck:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This offer is incomplete and cannot be boarded. Missing required "
+                f"disclosure terms: {', '.join(incomplete_precheck)}. Generate a new offer."
+            ),
+        )
+
+    name = r.get("name") or "Borrower"
 
     # Security fix: a fresh accept used to run fully anonymously with no
     # ownership check at all -- app_id is a sequential, guessable integer, so
     # anyone could accept/fund a STRANGER's approved application. Staff or
-    # the one-time accept_token (minted in run_decision, held only by the
-    # borrower's own browser session) is now required.
-    is_owner = bool(body.accept_token) and bool(r.get("accept_token")) and body.accept_token == r["accept_token"]
-    if not _is_staff(x_user_role, x_internal_token) and not is_owner:
-        raise HTTPException(status_code=403, detail="not authorized to accept this offer")
+    # the one-time accept_token (minted in run_decision/review_application,
+    # held only by the borrower's own browser session) is now required.
+    # Fast-path rejection only -- see the authoritative re-check below.
+    if not _is_staff(x_user_role, x_internal_token):
+        ok, status_code, message = decision_state.verify_accept_token(r, x_offer_accept_token)
+        if not ok:
+            raise HTTPException(status_code=status_code, detail=message)
 
-    # Security fix: two concurrent accepts on the same not-yet-funded
-    # application both used to pass this same (stale-read) status check and
-    # both board a loan. The UPDATE below is the real, atomic guard --
-    # Postgres row-locks the application for the duration of the UPDATE, so
-    # only ONE concurrent caller's WHERE status <> 'funded' can still be
-    # true; the other gets zero rows back and never boards anything.
-    # Boarding runs in the SAME transaction, so a mid-board failure leaves
-    # status unfunded (safe to retry) instead of stuck funded-with-no-loan.
-    # loans_app_id_key (db/migrations/0015) is the second, database-level
+    # Security fix (audit finding): two concurrent accepts on the same
+    # not-yet-funded application, or two concurrent accepts racing to use
+    # the SAME token, both used to be able to board a loan -- the old code
+    # only re-verified `status <> 'funded'` atomically; the token, decision
+    # outcome, and offer state were all read once, before the transaction,
+    # and trusted stale. Everything that must still be true at the instant
+    # of boarding is now re-verified here under a real row lock:
+    #   - applications.status is still not 'funded' (FOR UPDATE)
+    #   - decisions.outcome is still 'approve' (a rerun/correction could
+    #     have flipped it in the gap above -- and would have revoked the
+    #     token too, but re-checking the outcome directly is the real
+    #     invariant, not just a side effect of the token being gone)
+    #   - the token (if this isn't a staff call) still hashes to the same
+    #     value, is not expired (Postgres's own now()), and is not already
+    #     consumed
+    #   - the offer is still on record with a rate
+    # loans_app_id_key (db/migrations/0015) remains a second, database-level
     # backstop for any other path that ever inserts a loan.
     with db.transaction() as cur:
         cur.execute(
-            "UPDATE applications SET status = 'funded', accept_token = NULL "
-            "WHERE id = %s AND status <> 'funded' RETURNING id",
+            f"SELECT status, {_ACCEPT_TOKEN_FIELDS} FROM applications WHERE id = %s FOR UPDATE",
             (app_id,),
         )
-        if not cur.fetchall():
-            raise HTTPException(status_code=409, detail="application already funded")
-        loan_id = intake.board_to_servicing_tx(cur, app_id, name, r["amount"], rate, r["term_months"])
+        locked_rows = cur.fetchall()
+        if not locked_rows:
+            raise HTTPException(status_code=404, detail="application not found")
+        locked = locked_rows[0]
+        if locked["status"] == "funded":
+            raise HTTPException(
+                status_code=409,
+                detail="This application has already been boarded.",
+            )
+
+        cur.execute("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+        dec_rows = cur.fetchall()
+        locked_outcome = dec_rows[0]["outcome"] if dec_rows else None
+        if locked_outcome != "approve":
+            raise HTTPException(
+                status_code=422,
+                detail="This application is no longer approved and cannot be boarded.",
+            )
+
+        if not _is_staff(x_user_role, x_internal_token):
+            ok, status_code, message = decision_state.verify_accept_token(locked, x_offer_accept_token)
+            if not ok:
+                raise HTTPException(status_code=status_code, detail=message)
+
+        # Re-read the offer fresh under the lock too -- there is no
+        # offer-edit/cancel endpoint in this system today, so its rate
+        # cannot actually change underneath us, but the accepted_at
+        # condition matters: a second racing request must not board against
+        # an offer this same transaction is about to mark accepted.
+        cur.execute(
+            "SELECT apr, finance_charge, monthly_payment, amount_financed, total_of_payments "
+            "FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
+            (app_id,),
+        )
+        offer_rows = cur.fetchall()
+        if not offer_rows:
+            raise HTTPException(
+                status_code=409,
+                detail="Create an offer before boarding this application.",
+            )
+        # Gap F (PR #6 review): this used to check `apr IS NULL` alone, so an
+        # offer row missing finance_charge/monthly_payment/amount_financed/
+        # total_of_payments still boarded a real loan -- funding terms the
+        # borrower was never shown a complete disclosure for. All five
+        # canonical amounts must be present, checked here under the row lock.
+        incomplete = [f for f in _CANONICAL_OFFER_FIELDS if offer_rows[0][f] is None]
+        if incomplete:
+            log.error(
+                "refusing to board on an incomplete offer app_id=%s missing=%s",
+                app_id, ",".join(incomplete),
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This offer is incomplete and cannot be boarded. Missing required "
+                    f"disclosure terms: {', '.join(incomplete)}. Generate a new offer."
+                ),
+            )
+        rate = offer_rows[0]["apr"]
+
+        cur.execute(
+            "UPDATE applications SET status = 'funded', accept_token_hash = NULL, "
+            "accept_token_expires_at = NULL, accept_token_consumed_at = now() "
+            "WHERE id = %s AND status <> 'funded'",
+            (app_id,),
+        )
+        cur.execute(
+            "UPDATE offers SET accepted_at = now() WHERE app_id = %s AND accepted_at IS NULL",
+            (app_id,),
+        )
+        try:
+            loan_id = intake.board_to_servicing_tx(cur, app_id, name, r["amount"], rate, r["term_months"])
+        except psycopg2.errors.UniqueViolation:
+            # loans_app_id_key (db/migrations/0015) -- a loan already exists
+            # for this application; surface that instead of a raw 500.
+            raise HTTPException(status_code=409, detail="a loan already exists for this application")
     return {"loan_id": loan_id}

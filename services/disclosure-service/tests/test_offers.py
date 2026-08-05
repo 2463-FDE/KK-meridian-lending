@@ -29,6 +29,7 @@ prevent.
 """
 from decimal import Decimal
 
+import psycopg2.errors
 from app import config, db
 from app import offer as offer_mod
 from app.database import get_session
@@ -176,6 +177,39 @@ def test_create_offer_insert_atomically_checks_approval_and_upserts_by_decision(
     assert "ON CONFLICT (decision_id)" in insert_call[0]
     assert "DO NOTHING" in insert_call[0]
     assert "DO UPDATE" not in insert_call[0]
+
+
+def test_create_offer_falls_back_to_read_when_insert_hits_the_app_id_constraint(monkeypatch):
+    """Concurrency fix (borrower-workflow audit, found by a real-Postgres
+    test -- see db/tests/test_offer_creation_concurrency.py): offers.
+    decision_id and offers.app_id are two SEPARATE UNIQUE constraints, even
+    though this INSERT always sets them equal. A genuinely concurrent
+    insert can violate offers_app_id_key, which ON CONFLICT (decision_id)
+    does not target -- this used to raise an unhandled 500. It must be
+    caught and treated exactly like ON CONFLICT DO NOTHING firing: fall
+    through to the read-back, report created=False, never leak a raw
+    UniqueViolation to the caller."""
+    fake_db = _FakeDb()
+    fake_db.stored_offer = {
+        "id": 55, "app_id": 10, "decision_id": 10, "fee_pct_used": 0.03,
+        "apr": 7.99, "finance_charge": 500.0, "monthly_payment": 400.0,
+        "amount_financed": 8700.0, "total_of_payments": 9600.0,
+    }
+    real_query = fake_db.query
+
+    def _raise_on_insert(sql, params=None):
+        if "INSERT INTO offers" in sql:
+            fake_db.calls.append((sql, params))
+            raise psycopg2.errors.UniqueViolation("duplicate key value violates offers_app_id_key")
+        return real_query(sql, params)
+
+    monkeypatch.setattr(db, "query", _raise_on_insert)
+
+    resp = client.post("/offers", json=_offer_payload(application_id=10))
+
+    assert resp.status_code == 200
+    assert resp.json()["created"] is False
+    assert resp.json()["offer_id"] == 55
 
 
 def test_create_offer_ignores_client_supplied_principal_and_term(monkeypatch):

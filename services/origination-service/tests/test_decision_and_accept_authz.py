@@ -42,7 +42,7 @@ import contextlib
 
 import psycopg2.errors
 
-from app import clients, config, db, intake
+from app import clients, config, db, decision_state, intake
 from app.main import app
 from fastapi.testclient import TestClient
 
@@ -50,29 +50,101 @@ client = TestClient(app)
 
 _ACCESS_TOKEN = "real-access-token-xyz789"
 
+# Gap B: the submission token is stored as a sha256 hash with a Postgres-clock
+# expiry and a single-use marker -- never in plaintext. `access_token_live` is
+# what the real query computes from access_token_expires_at.
 _APPLICATION_ROW = {
     "id": 10, "applicant_id": 5, "amount": 9000, "term_months": 24,
     "income": 40000, "name": "Jane Borrower", "ssn": "123456781",
-    "access_token": _ACCESS_TOKEN,
+    "access_token_hash": decision_state.hash_access_token(_ACCESS_TOKEN),
+    "access_token_consumed_at": None,
+    "access_token_live": True,
 }
 
 
 # --- POST /{app_id}/decision -------------------------------------------------
 
 def _fake_decision_client_post(monkeypatch, response=None):
+    """PR #6 review (Finding 2): decision-service echoes back the SAME
+    attempt_id it was sent, and run_decision rejects a mismatch -- this fake
+    always echoes payload["attempt_id"] automatically so existing tests that
+    don't care about attempt_id specifically don't need to know its value."""
     calls = []
 
     def _fake_post(base_url, path, payload, headers=None):
         calls.append((base_url, path, payload, headers))
-        return response or {"outcome": "approve", "score": 700, "reason": None}
+        body = dict(response or {"outcome": "approve", "score": 700, "reason": None})
+        body.setdefault("attempt_id", payload.get("attempt_id"))
+        return body
 
     monkeypatch.setattr(clients, "post", _fake_post)
     return calls
 
 
+class _FakeRunDecisionTxCursor:
+    """Stands in for the psycopg2 cursor db.transaction() yields -- now used
+    for BOTH of run_decision's short transactions (PR #6 review, Finding 2):
+    TXN A (decision_state.start_decision_attempt, before decision-service is
+    called) and TXN B (the post-call recheck + decisions/decision_events/
+    attempt-completion write). Both share the exact same
+    decision_state.recheck_finality_locked helper for the applications-lock
+    and manual_reviews re-check, so locked_status/manual_review drive both.
+    manual_review lets a test simulate a staff decision committing between
+    the outer pre-check and either transaction (the race this design
+    closes)."""
+
+    def __init__(self, calls, locked_status="submitted", manual_review=None, attempt_id=1,
+                 attempt_still_active=True):
+        self.calls = calls
+        self.locked_status = locked_status
+        self.manual_review = manual_review
+        self.attempt_id = attempt_id
+        self.attempt_still_active = attempt_still_active
+        self._last = None
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql.strip(), params))
+        stmt = sql.strip()
+        if stmt.startswith("SELECT status FROM applications"):
+            self._last = [{"status": self.locked_status}] if self.locked_status is not None else []
+        elif stmt.startswith("SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
+                              "FROM manual_reviews"):
+            self._last = [self.manual_review] if self.manual_review else []
+        elif stmt.startswith("SELECT id, (lease_expires_at > now())"):
+            self._last = []  # no other attempt already in flight, by default
+        elif stmt.startswith("SELECT state, (lease_expires_at > now()) AS live"):
+            # TXN B's verify_attempt_still_active_locked -- still 'in_progress'
+            # and live unless a test says otherwise (attempt_still_active=False
+            # simulates a concurrent recovery having already expired/replaced it).
+            self._last = [{"state": "in_progress", "live": True}] if self.attempt_still_active else [
+                {"state": "expired", "live": False}
+            ]
+        elif stmt.startswith("INSERT INTO decision_attempts"):
+            self._last = [{"id": self.attempt_id}]
+        else:
+            self._last = []
+
+    def fetchall(self):
+        return self._last or []
+
+
+def _stub_run_decision_transaction(monkeypatch, calls, locked_status="submitted", manual_review=None, attempt_id=1,
+                                    attempt_still_active=True):
+    cursor = _FakeRunDecisionTxCursor(calls, locked_status, manual_review, attempt_id, attempt_still_active)
+
+    @contextlib.contextmanager
+    def _fake_tx():
+        yield cursor
+
+    monkeypatch.setattr(db, "transaction", _fake_tx)
+    return cursor
+
+
 def test_first_decision_with_the_applications_own_access_token_runs(monkeypatch):
     """The legitimate no-account borrower flow: the access_token minted at
     submission and handed back is round-tripped on the "Get decision" call."""
+    calls = []
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return []  # no decision on record yet -- this is the first run
@@ -80,6 +152,7 @@ def test_first_decision_with_the_applications_own_access_token_runs(monkeypatch)
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
@@ -122,28 +195,31 @@ def test_approved_decision_mints_an_accept_token(monkeypatch):
     """Review fix: accept_offer now requires either staff or this one-time
     token for a fresh accept -- it has to actually be minted (and returned to
     the caller) whenever the decision is an approval."""
-    update_calls = []
+    calls = []
 
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
-            return []
-        if sql.strip().startswith("UPDATE applications SET accept_token"):
-            update_calls.append(params)
             return []
         return [_APPLICATION_ROW]
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
     assert resp.status_code == 200
     token = resp.json()["accept_token"]
     assert token  # a real, non-empty token was minted
-    assert update_calls and update_calls[0][0] == token  # and persisted onto the app
+    update_calls = [c for c in calls if c[0].startswith("UPDATE applications SET accept_token_hash")]
+    # Only the sha256 hash is ever persisted -- never the raw token itself.
+    assert update_calls and update_calls[0][1][0] == decision_state.hash_accept_token(token)
+    assert token not in update_calls[0][1]
 
 
 def test_denied_decision_mints_no_accept_token(monkeypatch):
+    calls = []
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return []
@@ -151,6 +227,7 @@ def test_denied_decision_mints_no_accept_token(monkeypatch):
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch, response={"outcome": "deny", "score": 500, "reason": "low score"})
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post("/applications/10/decision", json={"access_token": _ACCESS_TOKEN})
 
@@ -174,6 +251,8 @@ def test_rerun_of_an_existing_decision_requires_staff(monkeypatch):
 
 
 def test_rerun_of_an_existing_decision_succeeds_for_staff(monkeypatch):
+    calls = []
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return [{"app_id": 10}]
@@ -183,6 +262,7 @@ def test_rerun_of_an_existing_decision_succeeds_for_staff(monkeypatch):
 
     monkeypatch.setattr(db, "query", _fake_query)
     _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls)
 
     resp = client.post(
         "/applications/10/decision",
@@ -213,7 +293,12 @@ def test_rerun_of_an_existing_decision_by_staff_without_internal_token_is_forbid
 def test_rerun_of_an_already_funded_application_is_rejected(monkeypatch):
     """Bug found in the field: scoring is deterministic, so a rerun on a
     funded application used to silently reset its recorded decision back to
-    the automated outcome while the loan sat funded on top of it."""
+    the automated outcome while the loan sat funded on top of it.
+
+    PR #6 review (Finding 2): this block now happens inside
+    decision_state.start_decision_attempt's locked recheck (TXN A), before
+    decision-service is ever called -- not the old unlocked pre-check --
+    so db.transaction() must be stubbed too."""
     funded_row = {**_APPLICATION_ROW, "status": "funded"}
 
     def _fake_query(sql, params=None):
@@ -222,6 +307,7 @@ def test_rerun_of_an_already_funded_application_is_rejected(monkeypatch):
         return [funded_row]
 
     monkeypatch.setattr(db, "query", _fake_query)
+    _stub_run_decision_transaction(monkeypatch, [], locked_status="funded")
     calls = _fake_decision_client_post(monkeypatch)
 
     resp = client.post(
@@ -237,15 +323,31 @@ def test_rerun_of_a_manually_reviewed_application_is_rejected(monkeypatch):
     """Bug found in the field: a rerun after a manual review (routers/
     applications.py's review_application) silently reset the outcome back to
     "refer", making the same application eligible for manual review again --
-    and again, indefinitely (observed: 5 flip-flopped reviews on one app)."""
+    and again, indefinitely (observed: 5 flip-flopped reviews on one app).
+
+    Review fix: the block message used to be generic ("resolved by staff");
+    it now states the actual outcome/staff member/timestamp/reason, and the
+    status code is 409 (a real conflict), not 422.
+
+    PR #6 review (Finding 2): this block now happens inside
+    decision_state.start_decision_attempt's locked recheck (TXN A), before
+    decision-service is ever called -- not the old unlocked pre-check --
+    so db.transaction() must be stubbed too."""
+    manual_review = {
+        "outcome": "deny", "reason": "DTI too high after manual re-verification",
+        "reviewer_name": "Sam Okafor", "reviewer_role": "underwriter",
+        "reviewed_at": "2026-08-01T12:00:00+00:00",
+    }
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return [{"app_id": 10}]
         if "FROM manual_reviews" in sql:
-            return [{"id": 1}]  # this application has a review on record
+            return [manual_review]
         return [_APPLICATION_ROW]
 
     monkeypatch.setattr(db, "query", _fake_query)
+    _stub_run_decision_transaction(monkeypatch, [], manual_review=manual_review)
     calls = _fake_decision_client_post(monkeypatch)
 
     resp = client.post(
@@ -253,20 +355,119 @@ def test_rerun_of_a_manually_reviewed_application_is_rejected(monkeypatch):
         headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
     )
 
-    assert resp.status_code == 422
+    assert resp.status_code == 409
     assert not calls
+    detail = resp.json()["detail"]
+    assert "manually DENIED" in detail
+    assert "Sam Okafor" in detail
+    assert "DTI too high after manual re-verification" in detail
+    assert "cannot be rerun" in detail
+
+
+def test_rerun_blocked_when_a_manual_review_commits_during_the_decision_service_call(monkeypatch):
+    """Architecture fix: decision-service no longer writes `decisions`
+    itself (it only proposes an outcome + records its own decision_events
+    audit row) -- origination-service is the sole writer, under a lock on
+    the SAME applications row review_application's own transaction locks.
+    Simulated here: the cheap pre-call check sees no manual review yet
+    (passes), decision-service responds with a proposed outcome, but by the
+    time this request's OWN transaction opens and takes the lock, a manual
+    review has landed (as if review_application's transaction committed
+    first) -- the authoritative in-transaction re-check (under the lock)
+    must catch this, never write decisions/applications.status/
+    accept_token, and report the real, effective decision."""
+    calls = []
+
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return [{"app_id": 10}]
+        if "FROM manual_reviews" in sql:
+            return []  # the cheap pre-call check -- nothing yet
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(
+        monkeypatch, calls,
+        manual_review={
+            "outcome": "approve", "reason": "DTI recalculated under 43%",
+            "reviewer_name": "Priya Nair", "reviewer_role": "csr",
+            "reviewed_at": "2026-08-01T12:05:00+00:00",
+        },
+    )
+
+    resp = client.post(
+        "/applications/10/decision",
+        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "manually APPROVED" in detail
+    assert "Priya Nair" in detail
+    # The race was caught under the lock, inside the transaction -- no
+    # decisions INSERT, no status UPDATE, no accept_token mint ever ran.
+    assert not any(c[0].startswith("INSERT INTO decisions") for c in calls)
+    assert not any(c[0].startswith("UPDATE applications") for c in calls)
+
+
+def test_rerun_discarded_when_its_own_attempt_expired_and_was_replaced(monkeypatch):
+    """PR #6 review, lease invariant: TXN B must verify the attempt it's
+    about to persist under is STILL the live, active reservation -- not
+    just that funded/manual finality hasn't landed. Simulated here: the
+    external call to decision-service finally returns, but by the time
+    this request's own TXN B takes the lock, ITS OWN attempt has already
+    expired and been replaced by a recovery (attempt_still_active=False) --
+    the late result must be discarded, writing neither decisions nor
+    decision_events, never overwriting whatever the replacement attempt
+    already committed."""
+    calls = []
+
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return []
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls, attempt_still_active=False)
+
+    resp = client.post(
+        "/applications/10/decision",
+        json={"access_token": _ACCESS_TOKEN},
+    )
+
+    assert resp.status_code == 409
+    assert "no longer active" in resp.json()["detail"]
+    assert not any(c[0].startswith("INSERT INTO decisions") for c in calls)
+    assert not any(c[0].startswith("INSERT INTO decision_events") for c in calls)
+    assert not any(c[0].startswith("UPDATE decision_attempts SET state = 'completed'") for c in calls)
 
 
 # --- POST /{app_id}/accept ---------------------------------------------------
 
 _ACCEPT_TOKEN = "real-token-abc123"
+_ACCEPT_TOKEN_HASH = decision_state.hash_accept_token(_ACCEPT_TOKEN)
 
 
-def _accept_row(status="approved", outcome="approve", apr=9.99, accept_token=_ACCEPT_TOKEN):
+def _accept_row(status="approved", outcome="approve", apr=9.99,
+                 token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None,
+                 offer_id=1):
+    """Gap F: the accept pre-check now reads all five canonical offer amounts
+    plus offer_id, so it can tell "no offer at all" (offer_id NULL) apart from
+    "offer exists but is incomplete". `apr=None` here keeps meaning "no offer"
+    for the existing callers that use it that way, so offer_id follows apr."""
     return {
         "amount": 9000, "term_months": 24, "status": status,
-        "name": "Jane Borrower", "apr": apr, "outcome": outcome,
-        "accept_token": accept_token,
+        "name": "Jane Borrower", "outcome": outcome,
+        "offer_id": offer_id if apr is not None else None,
+        "apr": apr,
+        "finance_charge": 500.0 if apr is not None else None,
+        "monthly_payment": 400.0 if apr is not None else None,
+        "amount_financed": 8700.0 if apr is not None else None,
+        "total_of_payments": 9600.0 if apr is not None else None,
+        "accept_token_hash": token_hash, "accept_token_consumed_at": token_consumed_at,
+        "token_live": token_live,
     }
 
 
@@ -283,24 +484,62 @@ def _stub_board_to_servicing(monkeypatch, loan_id=555, raises=None):
     return calls
 
 
-class _FakeTxCursor:
-    """Stands in for the psycopg2 cursor db.transaction() yields --
-    simulates the atomic conditional UPDATE (claim_succeeds toggles whether
-    a concurrent accept already won the race) and the two board_to_
-    servicing_tx INSERTs."""
+class _FakeAcceptTxCursor:
+    """Stands in for the psycopg2 cursor db.transaction() yields for
+    accept_offer -- the applications row lock (FOR UPDATE, with the hashed
+    token/expiry/consumed columns), the decisions outcome re-check, the
+    offer re-check, the atomic board+consume UPDATE, and the two
+    board_to_servicing_tx INSERTs, all under this one cursor, same as the
+    real single transaction.
 
-    def __init__(self, claim_succeeds, loan_id):
-        self.claim_succeeds = claim_succeeds
+    A concurrent accept that already won the race is now simulated via
+    locked_status="funded" (the FOR UPDATE re-check catches it immediately,
+    before the decisions/offer/board statements ever run) -- not via a
+    conditional UPDATE return value like the pre-hash version of this test.
+    raise_on_loan_insert lets a test simulate the loans_app_id_key backstop
+    firing on the INSERT INTO loans specifically.
+    """
+
+    def __init__(self, loan_id=999, locked_status="approved", locked_outcome="approve",
+                 token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None,
+                 offer_apr=9.99):
         self.loan_id = loan_id
+        self.locked_status = locked_status
+        self.locked_outcome = locked_outcome
+        self.token_hash = token_hash
+        self.token_live = token_live
+        self.token_consumed_at = token_consumed_at
+        self.offer_apr = offer_apr
         self.executed = []
+        self.raise_on_loan_insert = None
         self._last = None
 
     def execute(self, sql, params=None):
         self.executed.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("UPDATE applications"):
-            self._last = [{"id": params[0]}] if self.claim_succeeds else []
+        if stmt.startswith("SELECT status, accept_token_hash"):
+            self._last = [{
+                "status": self.locked_status,
+                "accept_token_hash": self.token_hash,
+                "accept_token_consumed_at": self.token_consumed_at,
+                "token_live": self.token_live,
+            }]
+        elif stmt.startswith("SELECT outcome FROM decisions"):
+            self._last = [{"outcome": self.locked_outcome}] if self.locked_outcome else []
+        elif stmt.startswith("SELECT apr, finance_charge, monthly_payment"):
+            # Gap F: all five canonical terms are re-read under the lock now.
+            self._last = [{
+                "apr": self.offer_apr, "finance_charge": 500.0,
+                "monthly_payment": 400.0, "amount_financed": 8700.0,
+                "total_of_payments": 9600.0,
+            }] if self.offer_apr is not None else []
+        elif stmt.startswith("UPDATE applications SET status = 'funded'"):
+            self._last = None
+        elif stmt.startswith("UPDATE offers SET accepted_at"):
+            self._last = None
         elif stmt.startswith("INSERT INTO loans"):
+            if self.raise_on_loan_insert:
+                raise self.raise_on_loan_insert
             self._last = {"id": self.loan_id}
         elif stmt.startswith("INSERT INTO balances"):
             self._last = None
@@ -314,8 +553,12 @@ class _FakeTxCursor:
         return self._last
 
 
-def _stub_transaction(monkeypatch, claim_succeeds=True, loan_id=999):
-    cursor = _FakeTxCursor(claim_succeeds, loan_id)
+def _stub_transaction(monkeypatch, loan_id=999, locked_status="approved", locked_outcome="approve",
+                       token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None,
+                       offer_apr=9.99):
+    cursor = _FakeAcceptTxCursor(
+        loan_id, locked_status, locked_outcome, token_hash, token_live, token_consumed_at, offer_apr,
+    )
 
     @contextlib.contextmanager
     def _fake_tx():
@@ -341,29 +584,94 @@ def test_first_accept_rejects_wrong_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": "attacker-guessed-token"})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": "attacker-guessed-token"})
 
     assert resp.status_code == 403
     assert not board_calls
 
 
+def test_first_accept_rejects_expired_token(monkeypatch):
+    """Security fix: expiry is enforced server-side (Postgres's own now(),
+    computed as the token_live boolean) -- an expired token must be
+    rejected with a clear, specific message, not the generic 403."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", token_live=False)])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 409
+    assert "expired" in resp.json()["detail"]
+    assert not board_calls
+
+
+def test_first_accept_rejects_already_consumed_token(monkeypatch):
+    """Security fix: single-use -- a token that already boarded a loan once
+    must not work again, independent of the hash/expiry checks."""
+    monkeypatch.setattr(
+        db, "query",
+        lambda sql, params=None: [_accept_row(status="approved", token_consumed_at="2026-08-01T00:00:00+00:00")],
+    )
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 409
+    assert "already been used" in resp.json()["detail"]
+    assert not board_calls
+
+
+def test_first_accept_rejects_a_revoked_token(monkeypatch):
+    """A rerun/manual-correction away from approve nulls accept_token_hash
+    (decision_state.revoke_accept_token) -- a request still carrying the
+    now-revoked raw token must be rejected, not silently accepted because
+    SOME hash used to exist.
+
+    Security fix (PR #6 review): the ownership gate now runs BEFORE any
+    state is revealed (hash-match only -- no hash at all can never match),
+    so this now returns the same generic 403 "not authorized" every other
+    non-owner gets, rather than the specific 409 "expired" message -- a
+    caller with a revoked token is not meaningfully different from a
+    stranger with no token at all."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", token_hash=None)])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 403
+    assert not board_calls
+
+
+def test_first_accept_error_response_never_echoes_the_raw_token(monkeypatch):
+    """A wrong-token attempt's own error message must never reflect the
+    caller's supplied value back -- always the same fixed, generic text."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
+    _stub_board_to_servicing(monkeypatch)
+
+    supplied = "a-very-distinctive-wrong-token-value"
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": supplied})
+
+    assert resp.status_code == 403
+    assert supplied not in resp.text
+
+
 def test_first_accept_succeeds_with_the_correct_accept_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
-    cursor = _stub_transaction(monkeypatch, claim_succeeds=True, loan_id=777)
+    cursor = _stub_transaction(monkeypatch, loan_id=777)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 777
-    # The status flip clears accept_token too -- one-time use.
-    update_sql = cursor.executed[0][0]
-    assert "accept_token = NULL" in update_sql
-    assert "status <> 'funded'" in update_sql
+    # The status flip clears the hash and stamps consumed_at too -- one-time use.
+    board_update = next(c for c in cursor.executed if c[0].startswith("UPDATE applications SET status = 'funded'"))
+    assert "accept_token_hash = NULL" in board_update[0]
+    assert "accept_token_consumed_at = now()" in board_update[0]
+    assert "status <> 'funded'" in board_update[0]
 
 
 def test_first_accept_succeeds_for_staff_without_a_token(monkeypatch):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
-    _stub_transaction(monkeypatch, claim_succeeds=True, loan_id=888)
+    _stub_transaction(monkeypatch, loan_id=888)
 
     resp = client.post(
         "/applications/10/accept",
@@ -387,54 +695,77 @@ def test_first_accept_by_staff_without_internal_token_is_forbidden(monkeypatch):
 def test_first_accept_returns_409_when_a_concurrent_accept_already_won(monkeypatch):
     """The review's race-condition finding: two concurrent accepts on the same
     not-yet-funded application both used to pass the same stale-read status
-    check and both board a loan. The atomic UPDATE is the real guard -- a
-    caller who loses the race gets 0 rows back and never boards anything."""
+    check and both board a loan. The FOR UPDATE re-check inside the
+    transaction is the real guard -- a caller who loses the race sees
+    status already 'funded' the instant it acquires the lock, and never
+    reaches the decisions/offer/board statements."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
-    cursor = _stub_transaction(monkeypatch, claim_succeeds=False)
+    cursor = _stub_transaction(monkeypatch, locked_status="funded")
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
-    # Only the UPDATE ran -- the loser never reaches the board INSERTs.
+    # Only the FOR UPDATE SELECT ran -- the loser never reaches the board INSERTs.
     assert len(cursor.executed) == 1
 
 
-def test_accept_rejects_application_that_was_never_approved(monkeypatch):
-    """The other half of the review finding: accept never checked the
-    decision outcome at all -- a denied or still-pending application could be
-    boarded/funded like any other."""
-    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="submitted", outcome="deny")])
-    board_calls = _stub_board_to_servicing(monkeypatch)
+def test_first_accept_rejected_when_decision_no_longer_approved_under_lock(monkeypatch):
+    """Security fix (audit finding): the pre-check read outcome == 'approve'
+    before the transaction opened -- a rerun/correction could flip it in
+    that gap. The authoritative re-check inside the lock must catch this
+    even though the stale pre-check read passed."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
+    cursor = _stub_transaction(monkeypatch, locked_outcome="deny")
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 422
-    assert not board_calls  # never boards/funds a loan for a non-approved application
+    assert not any(c[0].startswith("UPDATE applications SET status = 'funded'") for c in cursor.executed)
 
 
-def test_reaccept_of_an_already_funded_application_requires_staff(monkeypatch):
+# test_accept_rejects_application_that_was_never_approved (the review's
+# original finding: accept never checked the decision outcome at all) is now
+# covered more precisely by test_accept_rejects_a_denied_application_with_
+# its_reason and test_accept_rejects_a_still_pending_application below.
+
+
+def test_reaccept_of_an_already_funded_application_is_rejected_with_no_token(monkeypatch):
+    """Requirement: 'This application has already been boarded.' -- a hard
+    block, not a staff-only re-board path (that path is removed: the atomic
+    funding transaction already prevents the partial state -- funded status
+    with no loan -- it used to exist to recover from)."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post("/applications/10/accept", json={"accept_token": _ACCEPT_TOKEN})
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
-    assert resp.status_code == 403
-    assert not board_calls  # never re-boards/re-funds
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "This application has already been boarded."
+    assert not board_calls
 
 
-def test_reaccept_of_an_already_funded_application_succeeds_for_staff(monkeypatch):
+def test_reaccept_of_an_already_funded_application_is_rejected_for_staff_too(monkeypatch):
+    """Requirement: already-boarded blocks EVERYONE, staff included -- there
+    is no more re-board escape hatch."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
-    _stub_board_to_servicing(monkeypatch)
+    board_calls = _stub_board_to_servicing(monkeypatch)
 
     resp = client.post(
         "/applications/10/accept",
         headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "This application has already been boarded."
+    assert not board_calls
 
 
-def test_reaccept_of_an_already_funded_application_by_staff_without_internal_token_is_forbidden(monkeypatch):
+def test_reaccept_of_an_already_funded_application_by_staff_without_internal_token_is_still_rejected(monkeypatch):
+    """Security fix (PR #6 review): the ownership/staff gate now runs BEFORE
+    any state (including funded) is revealed -- an X-User-Role claim with no
+    X-Internal-Token is not trusted (same as everywhere else _is_staff is
+    used) and, with no accept_token either, gets the same generic 403
+    "not authorized" as any other non-owner, not the specific 409."""
     monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
     board_calls = _stub_board_to_servicing(monkeypatch)
 
@@ -444,16 +775,70 @@ def test_reaccept_of_an_already_funded_application_by_staff_without_internal_tok
     assert not board_calls
 
 
-def test_reaccept_reports_409_when_a_loan_already_exists(monkeypatch):
-    """loans_app_id_key (db/migrations/0015) is the database-level backstop --
-    if a staff re-accept somehow races a loan that already exists for this
-    app_id, surface a clean 409 instead of a raw 500."""
-    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="funded")])
-    _stub_board_to_servicing(monkeypatch, raises=psycopg2.errors.UniqueViolation("dup"))
+def test_first_accept_returns_409_when_no_offer_exists_yet(monkeypatch):
+    """Review fix: run_decision's auto_generate_offer call is best-effort, so
+    an approved application can reach accept_offer with no linked offer row
+    at all. This used to fall back to a hardcoded 7.99 APR and board the
+    borrower at a rate/terms nobody ever showed them -- no TILA disclosure on
+    record. Must fail closed (409) with a specific, actionable message."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved", apr=None)])
+    board_calls = _stub_board_to_servicing(monkeypatch)
 
-    resp = client.post(
-        "/applications/10/accept",
-        headers={"X-User-Role": "underwriter", "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
-    )
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
 
     assert resp.status_code == 409
+    assert resp.json()["detail"] == "Create an offer before boarding this application."
+    assert not board_calls
+
+
+def test_accept_rejects_a_denied_application_with_its_reason(monkeypatch):
+    """Requirement: 'This application cannot be boarded because it was
+    denied. Reason: [decision reason].'"""
+    def _fake_query(sql, params=None):
+        if "FROM decision_events" in sql:
+            return [{"reason_codes": ["Low credit bureau score relative to lending criteria"]}]
+        if "FROM manual_reviews" in sql:
+            return []  # automated-only deny -- no staff review on record
+        return [_accept_row(status="denied", outcome="deny")]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "This application cannot be boarded because it was denied. "
+        "Reason: Low credit bureau score relative to lending criteria."
+    )
+    assert not board_calls
+
+
+def test_accept_rejects_a_still_pending_application(monkeypatch):
+    """Requirement: 'This application must receive final approval before it
+    can be boarded.' -- covers 'refer' and no-decision-yet alike."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="in_review", outcome="refer")])
+    board_calls = _stub_board_to_servicing(monkeypatch)
+
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "This application must receive final approval before it can be boarded."
+    assert not board_calls
+
+
+def test_accept_reports_409_when_a_loan_already_exists(monkeypatch):
+    """loans_app_id_key (db/migrations/0015) is the database-level backstop --
+    if the loans INSERT somehow races a loan that already exists for this
+    app_id (e.g. the legacy direct-board endpoint), surface a clean 409
+    instead of a raw 500. This is now exercised on the NORMAL (not-yet-
+    funded) accept path -- the already-funded case is hard-blocked before
+    ever reaching a board attempt at all (see the already-boarded tests)."""
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [_accept_row(status="approved")])
+    cursor = _stub_transaction(monkeypatch)
+    cursor.raise_on_loan_insert = psycopg2.errors.UniqueViolation("dup")
+
+    resp = client.post("/applications/10/accept", headers={"X-Offer-Accept-Token": _ACCEPT_TOKEN})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "a loan already exists for this application"

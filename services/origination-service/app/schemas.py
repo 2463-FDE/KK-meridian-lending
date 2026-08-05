@@ -143,6 +143,11 @@ class Disclosure(BaseModel):
 class OfferOut(BaseModel):
     app_id: int
     disclosure: Disclosure
+    # Idempotency fix: a repeat/racing POST /offer for an application that
+    # already has one (e.g. auto-generated the instant the decision came
+    # back approve) now returns that SAME offer instead of a 409 -- this
+    # tells the caller which happened without parsing anything.
+    created: bool = True
 
 
 class ApplicationDetail(BaseModel):
@@ -157,6 +162,16 @@ class ApplicationDetail(BaseModel):
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
     offer: Optional[Disclosure] = None
+    # Review fix: once staff decides (review_application), that decision is
+    # final -- the frontend needs to know this to disable the Approve/Deny
+    # controls, not just rely on the backend's own 409 after a doomed retry.
+    decision_final: bool = False
+    # Bug fix: without these, the finalized-decision panel had nothing real
+    # to show -- staff could only see the original reason/who/when by
+    # deliberately attempting (and being blocked by) a second decision.
+    decision_reason: Optional[str] = None
+    decision_by: Optional[str] = None
+    decision_at: Optional[str] = None
 
 
 # income/employment_years are underwriting inputs, not borrower-facing status data.

@@ -1,8 +1,8 @@
 """Origination service (LOS) — FastAPI.
 
-Endpoints: application intake, KYC (CIP), decisioning, offer/disclosure, and the
-LOS->LSS boarding seam. Read paths (list/detail) use SQLAlchemy; the older write paths
-(intake, decisioning, boarding) still use raw psycopg2 — a partial, unfinished migration.
+Endpoints: application intake, KYC (CIP), decisioning, and offer/disclosure. Read
+paths (list/detail) use SQLAlchemy; the older write paths (intake, decisioning,
+boarding) still use raw psycopg2 — a partial, unfinished migration.
 """
 import logging
 import os
@@ -10,9 +10,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
 
-from . import intake
 from .logging_config import get_logger
 from .routers import applications, offers
 
@@ -38,19 +36,5 @@ def health():
     return {"status": "ok", "service": "origination"}
 
 
-class BoardIn(BaseModel):
-    app_id: int
-    applicant_name: str
-    principal: float
-    annual_rate_pct: float = 7.99
-    term_months: int = 48
-
-
-@app.post("/board")
-def board(body: BoardIn):
-    """Legacy direct-boarding endpoint (the LOS->LSS seam). See docs/architecture.md."""
-    loan_id = intake.board_to_servicing(
-        body.app_id, body.applicant_name, body.principal,
-        body.annual_rate_pct, body.term_months,
-    )
-    return {"loan_id": loan_id}
+# Boarding has no route of its own: POST /applications/{app_id}/accept
+# (routers/applications.py accept_offer) is the supported atomic path.

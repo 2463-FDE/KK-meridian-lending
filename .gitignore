@@ -38,5 +38,17 @@ services/*/combined-ca-bundle.pem
 coverage/
 .idea/
 .vscode/
+*.iml
 
-# NOTE: keep logs/ checked in for now — finance asked us to retain sample logs.
+# runtime log output (docker-compose mounts ./logs and services/*/logs as
+# volumes -- these accumulate locally on every run, never intended to be
+# committed)
+logs/
+services/*/logs/
+
+# Playwright E2E (frontend/e2e) -- local/CI run artifacts, never committed.
+# Traces are disabled in playwright.config.ts (see frontend/e2e/README.md
+# for why); report/results are still local output either way.
+frontend/playwright-report/
+frontend/test-results/
+frontend/blob-report/

@@ -21,6 +21,9 @@ class _FakeResponse:
         self.status_code = status_code
         self._json_body = json_body
         self.text = json.dumps(json_body)
+        # _proxy decodes resp.content directly (UTF-8 mojibake fix) rather
+        # than calling resp.json()/resp.text -- mirror a real httpx.Response.
+        self.content = self.text.encode("utf-8")
 
     def json(self):
         return self._json_body

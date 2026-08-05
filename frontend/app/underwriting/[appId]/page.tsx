@@ -48,6 +48,16 @@ interface Application {
   created_at?: string;
   kyc?: Kyc;
   decision?: string;
+  // Review fix: once staff decides, that decision is final -- this tells
+  // the frontend to disable Approve/Deny up front instead of only finding
+  // out via a 409 on submit.
+  decision_final?: boolean;
+  // Bug fix: without these, the finalized-decision panel had nothing real
+  // to show -- staff could only see the original reason/who/when by
+  // deliberately attempting (and being blocked by) a second decision.
+  decision_reason?: string;
+  decision_by?: string;
+  decision_at?: string;
   offer?: Offer;
 }
 
@@ -158,12 +168,12 @@ function UnderwritingDetailContent() {
       })) as DecisionResult;
       setDecision(res);
       setReviewReason("");
-      setActionMsg(`Manual review recorded: ${res.decision}.`);
-      // Bug fix: an approve auto-generates an offer server-side (same as the
-      // automated approve path), but this response only carries the decision
-      // outcome, not the offer itself -- reload the application so `offer`
-      // (and status) reflect what the server actually did instead of going
-      // stale until the next manual page refresh.
+      setActionMsg(`Decision recorded: ${res.decision}. This decision is final.`);
+      // Bug fix: an approve can auto-generate an offer server-side (same as
+      // the automated approve path), but this response only carries the
+      // decision outcome, not the offer itself -- reload the application so
+      // `offer` (and status) reflect what the server actually did instead of
+      // going stale until the next manual page refresh.
       await load();
     } catch (err) {
       setReviewErr(errMsg(err, "Could not record this review."));
@@ -362,64 +372,115 @@ function UnderwritingDetailContent() {
               </div>
             ) : null}
           </div>
-          {app?.status !== "funded" ? (
-            <button onClick={runDecision} disabled={actionBusy}>
-              {actionBusy ? "Working…" : "Run decision"}
-            </button>
-          ) : null}
+          {/* Bug fix: this used to only disable/hide the button once funded --
+              a manually-decided-but-not-yet-funded application still showed
+              an enabled button that always 409'd. Disabled (with a tooltip,
+              not just hidden) for either final state now, so the control
+              itself reflects reality instead of only the backend's error. */}
+          <button
+            onClick={runDecision}
+            disabled={actionBusy || app?.decision_final || app?.status === "funded"}
+            title={
+              app?.decision_final
+                ? "A staff member has already made a final decision -- the automated model cannot rerun and overwrite it."
+                : app?.status === "funded"
+                  ? "This application is funded -- its decision can no longer be rerun."
+                  : undefined
+            }
+          >
+            {actionBusy ? "Working…" : "Run decision"}
+          </button>
         </div>
         {app?.status === "funded" ? (
           <p className="hint" style={{ marginTop: 10 }}>
             {/* Bug fix: rerunning after funding used to silently reset the
                 recorded decision back to the automated outcome while the
                 loan sat funded on top of it -- the backend rejects this now
-                (422), so the button is hidden rather than offering an action
-                that always fails. */}
+                (422), so the button is disabled rather than offering an
+                action that always fails. */}
             This application is funded — its decision can no longer be rerun.
+          </p>
+        ) : app?.decision_final ? (
+          <p className="hint" style={{ marginTop: 10 }}>
+            A staff member has already made a final decision — the automated model cannot rerun and overwrite it.
           </p>
         ) : null}
       </div>
 
       {/* Manual review -- feature: staff tool to resolve a "refer" decision
           (policies/underwriting_guidelines.md's manual-review band, score
-          600-659 or DTI 43-50%). Only shown once there's actually a refer
-          to resolve -- an approve/deny/no-decision application has nothing
-          for this panel to do. */}
-      {currentDecision === "refer" ? (
+          600-659 or DTI 43-50%). Scoped to refer only -- staff cannot use
+          this to override a clean automated approve/deny (the backend
+          enforces this too; see review_application's "only a 'refer'
+          decision can be reviewed" 422).
+          The locked "finalized" info view shows whenever decision_final is
+          true (a resolved refer), funded or not -- who/when/why is a
+          permanent audit fact, not something that should disappear once
+          the loan is boarded. */}
+      {app?.decision_final || currentDecision === "refer" ? (
         <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-title" style={{ marginBottom: 8 }}>
-            Manual review required
-          </div>
-          <p className="hint" style={{ marginBottom: 16 }}>
-            This application scored in the manual-review band. Resolve it
-            below — the applicant can&rsquo;t accept an offer until this
-            is decided.
-          </p>
-          <label>Decision</label>
-          <select
-            value={reviewOutcome}
-            onChange={(e) => setReviewOutcome(e.target.value as "approve" | "deny")}
-          >
-            <option value="approve">Approve</option>
-            <option value="deny">Deny</option>
-          </select>
-          <label>Reason (shown to the applicant if denied)</label>
-          <textarea
-            rows={3}
-            value={reviewReason}
-            onChange={(e) => setReviewReason(e.target.value)}
-            placeholder="e.g. DTI recalculated under policy threshold after verifying updated income"
-          />
-          {reviewErr ? <div className="alert alert-error">{reviewErr}</div> : null}
-          <button
-            style={{ marginTop: 14 }}
-            onClick={submitReview}
-            disabled={reviewBusy || !reviewReason.trim()}
-          >
-            {reviewBusy
-              ? "Recording…"
-              : `Record ${reviewOutcome === "approve" ? "approval" : "denial"}`}
-          </button>
+          {app?.decision_final ? (
+            // Bug fix: this used to still render the editable form (disabled)
+            // bound to reviewOutcome's own default local state -- so a
+            // finalized DENY could visibly show "Approve" pre-selected,
+            // directly contradicting the decision chip right above it. Once
+            // final, show the ACTUAL recorded decision, not editable state
+            // that was never meant to reflect it.
+            <>
+              <div className="card-title" style={{ marginBottom: 8 }}>
+                Decision finalized
+              </div>
+              <p className="hint" style={{ marginBottom: 16 }}>
+                Staff has already made a final decision on this application. It cannot be changed.
+              </p>
+              <label>Decision</label>
+              <div style={{ marginBottom: 12 }}>
+                {currentDecision === "approve" ? "Approve" : "Deny"}
+              </div>
+              <label>Reason</label>
+              <div className="hint" style={{ marginBottom: 12 }}>
+                {app?.decision_reason || "—"}
+              </div>
+              {app?.decision_by ? (
+                <p className="hint">
+                  Decided by {app.decision_by}
+                  {app?.decision_at ? ` on ${shortDate(app.decision_at)}` : ""}.
+                </p>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <div className="card-title" style={{ marginBottom: 8 }}>
+                Manual review required
+              </div>
+              <p className="hint" style={{ marginBottom: 16 }}>
+                This application scored in the manual-review band. Resolve it below — the applicant can’t accept an offer until this is decided.
+              </p>
+              <label>Decision</label>
+              <select
+                value={reviewOutcome}
+                onChange={(e) => setReviewOutcome(e.target.value as "approve" | "deny")}
+              >
+                <option value="approve">Approve</option>
+                <option value="deny">Deny</option>
+              </select>
+              <label>Reason (shown to the applicant if denied)</label>
+              <textarea
+                rows={3}
+                value={reviewReason}
+                onChange={(e) => setReviewReason(e.target.value)}
+                placeholder="e.g. DTI recalculated under policy threshold after verifying updated income"
+              />
+              {reviewErr ? <div className="alert alert-error">{reviewErr}</div> : null}
+              <button
+                style={{ marginTop: 14 }}
+                onClick={submitReview}
+                disabled={reviewBusy || !reviewReason.trim()}
+              >
+                {reviewBusy ? "Recording…" : `Record ${reviewOutcome === "approve" ? "approval" : "denial"}`}
+              </button>
+            </>
+          )}
         </div>
       ) : null}
 
@@ -434,9 +495,18 @@ function UnderwritingDetailContent() {
           <button
             className="btn-ghost"
             onClick={makeOffer}
-            disabled={actionBusy}
+            disabled={actionBusy || Boolean(offer) || currentDecision !== "approve"}
+            title={
+              offer
+                ? "An offer has already been created for this application."
+                : currentDecision === "deny"
+                  ? `An offer cannot be created because this application was denied.${decision?.adverse_action_reason ? ` Decision reason: ${decision.adverse_action_reason}` : ""}`
+                  : currentDecision !== "approve"
+                    ? "An offer cannot be created until the application receives a final approval."
+                    : undefined
+            }
           >
-            {actionBusy ? "Working…" : offer ? "Regenerate offer" : "Make offer"}
+            {actionBusy ? "Working…" : offer ? "Offer already created" : "Make offer"}
           </button>
         </div>
 
@@ -493,12 +563,32 @@ function UnderwritingDetailContent() {
               Open the loan account →
             </Link>
           </div>
+        ) : app?.status === "funded" ? (
+          // Bug fix: boardedLoanId is session-local -- reloading the page
+          // after an earlier session already boarded this application left
+          // the button enabled again, as if nothing had happened. app.status
+          // is the persisted source of truth.
+          <div className="alert alert-success" style={{ margin: 0 }}>
+            This application has already been boarded.
+          </div>
         ) : (
           <div className="spread">
             <p className="hint" style={{ margin: 0 }}>
               Accept the offer and board this application as a serviced loan.
             </p>
-            <button onClick={acceptAndBoard} disabled={actionBusy}>
+            <button
+              onClick={acceptAndBoard}
+              disabled={actionBusy || currentDecision !== "approve" || !offer}
+              title={
+                currentDecision === "deny"
+                  ? `This application cannot be boarded because it was denied.${decision?.adverse_action_reason ? ` Reason: ${decision.adverse_action_reason}` : ""}`
+                  : currentDecision !== "approve"
+                    ? "This application must receive final approval before it can be boarded."
+                    : !offer
+                      ? "Create an offer before boarding this application."
+                      : undefined
+              }
+            >
               {actionBusy ? "Working…" : "Accept & board"}
             </button>
           </div>
