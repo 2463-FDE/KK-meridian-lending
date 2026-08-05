@@ -26,6 +26,7 @@ _AUTH_HEADERS = {"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN}
 def _payload(application_id=10, **overrides):
     body = {
         "application_id": application_id,
+        "attempt_id": 1,
         "applicant_id": 5,
         "name": "Attacker Supplied Name",
         "ssn": "000000000",
@@ -50,11 +51,14 @@ def test_run_decision_loads_application_from_db_ignores_body_financials(monkeypa
 
     async def _fake_decide(application):
         captured.update(application)
-        return {"decision": "refer", "score": 610, "reason_codes": []}
+        return {"decision": "refer", "score": 610, "reason_codes": [],
+                "bureau_score": 610, "model_version": "v1-stub", "top_features": None}
 
     monkeypatch.setattr(decision, "decide", _fake_decide)
 
-    resp = client.post("/decisions", json=_payload(application_id=10), headers=_AUTH_HEADERS)
+    resp = client.post(
+        "/decisions", json=_payload(application_id=10, attempt_id=42), headers=_AUTH_HEADERS
+    )
 
     assert resp.status_code == 200
     assert captured["app_id"] == 10
@@ -62,6 +66,9 @@ def test_run_decision_loads_application_from_db_ignores_body_financials(monkeypa
     assert captured["income"] == 40000
     assert captured["requested_amount"] == 9000
     assert captured["term_months"] == 24
+    # PR #6 review (Finding 2): attempt_id is an opaque correlation id --
+    # decision-service must echo it back unchanged, never derive its own.
+    assert resp.json()["attempt_id"] == 42
 
 
 def test_run_decision_404s_when_application_not_found(monkeypatch):

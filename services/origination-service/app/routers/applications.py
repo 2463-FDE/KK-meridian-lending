@@ -1,4 +1,7 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
+import json
+
+import httpx
 import psycopg2.errors
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -289,8 +292,9 @@ def run_decision(
     r = rows[0]
 
     existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
+    is_staff = _is_staff(x_user_role, x_internal_token)
     if existing:
-        if not _is_staff(x_user_role, x_internal_token):
+        if not is_staff:
             raise HTTPException(status_code=403, detail="staff only to rerun a decision")
         # Bug fix: reruns had no guard beyond staff-only -- since scoring is
         # deterministic (same SSN/income -> same score), rerunning after the
@@ -301,118 +305,206 @@ def run_decision(
         # bad: it silently overwrote a staff decision with a fresh automated
         # one, and since that reset the outcome back to "refer" it made the
         # application eligible for manual review AGAIN, letting the same app
-        # get reviewed and reversed indefinitely.
-        if r.get("status") == "funded":
-            raise HTTPException(
-                status_code=422,
-                detail="cannot rerun a decision on an already-funded application",
-            )
-        # Review fix: this used to be a generic 422 message. A final manual
-        # decision existing at all is a genuine conflict with the request to
-        # rerun (not a client input error, and not silently proceeding) --
-        # 409 is the correct status, and the message now states the actual
-        # outcome/reason/who/when instead of just "resolved by staff".
-        manual = decision_state.get_manual_review(app_id)
-        if manual:
-            raise HTTPException(status_code=409, detail=decision_state.format_rerun_blocked_message(manual))
+        # get reviewed and reversed indefinitely. (The funded/manual-final
+        # checks that used to run here, unlocked, now live inside
+        # decision_state.start_decision_attempt below -- locked, and run
+        # immediately before decision-service is ever called instead of
+        # only after it returns.)
+        requested_by = x_user_role
     else:
         is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
-        if not _is_staff(x_user_role, x_internal_token) and not is_owner:
+        if not is_staff and not is_owner:
             raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
+        requested_by = x_user_role if is_staff else "borrower"
 
-    # Architecture fix (single-writer race closure): decision-service now
-    # only COMPUTES a proposed outcome (and records its own append-only
-    # decision_events audit row) -- it no longer writes the authoritative
-    # `decisions` row itself (see graph.py::_node_persist). Called
-    # deliberately BEFORE opening any transaction below: nothing about
-    # computing the proposal needs to be atomic, and holding a lock across
-    # a network call this slow (a simulated bureau pull) would be its own
-    # problem even before considering deadlock risk.
-    resp = clients.post(clients.DECISION_URL, "/decisions", {
-        "application_id": app_id,
-        "applicant_id": r.get("applicant_id"),
-        "name": r.get("name"),
-        "ssn": r.get("ssn") or "",
-        "requested_amount": float(r.get("amount")),
-        "term_months": r.get("term_months"),
-        "annual_income": float(r.get("income") or 0),
-        "monthly_debt": 0,            # not captured in the LOS today
-        "credit_score": None,         # pulled downstream by decision-service
-    }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+    # PR #6 review (Finding 2): TXN A -- lock the application, recheck
+    # funded/manual finality (the authoritative check -- everything above
+    # is not), atomically recover a stale (crashed-process) attempt if one
+    # exists, and create a fresh 'in_progress' attempt, all in one short
+    # transaction, released BEFORE decision-service is ever called. A
+    # request already blocked by finality performs no bureau/model work at
+    # all. See decision_state.start_decision_attempt and
+    # db/migrations/0023_decision_attempts.sql.
+    attempt_id = decision_state.start_decision_attempt(app_id, requested_by)
+
+    try:
+        resp = clients.post(clients.DECISION_URL, "/decisions", {
+            "application_id": app_id,
+            "attempt_id": attempt_id,
+            "applicant_id": r.get("applicant_id"),
+            "name": r.get("name"),
+            "ssn": r.get("ssn") or "",
+            "requested_amount": float(r.get("amount")),
+            "term_months": r.get("term_months"),
+            "annual_income": float(r.get("income") or 0),
+            "monthly_debt": 0,            # not captured in the LOS today
+            "credit_score": None,         # pulled downstream by decision-service
+        }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+    except httpx.TimeoutException as e:
+        # Ambiguous: decision-service may never have started, may still be
+        # running, or may have finished with the response lost in transit --
+        # this cannot be told apart. The only safe action is to release the
+        # attempt and let a retry create a fresh one; decision-service has
+        # no idempotency key of its own, so a retry here CAN cause a second,
+        # independent bureau pull (documented limitation, not silently
+        # avoided -- see PR #6 review discussion).
+        decision_state.mark_attempt_failed(attempt_id, "timeout")
+        log.error("decision-service timed out app_id=%s attempt_id=%s: %s", app_id, attempt_id, e)
+        raise HTTPException(status_code=502, detail="decision-service timed out -- please try again") from e
+    except httpx.HTTPError as e:
+        decision_state.mark_attempt_failed(attempt_id, "unavailable")
+        log.error("decision-service unavailable app_id=%s attempt_id=%s: %s", app_id, attempt_id, e)
+        raise HTTPException(status_code=502, detail="decision-service is unavailable -- please try again") from e
+
+    # Security/correctness fix: decision-service must answer the SAME
+    # attempt this request is currently waiting on -- a response that
+    # doesn't match is never trusted enough to persist anything from.
+    if resp.get("attempt_id") != attempt_id:
+        decision_state.mark_attempt_failed(attempt_id, "invalid_response")
+        log.error(
+            "decision-service attempt_id mismatch app_id=%s expected=%s got=%s",
+            app_id, attempt_id, resp.get("attempt_id"),
+        )
+        raise HTTPException(status_code=502, detail="decision-service returned an inconsistent response")
+
     outcome = resp["outcome"]
 
-    # Audit fix: origination-service is now the SOLE writer of `decisions`.
-    # This transaction locks the same coordination row (applications, FOR
-    # UPDATE) that review_application's own transaction locks before
-    # touching manual_reviews/decisions -- both endpoints contend for the
-    # same lock before writing either table, so whichever commits first is
-    # genuinely final, not "probably fine because scoring is deterministic".
-    # No external call happens while this lock is held (decision-service's
-    # call already finished above), so there is no deadlock risk here,
-    # unlike the previous detect-and-abort approach this replaces.
+    # PR #6 review (Finding 2): TXN B -- lock again, first confirm THIS
+    # attempt is still the live, active reservation (state='in_progress'
+    # AND its lease has not passed -- see decision_state.
+    # verify_attempt_still_active_locked), then recheck finality one more
+    # time (the one genuinely-concurrent race that can't be closed without
+    # holding a lock across the network call above -- staff finalizing or
+    # funding landing in the exact window while decision-service was
+    # computing), and only THEN persist decisions + decision_events + mark
+    # the attempt completed, all atomically. A late/duplicate computation
+    # for an attempt that already expired-and-was-replaced (recovery ran
+    # while this call was still in flight) is discarded here too -- it must
+    # never overwrite whatever the replacement attempt already committed.
+    # If finality now blocks this attempt, it is marked discarded and
+    # NEITHER decisions NOR decision_events is written -- a discarded
+    # attempt can never appear as a permanent decision event. Every discard
+    # branch below exits the `with` block normally (not by raising inside
+    # it) so its own discard-marking UPDATE actually commits; the
+    # HTTPException is raised only after that commit succeeds.
     accept_token = None
-    with db.transaction() as cur:
-        cur.execute("SELECT status FROM applications WHERE id = %s FOR UPDATE", (app_id,))
-        locked = cur.fetchall()
-        if not locked:
-            raise HTTPException(status_code=404, detail="application not found")
-        if locked[0]["status"] == "funded":
-            raise HTTPException(
-                status_code=422,
-                detail="cannot rerun a decision on an already-funded application",
-            )
-        cur.execute(
-            "SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
-            "FROM manual_reviews WHERE app_id = %s",
-            (app_id,),
-        )
-        manual_locked = cur.fetchall()
-        if manual_locked:
-            raise HTTPException(
-                status_code=409,
-                detail=decision_state.format_rerun_blocked_message(manual_locked[0]),
-            )
+    discard_error = None
+    try:
+        with db.transaction() as cur:
+            if not decision_state.verify_attempt_still_active_locked(cur, attempt_id):
+                discard_error = (
+                    409,
+                    "this decision attempt is no longer active (expired or superseded) -- please retry",
+                )
+                funded, manual = None, None
+            else:
+                funded, manual = decision_state.recheck_finality_locked(cur, app_id)
 
-        cur.execute(
-            "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
-            "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
-            (app_id, outcome),
-        )
-        # Bug fix: reflect the outcome onto applications.status -- guarded so a
-        # staff rerun on an already-funded application can never regress a
-        # funded row backward (redundant with the funded check above now
-        # that both live in the same transaction, kept as defense in depth).
-        cur.execute(
-            "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
-            (_DECISION_STATUS.get(outcome, outcome), app_id),
-        )
-        if outcome == "approve":
-            # Security fix: accept_offer used to run fully anonymously for a
-            # fresh accept -- fine for the legitimate no-account borrower
-            # flow, except app_id is a sequential, guessable integer, so
-            # anyone could accept/fund a STRANGER's approved application.
-            # This one-time token is minted only now, held by the
-            # borrower's own browser (decision response -> frontend state
-            # -> accept call), and is the proof of ownership accept_offer
-            # requires from a non-staff caller. See decision_state.
-            # issue_accept_token for hashing/expiry.
-            accept_token = decision_state.issue_accept_token(cur, app_id)
-        else:
-            # Security fix (audit finding): a rerun landing on deny/refer
-            # used to leave a PREVIOUSLY minted token (from an earlier
-            # approve) still valid -- review_application already revoked it
-            # on its own non-approve branch, but this path had no
-            # equivalent, so the same application could be approved, then
-            # rerun to deny, while the old accept link still worked. Same
-            # helper both paths use now -- see decision_state.py.
-            decision_state.revoke_accept_token(cur, app_id)
+            if discard_error is not None:
+                pass  # already set above -- attempt itself is no longer active
+            elif funded:
+                cur.execute(
+                    "UPDATE decision_attempts SET state = 'discarded', completed_at = now(), "
+                    "failure_code = 'funded', failure_detail = %s WHERE id = %s AND state = 'in_progress'",
+                    (decision_state.sanitize_failure_detail("funded"), attempt_id),
+                )
+                discard_error = (422, "cannot rerun a decision on an already-funded application")
+            elif manual:
+                cur.execute(
+                    "UPDATE decision_attempts SET state = 'discarded', completed_at = now(), "
+                    "failure_code = 'superseded_by_staff', failure_detail = %s WHERE id = %s AND state = 'in_progress'",
+                    (decision_state.sanitize_failure_detail("superseded_by_staff"), attempt_id),
+                )
+                discard_error = (409, decision_state.format_rerun_blocked_message(manual))
+            else:
+                cur.execute(
+                    "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
+                    "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
+                    (app_id, outcome),
+                )
+                # Bug fix: reflect the outcome onto applications.status -- guarded so a
+                # staff rerun on an already-funded application can never regress a
+                # funded row backward (redundant with the funded check above now
+                # that both live in the same transaction, kept as defense in depth).
+                cur.execute(
+                    "UPDATE applications SET status = %s WHERE id = %s AND status <> 'funded'",
+                    (_DECISION_STATUS.get(outcome, outcome), app_id),
+                )
+                # PR #6 review (Finding 2): decision-service no longer writes this
+                # row itself (see decision-service/app/graph.py::_node_finalize) --
+                # origination writes it here, in the SAME transaction as
+                # `decisions`, only on the winning branch. attempt_id ties this
+                # permanent audit row to the exact attempt that produced it
+                # (db/migrations/0023_decision_attempts.sql).
+                cur.execute(
+                    "INSERT INTO decision_events "
+                    "(app_id, requested_amount, term_months, annual_income, bureau_score, "
+                    " model_score, model_version, top_features, decision, reason_codes, attempt_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        app_id,
+                        r.get("amount"),
+                        r.get("term_months"),
+                        r.get("income"),
+                        resp.get("bureau_score"),
+                        resp.get("score"),
+                        resp.get("model_version"),
+                        json.dumps(resp.get("top_features")),
+                        outcome,
+                        json.dumps(resp.get("reason_codes") or []),
+                        attempt_id,
+                    ),
+                )
+                if outcome == "approve":
+                    # Security fix: accept_offer used to run fully anonymously for a
+                    # fresh accept -- fine for the legitimate no-account borrower
+                    # flow, except app_id is a sequential, guessable integer, so
+                    # anyone could accept/fund a STRANGER's approved application.
+                    # This one-time token is minted only now, held by the
+                    # borrower's own browser (decision response -> frontend state
+                    # -> accept call), and is the proof of ownership accept_offer
+                    # requires from a non-staff caller. See decision_state.
+                    # issue_accept_token for hashing/expiry.
+                    accept_token = decision_state.issue_accept_token(cur, app_id)
+                else:
+                    # Security fix (audit finding): a rerun landing on deny/refer
+                    # used to leave a PREVIOUSLY minted token (from an earlier
+                    # approve) still valid -- review_application already revoked it
+                    # on its own non-approve branch, but this path had no
+                    # equivalent, so the same application could be approved, then
+                    # rerun to deny, while the old accept link still worked. Same
+                    # helper both paths use now -- see decision_state.py.
+                    decision_state.revoke_accept_token(cur, app_id)
+                cur.execute(
+                    "UPDATE decision_attempts SET state = 'completed', completed_at = now() "
+                    "WHERE id = %s AND state = 'in_progress'",
+                    (attempt_id,),
+                )
+    except Exception as e:
+        # PR #6 review, lease-invariant follow-up: a caught TXN-B
+        # persistence failure (anything unexpected reaching here -- e.g. a
+        # constraint violation) has already been rolled back by
+        # db.transaction()'s own except/rollback by the time it propagates
+        # out of the `with` block above. Mark the attempt failed in a
+        # SEPARATE short transaction right away, rather than leaving it
+        # 'in_progress' to be discovered only when its lease eventually
+        # expires -- a retry can proceed immediately instead of waiting.
+        # Lease expiry remains the fallback for the case this code can't
+        # even reach (the process itself dying mid-transaction).
+        log.error("TXN B failed to persist app_id=%s attempt_id=%s: %s", app_id, attempt_id, e)
+        decision_state.mark_attempt_failed(attempt_id, "persistence_error")
+        raise HTTPException(status_code=500, detail="could not persist the decision -- please retry") from e
+
+    if discard_error:
+        raise HTTPException(status_code=discard_error[0], detail=discard_error[1])
 
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
         # must not fail the decision that already happened. Outside the
         # transaction on purpose -- an external call here must never hold
-        # the coordination lock.
+        # the coordination lock, and this only runs after TXN B has already
+        # committed the permanent decision + audit event.
         try:
             disclosure_graph.auto_generate_offer(app_id)
         except Exception as e:  # noqa

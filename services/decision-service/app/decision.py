@@ -66,15 +66,6 @@ class ModelUnavailableError(RuntimeError):
     """Licensed AI scorer not configured/reachable and stubbing isn't allowed here."""
 
 
-class DecisionPersistenceError(RuntimeError):
-    """Could not durably record the decision + its audit event (decision_events).
-
-    Raised instead of swallowed: a decision that can't be proven to have happened
-    is exactly the gap the append-only audit trail exists to close, so returning
-    a decision to the caller anyway would defeat the point of recording one at all.
-    """
-
-
 class _ScorerResponse(BaseModel):
     """Strict schema for a real vendor scorer response.
 
@@ -296,20 +287,23 @@ async def _run_model(bureau_score: int, application: dict) -> dict:
 
 
 async def decide(application: dict) -> dict:
-    """Full decisioning chain (async -- see module docstring). Persists the legacy
-    outcome-only `decisions` row and the append-only `decision_events` row (inputs,
-    model score/version, top features, reason codes) as ONE transaction — both land
-    or neither does, so a decision is never returned to the caller without the audit
-    row that proves it happened (review finding: the two used to be written
-    separately with each failure only logged, letting a decision commit with no
-    matching audit event when the second insert failed silently).
+    """Full decisioning chain (async -- see module docstring). Compute-only:
+    pulls the bureau score, runs the scoring model, and returns the result
+    (score, decision, reason_codes, bureau_score, model_version,
+    top_features) -- it persists nothing to the database at all (PR #6
+    review, Finding 2). origination-service is the sole writer of both
+    `decisions` and `decision_events`, atomically, only after its own
+    lock+recheck confirms the request that triggered this call actually
+    wins its finality race (see routers/applications.py::run_decision on
+    the origination-service side).
 
-    Week 3: the pull-credit / score / persist steps are now an explicit LangGraph
-    graph (app/graph.py) instead of inline code here -- same three calls, same
-    fail-closed exceptions, now individually traceable. Deferred import: graph.py
-    imports this module at its own load time, so importing it up top would be
-    circular; by the time decide() is actually called, this module has finished
-    loading and the import below is just a sys.modules lookup.
+    Week 3: the pull-credit / score / finalize steps are an explicit
+    LangGraph graph (app/graph.py) instead of inline code here -- same
+    three calls, same fail-closed exceptions, now individually traceable.
+    Deferred import: graph.py imports this module at its own load time, so
+    importing it up top would be circular; by the time decide() is
+    actually called, this module has finished loading and the import below
+    is just a sys.modules lookup.
     """
     from .graph import run as _run_graph
 

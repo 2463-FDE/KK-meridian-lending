@@ -5,13 +5,14 @@ Both `decide()` tests use the deterministic stub bureau AND model paths: there i
 live Experian or licensed AI scorer in the test environment, so both calls fall back to
 their deterministic stubs.
 
-Persistence used to be best-effort and swallowed when no DB was present -- that was
-itself the review finding this PR fixes (a decision could be returned with no
-matching audit row). `decide()` now requires its `decisions` + `decision_events`
-transaction to succeed. The `_stub_persistence` fixture below stubs `db.transaction`
-to succeed by default so the scoring-chain tests below don't need a live Postgres;
-`test_decide_raises_when_audit_persistence_fails` overrides that stub to prove
-`decide()` actually fails closed when persistence breaks.
+PR #6 review (Finding 2): decide() used to require its `decisions` +
+`decision_events` transaction to succeed, persisting decision_events itself
+before ever returning. decision-service is now fully compute-only -- it
+persists nothing at all; origination-service is the sole writer of both
+tables, atomically, only after its own attempt/finality recheck confirms
+the request wins (see routers/applications.py::run_decision on the
+origination-service side). `test_decide_never_touches_the_database` below
+proves decide() makes zero db.transaction calls.
 
 Async rework: decide()/_pull_credit()/_call_ai_scorer()/_run_model() are all async
 now (see decision.py's module docstring) -- every test below that calls one of them
@@ -25,11 +26,6 @@ import pytest
 
 from app import config, decision
 from app.decision import CreditBureauUnavailableError, decide
-
-
-@pytest.fixture(autouse=True)
-def _stub_persistence(monkeypatch):
-    monkeypatch.setattr(decision.db, "transaction", lambda statements: [[], []])
 
 
 class _FakeResponse:
@@ -313,36 +309,23 @@ async def test_decide_returns_specific_reason_code_on_deny():
     assert result["adverse_action_reason"] != "purchasing history"
 
 
-# --- Review finding: decisions + decision_events must commit or fail together --
-# a decision was previously returned to the caller even when its audit row failed
-# to write, since each insert was wrapped in its own try/except that only logged.
+# --- PR #6 review (Finding 2): decision-service is now fully compute-only --
+# it must never touch the database at all. origination-service is the sole
+# writer of both `decisions` and `decision_events`, atomically, only after its
+# own attempt/finality recheck confirms the request wins (see
+# routers/applications.py::run_decision).
 
-async def test_decide_raises_when_audit_persistence_fails(monkeypatch):
-    def _boom(statements):
-        raise RuntimeError("simulated DB failure")
-
-    monkeypatch.setattr(decision.db, "transaction", _boom)
-    with pytest.raises(decision.DecisionPersistenceError):
-        await decide({"app_id": 5, "ssn": "123456782", "income": 100000})
-
-
-async def test_decide_persists_only_its_own_audit_event_not_the_decisions_row(monkeypatch):
-    """Architecture fix: decision-service used to also write the
-    authoritative `decisions` row here (unconditional ON CONFLICT DO
-    UPDATE) -- that let a rerun silently overwrite a staff final decision
-    out from under origination-service's own guards (audit finding).
-    decision-service now only proposes an outcome and persists its OWN
-    append-only audit trail (decision_events); origination-service is the
-    sole writer of `decisions`, under a lock (routers/applications.py::
-    run_decision)."""
+async def test_decide_never_touches_the_database(monkeypatch):
     calls = []
     monkeypatch.setattr(
         decision.db, "transaction",
         lambda statements: calls.append(statements) or [[]],
     )
-    await decide({"app_id": 6, "ssn": "123456782", "income": 100000})
-    assert len(calls) == 1
-    statements = calls[0]
-    assert len(statements) == 1
-    assert "INSERT INTO decision_events" in statements[0][0]
-    assert not any("INSERT INTO decisions" in s[0] for s in statements)
+    result = await decide({"app_id": 6, "ssn": "123456782", "income": 100000})
+
+    assert calls == [], "decide() must persist nothing -- origination-service writes decisions/decision_events now"
+    # Everything origination needs to write decision_events itself must still
+    # come back in the result.
+    assert result["bureau_score"] is not None
+    assert result["model_version"]
+    assert "top_features" in result

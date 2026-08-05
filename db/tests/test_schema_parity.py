@@ -69,7 +69,10 @@ def _build_fresh_init(conn):
     """Exactly what docker-compose's fresh Postgres volume runs, schema
     files only (002/003 are seed data -- irrelevant to a schema comparison,
     and 003 depends on rows 002 seeds that this test has no need for)."""
-    for filename in ("001_schema.sql", "004_decision_events.sql", "005_manual_reviews.sql"):
+    for filename in (
+        "001_schema.sql", "004_decision_events.sql", "005_manual_reviews.sql",
+        "006_decision_attempts.sql",
+    ):
         _run_sql_file(conn, FRESH_SCHEMA, INIT_DIR / filename)
 
 
@@ -105,6 +108,58 @@ def _build_pre_0022_schema_with_history(conn):
             INSERT INTO decisions (app_id, outcome) VALUES (1, 'approve');
             INSERT INTO manual_reviews (app_id, reviewer_role, reviewer_name, outcome, reason)
                 VALUES (1, 'underwriter', 'Sam Okafor', 'approve', 'DTI recalculated under policy');
+        """)
+    conn.commit()
+
+
+def _build_pre_0023_schema_with_history(conn):
+    """A representative shape of an existing, already-deployed database the
+    moment before migration 0023 runs: applications/decisions/manual_reviews
+    (as above) plus a real, pre-existing decision_events table (004's actual
+    shape -- no attempt_id column yet) with one real history row that must
+    survive the upgrade untouched."""
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SET search_path TO {MIGRATED_SCHEMA};
+            CREATE TABLE applications (
+                id SERIAL PRIMARY KEY,
+                status TEXT DEFAULT 'submitted',
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE TABLE decisions (
+                app_id INTEGER PRIMARY KEY REFERENCES applications(id),
+                outcome TEXT NOT NULL
+            );
+            CREATE TABLE manual_reviews (
+                id SERIAL PRIMARY KEY,
+                app_id INTEGER NOT NULL REFERENCES applications(id) UNIQUE,
+                reviewer_role TEXT NOT NULL,
+                reviewer_name TEXT,
+                outcome TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            CREATE TABLE decision_events (
+                id                SERIAL PRIMARY KEY,
+                app_id            INTEGER NOT NULL REFERENCES applications(id),
+                occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                requested_amount  NUMERIC(14,2),
+                term_months       INTEGER,
+                annual_income     NUMERIC(14,2),
+                bureau_score      INTEGER,
+                model_score       DOUBLE PRECISION,
+                model_version     TEXT NOT NULL,
+                top_features      JSONB,
+                decision          TEXT NOT NULL,
+                reason_codes      JSONB NOT NULL DEFAULT '[]'::jsonb
+            );
+            INSERT INTO applications (id, status) VALUES (1, 'approved');
+            INSERT INTO decisions (app_id, outcome) VALUES (1, 'approve');
+            INSERT INTO decision_events
+                (app_id, requested_amount, term_months, annual_income, bureau_score,
+                 model_score, model_version, top_features, decision, reason_codes)
+                VALUES (1, 9000, 24, 40000, 710, 0.82, 'v1', '["bureau_score"]'::jsonb,
+                        'approve', '[]'::jsonb);
         """)
     conn.commit()
 
@@ -190,3 +245,164 @@ def test_fresh_init_and_migrated_schemas_agree_on_the_accept_token_columns(conn)
     migrated_indexes = _indexes(conn, MIGRATED_SCHEMA, "applications")
     assert "idx_applications_accept_token_hash" in fresh_indexes
     assert "idx_applications_accept_token_hash" in migrated_indexes
+
+
+def test_fresh_init_has_decision_attempts_with_constraints(conn):
+    _build_fresh_init(conn)
+    cols = _columns(conn, FRESH_SCHEMA, "decision_attempts")
+    for field in ("id", "app_id", "state", "requested_by", "started_at",
+                  "lease_expires_at", "completed_at", "failure_code", "failure_detail"):
+        assert field in cols, f"{field} missing from fresh-init decision_attempts"
+
+    events_cols = _columns(conn, FRESH_SCHEMA, "decision_events")
+    assert "attempt_id" in events_cols
+
+    indexes = _indexes(conn, FRESH_SCHEMA, "decision_attempts")
+    assert "idx_decision_attempts_one_active" in indexes
+    event_indexes = _indexes(conn, FRESH_SCHEMA, "decision_events")
+    assert "idx_decision_events_attempt_id" in event_indexes
+
+
+def test_fresh_init_decision_attempts_constraints_reject_invalid_rows(conn):
+    """The CHECK constraints, not just the columns, must exist on a fresh
+    volume -- proven by attempting inserts that violate each one."""
+    _build_fresh_init(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {FRESH_SCHEMA}")
+        cur.execute("INSERT INTO applications (id, amount, term_months, status) VALUES (1, 9000, 24, 'submitted')")
+    conn.commit()
+
+    def _rejects(sql):
+        with conn.cursor() as cur:
+            cur.execute(f"SET search_path TO {FRESH_SCHEMA}")
+            with pytest.raises(psycopg2.errors.CheckViolation):
+                cur.execute(sql)
+        conn.rollback()
+
+    _rejects("INSERT INTO decision_attempts (app_id, state) VALUES (1, 'bogus_state')")
+    _rejects(
+        "INSERT INTO decision_attempts (app_id, state, lease_expires_at) "
+        "VALUES (1, 'in_progress', NULL)"
+    )
+    _rejects(
+        "INSERT INTO decision_attempts (app_id, state, completed_at) "
+        "VALUES (1, 'completed', NULL)"
+    )
+    _rejects(
+        "INSERT INTO decision_attempts (app_id, state, completed_at, failure_code) "
+        "VALUES (1, 'completed', now(), 'timeout')"
+    )
+    _rejects(
+        "INSERT INTO decision_attempts (app_id, state, completed_at) "
+        "VALUES (1, 'failed', now())"
+    )
+    _rejects(
+        "INSERT INTO decision_attempts (app_id, state, completed_at, failure_code) "
+        "VALUES (1, 'failed', now(), 'not_a_real_code')"
+    )
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {FRESH_SCHEMA}")
+        cur.execute(
+            "INSERT INTO decision_attempts (app_id, state, lease_expires_at) "
+            "VALUES (1, 'in_progress', now() + interval '60 seconds')"
+        )
+    conn.commit()
+
+
+def test_fresh_init_only_one_in_progress_attempt_per_application(conn):
+    _build_fresh_init(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {FRESH_SCHEMA}")
+        cur.execute("INSERT INTO applications (id, amount, term_months, status) VALUES (1, 9000, 24, 'submitted')")
+        cur.execute(
+            "INSERT INTO decision_attempts (app_id, state, lease_expires_at) "
+            "VALUES (1, 'in_progress', now() + interval '60 seconds')"
+        )
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {FRESH_SCHEMA}")
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            cur.execute(
+                "INSERT INTO decision_attempts (app_id, state, lease_expires_at) "
+                "VALUES (1, 'in_progress', now() + interval '60 seconds')"
+            )
+    conn.rollback()
+
+
+def test_fresh_init_one_decision_event_per_attempt(conn):
+    _build_fresh_init(conn)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {FRESH_SCHEMA}")
+        cur.execute("INSERT INTO applications (id, amount, term_months, status) VALUES (1, 9000, 24, 'approved')")
+        cur.execute(
+            "INSERT INTO decision_attempts (app_id, state, lease_expires_at) "
+            "VALUES (1, 'in_progress', now() + interval '60 seconds') RETURNING id"
+        )
+        attempt_id = cur.fetchone()["id"]
+        cur.execute(
+            "INSERT INTO decision_events (app_id, model_version, decision, attempt_id) "
+            "VALUES (1, 'v1', 'approve', %s)",
+            (attempt_id,),
+        )
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {FRESH_SCHEMA}")
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            cur.execute(
+                "INSERT INTO decision_events (app_id, model_version, decision, attempt_id) "
+                "VALUES (1, 'v1', 'approve', %s)",
+                (attempt_id,),
+            )
+    conn.rollback()
+
+
+def test_migration_0023_adds_decision_attempts_and_preserves_history(conn):
+    _build_pre_0023_schema_with_history(conn)
+    events_before = _columns(conn, MIGRATED_SCHEMA, "decision_events")
+    assert "attempt_id" not in events_before  # sanity: the pre-fix shape really existed
+
+    _run_sql_file(conn, MIGRATED_SCHEMA, MIGRATIONS_DIR / "0023_decision_attempts.sql")
+
+    events_after = _columns(conn, MIGRATED_SCHEMA, "decision_events")
+    assert "attempt_id" in events_after
+
+    attempt_cols = _columns(conn, MIGRATED_SCHEMA, "decision_attempts")
+    assert "state" in attempt_cols
+    assert "lease_expires_at" in attempt_cols
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {MIGRATED_SCHEMA}")
+        cur.execute("SELECT decision, model_version, reason_codes FROM decision_events WHERE app_id = 1")
+        row = cur.fetchone()
+        assert row["decision"] == "approve"
+        assert row["model_version"] == "v1"
+        # Historical row keeps attempt_id NULL forever -- the append-only
+        # trigger forbids ever backfilling it, and the migration must not
+        # attempt to.
+        cur.execute("SELECT attempt_id FROM decision_events WHERE app_id = 1")
+        assert cur.fetchone()["attempt_id"] is None
+
+
+def test_fresh_init_and_migrated_schemas_agree_on_decision_attempts(conn):
+    _build_fresh_init(conn)
+    _build_pre_0023_schema_with_history(conn)
+    _run_sql_file(conn, MIGRATED_SCHEMA, MIGRATIONS_DIR / "0023_decision_attempts.sql")
+
+    fresh_cols = _columns(conn, FRESH_SCHEMA, "decision_attempts")
+    migrated_cols = _columns(conn, MIGRATED_SCHEMA, "decision_attempts")
+    assert fresh_cols == migrated_cols, (
+        f"decision_attempts differs between fresh-init and migrated: "
+        f"{fresh_cols} vs {migrated_cols}"
+    )
+
+    fresh_events_cols = _columns(conn, FRESH_SCHEMA, "decision_events")
+    migrated_events_cols = _columns(conn, MIGRATED_SCHEMA, "decision_events")
+    assert fresh_events_cols["attempt_id"] == migrated_events_cols["attempt_id"]
+
+    fresh_indexes = _indexes(conn, FRESH_SCHEMA, "decision_attempts")
+    migrated_indexes = _indexes(conn, MIGRATED_SCHEMA, "decision_attempts")
+    assert "idx_decision_attempts_one_active" in fresh_indexes
+    assert "idx_decision_attempts_one_active" in migrated_indexes

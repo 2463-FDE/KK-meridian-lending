@@ -60,29 +60,41 @@ _APPLICATION_ROW = {
 # --- POST /{app_id}/decision -------------------------------------------------
 
 def _fake_decision_client_post(monkeypatch, response=None):
+    """PR #6 review (Finding 2): decision-service echoes back the SAME
+    attempt_id it was sent, and run_decision rejects a mismatch -- this fake
+    always echoes payload["attempt_id"] automatically so existing tests that
+    don't care about attempt_id specifically don't need to know its value."""
     calls = []
 
     def _fake_post(base_url, path, payload, headers=None):
         calls.append((base_url, path, payload, headers))
-        return response or {"outcome": "approve", "score": 700, "reason": None}
+        body = dict(response or {"outcome": "approve", "score": 700, "reason": None})
+        body.setdefault("attempt_id", payload.get("attempt_id"))
+        return body
 
     monkeypatch.setattr(clients, "post", _fake_post)
     return calls
 
 
 class _FakeRunDecisionTxCursor:
-    """Stands in for the psycopg2 cursor db.transaction() yields for
-    run_decision -- the applications row lock, the manual_reviews
-    re-check (both under that same lock), the decisions INSERT ... ON
-    CONFLICT DO UPDATE, the status UPDATE, and the accept_token mint all
-    run through this one cursor, same as the real single transaction.
+    """Stands in for the psycopg2 cursor db.transaction() yields -- now used
+    for BOTH of run_decision's short transactions (PR #6 review, Finding 2):
+    TXN A (decision_state.start_decision_attempt, before decision-service is
+    called) and TXN B (the post-call recheck + decisions/decision_events/
+    attempt-completion write). Both share the exact same
+    decision_state.recheck_finality_locked helper for the applications-lock
+    and manual_reviews re-check, so locked_status/manual_review drive both.
     manual_review lets a test simulate a staff decision committing between
-    the outer pre-check and this transaction (the race this design closes)."""
+    the outer pre-check and either transaction (the race this design
+    closes)."""
 
-    def __init__(self, calls, locked_status="submitted", manual_review=None):
+    def __init__(self, calls, locked_status="submitted", manual_review=None, attempt_id=1,
+                 attempt_still_active=True):
         self.calls = calls
         self.locked_status = locked_status
         self.manual_review = manual_review
+        self.attempt_id = attempt_id
+        self.attempt_still_active = attempt_still_active
         self._last = None
 
     def execute(self, sql, params=None):
@@ -93,6 +105,17 @@ class _FakeRunDecisionTxCursor:
         elif stmt.startswith("SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
                               "FROM manual_reviews"):
             self._last = [self.manual_review] if self.manual_review else []
+        elif stmt.startswith("SELECT id, (lease_expires_at > now())"):
+            self._last = []  # no other attempt already in flight, by default
+        elif stmt.startswith("SELECT state, (lease_expires_at > now()) AS live"):
+            # TXN B's verify_attempt_still_active_locked -- still 'in_progress'
+            # and live unless a test says otherwise (attempt_still_active=False
+            # simulates a concurrent recovery having already expired/replaced it).
+            self._last = [{"state": "in_progress", "live": True}] if self.attempt_still_active else [
+                {"state": "expired", "live": False}
+            ]
+        elif stmt.startswith("INSERT INTO decision_attempts"):
+            self._last = [{"id": self.attempt_id}]
         else:
             self._last = []
 
@@ -100,8 +123,9 @@ class _FakeRunDecisionTxCursor:
         return self._last or []
 
 
-def _stub_run_decision_transaction(monkeypatch, calls, locked_status="submitted", manual_review=None):
-    cursor = _FakeRunDecisionTxCursor(calls, locked_status, manual_review)
+def _stub_run_decision_transaction(monkeypatch, calls, locked_status="submitted", manual_review=None, attempt_id=1,
+                                    attempt_still_active=True):
+    cursor = _FakeRunDecisionTxCursor(calls, locked_status, manual_review, attempt_id, attempt_still_active)
 
     @contextlib.contextmanager
     def _fake_tx():
@@ -264,7 +288,12 @@ def test_rerun_of_an_existing_decision_by_staff_without_internal_token_is_forbid
 def test_rerun_of_an_already_funded_application_is_rejected(monkeypatch):
     """Bug found in the field: scoring is deterministic, so a rerun on a
     funded application used to silently reset its recorded decision back to
-    the automated outcome while the loan sat funded on top of it."""
+    the automated outcome while the loan sat funded on top of it.
+
+    PR #6 review (Finding 2): this block now happens inside
+    decision_state.start_decision_attempt's locked recheck (TXN A), before
+    decision-service is ever called -- not the old unlocked pre-check --
+    so db.transaction() must be stubbed too."""
     funded_row = {**_APPLICATION_ROW, "status": "funded"}
 
     def _fake_query(sql, params=None):
@@ -273,6 +302,7 @@ def test_rerun_of_an_already_funded_application_is_rejected(monkeypatch):
         return [funded_row]
 
     monkeypatch.setattr(db, "query", _fake_query)
+    _stub_run_decision_transaction(monkeypatch, [], locked_status="funded")
     calls = _fake_decision_client_post(monkeypatch)
 
     resp = client.post(
@@ -292,19 +322,27 @@ def test_rerun_of_a_manually_reviewed_application_is_rejected(monkeypatch):
 
     Review fix: the block message used to be generic ("resolved by staff");
     it now states the actual outcome/staff member/timestamp/reason, and the
-    status code is 409 (a real conflict), not 422."""
+    status code is 409 (a real conflict), not 422.
+
+    PR #6 review (Finding 2): this block now happens inside
+    decision_state.start_decision_attempt's locked recheck (TXN A), before
+    decision-service is ever called -- not the old unlocked pre-check --
+    so db.transaction() must be stubbed too."""
+    manual_review = {
+        "outcome": "deny", "reason": "DTI too high after manual re-verification",
+        "reviewer_name": "Sam Okafor", "reviewer_role": "underwriter",
+        "reviewed_at": "2026-08-01T12:00:00+00:00",
+    }
+
     def _fake_query(sql, params=None):
         if "FROM decisions" in sql:
             return [{"app_id": 10}]
         if "FROM manual_reviews" in sql:
-            return [{
-                "outcome": "deny", "reason": "DTI too high after manual re-verification",
-                "reviewer_name": "Sam Okafor", "reviewer_role": "underwriter",
-                "reviewed_at": "2026-08-01T12:00:00+00:00",
-            }]
+            return [manual_review]
         return [_APPLICATION_ROW]
 
     monkeypatch.setattr(db, "query", _fake_query)
+    _stub_run_decision_transaction(monkeypatch, [], manual_review=manual_review)
     calls = _fake_decision_client_post(monkeypatch)
 
     resp = client.post(
@@ -366,6 +404,39 @@ def test_rerun_blocked_when_a_manual_review_commits_during_the_decision_service_
     # decisions INSERT, no status UPDATE, no accept_token mint ever ran.
     assert not any(c[0].startswith("INSERT INTO decisions") for c in calls)
     assert not any(c[0].startswith("UPDATE applications") for c in calls)
+
+
+def test_rerun_discarded_when_its_own_attempt_expired_and_was_replaced(monkeypatch):
+    """PR #6 review, lease invariant: TXN B must verify the attempt it's
+    about to persist under is STILL the live, active reservation -- not
+    just that funded/manual finality hasn't landed. Simulated here: the
+    external call to decision-service finally returns, but by the time
+    this request's own TXN B takes the lock, ITS OWN attempt has already
+    expired and been replaced by a recovery (attempt_still_active=False) --
+    the late result must be discarded, writing neither decisions nor
+    decision_events, never overwriting whatever the replacement attempt
+    already committed."""
+    calls = []
+
+    def _fake_query(sql, params=None):
+        if "FROM decisions" in sql:
+            return []
+        return [_APPLICATION_ROW]
+
+    monkeypatch.setattr(db, "query", _fake_query)
+    _fake_decision_client_post(monkeypatch)
+    _stub_run_decision_transaction(monkeypatch, calls, attempt_still_active=False)
+
+    resp = client.post(
+        "/applications/10/decision",
+        json={"access_token": _ACCESS_TOKEN},
+    )
+
+    assert resp.status_code == 409
+    assert "no longer active" in resp.json()["detail"]
+    assert not any(c[0].startswith("INSERT INTO decisions") for c in calls)
+    assert not any(c[0].startswith("INSERT INTO decision_events") for c in calls)
+    assert not any(c[0].startswith("UPDATE decision_attempts SET state = 'completed'") for c in calls)
 
 
 # --- POST /{app_id}/accept ---------------------------------------------------

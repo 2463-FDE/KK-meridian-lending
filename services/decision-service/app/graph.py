@@ -1,14 +1,20 @@
 """LangGraph state graph for the decisioning chain (Week 3).
 
-decide() always ran the same three steps -- pull credit, score, persist -- as a
+decide() always ran the same three steps -- pull credit, score, finalize -- as a
 plain function body. This builds the exact same three steps as an explicit graph
 instead: each node calls the same functions decide() always called (_pull_credit,
-_run_model, db.transaction), so behavior, every fail-closed exception, and the
-existing test suite (which monkeypatches decision.db/decision.httpx/decision.EXPERIAN_KEY
-etc.) are unchanged. What the graph buys over the plain function body: each step is
-now individually traceable in LangSmith, and each has an explicit node boundary to
-extend later (e.g. a retry policy on just the bureau-pull node) instead of editing
-inline function code.
+_run_model), so behavior, every fail-closed exception, and the existing test suite
+(which monkeypatches decision.httpx/decision.EXPERIAN_KEY etc.) are unchanged. What
+the graph buys over the plain function body: each step is now individually
+traceable in LangSmith, and each has an explicit node boundary to extend later
+(e.g. a retry policy on just the bureau-pull node) instead of editing inline
+function code.
+
+PR #6 review (Finding 2): the third node used to persist decision_events directly
+(via decision.db.transaction) -- it is now compute-only, same as the rest of this
+graph; see _node_finalize's own docstring for why, and
+routers/applications.py::run_decision on the origination-service side for where
+that persistence moved.
 
 References the `decision` module object throughout (never `from .decision import X`
 for individual names) -- decision.py's own tests reload that module with
@@ -17,7 +23,6 @@ the SAME module object; `decision.py`'s own test comments explain why a static n
 import would go stale across a reload. Module-level access here stays correct
 across that reload for the same reason.
 """
-import json
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -45,60 +50,35 @@ async def _node_score(state: DecisionState) -> dict:
     return {"result": result}
 
 
-def _node_persist(state: DecisionState) -> dict:
-    """Architecture fix (single-writer race closure): decision-service used
-    to also write the authoritative `decisions` row here
-    (`INSERT ... ON CONFLICT (app_id) DO UPDATE`), unconditionally --
-    nothing here knew whether origination-service's `manual_reviews` table
-    already held a staff's final decision for this app_id, so a rerun could
-    silently overwrite it out from under origination-service's own guards
-    (audit finding: an unclosed race between this call and
-    review_application's transaction).
+def _node_finalize(state: DecisionState) -> dict:
+    """Architecture fix (PR #6 review, Finding 2): this node used to also
+    durably write decision_events here, unconditionally, before decision-
+    service ever knew whether the request it's answering had already lost
+    a finality race against a staff decision or funding in origination-
+    service -- a blocked/discarded rerun still left a permanent-looking
+    audit row behind it. decision-service is now fully compute-only: this
+    node writes nothing to the database at all. origination-service writes
+    decision_events itself, atomically with `decisions`, and ONLY after its
+    own lock+recheck confirms this attempt actually wins (see
+    routers/applications.py::run_decision) -- so a discarded attempt
+    produces no audit row at all, not a misleading one.
 
-    decision-service now only computes and records its OWN append-only
-    audit trail (decision_events -- what the model proposed, and why) --
-    origination-service is the sole writer of the authoritative `decisions`
-    row, under a lock, with a staleness check against manual_reviews (see
-    routers/applications.py::run_decision). This function still commits
-    decision_events durably before returning: a proposed outcome is never
-    reported to the caller without a matching audit row explaining it."""
+    (Earlier architecture fix, still true: decision-service does not write
+    the authoritative `decisions` row either -- origination-service is the
+    sole writer, under a lock, with a staleness check against
+    manual_reviews.)
+
+    Everything decision-service used to persist here is still returned to
+    the caller (bureau_score/model_version/top_features alongside the
+    existing score/decision/reason_codes) -- origination-service needs all
+    of it to write a complete decision_events row on its own end."""
     application = state["application"]
     result = state["result"]
     bureau_score = state["bureau_score"]
-    app_id = application.get("app_id")
-
-    try:
-        decision.db.transaction([
-            (
-                "INSERT INTO decision_events "
-                "(app_id, requested_amount, term_months, annual_income, bureau_score, "
-                " model_score, model_version, top_features, decision, reason_codes) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    app_id,
-                    application.get("requested_amount"),
-                    application.get("term_months"),
-                    application.get("income"),
-                    bureau_score,
-                    result["score"],
-                    result["model_version"],
-                    json.dumps(result["top_features"]),
-                    result["decision"],
-                    json.dumps(result["reason_codes"]),
-                ),
-            ),
-        ])
-    except Exception as e:
-        log.error("could not persist decision_event: %s", e)
-        raise decision.DecisionPersistenceError(
-            f"app_id={app_id}: decision computed ({result['decision']}, score="
-            f"{result['score']}) but could not be durably recorded — refusing to "
-            "report an outcome with no matching audit trail."
-        ) from e
 
     log.info(
         "GET /decision app_id=%s model_score=%s decision=%s reason_codes=%s",
-        app_id, result["score"], result["decision"], result["reason_codes"],
+        application.get("app_id"), result["score"], result["decision"], result["reason_codes"],
     )
     return {
         "final": {
@@ -106,6 +86,9 @@ def _node_persist(state: DecisionState) -> dict:
             "decision": result["decision"],
             "reason_codes": result["reason_codes"],
             "adverse_action_reason": result["reason_codes"][0] if result["reason_codes"] else None,
+            "bureau_score": bureau_score,
+            "model_version": result["model_version"],
+            "top_features": result["top_features"],
         }
     }
 
@@ -114,10 +97,10 @@ _graph = (
     StateGraph(DecisionState)
     .add_node("pull_credit", _node_pull_credit)
     .add_node("score", _node_score)
-    .add_node("persist", _node_persist)
+    .add_node("finalize", _node_finalize)
     .add_edge("pull_credit", "score")
-    .add_edge("score", "persist")
-    .add_edge("persist", END)
+    .add_edge("score", "finalize")
+    .add_edge("finalize", END)
     .set_entry_point("pull_credit")
     .compile()
 )

@@ -37,3 +37,14 @@ INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 # is a deliberately generous guess for that, configurable per environment;
 # tighten or loosen via ACCEPT_TOKEN_TTL_SECONDS without a code change.
 ACCEPT_TOKEN_TTL_SECONDS = int(os.getenv("ACCEPT_TOKEN_TTL_SECONDS", str(24 * 60 * 60)))
+
+# PR #6 review (Finding 2): how long a decision_attempts row may sit
+# 'in_progress' before a later request is allowed to treat it as abandoned
+# (a crashed process) and atomically recover -- see
+# decision_state.start_decision_attempt. Must outlive clients.py's own 30s
+# timeout on the call to decision-service (a genuinely still-running call
+# can legitimately take that full 30s before origination itself gives up) --
+# 2x that timeout leaves headroom for the lock/transaction overhead around
+# it without leaving a truly crashed attempt blocking reruns any longer than
+# necessary on this synchronous, user-facing flow.
+DECISION_ATTEMPT_LEASE_SECONDS = int(os.getenv("DECISION_ATTEMPT_LEASE_SECONDS", "60"))
