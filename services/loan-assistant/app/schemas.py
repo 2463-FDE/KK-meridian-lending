@@ -2,6 +2,25 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 
+class ExternalSignal(BaseModel):
+    """A published statistic cited alongside the summary.
+
+    Populated server-side from what the provider actually returned (app/macro.py),
+    never from the model's output -- same rule as `applicant_name`. The model is
+    shown the figure so it can reason about it, but if it restated the number
+    differently the officer still sees the published one.
+    """
+
+    source: str = Field(description="Publisher, e.g. 'U.S. Bureau of Labor Statistics'")
+    series_id: str = Field(description="Publisher's own series identifier, for verification")
+    label: str = Field(description="What the figure measures, in plain English")
+    value: float = Field(description="The published value")
+    unit: str = Field(description="Unit of the value, e.g. 'percent'")
+    period: str = Field(description="The period the figure describes, e.g. 'June 2026'")
+    url: str = Field(description="Where a reader can verify it")
+    citation: str = Field(description="One-line human-readable citation for display")
+
+
 class LoanSummary(BaseModel):
     applicant_name: str = Field(description="Full name of applicant")
     loan_amount: float = Field(description="Requested loan amount in USD")
@@ -16,6 +35,14 @@ class LoanSummary(BaseModel):
     flags: list[str] = Field(
         default_factory=list,
         description="List of specific concerns the officer should review (no raw PII)",
+    )
+    external_signals: list[ExternalSignal] = Field(
+        default_factory=list,
+        description=(
+            "Grounded context from outside the application. Empty when the "
+            "provider is disabled or unreachable -- the summary is still valid, "
+            "it simply has no external context to show."
+        ),
     )
 
 

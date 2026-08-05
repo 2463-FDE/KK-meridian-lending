@@ -39,9 +39,9 @@ from tenacity import (
     wait_exponential,
 )
 
-from . import config
+from . import config, macro
 from .redactor import redact_dict, redact_str
-from .schemas import LoanSummary
+from .schemas import ExternalSignal, LoanSummary
 
 try:
     from langsmith.wrappers import wrap_anthropic
@@ -188,13 +188,28 @@ def _missing_risk_grounding_fields(app_data: dict) -> list[str]:
     return [field for field in _RISK_GROUNDING_FIELDS if app_data.get(field) is None]
 
 
-def _build_prompt(app_data: dict) -> str:
+def _build_prompt(app_data: dict, signal=None) -> str:
     allowed = {k: app_data.get(k) for k in _PROMPT_ALLOWED_FIELDS if app_data.get(k) is not None}
     safe = redact_dict(allowed)
+    # The signal is context, not an input the model may invent. Appended as a
+    # labelled block rather than merged into the application data, so the model
+    # cannot mistake a published statistic for something the applicant stated.
+    # The value the officer finally sees is attached server-side from the same
+    # fetch (see summarize_application), not read back out of here.
+    context = ""
+    if signal is not None:
+        context = (
+            "External context (published statistic, NOT supplied by the applicant):"
+            + chr(10) + signal.cite() + chr(10)
+            + "You may reference this when it is relevant to employment or repayment "
+            "risk. Do not restate it as a fact about this applicant, and do not "
+            "invent any other external figures." + chr(10) + chr(10)
+        )
     return (
         "Summarize this loan application as JSON with fields: loan_amount, "
         "term_months, purpose, risk_tier, summary, flags.\n\n"
         f"Application data:\n{json.dumps(safe, indent=2)}\n\n"
+        f"{context}"
         "Respond with only the JSON object — no markdown fences, no extra text."
     )
 
@@ -276,7 +291,12 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
             "model assign a risk_tier it has no data to support."
         )
 
-    prompt = _build_prompt(app_data)
+    # One grounded external signal (app/macro.py). Fetched before the cost
+    # guard, never after: it adds tokens, so the guard has to see the prompt
+    # that will actually be sent. Fails open -- None simply means no context.
+    signal = macro.current_signal()
+
+    prompt = _build_prompt(app_data, signal)
 
     estimated = _estimate_tokens(_SYSTEM + prompt)
     if estimated > MAX_INPUT_TOKENS:
@@ -285,10 +305,19 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
             "Trim the application payload before calling summarize_application()."
         )
 
+    # The review asked for the signal's cost to be measured, not assumed. This
+    # logs the delta on every call, so the real figure is observable in
+    # production rather than a number someone quoted once in a PR.
+    signal_tokens = 0
+    if signal is not None:
+        signal_tokens = estimated - _estimate_tokens(_SYSTEM + _build_prompt(app_data, None))
+
     log.info(
-        "llm_client summarize app_id=%s estimated_tokens=%d",
+        "llm_client summarize app_id=%s estimated_tokens=%d signal=%s signal_tokens=%d",
         app_data.get("id", "unknown"),
         estimated,
+        signal.series_id if signal else "none",
+        signal_tokens,
     )
 
     client = make_client()
@@ -311,7 +340,25 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         log.error("llm_client parse error response=%s", safe_raw)
         raise LLMResponseError(f"Could not parse LLM response: {exc}") from exc
 
-    return LoanSummary(applicant_name=_applicant_name(app_data), **llm_output.model_dump())
+    # The citation is built from what the provider returned, not from anything
+    # the model produced -- the same rule _applicant_name follows. If the model
+    # restated the rate differently in its prose, the cited figure is still the
+    # published one.
+    signals = []
+    if signal is not None:
+        signals.append(
+            ExternalSignal(
+                source=signal.source, series_id=signal.series_id, label=signal.label,
+                value=signal.value, unit=signal.unit, period=signal.period,
+                url=signal.url, citation=signal.cite(),
+            )
+        )
+
+    return LoanSummary(
+        applicant_name=_applicant_name(app_data),
+        external_signals=signals,
+        **llm_output.model_dump(),
+    )
 
 
 def _applicant_name(app_data: dict) -> str:
