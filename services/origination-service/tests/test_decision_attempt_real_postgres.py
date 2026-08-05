@@ -63,8 +63,10 @@ def _full_schema_sql():
             amount NUMERIC(14,2) NOT NULL,
             term_months INTEGER NOT NULL,
             income NUMERIC(14,2),
-            access_token TEXT,
             status TEXT DEFAULT 'submitted',
+            access_token_hash TEXT,
+            access_token_expires_at TIMESTAMPTZ,
+            access_token_consumed_at TIMESTAMPTZ,
             accept_token_hash TEXT,
             accept_token_expires_at TIMESTAMPTZ,
             accept_token_consumed_at TIMESTAMPTZ
@@ -95,6 +97,25 @@ def _full_schema_sql():
             decision TEXT NOT NULL,
             reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
             attempt_id INTEGER
+        );
+        -- Canonical offer row (db/init/001_schema.sql). Nullable amounts on
+        -- purpose: the Gap F tests seed deliberately incomplete rows to prove
+        -- the read/accept paths refuse them. The production schema carries a
+        -- CHECK (offers_canonical_terms_present) that would block that seeding,
+        -- which is precisely why these tests assert the APPLICATION-level
+        -- refusal rather than relying on the constraint alone.
+        CREATE TABLE offers (
+            id SERIAL PRIMARY KEY,
+            app_id INTEGER REFERENCES applications(id) UNIQUE,
+            decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,
+            fee_pct_used NUMERIC(5,4),
+            apr NUMERIC(7,3),
+            finance_charge NUMERIC(14,2),
+            monthly_payment NUMERIC(14,2),
+            amount_financed NUMERIC(14,2),
+            total_of_payments NUMERIC(14,2),
+            created_at TIMESTAMPTZ DEFAULT now(),
+            accepted_at TIMESTAMPTZ
         );
         -- Boarding sink (db/init/001_schema.sql:117-138). Present so the A3
         -- route-removal test can assert on REAL row counts rather than on a
@@ -156,6 +177,8 @@ def real_db(monkeypatch):
 
 def _seed_application(conn, app_id, amount=9000, term_months=24, income=40000,
                        access_token="real-access-token", status="submitted"):
+    """Seeds a live submission token the same way intake does: only the sha256
+    hash is stored, with a Postgres-clock expiry (Gap B)."""
     with conn.cursor() as c:
         c.execute(f"SET search_path TO {SCHEMA}")
         c.execute(
@@ -163,9 +186,11 @@ def _seed_application(conn, app_id, amount=9000, term_months=24, income=40000,
             (app_id, "Jane Borrower", "123456781"),
         )
         c.execute(
-            "INSERT INTO applications (id, applicant_id, amount, term_months, income, access_token, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (app_id, app_id, amount, term_months, income, access_token, status),
+            "INSERT INTO applications (id, applicant_id, amount, term_months, income, "
+            "access_token_hash, access_token_expires_at, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, now() + interval '1 hour', %s)",
+            (app_id, app_id, amount, term_months, income,
+             decision_state.hash_access_token(access_token), status),
         )
     conn.commit()
 
@@ -789,3 +814,102 @@ def test_a_genuinely_new_decision_request_gets_a_fresh_bureau_key(real_db, monke
         "a completed predecessor means a NEW decision request -- reusing the key "
         "would serve stale credit data"
     )
+
+
+# --- Test 8 (Gap F): incomplete offer terms can never board a loan ----------
+
+_CANONICAL_TERMS = ("apr", "finance_charge", "monthly_payment", "amount_financed",
+                    "total_of_payments")
+
+
+@pytest.mark.parametrize("missing_field", _CANONICAL_TERMS)
+def test_incomplete_offer_terms_never_board_a_loan(real_db, monkeypatch, missing_field):
+    """Gap F, the part that actually moves money: accept_offer used to check
+    `apr IS NULL` alone, so an offers row missing finance_charge,
+    monthly_payment, amount_financed or total_of_payments still boarded a real
+    loan -- funding a borrower on terms they were never shown a complete
+    disclosure for. All five are re-checked under the row lock now.
+
+    One case per canonical amount, asserted against real loans/balances counts
+    rather than a mocked cursor."""
+    app_id = 520 + _CANONICAL_TERMS.index(missing_field)
+    _seed_application(real_db, app_id, status="approved")
+
+    complete = {
+        "apr": 5.946, "finance_charge": 768.11, "monthly_payment": 407.0,
+        "amount_financed": 8730.0, "total_of_payments": 9768.11,
+    }
+    terms = dict(complete, **{missing_field: None})
+    raw_accept = "borrower-accept-token-for-gap-f"
+
+    with real_db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (%s, 'approve')", (app_id,))
+        cur.execute(
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
+            "monthly_payment, amount_financed, total_of_payments) "
+            "VALUES (%s, %s, 0.03, %s, %s, %s, %s, %s)",
+            (app_id, app_id, terms["apr"], terms["finance_charge"], terms["monthly_payment"],
+             terms["amount_financed"], terms["total_of_payments"]),
+        )
+        cur.execute(
+            "UPDATE applications SET accept_token_hash = %s, "
+            "accept_token_expires_at = now() + interval '1 hour' WHERE id = %s",
+            (decision_state.hash_accept_token(raw_accept), app_id),
+        )
+    real_db.commit()
+
+    def _counts():
+        with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SET search_path TO {SCHEMA}")
+            cur.execute("SELECT count(*) AS n FROM loans")
+            loans = cur.fetchone()["n"]
+            cur.execute("SELECT count(*) AS n FROM balances")
+            return loans, cur.fetchone()["n"]
+
+    before = _counts()
+    resp = client.post(
+        f"/applications/{app_id}/accept",
+        headers={"X-Offer-Accept-Token": raw_accept},
+    )
+
+    assert resp.status_code == 409, f"a NULL {missing_field} must not board a loan"
+    assert missing_field in resp.json()["detail"]
+    assert _counts() == before, f"a loan/balance was boarded despite a NULL {missing_field}"
+
+
+def test_a_complete_offer_still_boards_exactly_one_loan_and_balance(real_db, monkeypatch):
+    """Regression guard for Gap F: the integrity check must not break the
+    supported accept path."""
+    app_id = 530
+    _seed_application(real_db, app_id, status="approved")
+    raw_accept = "borrower-accept-token-complete"
+
+    with real_db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (%s, 'approve')", (app_id,))
+        cur.execute(
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
+            "monthly_payment, amount_financed, total_of_payments) "
+            "VALUES (%s, %s, 0.03, 5.946, 768.11, 407.0, 8730.0, 9768.11)",
+            (app_id, app_id),
+        )
+        cur.execute(
+            "UPDATE applications SET accept_token_hash = %s, "
+            "accept_token_expires_at = now() + interval '1 hour' WHERE id = %s",
+            (decision_state.hash_accept_token(raw_accept), app_id),
+        )
+    real_db.commit()
+
+    resp = client.post(
+        f"/applications/{app_id}/accept",
+        headers={"X-Offer-Accept-Token": raw_accept},
+    )
+
+    assert resp.status_code == 200
+    with real_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) AS n FROM loans WHERE app_id = %s", (app_id,))
+        assert cur.fetchone()["n"] == 1
+        cur.execute("SELECT count(*) AS n FROM balances")
+        assert cur.fetchone()["n"] == 1

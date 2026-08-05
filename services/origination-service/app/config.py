@@ -38,6 +38,16 @@ INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 # tighten or loosen via ACCEPT_TOKEN_TTL_SECONDS without a code change.
 ACCEPT_TOKEN_TTL_SECONDS = int(os.getenv("ACCEPT_TOKEN_TTL_SECONDS", str(24 * 60 * 60)))
 
+# How long the SUBMISSION token (ApplicationCreated.access_token) stays valid.
+# It proves ownership for the very first decision call on an application whose
+# borrower has no account yet -- the same bearer-credential-at-rest problem the
+# acceptance token had, so it gets the same hash/expiry/single-use lifecycle
+# (see decision_state.issue_access_token). 24 hours by design symmetry with the
+# acceptance window above: a borrower who submits and comes back the next day
+# still gets their first decision; anything older re-submits. Configurable per
+# environment.
+ACCESS_TOKEN_TTL_SECONDS = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", str(24 * 60 * 60)))
+
 # PR #6 review (Finding 2): how long a decision_attempts row may sit
 # 'in_progress' before a later request is allowed to treat it as abandoned
 # (a crashed process) and atomically recover -- see

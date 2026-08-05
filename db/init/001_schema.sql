@@ -43,11 +43,21 @@ CREATE TABLE IF NOT EXISTS applications (
     job_title         TEXT,
     employment_years  DOUBLE PRECISION,            -- a duration, not money -- left as-is
     status            TEXT DEFAULT 'submitted',
-    -- Review fix: minted once at submission (intake.create_application) and
-    -- returned to the caller -- proves ownership for the FIRST decision call
-    -- (see routers/applications.py run_decision), since app_id alone is a
-    -- guessable integer and the borrower has no account yet at this point.
-    access_token      TEXT,
+    -- Minted once at submission (intake.create_application) and returned to
+    -- the caller -- proves ownership for the FIRST decision call (see
+    -- routers/applications.py run_decision), since app_id alone is a guessable
+    -- integer and the borrower has no account yet at this point.
+    --
+    -- Security fix (db/migrations/0025, backported here so a fresh volume never
+    -- recreates the vulnerability): this used to be a plaintext `access_token
+    -- TEXT` column that never expired and was never consumed -- the same
+    -- bearer-credential-at-rest problem 0022 fixed for the acceptance token.
+    -- Only the sha256 hash is stored now, with a server-clock (Postgres now())
+    -- expiry and a single-use consumed marker stamped by the decision that
+    -- used it.
+    access_token_hash          TEXT,
+    access_token_expires_at    TIMESTAMPTZ,
+    access_token_consumed_at   TIMESTAMPTZ,
     -- Review fix: one-time token minted onto the application when it's
     -- approved (run_decision), required to accept it anonymously (the
     -- no-account borrower flow) since app_id is a sequential, guessable
@@ -72,6 +82,9 @@ CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_applications_accept_token_hash
     ON applications (accept_token_hash)
     WHERE accept_token_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_applications_access_token_hash
+    ON applications (access_token_hash)
+    WHERE access_token_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_applications_applicant ON applications(applicant_id);
 
 -- KYC: CIP only. No sanctions/OFAC, no beneficial owner, no monitoring.
@@ -110,7 +123,21 @@ CREATE TABLE IF NOT EXISTS offers (
     -- Review fix (db/migrations/0021): OFFER_ACCEPTED is a real workflow
     -- state, not just implied by BOARDED -- stamped the moment accept_offer
     -- boards the loan (same atomic action in this system today).
-    accepted_at TIMESTAMPTZ
+    accepted_at TIMESTAMPTZ,
+    -- Gap F (db/migrations/0026, backported here): the five canonical TILA
+    -- amounts above must all be present or the row is not a disclosure. Read
+    -- paths used to substitute defaults for a NULL (`apr or 7.99`), turning a
+    -- corrupt row into a real-looking offer a borrower could accept. On a
+    -- fresh volume there is no historical damage to tolerate, so this is a
+    -- plain (already-valid) CHECK; 0026 adds it NOT VALID on an existing
+    -- database so the operator can see and remediate offending rows first.
+    CONSTRAINT offers_canonical_terms_present CHECK (
+        apr IS NOT NULL
+        AND finance_charge IS NOT NULL
+        AND monthly_payment IS NOT NULL
+        AND amount_financed IS NOT NULL
+        AND total_of_payments IS NOT NULL
+    )
 );
 
 -- LSS tables. A funded loan is "boarded" here by a direct insert from origination.

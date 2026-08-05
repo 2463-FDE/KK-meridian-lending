@@ -260,6 +260,79 @@ def mark_attempt_failed(attempt_id: int, failure_code: str) -> None:
         )
 
 
+# --- Submission (access) token -----------------------------------------------
+# PR #6 review (Gap B): the token minted at submission and used to prove
+# ownership on the FIRST decision call used to be stored in plain text
+# (applications.access_token), never expired, was never consumed, and was
+# compared with a plain `==`. That is the exact set of problems migration 0022
+# fixed for the acceptance token; this is the same lifecycle applied to the
+# other bearer credential. Only the sha256 hash is stored, expiry is Postgres's
+# own now(), comparison is constant-time, and the token is consumed by the
+# decision it authorises.
+
+
+def hash_access_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+def new_access_token() -> tuple[str, str]:
+    """Mint a submission token. Returns (raw, hash) -- the raw value is handed
+    back to the borrower's browser exactly once (ApplicationCreated.
+    access_token) and never stored, logged or returned again."""
+    raw = secrets.token_urlsafe(32)
+    return raw, hash_access_token(raw)
+
+
+def access_token_matches(stored_hash: str | None, raw_token: str | None) -> bool:
+    """Constant-time hash comparison. Never `==` on the raw value."""
+    if not stored_hash or not raw_token:
+        return False
+    return secrets.compare_digest(stored_hash, hash_access_token(raw_token))
+
+
+def verify_access_token(row: dict, raw_token: str | None) -> bool:
+    """Is `raw_token` the live submission token for this application?
+
+    `row` must include access_token_hash, access_token_consumed_at and
+    access_token_live (computed by the caller's SQL as
+    "access_token_expires_at IS NOT NULL AND access_token_expires_at > now()"
+    -- Postgres's clock, never the app host's).
+
+    Returns a bare bool on purpose: unlike the acceptance token, the caller
+    here collapses every failure into one generic 403 so an anonymous caller
+    cannot distinguish "wrong token" from "expired" from "already used" from
+    "no such application" (see run_decision).
+    """
+    if row.get("access_token_consumed_at") is not None:
+        return False
+    if not row.get("access_token_hash") or not row.get("access_token_live"):
+        return False
+    return access_token_matches(row["access_token_hash"], raw_token)
+
+
+def consume_access_token(cur, app_id: int) -> None:
+    """Single-use: stamp the submission token consumed once the decision it
+    authorised has actually been persisted. Runs inside that same transaction
+    (TXN B), so a decision that rolls back leaves the token usable and the
+    borrower's retry still works -- notably the ambiguous-timeout retry path
+    (Gap A), which must not be locked out by a token it never got to use."""
+    cur.execute(
+        "UPDATE applications SET access_token_consumed_at = now() "
+        "WHERE id = %s AND access_token_consumed_at IS NULL",
+        (app_id,),
+    )
+
+
+# Shared by the ownership pre-check and any locked re-read -- access_token_live
+# is evaluated by Postgres's own now(), never Python's.
+ACCESS_TOKEN_FIELDS = (
+    "access_token_hash, access_token_consumed_at, "
+    "(access_token_expires_at IS NOT NULL AND access_token_expires_at > now()) AS access_token_live"
+)
+
+
+# --- Acceptance (offer) token -------------------------------------------------
+
 def hash_accept_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode()).hexdigest()
 

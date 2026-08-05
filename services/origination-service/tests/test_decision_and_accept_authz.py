@@ -50,10 +50,15 @@ client = TestClient(app)
 
 _ACCESS_TOKEN = "real-access-token-xyz789"
 
+# Gap B: the submission token is stored as a sha256 hash with a Postgres-clock
+# expiry and a single-use marker -- never in plaintext. `access_token_live` is
+# what the real query computes from access_token_expires_at.
 _APPLICATION_ROW = {
     "id": 10, "applicant_id": 5, "amount": 9000, "term_months": 24,
     "income": 40000, "name": "Jane Borrower", "ssn": "123456781",
-    "access_token": _ACCESS_TOKEN,
+    "access_token_hash": decision_state.hash_access_token(_ACCESS_TOKEN),
+    "access_token_consumed_at": None,
+    "access_token_live": True,
 }
 
 
@@ -446,10 +451,21 @@ _ACCEPT_TOKEN_HASH = decision_state.hash_accept_token(_ACCEPT_TOKEN)
 
 
 def _accept_row(status="approved", outcome="approve", apr=9.99,
-                 token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None):
+                 token_hash=_ACCEPT_TOKEN_HASH, token_live=True, token_consumed_at=None,
+                 offer_id=1):
+    """Gap F: the accept pre-check now reads all five canonical offer amounts
+    plus offer_id, so it can tell "no offer at all" (offer_id NULL) apart from
+    "offer exists but is incomplete". `apr=None` here keeps meaning "no offer"
+    for the existing callers that use it that way, so offer_id follows apr."""
     return {
         "amount": 9000, "term_months": 24, "status": status,
-        "name": "Jane Borrower", "apr": apr, "outcome": outcome,
+        "name": "Jane Borrower", "outcome": outcome,
+        "offer_id": offer_id if apr is not None else None,
+        "apr": apr,
+        "finance_charge": 500.0 if apr is not None else None,
+        "monthly_payment": 400.0 if apr is not None else None,
+        "amount_financed": 8700.0 if apr is not None else None,
+        "total_of_payments": 9600.0 if apr is not None else None,
         "accept_token_hash": token_hash, "accept_token_consumed_at": token_consumed_at,
         "token_live": token_live,
     }
@@ -510,8 +526,13 @@ class _FakeAcceptTxCursor:
             }]
         elif stmt.startswith("SELECT outcome FROM decisions"):
             self._last = [{"outcome": self.locked_outcome}] if self.locked_outcome else []
-        elif stmt.startswith("SELECT apr FROM offers"):
-            self._last = [{"apr": self.offer_apr}] if self.offer_apr is not None else []
+        elif stmt.startswith("SELECT apr, finance_charge, monthly_payment"):
+            # Gap F: all five canonical terms are re-read under the lock now.
+            self._last = [{
+                "apr": self.offer_apr, "finance_charge": 500.0,
+                "monthly_payment": 400.0, "amount_financed": 8700.0,
+                "total_of_payments": 9600.0,
+            }] if self.offer_apr is not None else []
         elif stmt.startswith("UPDATE applications SET status = 'funded'"):
             self._last = None
         elif stmt.startswith("UPDATE offers SET accepted_at"):

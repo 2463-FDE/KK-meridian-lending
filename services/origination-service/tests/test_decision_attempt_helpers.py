@@ -17,10 +17,13 @@ from fastapi.testclient import TestClient
 client = TestClient(app)
 
 _ACCESS_TOKEN = "real-access-token-xyz789"
+# Gap B: hashed submission token, Postgres-clock expiry, single-use marker.
 _APPLICATION_ROW = {
     "id": 10, "applicant_id": 5, "amount": 9000, "term_months": 24,
     "income": 40000, "name": "Jane Borrower", "ssn": "123456781",
-    "access_token": _ACCESS_TOKEN,
+    "access_token_hash": decision_state.hash_access_token(_ACCESS_TOKEN),
+    "access_token_consumed_at": None,
+    "access_token_live": True,
 }
 
 

@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session
 
 from .. import config, db, models, offer as offer_mod, schedule
 from ..database import get_session
+from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferIn, OfferResponse, ScheduleRow
 
+log = get_logger("offers")
 router = APIRouter(tags=["offers"])
 
 
@@ -149,12 +151,43 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     )
     if not offer:
         raise HTTPException(status_code=404, detail="no offer for this application")
+
+    # Gap F (PR #6 review): every one of the five canonical disclosure amounts
+    # used to be read as `offer.<field> or <default>`. A NULL apr silently
+    # became 7.99, a NULL finance_charge silently became 0 -- so a corrupt or
+    # half-written offer row was rendered as a real, plausible-looking TILA
+    # disclosure with invented terms, and the borrower could accept it. These
+    # are canonical loan terms: if any is missing the row is not a disclosure,
+    # and the honest answer is an explicit integrity error, not a default.
+    missing = [
+        name for name, value in (
+            ("apr", offer.apr),
+            ("finance_charge", offer.finance_charge),
+            ("monthly_payment", offer.monthly_payment),
+            ("amount_financed", offer.amount_financed),
+            ("total_of_payments", offer.total_of_payments),
+        )
+        if value is None
+    ]
+    if missing:
+        log.error(
+            "incomplete offer row offer_id=%s application_id=%s missing=%s",
+            offer.id, application_id, ",".join(missing),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This offer is incomplete and cannot be displayed. Missing required "
+                f"disclosure terms: {', '.join(missing)}. Generate a new offer."
+            ),
+        )
+
     # Rebuild the display schedule from the persisted offer (Offer ORM only). Recover the
     # principal/term from the stored disclosure box and reuse the stored APR as the schedule
     # rate — the same shortcut the LOS read path takes. Float math throughout (D1).
-    monthly_payment = offer.monthly_payment or 0.0
-    total_of_payments = offer.total_of_payments or 0.0
-    amount_financed = offer.amount_financed or 0.0
+    monthly_payment = float(offer.monthly_payment)
+    total_of_payments = float(offer.total_of_payments)
+    amount_financed = float(offer.amount_financed)
     # W4 review fix: use the fee rule actually snapshotted on THIS row, not
     # whatever ORIGINATION_FEE_PCT happens to be right now -- reading the live
     # constant here instead of the stored snapshot was exactly the drift this
@@ -165,16 +198,18 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     fee_pct = offer.fee_pct_used if offer.fee_pct_used is not None else float(offer_mod.ORIGINATION_FEE_PCT)
     principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
     term_months = round(total_of_payments / monthly_payment) if monthly_payment else 0
-    rows = schedule.amortization(principal, offer.apr or 7.99, term_months) if term_months else []
+    # No `or 7.99` fallback: apr is guaranteed non-NULL by the integrity check
+    # above, so the schedule is always built from the rate actually disclosed.
+    rows = schedule.amortization(principal, float(offer.apr), term_months) if term_months else []
     disclosure = Disclosure(
-        apr=offer.apr or 0, finance_charge=offer.finance_charge or 0,
+        apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, amount_financed=amount_financed,
         total_of_payments=total_of_payments,
     )
     return OfferResponse(
         offer_id=offer.id, application_id=application_id,
         decision_id=offer.decision_id, fee_pct_used=fee_pct,
-        apr=offer.apr or 0, finance_charge=offer.finance_charge or 0,
+        apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, total_of_payments=total_of_payments,
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],
     )

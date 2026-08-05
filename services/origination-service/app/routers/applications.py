@@ -78,6 +78,36 @@ def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> Non
         raise HTTPException(status_code=403, detail="staff only")
 
 
+# The five canonical TILA amounts. An offers row missing any of them is not a
+# disclosure -- see _offer_disclosure_or_none and Gap F.
+_CANONICAL_OFFER_FIELDS = (
+    "apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments",
+)
+
+
+def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
+    """Render an offers row as a Disclosure, or None if it is incomplete.
+
+    Gap F (PR #6 review): this read used to be `offer.apr or 0` per field, so a
+    row with a NULL amount was presented as a real disclosure quoting 0.00 --
+    invented terms indistinguishable from genuine ones. Missing terms now
+    render as "no offer", never as a number nobody calculated."""
+    if offer is None:
+        return None
+    missing = [f for f in _CANONICAL_OFFER_FIELDS if getattr(offer, f, None) is None]
+    if missing:
+        log.error(
+            "incomplete offer row app_id=%s offer_id=%s missing=%s",
+            app_id, getattr(offer, "id", None), ",".join(missing),
+        )
+        return None
+    return Disclosure(
+        apr=offer.apr, finance_charge=offer.finance_charge,
+        monthly_payment=offer.monthly_payment, amount_financed=offer.amount_financed,
+        total_of_payments=offer.total_of_payments,
+    )
+
+
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
@@ -228,11 +258,14 @@ def get_application(
         decision_reason=mr["reason"] if mr else None,
         decision_by=(mr["reviewer_name"] or mr["reviewer_role"]) if mr else None,
         decision_at=mr["reviewed_at"].isoformat() if mr and hasattr(mr["reviewed_at"], "isoformat") else None,
-        offer=Disclosure(
-            apr=offer.apr or 0, finance_charge=offer.finance_charge or 0,
-            monthly_payment=offer.monthly_payment or 0, amount_financed=offer.amount_financed or 0,
-            total_of_payments=offer.total_of_payments or 0,
-        ) if offer else None,
+        # Gap F (PR #6 review): these five used to be `offer.<field> or 0`, so
+        # an incomplete offer row was rendered to the staff console as a real
+        # disclosure showing 0.00 terms. An offer missing any canonical amount
+        # is not a disclosure -- surface nothing rather than invented numbers.
+        # (disclosure-service's own read path returns an explicit 409; this is
+        # a staff detail view, so it degrades to "no offer yet" instead of
+        # failing the whole application page.)
+        offer=_offer_disclosure_or_none(offer, a.id),
     )
 
 
@@ -287,7 +320,8 @@ def run_decision(
     # stranger's stored SSN. A first call now also requires either a staff
     # session or the access_token minted onto this application at submission.
     rows = db.query(
-        "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, a.access_token, "
+        f"SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, "
+        f"{decision_state.ACCESS_TOKEN_FIELDS}, "
         "a.status, ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
@@ -317,7 +351,12 @@ def run_decision(
         # only after it returns.)
         requested_by = x_user_role
     else:
-        is_owner = bool(body.access_token) and bool(r.get("access_token")) and body.access_token == r["access_token"]
+        # Gap B: constant-time hash comparison against the stored sha256, plus
+        # Postgres-clock expiry and single-use state -- never a plain `==` on a
+        # plaintext column. Every failure mode (wrong / expired / already used /
+        # never issued) collapses into the same generic 403 so an anonymous
+        # caller learns nothing about the application from the response.
+        is_owner = decision_state.verify_access_token(r, body.access_token)
         if not is_staff and not is_owner:
             raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
         requested_by = x_user_role if is_staff else "borrower"
@@ -483,6 +522,12 @@ def run_decision(
                     # rerun to deny, while the old accept link still worked. Same
                     # helper both paths use now -- see decision_state.py.
                     decision_state.revoke_accept_token(cur, app_id)
+                # Gap B: single-use. Consumed HERE, in the same transaction as
+                # the decision it authorised -- so a rolled-back decision (or
+                # the ambiguous-timeout retry path from Gap A, which never got
+                # this far) leaves the token usable and the borrower is not
+                # locked out of a decision they never received.
+                decision_state.consume_access_token(cur, app_id)
                 cur.execute(
                     "UPDATE decision_attempts SET state = 'completed', completed_at = now(), "
                     "bureau_reference_id = %s "
@@ -801,7 +846,8 @@ def accept_offer(
     # between this read and that lock.
     rows = db.query(
         f"SELECT a.amount, a.term_months, a.status, {_ACCEPT_TOKEN_FIELDS}, ap.name, "
-        "o.apr, o.accepted_at, d.outcome "
+        "o.id AS offer_id, o.apr, o.finance_charge, o.monthly_payment, "
+        "o.amount_financed, o.total_of_payments, o.accepted_at, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
@@ -849,10 +895,24 @@ def accept_offer(
             status_code=422,
             detail="This application must receive final approval before it can be boarded.",
         )
-    if r.get("apr") is None:
+    if r.get("offer_id") is None:
         raise HTTPException(
             status_code=409,
             detail="Create an offer before boarding this application.",
+        )
+    # Gap F: an offer row that EXISTS but is missing canonical terms is a
+    # different problem from having no offer at all, and deserves a different
+    # answer -- the borrower needs a regenerated offer, not a first one. The
+    # authoritative check is the locked re-read below; this fast path just
+    # avoids opening a transaction for a row already known to be unusable.
+    incomplete_precheck = [f for f in _CANONICAL_OFFER_FIELDS if r.get(f) is None]
+    if incomplete_precheck:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This offer is incomplete and cannot be boarded. Missing required "
+                f"disclosure terms: {', '.join(incomplete_precheck)}. Generate a new offer."
+            ),
         )
 
     name = r.get("name") or "Borrower"
@@ -921,14 +981,33 @@ def accept_offer(
         # condition matters: a second racing request must not board against
         # an offer this same transaction is about to mark accepted.
         cur.execute(
-            "SELECT apr FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
+            "SELECT apr, finance_charge, monthly_payment, amount_financed, total_of_payments "
+            "FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
             (app_id,),
         )
         offer_rows = cur.fetchall()
-        if not offer_rows or offer_rows[0]["apr"] is None:
+        if not offer_rows:
             raise HTTPException(
                 status_code=409,
                 detail="Create an offer before boarding this application.",
+            )
+        # Gap F (PR #6 review): this used to check `apr IS NULL` alone, so an
+        # offer row missing finance_charge/monthly_payment/amount_financed/
+        # total_of_payments still boarded a real loan -- funding terms the
+        # borrower was never shown a complete disclosure for. All five
+        # canonical amounts must be present, checked here under the row lock.
+        incomplete = [f for f in _CANONICAL_OFFER_FIELDS if offer_rows[0][f] is None]
+        if incomplete:
+            log.error(
+                "refusing to board on an incomplete offer app_id=%s missing=%s",
+                app_id, ",".join(incomplete),
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This offer is incomplete and cannot be boarded. Missing required "
+                    f"disclosure terms: {', '.join(incomplete)}. Generate a new offer."
+                ),
             )
         rate = offer_rows[0]["apr"]
 
