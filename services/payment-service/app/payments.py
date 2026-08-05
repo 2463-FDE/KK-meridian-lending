@@ -287,11 +287,22 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     except Exception as exc:
         # Servicing unreachable / errored — the card was already charged and the row
         # written, so we still report the charge captured, but as "pending" (not yet
-        # applied) rather than falsely claiming the balance moved. Reconciled by the
-        # next same-key retry, or by an out-of-band job (not yet built) for a charge
-        # that's never retried.
+        # applied) rather than falsely claiming the balance moved.
+        #
+        # Review fix (PR #8): "or by an out-of-band job (not yet built)" used to be
+        # the end of this comment, and that job really did not exist -- a charge the
+        # client never retried stayed captured-and-uncredited forever. app/reconcile.py
+        # is that job now; leaving applied_at NULL is what enqueues this row for it.
+        # apply_next_attempt_at stays NULL here, which means "due immediately".
+        #
+        # Exception TYPE only: a servicing error message can embed the request
+        # parameters, and this column is for triage, not for reconstructing the call.
+        db.query(
+            "UPDATE payments SET apply_last_error = %s WHERE id = %s",
+            (type(exc).__name__, payment_id),
+        )
         log.error(
-            "apply-payment call to servicing failed loan_id=%s payment_id=%s: %s",
-            loan_id, payment_id, exc,
+            "apply-payment call to servicing failed loan_id=%s payment_id=%s error_type=%s",
+            loan_id, payment_id, type(exc).__name__,
         )
         return False

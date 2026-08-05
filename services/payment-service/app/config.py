@@ -26,3 +26,15 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # see docker-compose.yml). Unset means no caller can ever match it, so a
 # deploy that forgets to configure this fails closed rather than open.
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
+# Reconciliation of captured-but-unapplied payments (app/reconcile.py). Seconds
+# between polls; 0 disables the in-process worker entirely, which is what the
+# test suite and any deployment running the drain as a separate job should use.
+RECONCILE_INTERVAL_SECONDS = int(os.getenv("PAYMENT_RECONCILE_INTERVAL_SECONDS", "60"))
+RECONCILE_BATCH_SIZE = int(os.getenv("PAYMENT_RECONCILE_BATCH_SIZE", "20"))
+# Retry ceiling. A row that exhausts this is NOT resolved -- it stops being
+# retried automatically and stays in the unreconciled report for a human.
+RECONCILE_MAX_ATTEMPTS = int(os.getenv("PAYMENT_RECONCILE_MAX_ATTEMPTS", "10"))
+# Exponential backoff cap, so a persistent servicing outage settles into a
+# steady low-rate retry instead of growing unboundedly or hammering.
+RECONCILE_BACKOFF_CAP_SECONDS = int(os.getenv("PAYMENT_RECONCILE_BACKOFF_CAP_SECONDS", "900"))

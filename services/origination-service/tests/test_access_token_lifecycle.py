@@ -65,6 +65,19 @@ def real_db(monkeypatch):
             CREATE TABLE decisions (
                 app_id INTEGER PRIMARY KEY REFERENCES applications(id), outcome TEXT NOT NULL
             );
+            -- PR #8: an approval now reports DecisionOut.offer_ready, which
+            -- means run_decision reads offers on the approve path.
+            CREATE TABLE offers (
+                id SERIAL PRIMARY KEY,
+                app_id INTEGER REFERENCES applications(id) UNIQUE,
+                decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,
+                fee_pct_used NUMERIC(5,4),
+                apr NUMERIC(7,3), finance_charge NUMERIC(14,2),
+                monthly_payment NUMERIC(14,2), amount_financed NUMERIC(14,2),
+                total_of_payments NUMERIC(14,2),
+                accepted_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
             CREATE TABLE manual_reviews (
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER NOT NULL REFERENCES applications(id) UNIQUE,

@@ -85,6 +85,22 @@ _CANONICAL_OFFER_FIELDS = (
 )
 
 
+def _complete_offer_exists(app_id: int) -> bool:
+    """Whether a usable TILA disclosure is on record for this application.
+
+    PR #8 review: auto-generation is best-effort, so an approval could come
+    back with an accept_token and no offer behind it. accept_offer already
+    refuses to board without complete terms (Gap F), so this is not a funding
+    hole -- but the caller had no way to know until it hit that 409. This is
+    what DecisionOut.offer_ready reports.
+    """
+    checks = " AND ".join(f"{f} IS NOT NULL" for f in _CANONICAL_OFFER_FIELDS)
+    rows = db.query(
+        f"SELECT 1 FROM offers WHERE app_id = %s AND {checks} LIMIT 1", (app_id,)
+    )
+    return bool(rows)
+
+
 def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
     """Render an offers row as a Disclosure, or None if it is incomplete.
 
@@ -566,6 +582,9 @@ def run_decision(
     if discard_error:
         raise HTTPException(status_code=discard_error[0], detail=discard_error[1])
 
+    # None, not False: a deny/refer produces no offer by design, and reporting
+    # "not ready" there would read like a failure rather than "not applicable".
+    offer_ready = None
     if outcome == "approve":
         # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
@@ -576,7 +595,18 @@ def run_decision(
         try:
             disclosure_graph.auto_generate_offer(app_id)
         except Exception as e:  # noqa
-            log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
+            # ERROR, not WARNING: an approved application with no disclosure is
+            # an operational event, not a hiccup -- the borrower cannot be
+            # funded until someone generates one (POST /los/offer).
+            log.error(
+                "auto offer-generation failed app_id=%s error_type=%s", app_id, type(e).__name__
+            )
+        offer_ready = _complete_offer_exists(app_id)
+        if not offer_ready:
+            log.error(
+                "approved application has no complete offer app_id=%s -- accept will be "
+                "refused until one is generated", app_id,
+            )
 
     return DecisionOut(
         app_id=app_id,
@@ -584,6 +614,7 @@ def run_decision(
         score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
         adverse_action_reason=resp.get("reason"),
         accept_token=accept_token,
+        offer_ready=offer_ready,
     )
 
 
@@ -755,6 +786,9 @@ def review_application(
         else:
             decision_state.revoke_accept_token(cur, app_id)
 
+    # None, not False: a deny/refer produces no offer by design, and reporting
+    # "not ready" there would read like a failure rather than "not applicable".
+    offer_ready = None
     if body.outcome == "approve":
         # Same auto-offer as the automated approve path in run_decision above
         # -- a manually-approved application gets exactly the same
@@ -764,13 +798,22 @@ def review_application(
         try:
             disclosure_graph.auto_generate_offer(app_id)
         except Exception as e:  # noqa
-            log.warning("auto offer-generation failed app_id=%s: %s", app_id, e)
+            log.error(
+                "auto offer-generation failed app_id=%s error_type=%s", app_id, type(e).__name__
+            )
+        offer_ready = _complete_offer_exists(app_id)
+        if not offer_ready:
+            log.error(
+                "staff-approved application has no complete offer app_id=%s -- accept will "
+                "be refused until one is generated", app_id,
+            )
 
     return DecisionOut(
         app_id=app_id,
         decision=body.outcome,
         adverse_action_reason=body.reason if body.outcome == "deny" else None,
         accept_token=accept_token,
+        offer_ready=offer_ready,
     )
 
 

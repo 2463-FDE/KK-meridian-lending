@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV (still open, PCI debt -- unrelated to the fix below).
+-- Payments. pan/cvv are legacy-only columns now -- see the tokenization note below.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
@@ -205,10 +205,24 @@ CREATE TABLE IF NOT EXISTS payments (
     -- apply succeeded. A retry on the same idempotency_key checks this and
     -- retries the apply instead of blindly reporting "captured" again.
     applied_at  TIMESTAMPTZ,
+    -- db/migrations/0028: a captured-but-unapplied row is a durable work item
+    -- the reconciler drains (payment-service/app/reconcile.py). Nothing used
+    -- to look for these at all, so a borrower who closed the tab left money
+    -- captured and the balance uncredited, permanently. apply_next_attempt_at
+    -- doubles as the claim marker: a worker claims a row by pushing it into
+    -- the future in the same statement that selects it, so two replicas can
+    -- never work the same payment at once. apply_last_error holds the
+    -- exception TYPE only -- never a message, which can embed request values.
+    apply_attempts INTEGER NOT NULL DEFAULT 0,
+    apply_next_attempt_at TIMESTAMPTZ,
+    apply_last_error TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_key
     ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payments_unapplied
+    ON payments (apply_next_attempt_at)
+    WHERE auth_status = 'captured' AND applied_at IS NULL;
 
 -- Review fix: guards servicing-service's apply-payment endpoint against
 -- applying the same captured payment twice (a payment-service retry after a

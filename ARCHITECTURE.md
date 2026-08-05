@@ -169,8 +169,9 @@ asserted. `offers.decision_id` is now FK'd to `decisions.app_id` with a **unique
 constraint, making offer creation idempotent per decision and closing a leaked-decision
 path where a caller-supplied `decision_id` for an unrelated application used to be trusted
 verbatim. `applicants.zip` (Week 8) backs the ZIP3-level four-fifths-rule disparate-impact
-screen (`fair_lending.py`) — no field existed to check this against before. `payments`
-still carries the full PAN + CVV (open PCI debt, ADR 0003, targeted by PR #8). The
+screen (`fair_lending.py`) — no field existed to check this against before. `payments.pan`/`cvv`
+survive only as nullable legacy columns for rows written before tokenization; no code path
+writes them anymore (ADR 0008, PR #8). The
 retried-POST double-charge that D2 described is CLOSED: `payments.idempotency_key` is
 required at the API boundary (`ChargeIn.idempotency_key`, `min_length=1`) and enforced by
 a partial unique index (`db/migrations/0007`), with servicing-side apply-once protection in

@@ -108,6 +108,12 @@ class _FakeDb:
             elif "applied_at" in stmt:
                 (payment_id,) = params
                 self._by_id[payment_id]["applied_at"] = "2026-07-29T00:00:00Z"
+            elif "apply_last_error" in stmt:
+                # PR #8: a failed apply records the exception TYPE for triage
+                # (never the message) and leaves applied_at NULL, which is what
+                # enqueues the row for app/reconcile.py.
+                error_code, payment_id = params
+                self._by_id[payment_id]["apply_last_error"] = error_code
             else:
                 raise AssertionError(f"unexpected UPDATE: {sql}")
             return []

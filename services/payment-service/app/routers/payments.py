@@ -1,11 +1,51 @@
 """Payment capture API. POST /payments charges a card/ACH and applies it to the balance."""
 from fastapi import APIRouter, Header, HTTPException
 
-from .. import config, payments
+from .. import config, payments, reconcile
 from ..payments import IdempotencyKeyConflict
 from ..schemas import PaymentIn, PaymentOut
 
 router = APIRouter(tags=["payments"])
+
+
+def _require_internal_token(x_internal_token: str | None) -> None:
+    # Defense in depth: the network boundary (no host port -- see
+    # docker-compose.yml) is the primary control; this is the fallback in case
+    # that boundary is ever mistakenly reopened. An unset config token can
+    # never match, so a deploy that forgets to set one fails closed.
+    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=401, detail="not authorized")
+
+
+@router.get("/payments/unreconciled")
+def get_unreconciled(
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """Money captured on the card but not yet credited to a loan balance.
+
+    PR #8 review: these rows existed before but nothing could list them --
+    `applied_at IS NULL` was queried nowhere, so an operator had no way to find
+    out that a borrower had been charged without their balance moving. Gated
+    like every other route here: the counts alone say how much money is in
+    limbo, which is not something an anonymous caller should be able to read.
+    """
+    _require_internal_token(x_internal_token)
+    return reconcile.unreconciled_summary()
+
+
+@router.post("/payments/reconcile")
+def post_reconcile(
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """Run one reconciliation pass now, instead of waiting for the next poll.
+
+    Exists so the drain is operable by hand during an incident, and so a
+    deployment that disables the in-process worker
+    (PAYMENT_RECONCILE_INTERVAL_SECONDS=0) can still trigger it from a
+    scheduled job. Safe to call concurrently -- see reconcile.claim_due.
+    """
+    _require_internal_token(x_internal_token)
+    return reconcile.reconcile_once(config.RECONCILE_BATCH_SIZE)
 
 
 @router.post("/payments", response_model=PaymentOut)
@@ -13,12 +53,7 @@ def post_payment(
     body: PaymentIn,
     x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
 ):
-    # Defense in depth: the network boundary (no host port -- see
-    # docker-compose.yml) is the primary control; this is the fallback in case
-    # that boundary is ever mistakenly reopened. An unset config token can
-    # never match, so a deploy that forgets to set one fails closed.
-    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
-        raise HTTPException(status_code=401, detail="not authorized")
+    _require_internal_token(x_internal_token)
 
     try:
         return payments.charge(
