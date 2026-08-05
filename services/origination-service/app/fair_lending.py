@@ -1,6 +1,6 @@
 """ZIP-level disparate-impact check (Week 8 fair-lending fix).
 
-ROADMAP.md's own Week 8 finding: "Can't be checked at all -- confirmed no ZIP
+docs/ROADMAP.md's own Week 8 finding: "Can't be checked at all -- confirmed no ZIP
 field exists anywhere in the schema." db/migrations/0014_add_applicant_zip.sql
 adds the field; this module is the actual check it unblocks.
 

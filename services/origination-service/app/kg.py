@@ -3,7 +3,7 @@
 The borrower -> application -> decision -> offer -> disclosure chain the KG
 schema doc describes is already FK-linked relational data in the one shared
 Postgres instance every service reads/writes (ADR 0002) -- there is no separate
-graph database backing this, on purpose (see ROADMAP.md's Week 4 entry): the
+graph database backing this, on purpose (see docs/ROADMAP.md's Week 4 entry): the
 data already IS a graph shape, so standing up a second store would just be a
 second source of truth for the same five tables. This module is the traversal
 layer -- it reads the same rows the rest of origination-service already reads,
