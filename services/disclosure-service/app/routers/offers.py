@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import config, db, fees, models, offer as offer_mod, schedule
+from .. import apr, config, db, fees, models, offer as offer_mod, schedule
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferIn, OfferResponse, ScheduleRow
@@ -317,9 +317,17 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         )
     principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
     term_months = round(total_of_payments / monthly_payment) if monthly_payment else 0
-    # No `or 7.99` fallback: apr is guaranteed non-NULL by the integrity check
-    # above, so the schedule is always built from the rate actually disclosed.
-    rows = schedule.amortization(principal, float(offer.apr), term_months) if term_months else []
+    # Review fix: this used to build the schedule at `offer.apr`. The APR and
+    # the note rate are not interchangeable once a prepaid fee exists -- the APR
+    # is solved against the amount financed, the payments run on the full
+    # principal -- so the redisplayed schedule showed a monthly payment that did
+    # not match the disclosed one. Recover the rate the payments were actually
+    # calculated at from the stored payment itself.
+    note_rate = (
+        apr.note_rate_from_payment(principal, monthly_payment, term_months)
+        if term_months and monthly_payment else 0.0
+    )
+    rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
     disclosure = Disclosure(
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, amount_financed=amount_financed,
