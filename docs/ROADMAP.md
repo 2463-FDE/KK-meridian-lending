@@ -39,6 +39,7 @@ during Week 4); those are marked where they occur.
 | 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
 | 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
+| — | **Not on any brief:** test + CI infrastructure, browser E2E, migration parity, the bureau/decision-attempt seams, this register | ✅ Landed |
 
 ## Owed to the client
 
@@ -112,7 +113,8 @@ Stack must be up (`docker compose up -d`). All 3 confirmed live-working this ses
 
 **Policy questions to catch fast (assistant agent):**
 - *Should answer* — "What is the maximum loan amount for a personal installment loan?" → must say **$50,000** and cite `underwriting_guidelines.md`. Wrong number or no citation = retrieval or ingestion broke.
-- *Should answer* — "What model score is required to approve?" → must say **≥660** (and DTI ≤43%). Confirms it's reading the real cutoffs the Decision Graph actually enforces, not stale/generic text.
+- *Should answer* — "What model score is required to approve?" → must say **≥660**, citing `underwriting_guidelines.md`. Confirms it is reading the real score band the Decision Graph enforces, not stale/generic text.
+  **Careful with the answer it gives about DTI.** The policy document also names a DTI ≤43% cutoff and fraud-flag rules, and the assistant will quote them — but **the code implements neither** (`monthly_debt` is hardcoded to `0` by origination before decision-service ever sees it, and no fraud check exists anywhere). The assistant is correctly quoting policy; the policy describes a system that was never built. See `adr/0007-underwriting-policy-dti-fraud-gap.md`.
 - *Should decline, not guess* — anything not in `policies/` (e.g. "what's the CEO's favorite color?") → must return `answerable:false` with the honest-decline message. If it answers this instead of declining, it's hallucinating — treat as a broken guardrail, not a feature.
 
 Login page (`/login`) lists all seeded demo creds. Full curl-only script (no browser): `test_agents.sh` (see this session's scratch dir) — hits all 3 in one run, no manual placeholder-swapping.
@@ -120,6 +122,7 @@ Login page (`/login`) lists all seeded demo creds. Full curl-only script (no bro
 ---
 
 ## Week 1 — LLM Engineering for Production
+### Feature: safe LLM engine — client, PII redactor, secrets cleanup, Decimal money
 
 **Domains touched:** Payments · Origination · Decisioning · Finance
 
@@ -150,6 +153,7 @@ underneath it, not the feature itself.
 ---
 
 ## Week 2 — RAG & Knowledge Retrieval
+### Feature: policy retrieval + corpus hygiene gate
 
 **Domains touched:** Decisioning · Payments (PII) · Origination
 
@@ -177,6 +181,20 @@ applications.jsonl` — raw `ssn`, `pan`, `dob` on every record, unredacted. A
 - Two review rounds, both fixed before merge: the eval grader first checked against ground truth instead of what retrieval actually returned, then was found to still accept the expected answer as an input (proving it could find a fact it was handed, not that it works blind) — fixed to grade real retrieval output with no answer key. A third, post-merge fix closed a denial-paraphrase case that cleared generic policy-vocabulary coverage without ever mentioning #6012.
 - 41/41 tests pass. Merged to `main` (PR #4).
 
+**Found live through the new policy-chat feature, no brief prompted it —
+`adr/0007`:** a staff member asked what the decisioning policy is and got back
+`underwriting_guidelines.md#5.0` verbatim, which names a **DTI ≤ 43% cutoff and
+fraud-flag rules that the code has never implemented**. `monthly_debt` is
+hardcoded to `0` by origination before decision-service ever sees it, and no
+fraud check exists anywhere in the codebase — re-verified today.
+
+The retrieval is working correctly; that is what makes this worth recording.
+The assistant faithfully quotes an approved policy document describing controls
+that do not exist, which is a worse failure than a retrieval bug: a staff member
+now has a citation for a rule nothing enforces. ⬜ **Open** — the gap is
+documented in the ADR, and neither the policy nor the code has been changed to
+agree with the other. Whoever closes it has to pick which one is wrong.
+
 *Shipped separately, same week, ahead of this brief:* the AI-summary feature
 from Week 1's engine went live (`/applications/{id}/summary` route, gateway
 proxy, frontend card), plus the leaked-key cleanup from Week 1's Problem 2
@@ -186,6 +204,7 @@ so a rotated key can't leak again unnoticed.
 ---
 
 ## Week 3 — Single-Agent Design + Memory
+### Feature: AI scorer wrapper + append-only decision memory
 
 **Domains touched:** Decisioning · Finance (performance)
 
@@ -226,6 +245,7 @@ quality.
 ---
 
 ## Week 4 — Multi-Agent + Knowledge Graphs
+### Feature: auto-disclosure on approval + loan-history traversal
 
 **Domains touched:** Disclosures · Decisioning · Finance
 
@@ -347,6 +367,7 @@ before starting those weeks' own briefs.
 ---
 
 ## Week 5 — Spec-Driven Dev & Problem Scoping
+### Feature: payment idempotency + card tokenization
 
 **Domains touched:** Payments
 
@@ -421,6 +442,7 @@ branch**, not on `main`.
 ---
 
 ## Week 6 — AI-Augmented SDLC (Legacy Comprehension)
+### Feature: servicing RBAC, maker-checker, append-only ledger
 
 **Domains touched:** Servicing
 
@@ -466,6 +488,7 @@ gateway, ahead of this week's own official scope.
 ---
 
 ## Week 7 — Observability / SRE / Guardrails
+### Feature: cross-service trace ID + scoped reconciliation control
 
 **Domains touched:** Payments · Servicing · Finance
 
@@ -514,6 +537,7 @@ case, and it is not on `main` yet.
 ---
 
 ## Week 8 — Security / Governance / Responsible AI
+### Feature: model governance + fair-lending screen
 
 **Domains touched:** Decisioning · KYC (data governance)
 
@@ -546,6 +570,7 @@ only, pending go-ahead to build.**
 ---
 
 ## Week 9 — Client Specialization Track: Lending Compliance / BSA-AML
+### Feature: beneficial ownership + sanctions screening
 
 **Domains touched:** KYC
 
@@ -578,6 +603,7 @@ not built. Not yet started — plan only, pending go-ahead to write it.**
 ---
 
 ## Week 10 — Project Work & Client Showcase (capstone)
+### Feature: retention-aware redaction + handoff package
 
 **Domains touched:** Finance · Decisioning · KYC · Payments · Servicing (all — this is the integration week)
 
@@ -629,6 +655,76 @@ risk-prioritized roadmap), and a board-framed showcase (`kal_docs/SHOWCASE.md`
 started — plan only, pending go-ahead to build.**
 
 ---
+
+---
+
+## Not on any week's brief
+
+Work that shipped without a client brief asking for it. It sits outside the
+week structure, which is exactly why it kept going unrecorded — including the
+one finding the Week 1–4 client review singled out as the most valuable thing
+in the engagement.
+
+### Test and CI infrastructure — ✅ Landed
+
+**CI had never run a single test.** `pytest` was not in any service's
+requirements and the test step carried `|| true` on top of `continue-on-error`,
+so every "backend (X)" check reported success without executing anything, for
+every PR, for the whole engagement. A defect in the process that was hiding
+every other defect. Each service now has `requirements-dev.txt`, the masking is
+gone, and a real failure is visible.
+
+Everything else in `.github/workflows/ci.yml` was also built here, none of it
+briefed. All blocking unless noted:
+
+| Job | What it catches |
+|---|---|
+| `secrets` | gitleaks over full history. Has already caught a real commit — a plausible-looking token in a test fixture |
+| `backend` | All eight suites, with a real PostgreSQL service so the `skipif(not DATABASE_URL)` tests actually run instead of silently skipping |
+| `db-migrations` | Every migration applied to real PostgreSQL, plus the parity suite below |
+| `docker-build` | `docker compose build` on a clean checkout — every Dockerfile used to `COPY` a gitignored CA bundle and fail |
+| `e2e` | Full stack up, Playwright drives the browser, Postgres rows verified directly |
+| `frontend` | `npm run build` |
+| `dependency-audit`, `dependency-audit-frontend` | pip-audit / npm audit. **Non-blocking** — first run's findings are not triaged, so a green tick here is not a clean-scan result |
+
+**Migration parity** (`db/tests/test_migration_paths_converge.py`) builds the
+schema four ways — fresh init; legacy plus migrations; fresh init plus
+migrations; migrations applied twice — and asserts they converge on the same
+columns, unique constraints, CHECK constraints *with validation state*,
+indexes, foreign keys and defaults. Four migrations could not replay onto a
+fresh database at all before this; the legacy-versus-fresh comparison then found
+five indexes that `db/init` creates and no migration ever did.
+
+**Browser end-to-end** (`frontend/e2e/`, 5 specs): approved, denied,
+existing-offer, and both halves of the manual-review path. Each verifies
+PostgreSQL rows directly rather than trusting the screen. The interactive
+verification these replace was never checked in, so it was not repeatable by
+anyone else — the same closure gap as the roadmap itself.
+
+### Review-driven architecture work — ✅ Landed (PR #6)
+
+Not on any brief; came out of the review cycles on the Week 4 branch.
+
+- **`decision-service/app/bureau.py`** — the `BureauClient` seam. This is the
+  abstraction RF-21 predicted would be needed ("same shape as the planned
+  `CreditBureauClient`"); it now exists, carrying an idempotency key so a retry
+  after an ambiguous timeout recovers the original pull instead of billing a
+  second hard credit inquiry. Honest limit: no real bureau is integrated, so the
+  contract is verified against our own stub.
+- **`origination-service/app/decision_state.py`** — the leased
+  `decision_attempts` reservation (`db/migrations/0023`) that lets the external
+  decision call happen with no transaction held while still guaranteeing at most
+  one in-flight attempt per application, with a fixed global lock order
+  (`applications` → `decision_attempts`) to avoid deadlock.
+
+### Documentation — ✅ Landed
+
+- [`DEBT.md`](DEBT.md) — the D/RF register. Never existed in any form before,
+  despite being cited across the ADRs, the runbook and the source.
+- `adr/0001` (record architecture decisions) and `adr/0004` (decompose the
+  origination monolith) predate the week structure and are referenced from
+  `ARCHITECTURE.md` rather than from any week here.
+- `adr/0007` — see the DTI/fraud finding under Week 2.
 
 ## Keeping this file honest
 
