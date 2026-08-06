@@ -23,8 +23,9 @@ Cheap to run, expensive to skip. Do it first, every time.
 ## W7–W10 working agreement
 
 ### Keep the slicing — it is the thing I fixed
-One concern per PR. If a PR title needs "and", it is two PRs. My seven open PRs this week average
-~309 additions; that is the target, not the exception.
+One concern per PR. If a PR title needs "and", it is two PRs. My eight open PRs this week
+(#10-#17) average ~285 additions, range 52-598; that is the target, not the exception. The
+review said "seven ... ~309", which was true of #10-#16 before this PR existed.
 
 ### Estimates get reported against actuals
 I estimated 7–10 days for eight items and opened six of them as PRs within two days. Every
@@ -37,5 +38,11 @@ My historical median merged lead time is 171 hours — seven days, the worst in 
 was never my problem; **sitting** was. A PR that is ready to merge gets merged the same day.
 
 ### Every citation resolves
-My ADRs cite a `ROADMAP.md` and a `kal_docs/10_WEEK_PLAN.md` that are **not in the repository**.
 Before I cite a document, it is committed. A citation that does not resolve is a broken claim.
+
+Two live examples, both verified rather than assumed. `kal_docs/` holds my private notes,
+including a `ROADMAP.md` that is **not** the tracked `docs/ROADMAP.md` — a reviewer already
+mistook one for the other, so it is gitignored now. And `docs/ROADMAP.md` currently cites
+`DEBT.md` D5c, which exists only on PR #16's branch; that is why #16 merges first. The
+review copy of this rule cited `kal_docs/10_WEEK_PLAN.md` as the example — that file has
+never existed in this repository, on any branch, so the example itself did not resolve.

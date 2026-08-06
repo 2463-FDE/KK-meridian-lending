@@ -45,19 +45,31 @@ during Week 4); those are marked where they occur.
 
 ### Open pull requests
 
-All CI-green and mergeable. **None has a human review**, so none is ✅.
+Eight open. **None has a human review**, so none is ✅. CI status is stated per
+row rather than asserted for all — GitHub Actions has been in a major outage
+since 2026-08-06 15:22 UTC, so a red or pending check on these is not evidence
+about the branch.
 
 | PR | Concern | Additions | Status |
 |---|---|---|---|
-| #10 | Actuarial APR + TILA box foots | +598 | 🟠 |
-| #11 | `payments.pan`/`cvv` removal — expand half | +281 | 🟠 |
-| #12 | Graph-store threshold answered by measurement (`adr/0009`) | +400 | 🟠 |
-| #13 | One grounded external signal on the officer summary | +514 | 🟠 |
-| #14 | Correct a wrong answer from the review screen | +211 | 🟠 |
-| #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | +108 | 🟠 base is #11's branch |
-| #16 | Four docstrings claiming a PII leak the code does not have | +52 | 🟠 |
+| #10 | Actuarial APR + TILA box foots | +598 | 🟠 CI green |
+| #11 | `payments.pan`/`cvv` removal — expand half | +281 | 🟠 CI green |
+| #12 | Graph-store threshold answered by measurement (`adr/0009`) | +400 | 🟠 CI green |
+| #13 | One grounded external signal on the officer summary | +514 | 🟠 CI green |
+| #14 | Correct a wrong answer from the review screen | +211 | 🟠 CI green |
+| #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | +108 | 🟠 CI green · base is #11's branch |
+| #16 | Four docstrings claiming a PII leak the code does not have | +52 | 🟠 **CI not green** — `e2e` reaped at 56m with zero steps recorded during the outage; 19 of 22 checks still queued; `mergeStateStatus` UNSTABLE |
+| #17 | This status and citation pass | +114 | 🟠 CI queued behind the outage |
 
-**Merge order:** #11 → #15 (stacked). Then #10, #12, #13, #14, #16 in any order.
+**Merge order — not arbitrary:**
+
+1. **#16 before #17.** #17 cites `DEBT.md` D5c, which only exists on #16's branch.
+2. **#11 before #15.** #15's base *is* #11's branch.
+3. **#12 and #13 conflict with #17** — all three edit the same two rows of the
+   "Owed to the client" table below. Whichever lands second needs a manual
+   resolution, and #12/#13 mark those rows ✅ where rule 1 of *Keeping this file
+   honest* requires 🟠. Take the 🟠 version.
+4. #10 and #14 are independent of the rest.
 
 ## Owed to the client
 
@@ -72,12 +84,12 @@ not lost between weeks:
 
 ## Verification baseline
 
-Counts below are as of **2026-08-05** on `main` plus the repo-hygiene commit.
-Reproduce with `python -m pytest -q` per service, `python -m pytest db/tests -q`,
-and `npm run test:e2e` in `frontend/`.
+Counts below were measured at **`ca1dbf9`** (the PR #6 merge, 2026-08-05).
+⚠️ **PRs #8 and #9 merged after that commit, so every figure here is
+understated — re-measurement pending.** Reproduce with `python -m pytest -q` per
+service, `python -m pytest db/tests -q`, and `npm run test:e2e` in `frontend/`.
 
-- **441** backend tests across all eight services ⚠️ *measured at `ca1dbf9`; PRs #8/#9 merged
-  after, so this is understated — re-measurement pending*
+- **441** backend tests across all eight services
 - **76** db migration tests against real PostgreSQL
 - **5** Playwright end-to-end specs driving the browser
 
@@ -158,7 +170,7 @@ PAN/CVV/SSN. Float-based money math. A README claiming PCI-DSS compliance.
 |---|---|---|---|---|
 | 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | 🟡 **Partial — three halves, one closed.** ✅ `payment-service.charge()` redacts via a ported copy of `loan-assistant/redactor.py` before logging. ✅ `servicing-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. 🟨 Storage: the `pan`/`cvv` columns still exist, nullable and **unwritten** — the seed writers went in PR #11, so both seed files insert `last4`/`brand` only and a fresh database contains no card data (a seed-content test enforces that, failing on a PAN-shaped literal in any inserted column or seed target). PR #15 drops the columns, which closes D5b/D13. *This line previously said the seeds "still write real values into them, so every fresh database contains card data" — true when written, false since PR #11.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
 | 2 | Origination / Decisioning | Bureau + core-banking + processor keys hardcoded in `config.py`, also committed in root `.env` | ✅ Effectively closed — `.env` untracked, hardcoded fallbacks removed from all 7 services. **Confirmed with the project owner: these were training placeholders (`EXAMPLE-LEAKED-KEY-rotate-me`), never real provider accounts** — so there's no live credential to rotate, and the old values still in git history aren't a real security exposure, just cosmetic (a reviewer seeing placeholder-labeled strings in `git log`). A history rewrite remains available on request but isn't fixing an actual vulnerability here | For a *real* deployment this would be a genuine breach risk (a leaked bureau key pulling real credit data under Meridian's name) — confirmed not the case for this training instance specifically |
-| 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
+| 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers — **but see the ⚠️ note under Owed to the client: exact arithmetic is not the same as the right formula, and `compute_apr` on `main` still uses the wrong one.** Details:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
 | 4 | Payments | README claims "PCI-DSS compliant," schema has plaintext `pan`/`cvv` columns | ✅ Fixed:<br>• Removed the false "PCI-DSS compliant" claim<br>• README now states plainly it's **not** compliant and names the specific gaps (raw PAN/CVV storage, plaintext logging half still open) | a false claim is worse than an honest gap |
 
 **Built this week (the actual deliverable):**
@@ -282,7 +294,7 @@ origination-fee % copy-pasted into three files, drifted: `apr.py` 0.025,
 |---|---|---|---|---|
 | 1 | Disclosures | The fee constant is copy-pasted into 3 files and has drifted — `apr.py` (0.025) doesn't match `fees.py`/`offer.py` (0.030) or the published `policies/fee_schedule.md` | ✅ Fixed — `apr.py` and `offer.py` now import `ORIGINATION_FEE_PCT` from `fees.py` (one source of truth) instead of redeclaring it; `compute_apr(18000, 7.99, 48)` now correctly returns 5.196% (was 5.041% with the wrong 0.025 fee), confirmed against `test_apr.py`'s own Decimal reference | `apr.py`'s wrong value is the one that computes the number that ships on the real TILA disclosure — a real Reg Z tolerance breach, not a rounding nit |
 | 2 | Disclosures | No link from a disclosure back to the exact decision + fee-constant version that produced it (`offers` has no `decision_id`, no snapshot of which rule version ran) | ✅ Fixed:<br>• `offers.decision_id` — real FK to `decisions(app_id)` (`db/migrations/0008_offer_decision_link.sql` — renumbered after merging with Week 3's own `0006`/`0007`), not a loose reference; an offer can't be linked to a decision that doesn't exist<br>• `offers.fee_pct_used` — snapshots `ORIGINATION_FEE_PCT` at offer-creation time, so a later change to the constant can never retroactively change what an existing offer is proven to have used<br>• Both origination-service's manual `POST /los/offer` and the new auto-generated path (see #3) populate them | If `ORIGINATION_FEE_PCT` changes next quarter, there's now a real record of what fee was actually used for a loan originated today |
-| 3 | Disclosures | Auto-generating the offer + disclosure on approval is still fully manual | ✅ Fixed:<br>• `run_decision()` now calls disclosure-service's `/offers` automatically the moment `decision-service` returns `approve`, using the application's own requested amount/term<br>• Best-effort — a disclosure-service hiccup logs a warning and doesn't fail the decision that already happened; the loan officer can still build it manually via `POST /los/offer`<br>• Verified live end-to-end: application 7302 (approve, score 672) auto-produced offer id 186 with `decision_id=7302`, `fee_pct_used=0.0300`, correct APR/schedule<br>• All 182 backend tests still pass *(at the time)* | Directly answers the automation ask — the offer + TILA disclosure now exist the moment underwriting approves, with an auditable link back to that exact decision |
+| 3 | Disclosures | Auto-generating the offer + disclosure on approval is still fully manual | ✅ Fixed:<br>• `run_decision()` now calls disclosure-service's `/offers` automatically the moment `decision-service` returns `approve`, using the application's own requested amount/term<br>• Best-effort — a disclosure-service hiccup logs a warning and doesn't fail the decision that already happened; the loan officer can still build it manually via `POST /los/offer`<br>• Verified live end-to-end: application 7302 (approve, score 672) auto-produced offer id 186 with `decision_id=7302`, `fee_pct_used=0.0300`, and an APR/schedule that were correct *for the formula then in use* — ⚠️ that formula is itself wrong, see Owed to the client<br>• All 182 backend tests still pass *(at the time)* | Directly answers the automation ask — the offer + TILA disclosure now exist the moment underwriting approves, with an auditable link back to that exact decision |
 
 **A correction worth stating plainly — the client's own attached numbers don't
 match what the code actually computes:** re-running `apr.compute_apr(18000,
@@ -768,8 +780,10 @@ Four rules that this file has broken before, and which later passes fixed:
    origination's middleware still logged full request bodies. No such middleware
    exists — the claim came from a docstring and was repeated twice before anyone
    grepped for the call site (`DEBT.md` D5c).
-4. **Never leave a ✅ standing after the PR it was waiting on merges.** Week 5 sat
-   at 🔵 for a day after PR #8 landed, and its "none of that is true on `main`"
-   paragraph became actively misleading rather than merely stale.
+4. **Never leave a 🟠 standing after the PR it was waiting on merges.** Week 5
+   sat at 🔵 for a day after PR #8 landed, and its "none of that is true on
+   `main`" paragraph became actively misleading rather than merely stale. ✅ is
+   the *correct* marker once the PR lands — the defect is the stale marker
+   outliving the merge, not the tick replacing it.
 
-Last full accuracy pass: **2026-08-06**, against `main` at `90ebce2` plus open PRs #10–#16.
+Last full accuracy pass: **2026-08-06**, against `main` at `90ebce2` plus open PRs #10–#17.

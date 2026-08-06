@@ -129,8 +129,10 @@ Three findings from review, all fixed before merge:
 ## Addendum (2026-08-06): the authority cited in Context was withdrawn
 
 The Context section above cites **CFPB Circular 2023-03**. That circular was
-**withdrawn on 12 May 2025**, after this ADR was accepted. The decision it
-justified does not change — but a withdrawn circular is not something to cite in
+**withdrawn on 12 May 2025** — **fourteen months before this ADR was accepted on
+2026-07-14**. So this was never a case of being overtaken by events: the citation
+was already dead on the day it was written, and nobody checked. The decision it
+justified does not change, but a withdrawn circular is not something to cite in
 front of a regulator, so the live anchor is recorded here rather than edited into
 the accepted text above.
 
@@ -152,8 +154,14 @@ between only two categories and is still not fixture-tested against known cases 
 that gap is unchanged by this correction, and is tracked on the roadmap rather
 than closed here.
 
-**Why an addendum and not an edit.** An accepted ADR is a record of what was
-decided on a date, under the constraints known then. Rewriting the Context to
-cite a rule nobody was looking at in July 2026 would make the record read as if
-the withdrawal had been anticipated. ADR 0008 supersedes 0003 the same way — a
-new statement referencing the old, not a rewrite of it.
+**Why an addendum and not an edit.** An accepted ADR records what was decided on
+a date and what was believed at the time — including the mistakes. Editing the
+Context to cite 12 CFR 1002.9 would erase the actual finding, which is not "the
+rule changed" but "we cited a fourteen-month-dead circular without checking, and
+it took another month to notice." That is the part worth keeping on the record.
+ADR 0008 supersedes 0003 the same way — a new statement referencing the old, not
+a rewrite of it.
+
+**The generalisable lesson:** a regulatory citation needs a checked date, the
+same way a document citation needs to be committed. Neither is satisfied by
+having read it somewhere.
