@@ -72,7 +72,8 @@ WITH RECURSIVE edges AS (
     SELECT a.id AS src, b.id AS dst
       FROM applicants a JOIN applicants b
         ON a.id <> b.id
-       AND ( a.address = b.address OR a.phone = b.phone OR a.email = b.email )
+       AND ( a.address = b.address OR a.phone = b.phone OR a.email = b.email
+          OR a.ssn = b.ssn OR a.ein = b.ein )
     UNION
     SELECT ap1.applicant_id, ap2.applicant_id
       FROM applications ap1 JOIN applications ap2
@@ -93,27 +94,50 @@ So the question is not expressiveness. It is where this stops working.
 
 ## The measured flip point
 
-Benchmarked against PostgreSQL 16 in this repo's own container. Synthetic
-applicants: household clusters of three sharing an address, a shared phone every
-seventh row, employers spread across 200 firms, every join column indexed,
-`ANALYZE` run. Deliberately **optimistic** — a real fraud ring is denser than
-this, and denser means worse.
+Reproduce with the committed harness. That is the point of the exercise, and
+the first version of this ADR failed it -- it quoted an ad-hoc shell session and
+committed nothing, while claiming anyone could re-run it (PR #12 review):
 
-**N = 10,000 applicants, one root:**
+```
+export DATABASE_URL=postgresql://meridian:postgres@localhost:5432/meridian
+python db/bench/graph_traversal_benchmark.py --rows 10000 --max-depth 5
+```
+
+`db/bench/graph_traversal_benchmark.py` holds the schema, the index DDL, the
+deterministic generator, the exact query and the timing method, and prints an
+`EXPLAIN (ANALYZE, BUFFERS)` plan with `--explain`. No `random()` anywhere, so
+reachability counts reproduce exactly; timings vary with hardware.
+
+The synthetic population is deliberately *sparser* than a real fraud ring:
+households of three sharing an address, a shared phone every seventh row, 200
+employers, and identity collisions on `ssn` and `ein` at 1% and 0.4%. Denser
+means worse, so these are a lower bound on the problem.
+
+**N = 10,000 applicants, one root, PostgreSQL 16:**
 
 | Depth limit | Applicants reached | Time |
 |---|---|---|
-| 1 | 55 | 2.6 s |
-| 2 | 466 | 1.4 s |
-| 3 | 795 | 1.8 s |
-| 4 | 1,159 | **43.8 s** |
-| 5 | — | **aborted at 240 s** |
+| 1 | 55 | 3.3 s |
+| 2 | 466 | 1.7 s |
+| 3 | 850 | 3.0 s |
+| 4 | 1,621 | **72.3 s** |
+| 5 | (none) | **aborted at 240 s** |
+
+*An earlier revision reported 795 / 1,159 / 43.8 s. Those came from a CTE that
+joined only address, phone, email and employer, while this document claimed
+`ssn` and `ein` as edges too, so it measured a sparser graph than the one it
+argued about. The review caught it. With the full edge set the walk reaches 40%
+further at depth 4 and takes 65% longer, which strengthens the conclusion rather
+than changing it.*
 
 Ten thousand applicants is a *small* lending book. The wall is not at some
 distant scale — it is at **depth 4 on a book this size**, and it is a cliff, not
 a slope: 1.8 s to 43.8 s to no-answer across two hops.
 
-The reason is structural, not a missing index. Every hop re-joins through an
+The reason is structural, not a missing index, and the EXPLAIN shows it: at
+depth 3 the recursive term produces **160,239 rows to yield 850 distinct
+applicants**. The walk re-expands every path rather than every node, and the
+cycle guard can only prune a row after it exists. Every hop re-joins through an
 index and materialises a new frontier, so cost compounds with the branching
 factor: roughly 24× per hop here. A graph store's index-free adjacency makes a
 hop a pointer dereference, so its cost tracks the number of nodes actually
