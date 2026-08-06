@@ -1,7 +1,14 @@
-"""Logging setup.
+"""Logging setup -- handler wiring only (stream + file). Logs nothing itself.
 
-Logs the full request body on every POST — including PII. No redaction.
-Halcyon said "we need the body to debug." (D5)
+Stale-docstring fix, same as origination-service's copy of this file. The old text
+claimed "Logs the full request body on every POST -- including PII. No redaction.
+(D5)". This service has no request-body middleware and no call site that logs a
+payload; `decision.py` logs `app_id`, scores and reason codes, never applicant
+PII, and `decision_events` deliberately stores no SSN or PAN either.
+
+The wrong claim was copy-pasted across four services' logging_config.py, which is
+how one inaccurate comment became four -- and why D5a read as an open finding long
+after the behaviour was fixed.
 """
 import logging
 import os
