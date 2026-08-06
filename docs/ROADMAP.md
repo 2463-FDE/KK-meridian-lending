@@ -59,7 +59,7 @@ about the branch.
 | #14 | Correct a wrong answer from the review screen | +211 | 🟠 CI green |
 | #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | +108 | 🟠 CI green · base is #11's branch |
 | #16 | Four docstrings claiming a PII leak the code does not have | +52 | 🟠 **CI not green** — `e2e` reaped at 56m with zero steps recorded during the outage; 19 of 22 checks still queued; `mergeStateStatus` UNSTABLE |
-| #17 | This status and citation pass | +114 | 🟠 CI queued behind the outage |
+| #17 | This status and citation pass | +114 | 🟠 **No CI run exists.** The outage swallowed the `pull_request` trigger, so unlike #16 there is nothing queued to drain — it needed a re-push to create a run. Not a path filter: `ci.yml` has none, and the docs-only PR #9 ran the full suite |
 
 **Merge order — not arbitrary:**
 
