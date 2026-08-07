@@ -156,6 +156,13 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
         apr=offer.apr, finance_charge=offer.finance_charge,
         monthly_payment=offer.monthly_payment, amount_financed=offer.amount_financed,
         total_of_payments=offer.total_of_payments,
+        # Passed through as stored, including None. A legacy offer reports no
+        # final payment rather than a recomputed one: shown beside four genuinely
+        # disclosed amounts, a reconstructed figure is indistinguishable from a
+        # disclosed one.
+        regular_payment_count=getattr(offer, "regular_payment_count", None),
+        final_payment=getattr(offer, "final_payment", None),
+        term_months=getattr(offer, "term_months", None),
     )
 
 

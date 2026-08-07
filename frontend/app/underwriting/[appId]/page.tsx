@@ -7,7 +7,7 @@ import LoanSummaryCard from "../../../components/LoanSummaryCard";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
-import { usd, pct, shortDate } from "../../../lib/format";
+import { usd, pct, shortDate, paymentPlanText } from "../../../lib/format";
 
 interface Kyc {
   name_verified?: boolean;
@@ -19,9 +19,14 @@ interface Kyc {
 interface Offer {
   apr: number;
   finance_charge: number;
+  // The REGULAR payment. Model B bills final_payment in the last period.
   monthly_payment: number;
   amount_financed: number;
   total_of_payments: number;
+  // Null on a legacy offer that never recorded a schedule.
+  regular_payment_count?: number | null;
+  final_payment?: number | null;
+  term_months?: number | null;
 }
 
 interface Applicant {
@@ -563,6 +568,32 @@ function UnderwritingDetailContent() {
                 </div>
               </div>
             </div>
+            {/* Payment plan, spelled out. The four boxes above are the federal
+                disclosure and do not carry the payment schedule, so staff had
+                no way to see that the final payment differs from the regular
+                one -- which under Model B it almost always does. A legacy offer
+                with no recorded schedule says so instead of showing a
+                reconstructed figure beside four genuinely disclosed ones. */}
+            <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>
+              {offer.regular_payment_count != null && offer.final_payment != null ? (
+                <>
+                  Payment plan:{" "}
+                  <strong>
+                    {paymentPlanText(
+                      offer.monthly_payment,
+                      offer.regular_payment_count,
+                      offer.final_payment,
+                    )}
+                  </strong>
+                </>
+              ) : (
+                <>
+                  Monthly payment <strong>{usd(offer.monthly_payment)}</strong>. No
+                  contractual payment schedule was recorded for this offer, so the
+                  final payment is not known and it cannot be boarded.
+                </>
+              )}
+            </p>
           </div>
         ) : null}
       </div>

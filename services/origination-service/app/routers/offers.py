@@ -63,6 +63,15 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
         monthly_payment=d.get("monthly_payment", 0),
         amount_financed=d.get("amount_financed", 0),
         total_of_payments=d.get("total_of_payments", 0),
+        # Forwarded, not defaulted. `.get(x, 0)` is right for the four amounts
+        # -- an offer that reached this point has them, and Gap F refuses the row
+        # otherwise -- but a MISSING final payment is meaningfully different from
+        # a zero one, so these carry None through. The borrower screen shows a
+        # single monthly figure when they are absent rather than describing a
+        # final payment of $0.00.
+        regular_payment_count=d.get("regular_payment_count"),
+        final_payment=d.get("final_payment"),
+        term_months=d.get("term_months"),
         schedule=[ScheduleRow(**row) for row in rows],
     )
     return OfferOut(app_id=app_id, disclosure=disclosure, created=resp.get("created", True))

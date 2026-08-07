@@ -141,9 +141,17 @@ class ScheduleRow(BaseModel):
 class Disclosure(BaseModel):
     apr: float
     finance_charge: float
+    # The REGULAR payment: billed in every period but the last. See
+    # disclosure-service's Disclosure for why the name is kept.
     monthly_payment: float
     amount_financed: float
     total_of_payments: float
+    # Null on a legacy offer with no stored schedule. The staff console shows a
+    # single monthly figure when these are absent, rather than inventing a final
+    # payment to fill the sentence out.
+    regular_payment_count: Optional[int] = None
+    final_payment: Optional[float] = None
+    term_months: Optional[int] = None
     schedule: list[ScheduleRow] = []
 
 

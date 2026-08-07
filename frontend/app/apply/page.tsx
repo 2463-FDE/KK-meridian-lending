@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
 import { apiGet, apiPost, ApiError } from "../../lib/api";
-import { usd, pct } from "../../lib/format";
+import { usd, pct, paymentPlanText } from "../../lib/format";
 
 const STEPS: Step[] = [
   { n: 1, label: "Personal" },
@@ -110,6 +110,12 @@ interface Disclosure {
   monthly_payment: number;
   amount_financed: number;
   total_of_payments: number;
+  // Model B: monthly_payment is the REGULAR payment and the final period bills
+  // final_payment instead. Optional -- a pre-0030 offer has no stored schedule
+  // and reports null rather than a reconstructed figure.
+  regular_payment_count?: number | null;
+  final_payment?: number | null;
+  term_months?: number | null;
   schedule?: {
     n: number;
     due_date: string;
@@ -1174,8 +1180,14 @@ function OfferPanel({
     <div style={{ marginTop: 22 }}>
       <h3>Your offer</h3>
       <p className="hint" style={{ marginBottom: 12 }}>
-        {usd(amount)} over {termMonths} months · monthly payment{" "}
-        <strong>{usd(disclosure.monthly_payment)}</strong>
+        {usd(amount)} over {termMonths} months ·{" "}
+        <strong>
+          {paymentPlanText(
+            disclosure.monthly_payment,
+            disclosure.regular_payment_count,
+            disclosure.final_payment,
+          )}
+        </strong>
         {disclosure.note_rate_pct != null && (
           <>
             {" · interest rate (note rate) "}

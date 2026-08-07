@@ -29,9 +29,26 @@ class Disclosure(BaseModel):
     note_rate_pct: float | None = None
     apr: float
     finance_charge: float
+    # Under Model B `monthly_payment` is the REGULAR payment -- the amount billed
+    # in every period except the last. The final period bills `final_payment`,
+    # which absorbs the cent residue and is a different number. Presenting only
+    # `monthly_payment` and a term told the borrower they would make N identical
+    # payments, which is not what the contract says.
+    #
+    # The name is kept because it is the persisted column name and the field
+    # every existing caller reads; renaming it in the API while offers.
+    # monthly_payment stays put would put the confusion somewhere else.
     monthly_payment: float
     amount_financed: float
     total_of_payments: float
+    # How many periods bill `monthly_payment`, and what the last one bills.
+    # Optional because pre-0030 rows have no stored schedule -- and a legacy row
+    # must report null here rather than a plausible guess, since a reconstructed
+    # final payment presented beside genuine disclosed amounts is
+    # indistinguishable from a real one.
+    regular_payment_count: int | None = None
+    final_payment: float | None = None
+    term_months: int | None = None
     schedule: list[ScheduleRow] = []
 
 

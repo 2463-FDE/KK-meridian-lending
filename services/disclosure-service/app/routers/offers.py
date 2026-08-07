@@ -269,6 +269,14 @@ def create_offer(
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
         monthly_payment=float(row["monthly_payment"]), amount_financed=float(row["amount_financed"]),
         total_of_payments=float(row["total_of_payments"]),
+        # Straight from the stored row. Never derived here: the final payment is
+        # not a function of the other amounts, so a value computed at read time
+        # would be this generator's opinion presented as a disclosed term.
+        regular_payment_count=(int(row["regular_payment_count"])
+                               if row.get("regular_payment_count") is not None else None),
+        final_payment=(float(row["final_payment"])
+                       if row.get("final_payment") is not None else None),
+        term_months=(int(row["term_months"]) if row.get("term_months") is not None else None),
     )
     return OfferResponse(
         offer_id=row["id"], application_id=row["app_id"],
@@ -382,6 +390,14 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, amount_financed=amount_financed,
         total_of_payments=total_of_payments,
+        # Stored values only. This endpoint reconstructs a SCHEDULE for display
+        # when none was recorded, but it must not manufacture the contractual
+        # terms themselves -- a legacy row reports null and the caller can tell.
+        regular_payment_count=(int(offer.regular_payment_count)
+                               if offer.regular_payment_count is not None else None),
+        final_payment=(float(offer.final_payment)
+                       if offer.final_payment is not None else None),
+        term_months=(int(offer.term_months) if offer.term_months is not None else None),
     )
     return OfferResponse(
         offer_id=offer.id, application_id=application_id,
