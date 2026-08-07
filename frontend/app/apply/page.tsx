@@ -202,6 +202,16 @@ export default function ApplyPage() {
 
   // submission / decision / offer state
   const [busy, setBusy] = useState(false);
+  // The exact form values that were POSTed, frozen at submit time.
+  //
+  // Defence in depth behind the disabled Edit controls. Those stop the race
+  // being *reachable*; this stops it *mattering*. Everything after submission
+  // -- the Step 5 offer panel, and the fallback offer creation -- reads this
+  // snapshot rather than `form`, so even if some future control mutated the
+  // form mid-flight, the terms shown and the terms requested would still be
+  // the ones the backend actually accepted. `form` stays live only for the
+  // pre-submit wizard.
+  const [submitted, setSubmitted] = useState<FormState | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [app, setApp] = useState<AppResult | null>(null);
   const [decision, setDecision] = useState<DecisionResult | null>(null);
@@ -273,6 +283,11 @@ export default function ApplyPage() {
 
   /** Jump straight from the review to the step that owns a field. */
   function editStep(target: number) {
+    // Guarded in the function, not only on the button. The disabled attribute
+    // is an affordance; this is the rule. It also closes the gap where a
+    // control is activated in the same tick that `busy` flips, before React
+    // has re-rendered it as disabled.
+    if (busy || submitted) return;
     setErrors({});
     setReturningToReview(true);
     setStep(target);
@@ -284,6 +299,7 @@ export default function ApplyPage() {
    * otherwise an edit could put the application back into review carrying a
    * value the wizard would never have accepted going forward. */
   function returnToReview() {
+    if (busy || submitted) return;
     // Validate every step that feeds the review, not just the one on screen.
     // Validating only the current step left a hole: edit step 3, type something
     // invalid, press Back to step 2, then return -- step 2 validates clean and
@@ -306,24 +322,30 @@ export default function ApplyPage() {
   }
 
   async function submitApplication() {
+    // Snapshot FIRST, synchronously, and build the request body from the
+    // snapshot rather than from `form`. Reading `form` field by field across
+    // the call meant the body and the record of what was sent could in
+    // principle disagree; now there is exactly one object and it cannot change.
+    const sent: FormState = { ...form };
+    setSubmitted(sent);
     setBusy(true);
     setApiError(null);
     try {
       const res = (await apiPost("/los/applications", {
-        name: form.name,
-        dob: form.dob,
-        ssn: form.ssn,
-        address: `${form.street}, ${form.city}, ${form.state}`,
-        zip_code: form.zip_code,
-        email: form.email,
-        phone: form.phone,
-        employer: form.employer,
-        job_title: form.job_title,
-        income: parseFloat(form.annual_income || "0"),
-        employment_years: parseInt(form.employment_years || "0", 10),
-        amount: form.amount,
-        term_months: parseInt(form.term_months, 10),
-        purpose: form.purpose,
+        name: sent.name,
+        dob: sent.dob,
+        ssn: sent.ssn,
+        address: `${sent.street}, ${sent.city}, ${sent.state}`,
+        zip_code: sent.zip_code,
+        email: sent.email,
+        phone: sent.phone,
+        employer: sent.employer,
+        job_title: sent.job_title,
+        income: parseFloat(sent.annual_income || "0"),
+        employment_years: parseInt(sent.employment_years || "0", 10),
+        amount: sent.amount,
+        term_months: parseInt(sent.term_months, 10),
+        purpose: sent.purpose,
       })) as AppResult;
       setApp(res);
       setStep(5);
@@ -393,9 +415,14 @@ export default function ApplyPage() {
         "/los/offer",
         {
           app_id: app.app_id,
-          principal: form.amount,
+          // The SUBMITTED terms, not the current form. This is the call the
+          // review flagged: it used to send whatever `form` held at the moment
+          // the borrower pressed "View your offer", which after an in-flight
+          // edit was not what the backend had accepted -- so an offer could be
+          // created on terms the application record never carried.
+          principal: (submitted ?? form).amount,
           annual_rate_pct: OFFER_RATE_PCT,
-          term_months: parseInt(form.term_months, 10),
+          term_months: parseInt((submitted ?? form).term_months, 10),
         },
         { "X-Offer-Accept-Token": token },
       )) as { app_id: string | number; disclosure: Disclosure };
@@ -697,7 +724,7 @@ export default function ApplyPage() {
               title="Review your application"
               desc="Double check everything below before you submit."
             />
-            <SummaryGroup title="Personal" editId="edit-step-1" onEdit={() => editStep(1)}>
+            <SummaryGroup title="Personal" editId="edit-step-1" onEdit={() => editStep(1)} editDisabled={busy}>
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
               <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
@@ -708,7 +735,7 @@ export default function ApplyPage() {
               <SummaryRow label="State" value={form.state} />
               <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
-            <SummaryGroup title="Employment & income" editId="edit-step-2" onEdit={() => editStep(2)}>
+            <SummaryGroup title="Employment & income" editId="edit-step-2" onEdit={() => editStep(2)} editDisabled={busy}>
               <SummaryRow label="Employer" value={form.employer} />
               <SummaryRow label="Job title" value={form.job_title} />
               <SummaryRow
@@ -720,7 +747,7 @@ export default function ApplyPage() {
                 value={form.employment_years}
               />
             </SummaryGroup>
-            <SummaryGroup title="Loan details" editId="edit-step-3" onEdit={() => editStep(3)}>
+            <SummaryGroup title="Loan details" editId="edit-step-3" onEdit={() => editStep(3)} editDisabled={busy}>
               <SummaryRow label="Amount" value={usd(form.amount)} />
               <SummaryRow
                 label="Term"
@@ -820,8 +847,11 @@ export default function ApplyPage() {
                 {disclosure ? (
                   <OfferPanel
                     disclosure={disclosure}
-                    amount={form.amount}
-                    termMonths={form.term_months}
+                    // Displayed from the submitted snapshot for the same
+                    // reason: the panel states what this application is for,
+                    // and that is a fact about the record, not about the form.
+                    amount={(submitted ?? form).amount}
+                    termMonths={(submitted ?? form).term_months}
                     showSchedule={showSchedule}
                     onToggleSchedule={() => setShowSchedule((v) => !v)}
                     onAccept={acceptOffer}
@@ -1025,11 +1055,18 @@ function SummaryGroup({
   children,
   onEdit,
   editId,
+  editDisabled,
 }: {
   title: string;
   children: React.ReactNode;
   onEdit?: () => void;
   editId?: string;
+  // Disabled while a submission is in flight. Reviewed as high severity: the
+  // Submit button and the review's Back button both honoured `busy`, but these
+  // Edit controls were added later and bypassed that guard entirely, so they
+  // were the one way left to mutate `form` after the POST body had been
+  // snapshotted from it.
+  editDisabled?: boolean;
 }) {
   return (
     <div style={{ marginBottom: 18 }}>
@@ -1052,7 +1089,13 @@ function SummaryGroup({
             id={editId}
             className="btn-ghost"
             onClick={onEdit}
+            disabled={editDisabled}
             aria-label={`Edit ${title}`}
+            title={
+              editDisabled
+                ? "Your application is being submitted and can no longer be changed."
+                : undefined
+            }
             style={{ fontSize: "0.85rem", padding: "2px 10px" }}
           >
             Edit

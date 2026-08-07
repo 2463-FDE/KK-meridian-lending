@@ -33,7 +33,11 @@ export function fictionalApplicant(label: string, lastDigitEven: boolean, income
   };
 }
 
-export async function submitApplication(page: Page, applicant: FictionalApplicant): Promise<void> {
+export async function submitApplication(
+  page: Page,
+  applicant: FictionalApplicant,
+  opts?: { stopAtReview?: boolean },
+): Promise<void> {
   await page.goto("/apply");
   await expect(page.getByText("Step 1 of 5")).toBeVisible();
   await page.getByPlaceholder("Jane Q. Borrower").fill(applicant.name);
@@ -59,6 +63,13 @@ export async function submitApplication(page: Page, applicant: FictionalApplican
   await page.getByRole("button", { name: "Next" }).click();
 
   await expect(page.getByText("Step 4 of 5")).toBeVisible();
+
+  // `stopAtReview` leaves the wizard on the review screen without submitting.
+  // submit-in-flight-edit.spec.ts needs to press Submit itself, because the
+  // whole point of that test is what happens DURING the request -- a helper
+  // that submits and waits for Step 5 has already skipped the window.
+  if (opts?.stopAtReview) return;
+
   await page.getByRole("button", { name: "Submit application" }).click();
 
   await expect(page.getByText("Step 5 of 5")).toBeVisible({ timeout: 15_000 });
