@@ -11,7 +11,12 @@ interface LoanRow {
   id: string | number;
   applicant_name: string;
   principal: number;
-  apr: number;
+  // Servicing exposes the CONTRACTUAL note rate under its accurate name.
+  // The database column behind it is still `loans.apr` (legacy, tracked as
+  // D19); the API is where that name stops. This is NOT the disclosed
+  // federal APR -- that lives on the offer, and is the larger of the two
+  // once a prepaid fee exists.
+  note_rate_pct: number;
   term_months: number;
   status: string;
   balance: number;
@@ -174,7 +179,7 @@ function ServicingContent() {
               <th>Loan ID</th>
               <th>Borrower</th>
               <th className="num">Principal</th>
-              <th className="num">APR</th>
+              <th className="num">Rate</th>
               <th className="num">Term</th>
               <th>Status</th>
               <th className="num">Balance</th>
@@ -205,7 +210,7 @@ function ServicingContent() {
                   </td>
                   <td>{l.applicant_name}</td>
                   <td className="num">{usd(l.principal)}</td>
-                  <td className="num">{pct(l.apr)}</td>
+                  <td className="num">{pct(l.note_rate_pct)}</td>
                   <td className="num">{l.term_months} mo</td>
                   <td>
                     <StatusChip status={l.status} />

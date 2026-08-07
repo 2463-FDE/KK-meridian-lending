@@ -13,7 +13,12 @@ interface Loan {
   id: string | number;
   applicant_name: string;
   principal: number;
-  apr: number;
+  // Servicing exposes the CONTRACTUAL note rate under its accurate name.
+  // The database column behind it is still `loans.apr` (legacy, tracked as
+  // D19); the API is where that name stops. This is NOT the disclosed
+  // federal APR -- that lives on the offer, and is the larger of the two
+  // once a prepaid fee exists.
+  note_rate_pct: number;
   term_months: number;
   status: string;
   balance: number;
@@ -298,8 +303,8 @@ function LoanDetailContent() {
             <dd>{usd(loan?.principal)}</dd>
           </div>
           <div className="dl-row">
-            <dt>APR</dt>
-            <dd>{pct(loan?.apr)}</dd>
+            <dt>Interest rate (note rate)</dt>
+            <dd>{pct(loan?.note_rate_pct)}</dd>
           </div>
           <div className="dl-row">
             <dt>Term</dt>

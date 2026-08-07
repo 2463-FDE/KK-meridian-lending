@@ -281,5 +281,43 @@ def test_an_offer_with_no_recorded_note_rate_is_refused_rather_than_guessed(real
     resp = _accept(token)
 
     assert resp.status_code == 409
-    assert "contractual rate" in resp.json()["detail"]
+    # note_rate_pct is canonical, so the incomplete-offer precheck now names it
+    # by field before the boarding-time contractual-rate guard is reached. Either
+    # message is a refusal to guess a rate; assert on the field name, which both
+    # carry, rather than on which guard fired first.
+    detail = resp.json()["detail"]
+    assert "note_rate_pct" in detail or "contractual rate" in detail, detail
+    assert _sql(real_db, "SELECT count(*)::int AS n FROM loans")[0]["n"] == 0
+
+
+def test_offer_ready_is_false_when_only_the_note_rate_is_missing(real_db):
+    """offer_ready must not promise what accept will refuse.
+
+    note_rate_pct was absent from _CANONICAL_OFFER_FIELDS, so an offer with a
+    complete TILA box but no contractual rate reported ready -- and then 409'd on
+    accept, because accept will not infer a rate. The caller was told to proceed
+    into a guaranteed failure. Both halves are asserted here: not ready, and
+    cannot board.
+    """
+    token = _approved_application(real_db, with_offer=True)
+    _sql(real_db, "UPDATE offers SET note_rate_pct = NULL WHERE app_id = 1")
+
+    # every other canonical term is still present
+    row = _sql(
+        real_db,
+        "SELECT apr, finance_charge, monthly_payment, amount_financed, "
+        "total_of_payments FROM offers WHERE app_id = 1",
+    )[0]
+    assert all(v is not None for v in row.values()), "fixture must keep the rest complete"
+
+    from app.routers import applications as app_router
+
+    assert app_router._complete_offer_exists(1) is False, (
+        "offer_ready reported a usable disclosure for an offer with no note rate"
+    )
+
+    # and the promise matches reality: accept refuses rather than guessing
+    resp = _accept(token)
+    assert resp.status_code == 409
+    assert "note_rate_pct" in resp.json()["detail"], resp.json()["detail"]
     assert _sql(real_db, "SELECT count(*)::int AS n FROM loans")[0]["n"] == 0

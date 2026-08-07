@@ -81,6 +81,12 @@ def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> Non
 # The five canonical TILA amounts. An offers row missing any of them is not a
 # disclosure -- see _offer_disclosure_or_none and Gap F.
 _CANONICAL_OFFER_FIELDS = (
+    # note_rate_pct is canonical: accept_offer refuses to board without it
+    # (it will not infer a contractual rate), so an offer lacking it is not
+    # usable no matter how complete the rest of the TILA box looks. Leaving it
+    # out here made offer_ready report True for an offer that then 409'd on
+    # accept -- the caller was told to proceed into a guaranteed failure.
+    "note_rate_pct",
     "apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments",
 )
 
@@ -888,7 +894,7 @@ def accept_offer(
     # between this read and that lock.
     rows = db.query(
         f"SELECT a.amount, a.term_months, a.status, {_ACCEPT_TOKEN_FIELDS}, ap.name, "
-        "o.id AS offer_id, o.apr, o.finance_charge, o.monthly_payment, "
+        "o.id AS offer_id, o.note_rate_pct, o.apr, o.finance_charge, o.monthly_payment, "
         "o.amount_financed, o.total_of_payments, o.accepted_at, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "

@@ -77,6 +77,11 @@ class Offer(Base):
     # against a retried/duplicated create_offer call (W4 review fix).
     decision_id: Mapped[int | None] = mapped_column(ForeignKey("decisions.app_id"), unique=True, nullable=True)
     fee_pct_used: Mapped[float | None] = mapped_column(Numeric(5, 4, asdecimal=False), nullable=True)
+    # The contractual note rate (db/migrations/0030). Declared here because
+    # _offer_disclosure_or_none() and _complete_offer_exists() treat it as a
+    # canonical term via getattr -- an undeclared column reads as None, so a
+    # perfectly good offer was reported "missing=note_rate_pct" and refused.
+    note_rate_pct: Mapped[float | None] = mapped_column(Numeric(7, 3, asdecimal=False), nullable=True)
     apr: Mapped[float | None] = mapped_column(Numeric(7, 3, asdecimal=False), nullable=True)
     finance_charge: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     monthly_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)

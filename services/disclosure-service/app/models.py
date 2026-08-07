@@ -25,6 +25,11 @@ class Offer(Base):
     # against a retried/duplicated create_offer call (W4 review fix).
     decision_id: Mapped[int | None] = mapped_column(ForeignKey("decisions.app_id"), unique=True, nullable=True)
     fee_pct_used: Mapped[float | None] = mapped_column(Numeric(5, 4, asdecimal=False), nullable=True)
+    # The contractual interest rate the payment stream is priced at (db/migrations
+    # /0030). Distinct from `apr`, which additionally carries the prepaid fee.
+    # Nullable only because offers created before 0030 have no stored value --
+    # those, and only those, fall back to apr.note_rate_from_payment().
+    note_rate_pct: Mapped[float | None] = mapped_column(Numeric(7, 3, asdecimal=False), nullable=True)
     apr: Mapped[float | None] = mapped_column(Numeric(7, 3, asdecimal=False), nullable=True)
     finance_charge: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     monthly_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)

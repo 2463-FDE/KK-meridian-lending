@@ -245,6 +245,7 @@ def create_offer(
             repaired = True
 
     disclosure = Disclosure(
+        note_rate_pct=(float(row["note_rate_pct"]) if row.get("note_rate_pct") is not None else None),
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
         monthly_payment=float(row["monthly_payment"]), amount_financed=float(row["amount_financed"]),
         total_of_payments=float(row["total_of_payments"]),
@@ -326,12 +327,23 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     # principal -- so the redisplayed schedule showed a monthly payment that did
     # not match the disclosed one. Recover the rate the payments were actually
     # calculated at from the stored payment itself.
-    note_rate = (
-        apr.note_rate_from_payment(principal, monthly_payment, term_months)
-        if term_months and monthly_payment else 0.0
-    )
+    # Prefer the STORED contractual rate. note_rate_from_payment() is legacy
+    # compatibility ONLY -- for offers created before db/migrations/0030, which
+    # have no stored value. A recovered rate is an inference from an already
+    # rounded payment, so it must never be preferred over a persisted one, and
+    # accept refuses to board a recovered rate at all (applications.py::
+    # accept_offer). Asserted both ways:
+    # test_stored_note_rate_is_preferred_over_recovery (normal rows never reach
+    # the recovery) and test_a_legacy_offer_without_a_stored_note_rate_recovers.
+    if offer.note_rate_pct is not None:
+        note_rate = float(offer.note_rate_pct)
+    elif term_months and monthly_payment:
+        note_rate = apr.note_rate_from_payment(principal, monthly_payment, term_months)
+    else:
+        note_rate = 0.0
     rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
     disclosure = Disclosure(
+        note_rate_pct=(note_rate or None),
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, amount_financed=amount_financed,
         total_of_payments=total_of_payments,

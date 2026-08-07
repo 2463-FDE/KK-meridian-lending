@@ -20,6 +20,13 @@ class ScheduleRow(BaseModel):
 
 
 class Disclosure(BaseModel):
+    # Two distinct rates, deliberately named so they cannot be confused at any
+    # boundary. `note_rate_pct` is the contractual interest rate the payment
+    # stream is priced at and the rate servicing amortizes; `apr` is the
+    # disclosed federal APR, which additionally carries the prepaid origination
+    # fee and is therefore always the larger of the two once a fee exists.
+    # Optional because pre-0030 offer rows have no stored note rate.
+    note_rate_pct: float | None = None
     apr: float
     finance_charge: float
     monthly_payment: float

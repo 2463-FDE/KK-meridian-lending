@@ -1,16 +1,24 @@
 """Pydantic response models for the LSS API."""
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 T = TypeVar("T")
 
 
 class LoanListItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: int
     applicant_name: Optional[str] = None
     principal: float
-    apr: float
+    # The database column is still `loans.apr`, but what it holds -- and what
+    # schedule.amortization() consumes -- is the CONTRACTUAL note rate, not the
+    # disclosed federal APR. Exposing it to clients as "apr" was a misleading
+    # label on a regulated figure, so the API name says what the value is. The
+    # column rename is tracked as D19; until it lands, this alias is the
+    # boundary where the legacy name stops.
+    note_rate_pct: float = Field(validation_alias="apr", serialization_alias="note_rate_pct")
     term_months: int
     status: Optional[str] = None
     balance: float = 0.0

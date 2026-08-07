@@ -31,6 +31,7 @@ from decimal import Decimal
 
 import psycopg2.errors
 from app import config, db
+from app import apr as apr_mod
 from app import offer as offer_mod
 from app.database import get_session
 from app.main import app
@@ -306,6 +307,16 @@ def test_create_offer_rejects_when_no_application_on_record(monkeypatch):
 
 
 class _FakeOffer:
+    """Stand-in for the ORM Offer row.
+
+    Every column the read path touches is defaulted here, so a double that
+    omits one behaves like a NULL column rather than raising AttributeError.
+    `note_rate_pct` defaults to None deliberately: that is the legacy,
+    pre-0030 shape, and the read path's recovery branch is what it exercises.
+    """
+
+    note_rate_pct = None
+
     def __init__(self, **kw):
         for k, v in kw.items():
             setattr(self, k, v)
@@ -346,3 +357,72 @@ def test_get_offer_uses_stored_fee_pct_not_live_constant(monkeypatch):
     body = resp.json()
     assert body["fee_pct_used"] == 0.05
     assert body["decision_id"] == 10
+
+
+def test_stored_note_rate_is_preferred_over_recovery(monkeypatch):
+    """A normal, post-0030 offer must never reach note_rate_from_payment().
+
+    Recovery infers a rate from an already-rounded payment. It exists only so
+    pre-0030 rows still render; preferring it over a persisted value would mean
+    the displayed rate drifts from the contractual one by a rounding artefact.
+    Proven by making the recovery raise: if the read path calls it for a row that
+    has note_rate_pct, this test fails loudly instead of silently agreeing.
+    """
+    def _must_not_be_called(*a, **kw):
+        raise AssertionError(
+            "note_rate_from_payment() was called for an offer that has a stored "
+            "note_rate_pct -- recovery is legacy compatibility only"
+        )
+
+    monkeypatch.setattr(apr_mod, "note_rate_from_payment", _must_not_be_called)
+
+    offer = _FakeOffer(
+        id=43, app_id=11, decision_id=11, fee_pct_used=0.03,
+        note_rate_pct=7.99, apr=10.072, finance_charge=2369.15,
+        monthly_payment=469.98, amount_financed=14550.0, total_of_payments=16919.15,
+    )
+    def _fake_get_session():
+        yield _FakeSession(offer)
+
+    app.dependency_overrides[get_session] = _fake_get_session
+    try:
+        resp = client.get("/applications/11/offer")
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["disclosure"]["note_rate_pct"] == pytest.approx(7.99, abs=1e-3)
+
+
+def test_a_legacy_offer_without_a_stored_note_rate_recovers(monkeypatch):
+    """The other half: a genuine pre-0030 row still renders a rate.
+
+    Removing the recovery entirely would blank the rate on historical offers, so
+    it has to stay -- reachable only when note_rate_pct is actually absent.
+    """
+    called = {}
+
+    def _recovery(principal, payment, term):
+        called["args"] = (principal, payment, term)
+        return 7.99
+
+    monkeypatch.setattr(apr_mod, "note_rate_from_payment", _recovery)
+
+    offer = _FakeOffer(
+        id=44, app_id=12, decision_id=12, fee_pct_used=0.03,
+        note_rate_pct=None,                      # the legacy shape
+        apr=10.072, finance_charge=2369.15,
+        monthly_payment=469.98, amount_financed=14550.0, total_of_payments=16919.15,
+    )
+    def _fake_get_session():
+        yield _FakeSession(offer)
+
+    app.dependency_overrides[get_session] = _fake_get_session
+    try:
+        resp = client.get("/applications/12/offer")
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert resp.status_code == 200
+    assert called, "recovery was not reached for a row with no stored note rate"
+    assert resp.json()["disclosure"]["note_rate_pct"] == pytest.approx(7.99, abs=1e-3)
