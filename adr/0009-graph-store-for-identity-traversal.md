@@ -65,30 +65,41 @@ Adding a third fixed query for this would not help. There is no depth to hard-co
 ## Postgres can express it — this is the part that matters
 
 The honest answer is not "relational cannot do this". A recursive CTE can, and
-here it is, verified against real PostgreSQL:
+the form below is the one to quote — it expands only the current frontier
+against an indexed posting table, so no global adjacency relation is ever
+formed:
 
 ```sql
-WITH RECURSIVE edges AS (
-    SELECT a.id AS src, b.id AS dst
-      FROM applicants a JOIN applicants b
-        ON a.id <> b.id
-       AND ( a.address = b.address OR a.phone = b.phone OR a.email = b.email
-          OR a.ssn = b.ssn OR a.ein = b.ein )
-    UNION
-    SELECT ap1.applicant_id, ap2.applicant_id
-      FROM applications ap1 JOIN applications ap2
-        ON ap1.applicant_id <> ap2.applicant_id AND ap1.employer = ap2.employer
-),
-walk AS (
+-- identity_attr(applicant_id, kind, value), indexed on (kind, value) and
+-- (applicant_id), built once from applicants.{address,phone,email,ssn,ein}
+-- and applications.employer.
+WITH RECURSIVE walk AS (
     SELECT :root AS id, 0 AS depth, ARRAY[:root] AS path
     UNION ALL
-    SELECT e.dst, w.depth + 1, w.path || e.dst
-      FROM walk w JOIN edges e ON e.src = w.id
+    SELECT x2.applicant_id, w.depth + 1, w.path || x2.applicant_id
+      FROM walk w
+      JOIN identity_attr x1 ON x1.applicant_id = w.id
+      JOIN identity_attr x2 ON x2.kind  = x1.kind
+                           AND x2.value = x1.value
+                           AND x2.applicant_id <> w.id
      WHERE w.depth < :maxdepth
-       AND NOT e.dst = ANY(w.path)          -- cycle guard, mandatory
+       AND NOT x2.applicant_id = ANY(w.path)   -- cycle guard, mandatory
 )
 SELECT count(DISTINCT id) FROM walk;
 ```
+
+A posting table rather than five OR'd column predicates because the edge set
+spans two tables — the employer edge lives on `applications` — and PostgreSQL
+forbids a recursive self-reference inside a subquery, so the employer arm cannot
+be bolted on as an `EXISTS` beside the applicant columns. Normalising every
+identity attribute into one relation keeps all six edge kinds in a single
+index-driven join.
+
+The earlier revision of this ADR printed a different query here: one that
+declared `WITH RECURSIVE edges AS (<all-pairs self-join>)` and then walked it.
+That version still runs, and is retained in the harness as a labelled
+pessimistic baseline, but it is not what a competent implementation would ship
+and its timings should never be quoted as PostgreSQL's cost.
 
 So the question is not expressiveness. It is where this stops working.
 
@@ -113,46 +124,95 @@ households of three sharing an address, a shared phone every seventh row, 200
 employers, and identity collisions on `ssn` and `ein` at 1% and 0.4%. Denser
 means worse, so these are a lower bound on the problem.
 
-**N = 10,000 applicants, one root, PostgreSQL 16:**
+### One run is the source for every number below
 
-| Depth limit | Applicants reached | Time |
+All timings on this page come from a single run, recorded as
+`db/bench/results.json` with the plans in `db/bench/run-output.txt`:
+
+- **2026-08-07T21:20Z**, N = 10,000 applicants, root = 1, 120 s statement timeout
+- PostgreSQL **16.14** — `shared_buffers` 128MB, `work_mem` 4MB,
+  `effective_cache_size` 4GB, `max_parallel_workers_per_gather` 2, `jit` on
+- Windows 11 (10.0.26200), Intel64 Family 6 Model 140
+
+An earlier revision of this ADR quoted three mutually contradictory sets of
+figures — a table reading 3.3 s / 3.0 s / 72.3 s, prose calling the cliff
+"1.8 s to 43.8 s", a decision rule promising "under two seconds", and a fourth
+number (44 s) in `kg.py`. Since the revisit trigger is latency-based, none of
+them governed. Everything below is transcribed from the run above and nothing
+else.
+
+### Three implementations, because "PostgreSQL is slow" was measuring one bad one
+
+The previous harness declared `WITH RECURSIVE edges AS (<all-pairs self-join>)`
+and walked from a single root, so every timing included planning against the
+entire adjacency relation — a *global* build charged to a *root-scoped*
+question. That is the most pessimistic relational implementation available, and
+reporting it as "PostgreSQL" nearly rejected a Postgres design nobody had tried.
+
+The harness now measures three implementations of the **same** traversal over
+the **same** edge set. It asserts identical reachability at every depth and
+aborts the run if they diverge; on this run all three returned 55 / 466 / 850 /
+1,621, so the comparison is sound.
+
+**Per-query traversal time (seconds), N = 10,000:**
+
+| Depth | Reached | frontier-attr | materialized | global-edge *(pessimistic)* |
+|---|---|---|---|---|
+| 1 | 55 | **0.005** | 0.002 | 1.325 |
+| 2 | 466 | **0.028** | 0.011 | 1.478 |
+| 3 | 850 | **0.514** | 0.288 | 2.485 |
+| 4 | 1,621 | **38.72** | 16.87 | 19.85 |
+| 5 | — | **abort >120 s** | abort >120 s | abort >120 s |
+
+One-off build costs, kept out of the per-query numbers on purpose — a derived
+structure that takes seconds to build and answers in milliseconds is a different
+engineering proposition from one that is free:
+
+| Structure | Build | Rows |
 |---|---|---|
-| 1 | 55 | 3.3 s |
-| 2 | 466 | 1.7 s |
-| 3 | 850 | 3.0 s |
-| 4 | 1,621 | **72.3 s** |
-| 5 | (none) | **aborted at 240 s** |
+| `identity_attr` (postings) | 0.238 s | 40,140 |
+| `edges` (materialised pairs) | 1.690 s | 553,928 |
 
-*An earlier revision reported 795 / 1,159 / 43.8 s. Those came from a CTE that
-joined only address, phone, email and employer, while this document claimed
-`ssn` and `ein` as edges too, so it measured a sparser graph than the one it
-argued about. The review caught it. With the full edge set the walk reaches 40%
-further at depth 4 and takes 65% longer, which strengthens the conclusion rather
-than changing it.*
+### What that changes, and what it does not
 
-Ten thousand applicants is a *small* lending book. The wall is not at some
-distant scale — it is at **depth 4 on a book this size**, and it is a cliff, not
-a slope: 1.8 s to 43.8 s to no-answer across two hops.
+**It changes the depth ≤3 story completely.** A properly root-scoped traversal
+answers depth 3 in **0.29–0.51 s**, not the ~3 s previously published. The old
+figure was the cost of rebuilding the whole graph per query. At depth ≤3 there
+is not merely "nothing to buy" — there is a comfortable margin, and the earlier
+decision rule was nearly violated by its own evidence table.
 
-The reason is structural, not a missing index, and the EXPLAIN shows it: at
-depth 3 the recursive term produces **160,239 rows to yield 850 distinct
-applicants**. The walk re-expands every path rather than every node, and the
-cycle guard can only prune a row after it exists. Every hop re-joins through an
-index and materialises a new frontier, so cost compounds with the branching
-factor: roughly 24× per hop here. A graph store's index-free adjacency makes a
-hop a pointer dereference, so its cost tracks the number of nodes actually
-*visited* rather than the size of the table being re-searched. Indexing cannot
+**It does not change the cliff.** Depth 4 costs 17–39 s on every implementation,
+and depth 5 does not return inside two minutes on any of them. Notably the
+materialised edge table — a genuine read model, 553,928 rows prebuilt and
+indexed — is *not* rescued by that work: 16.87 s at depth 4. The wall is not an
+indexing problem.
+
+The `EXPLAIN (ANALYZE, BUFFERS)` says why, and it is structural. At depth 4 the
+frontier-attr recursive union emits **9,419,712 rows to yield 1,621 distinct
+applicants**, and the materialised variant emits 8,486,438. The index is working
+exactly as intended — the plan shows a Bitmap Index Scan returning 4 rows per
+probe — so the per-lookup cost is already near optimal. What explodes is the
+number of lookups: the walk re-expands every *path* rather than every *node*,
+and the cycle guard can only prune a row after it has been produced. A graph
+store's index-free adjacency makes a hop a pointer dereference, so its cost
+tracks nodes actually visited rather than paths enumerated. Indexing cannot
 close that gap, because the index lookup is the thing being repeated.
+
+Ten thousand applicants is a *small* lending book, and the wall is at **depth 4
+on a book this size**.
 
 ### So the answer flips when all three hold
 
 1. **Traversal is the query, not a step in it.** Reading one loan's history is a
    tree walk; Postgres wins, and no graph store is warranted.
-2. **Depth is unbounded and above three.** At depth ≤3 the recursive CTE answers
-   in under two seconds on 10k rows and there is nothing to buy.
-3. **It runs interactively.** A nightly batch can absorb 43 seconds. An
-   underwriter waiting on a screen cannot, and neither can a decision-time
-   check.
+2. **Depth is unbounded and above three.** At depth ≤3 a root-scoped traversal
+   answers in **under 0.6 s** on 10k rows (0.514 s worst of the two sound
+   implementations), so there is nothing to buy. This threshold is stated
+   against the measured frontier-attr column above, not against the pessimistic
+   baseline.
+3. **It runs interactively.** A nightly batch can absorb the depth-4 cost
+   (16.87–38.72 s). An underwriter waiting on a screen cannot, and neither can a
+   decision-time check.
 
 If any one of those is false, foreign keys remain the right answer. **For
 Meridian today, (1) is false** — there is no fraud-ring product, no

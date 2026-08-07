@@ -14,9 +14,20 @@ relational joins are good at. The traversal that would justify a graph store --
 "find every applicant reachable from this one through any shared identity
 attribute, to unbounded depth" (fraud rings, beneficial ownership) -- cannot be
 written here at all, because there is no depth to hard-code. PostgreSQL can
-express it with a recursive CTE; that CTE answers in under two seconds to depth
-3 on 10k applicants, takes 44 seconds at depth 4, and does not return at depth
-5. Nothing in production needs depth > 3 today, so this stays relational. ADR
+express it with a recursive CTE, and on the single benchmark run ADR 0009 is
+transcribed from (db/bench/results.json, 2026-08-07T21:20Z, 10k applicants,
+PostgreSQL 16.14) a root-scoped version answers depth 3 in **0.51 s**, costs
+**16.9-38.7 s at depth 4**, and does not return at depth 5 inside two minutes.
+
+Those numbers replace a "44 seconds at depth 4" that appeared only here and
+matched neither the ADR's table nor its prose. They also correct the depth-3
+figure downward by roughly 6x: the earlier benchmark rebuilt the entire
+adjacency relation on every query, so it was measuring the worst relational
+implementation rather than the best one. Materialising an indexed edge table
+does NOT rescue depth 4 either, which is why the wall is structural and not an
+indexing problem.
+
+Nothing in production needs depth > 3 today, so this stays relational. ADR
 0009 records the trigger to revisit (Week 9's beneficial-ownership work is the
 likely one).
 
