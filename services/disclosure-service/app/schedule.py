@@ -6,28 +6,44 @@ this used to accumulate in float across up to 60 rows, the same drift that
 affected the disclosed APR.
 """
 import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from . import apr
+
+
+CENT = Decimal("0.01")
+
+
+def _cents(value) -> Decimal:
+    """Round to cents HALF-UP, matching Postgres NUMERIC.
+
+    Not round(): round() on a Decimal is round-half-to-EVEN, so an exact
+    half-cent goes to the nearest even digit and disagrees with the database
+    that stores the result. Caught by the BOARDING-24 golden vector, whose
+    first-period interest is exactly 59.925 -- half-to-even gives 59.92,
+    half-up gives 59.93, and every later row inherits the difference.
+    """
+    v = value if isinstance(value, Decimal) else Decimal(str(value))
+    return v.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
 def amortization(principal: float, annual_rate_pct: float, term_months: int,
                  start: datetime.date | None = None) -> list[dict]:
     start = start or datetime.date.today()
     p = Decimal(str(principal))
-    regular = round(apr.monthly_payment_decimal(principal, annual_rate_pct, term_months), 2)
+    regular = _cents(apr.monthly_payment_decimal(principal, annual_rate_pct, term_months))
     monthly_rate = Decimal(str(annual_rate_pct)) / 100 / 12
     balance = p
     rows: list[dict] = []
     for n in range(1, term_months + 1):
-        interest = round(balance * monthly_rate, 2)
+        interest = _cents(balance * monthly_rate)
         if n == term_months:
             principal_part = balance
-            payment = round(principal_part + interest, 2)
+            payment = _cents(principal_part + interest)
         else:
             payment = regular
             principal_part = payment - interest
-        balance = round(balance - principal_part, 2)
+        balance = _cents(balance - principal_part)
         due = _add_months(start, n)
         rows.append({
             "n": n,

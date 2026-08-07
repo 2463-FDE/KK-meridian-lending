@@ -153,6 +153,46 @@ CREATE TABLE IF NOT EXISTS offers (
         AND monthly_payment IS NOT NULL
         AND amount_financed IS NOT NULL
         AND total_of_payments IS NOT NULL
+    ),
+    -- Model B schedule integrity (db/migrations/0030). Mirrored here so both
+    -- provisioning paths enforce the same rules -- test_migration_paths_converge
+    -- compares CHECK constraints by name and normalized expression, so a rule
+    -- present on one path and absent on the other fails the build.
+    --
+    -- The application checks these too; that is not a substitute. Seed SQL, the
+    -- repair path and any operator with psql all write this table, and a
+    -- half-written schedule is worse than an absent one: it reads as "recorded"
+    -- to a single-column NULL check while describing nothing billable.
+    CONSTRAINT offers_schedule_all_or_nothing CHECK (
+        (regular_payment_count IS NULL
+         AND final_payment      IS NULL
+         AND term_months        IS NULL
+         AND schedule_version   IS NULL)
+        OR
+        (regular_payment_count IS NOT NULL
+         AND final_payment      IS NOT NULL
+         AND term_months        IS NOT NULL
+         AND schedule_version   IS NOT NULL)
+    ),
+    -- An identity of Model B, not a policy: term_months - 1 regular payments
+    -- plus one adjusted final payment. Also the exact corruption a mismatched
+    -- request body used to produce -- a 36-month schedule filed as 60 months.
+    CONSTRAINT offers_schedule_term_agrees CHECK (
+        term_months IS NULL OR regular_payment_count + 1 = term_months
+    ),
+    -- Zero regular payments is correct and reachable: a single-payment loan is
+    -- all final payment.
+    CONSTRAINT offers_schedule_shape_sane CHECK (
+        (term_months IS NULL OR term_months >= 1)
+        AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+    ),
+    CONSTRAINT offers_final_payment_positive CHECK (
+        final_payment IS NULL OR final_payment > 0
+    ),
+    -- An unknown version is not forward compatibility; it is a row whose
+    -- amounts were produced by rounding rules the reader does not have.
+    CONSTRAINT offers_schedule_version_supported CHECK (
+        schedule_version IS NULL OR schedule_version IN ('B1')
     )
 );
 
@@ -175,7 +215,32 @@ CREATE TABLE IF NOT EXISTS loans (
     schedule_version      TEXT,
     term_months     INTEGER NOT NULL,
     status          TEXT DEFAULT 'current',
-    opened_at       TIMESTAMPTZ DEFAULT now()
+    opened_at       TIMESTAMPTZ DEFAULT now(),
+    -- Model B schedule integrity on the boarded contract (db/migrations/0030).
+    -- No term_months in the group: loans.term_months already exists and is NOT
+    -- NULL, so the count is reconciled against the loan's own term instead.
+    CONSTRAINT loans_schedule_all_or_nothing CHECK (
+        (regular_payment       IS NULL
+         AND regular_payment_count IS NULL
+         AND final_payment     IS NULL
+         AND schedule_version  IS NULL)
+        OR
+        (regular_payment       IS NOT NULL
+         AND regular_payment_count IS NOT NULL
+         AND final_payment     IS NOT NULL
+         AND schedule_version  IS NOT NULL)
+    ),
+    CONSTRAINT loans_schedule_term_agrees CHECK (
+        regular_payment_count IS NULL OR regular_payment_count + 1 = term_months
+    ),
+    CONSTRAINT loans_schedule_amounts_positive CHECK (
+        (regular_payment IS NULL OR regular_payment > 0)
+        AND (final_payment IS NULL OR final_payment > 0)
+        AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+    ),
+    CONSTRAINT loans_schedule_version_supported CHECK (
+        schedule_version IS NULL OR schedule_version IN ('B1')
+    )
 );
 
 -- Mutable balance: one column, overwritten in place. No ledger, no transaction history.

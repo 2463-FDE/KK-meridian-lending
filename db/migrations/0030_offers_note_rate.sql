@@ -120,3 +120,203 @@ BEGIN
           'schedule reports as unavailable.', unpinned;
     END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- Constraints: make "partly recorded" unrepresentable
+-- ---------------------------------------------------------------------------
+-- Application code checks these already, and that is not the same thing. The
+-- application is one of several writers (seed SQL, the repair path, migrations,
+-- and any operator with psql), and a half-written schedule is worse than none:
+-- a row with a final_payment but no count reads as "recorded" to a NULL check
+-- while describing no schedule anybody can bill. Every rule below is a fact
+-- about what a Model B schedule IS, so the database is where it belongs.
+--
+-- All are validated immediately rather than NOT VALID. That is safe precisely
+-- because 0030 does not back-fill: every pre-existing row has all four columns
+-- NULL and so satisfies the all-null branch. A NOT VALID constraint here would
+-- buy nothing and leave a second step for someone to forget.
+--
+-- Guarded by pg_constraint lookups because ALTER TABLE ... ADD CONSTRAINT has
+-- no IF NOT EXISTS form for CHECK, and this file has to stay re-runnable.
+--
+-- Every guard filters on the table AND current_schema(). conname is unique only
+-- per table, so matching on the name alone means any constraint of that name
+-- anywhere in the database makes this migration skip silently and leave the
+-- table unprotected. 0026 carries the same warning because it shipped that bug
+-- once; these guards were written with it and caught by
+-- test_legacy_upgrade_reaches_the_same_shape_as_a_fresh_install[checks], which
+-- compares both provisioning paths inside one database and so reproduces the
+-- cross-schema collision exactly.
+
+DO $$
+BEGIN
+    -- All-or-nothing. The four columns describe one schedule; any proper subset
+    -- of them describes nothing. This is the constraint that makes every NULL
+    -- check elsewhere in the codebase sound: code may test one column and
+    -- conclude about the group.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'offers'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'offers_schedule_all_or_nothing'
+    ) THEN
+        ALTER TABLE offers ADD CONSTRAINT offers_schedule_all_or_nothing CHECK (
+            (regular_payment_count IS NULL
+             AND final_payment      IS NULL
+             AND term_months        IS NULL
+             AND schedule_version   IS NULL)
+            OR
+            (regular_payment_count IS NOT NULL
+             AND final_payment      IS NOT NULL
+             AND term_months        IS NOT NULL
+             AND schedule_version   IS NOT NULL)
+        );
+    END IF;
+
+    -- The count and the term must describe the same schedule. Under Model B
+    -- there are exactly term_months - 1 regular payments and one adjusted
+    -- final payment, so this is an identity, not a policy. It is also the
+    -- specific corruption a mismatched request body produced before the
+    -- server-derived term was stored: a 36-month schedule filed under a
+    -- 60-month term.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'offers'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'offers_schedule_term_agrees'
+    ) THEN
+        ALTER TABLE offers ADD CONSTRAINT offers_schedule_term_agrees CHECK (
+            term_months IS NULL OR regular_payment_count + 1 = term_months
+        );
+    END IF;
+
+    -- A term of at least one period, and a non-negative count (zero is correct
+    -- and reachable: a single-payment loan is all final payment).
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'offers'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'offers_schedule_shape_sane'
+    ) THEN
+        ALTER TABLE offers ADD CONSTRAINT offers_schedule_shape_sane CHECK (
+            (term_months IS NULL OR term_months >= 1)
+            AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+        );
+    END IF;
+
+    -- A billed amount of zero or less is not a payment. Scoped to the new
+    -- column only: monthly_payment predates this migration and constraining it
+    -- here would be an unrelated rule smuggled into a schedule change.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'offers'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'offers_final_payment_positive'
+    ) THEN
+        ALTER TABLE offers ADD CONSTRAINT offers_final_payment_positive CHECK (
+            final_payment IS NULL OR final_payment > 0
+        );
+    END IF;
+
+    -- Only rounding policies this codebase can actually bill. An unknown
+    -- version is not a forward-compatible value -- it is a row whose payment
+    -- amounts were produced by rules the reader does not have.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'offers'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'offers_schedule_version_supported'
+    ) THEN
+        ALTER TABLE offers ADD CONSTRAINT offers_schedule_version_supported CHECK (
+            schedule_version IS NULL OR schedule_version IN ('B1')
+        );
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    -- The same rules on the boarded contract. loans has no term_months of its
+    -- own to reconcile -- the column already exists and is NOT NULL -- so the
+    -- group here is the three amounts plus the version, and the count is
+    -- checked against the loan's own term.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'loans'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'loans_schedule_all_or_nothing'
+    ) THEN
+        ALTER TABLE loans ADD CONSTRAINT loans_schedule_all_or_nothing CHECK (
+            (regular_payment       IS NULL
+             AND regular_payment_count IS NULL
+             AND final_payment     IS NULL
+             AND schedule_version  IS NULL)
+            OR
+            (regular_payment       IS NOT NULL
+             AND regular_payment_count IS NOT NULL
+             AND final_payment     IS NOT NULL
+             AND schedule_version  IS NOT NULL)
+        );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'loans'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'loans_schedule_term_agrees'
+    ) THEN
+        ALTER TABLE loans ADD CONSTRAINT loans_schedule_term_agrees CHECK (
+            regular_payment_count IS NULL OR regular_payment_count + 1 = term_months
+        );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'loans'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'loans_schedule_amounts_positive'
+    ) THEN
+        ALTER TABLE loans ADD CONSTRAINT loans_schedule_amounts_positive CHECK (
+            (regular_payment IS NULL OR regular_payment > 0)
+            AND (final_payment IS NULL OR final_payment > 0)
+            AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+        );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'loans'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'loans_schedule_version_supported'
+    ) THEN
+        ALTER TABLE loans ADD CONSTRAINT loans_schedule_version_supported CHECK (
+            schedule_version IS NULL OR schedule_version IN ('B1')
+        );
+    END IF;
+END $$;

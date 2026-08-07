@@ -48,6 +48,24 @@ class ScheduleRow(BaseModel):
 class ScheduleOut(BaseModel):
     loan_id: int
     schedule: list[ScheduleRow]
+    # Where these rows came from (db/migrations/0030). "contract" = the payment
+    # amounts stored on the loan at boarding. "reconstructed" = solved now from
+    # principal, rate and term because no schedule was recorded.
+    #
+    # Reported rather than inferred, and never conflated: a reconstruction is
+    # this generator's opinion of what the terms probably were, not the terms
+    # that were agreed. A caller that cannot tell the two apart will present a
+    # guess as a contract.
+    source: str = "contract"
+    # The rounding policy that produced the stored amounts. NULL for a
+    # reconstruction, because no policy was recorded to name.
+    schedule_version: Optional[str] = None
+    # Set only when the stored amounts do not fully amortize the principal.
+    # Left absent on a consistent contract so its presence is the signal.
+    unamortized_residue: Optional[float] = None
+    # Human-readable statement of any caveat above. Present exactly when the
+    # rows are not the recorded contract, or when a residue exists.
+    note: Optional[str] = None
 
 
 class PaymentItem(BaseModel):

@@ -443,3 +443,104 @@ def test_boarding_required_fields_is_a_strict_superset_of_the_tila_amounts():
         "offer_ready and accept must enforce the same set, or a caller is told "
         "'ready' and then gets a 409"
     )
+
+
+def test_boarding_copies_the_contractual_schedule_onto_the_loan(real_db):
+    """The offer's Model B terms must land on `loans`, not be recomputed later.
+
+    Servicing used to regenerate the schedule from principal/rate/term with
+    whatever generator was deployed at read time, so a later rounding-policy
+    change silently altered the contractual terms of a signed loan. Under
+    Model B it is worse than drift: the final payment absorbs the cent residue
+    and cannot be recovered from any other stored figure, so a recomputation
+    cannot reproduce it at all.
+
+    Asserted field by field against the offer row rather than against literals,
+    so the test proves a COPY happened and not merely that some plausible
+    numbers were written.
+    """
+    token = _approved_application(real_db, with_offer=True)
+    assert _accept(token).status_code == 200
+
+    offer = _sql(real_db,
+                 "SELECT monthly_payment, regular_payment_count, final_payment, "
+                 "term_months, schedule_version, note_rate_pct FROM offers WHERE app_id = 1")[0]
+    loan = _sql(real_db,
+                "SELECT apr, term_months, regular_payment, regular_payment_count, "
+                "final_payment, schedule_version FROM loans WHERE app_id = 1")[0]
+
+    assert loan["regular_payment"] == offer["monthly_payment"]
+    assert loan["regular_payment_count"] == offer["regular_payment_count"]
+    assert loan["final_payment"] == offer["final_payment"]
+    assert loan["schedule_version"] == offer["schedule_version"]
+    assert loan["term_months"] == offer["term_months"]
+    # And the rate boarded is still the contractual note rate, not the
+    # disclosed APR -- the two are deliberately different in this fixture, so
+    # a confusion between them fails here rather than passing by coincidence.
+    assert float(loan["apr"]) == _NOTE_RATE_PCT
+    assert float(loan["apr"]) != _COMPLETE_TERMS["apr"]
+
+    # The copy satisfies the schedule constraints, which is not automatic: the
+    # count/term identity is checked against the LOAN's term, so a boarding bug
+    # that copied the wrong term could not have committed this row at all.
+    assert loan["regular_payment_count"] + 1 == loan["term_months"]
+
+
+def test_the_boarded_term_is_the_offers_term_not_the_applications(real_db):
+    """Boarding reads the term the schedule was solved for.
+
+    These agree today -- the offer is built from the application's term and the
+    stored value is server-derived -- so the call site used the application row
+    and nothing failed. It is still the wrong source: only the offer's term is
+    the one its payment count belongs to, and loans_schedule_term_agrees checks
+    the count against whatever boarding writes. A counteroffer at a different
+    term would board a schedule filed under a term it does not describe.
+
+    Made observable by giving the two rows different terms, which is only
+    reachable through direct SQL -- exactly how a counteroffer path would
+    eventually write it.
+    """
+    token = _approved_application(real_db, with_offer=True)
+    # Offer says 24 months / 23 regular payments (as inserted); application is
+    # rewritten to 36 so the two disagree.
+    _sql(real_db, "UPDATE applications SET term_months = 36 WHERE id = 1")
+
+    assert _accept(token).status_code == 200
+
+    loan = _sql(real_db, "SELECT term_months, regular_payment_count FROM loans WHERE app_id = 1")[0]
+    assert loan["term_months"] == 24, (
+        "boarded the application's requested term instead of the offer's "
+        "contractual term"
+    )
+    assert loan["regular_payment_count"] + 1 == loan["term_months"]
+
+
+def test_a_boarding_failure_leaves_no_partly_recorded_loan(real_db, monkeypatch):
+    """The schedule copy is in the accept transaction, not after it.
+
+    A loan committed without the terms it is billed on would be a funded
+    contract whose payment amounts exist nowhere -- and accept has no second
+    chance to write them, because the same transaction marks the offer
+    accepted and the offer is thereafter immutable.
+
+    Forced by making the balances insert fail after the loan insert has already
+    succeeded, so the failure lands strictly between the two writes.
+    """
+    token = _approved_application(real_db, with_offer=True)
+
+    real_board = intake.board_to_servicing_tx
+
+    def _fail_after_loan_insert(cur, *a, **k):
+        real_board(cur, *a, **k)
+        raise RuntimeError("simulated failure after the loan row was inserted")
+
+    monkeypatch.setattr(intake, "board_to_servicing_tx", _fail_after_loan_insert)
+
+    with pytest.raises(RuntimeError):
+        _accept(token)
+
+    assert _sql(real_db, "SELECT count(*)::int AS n FROM loans")[0]["n"] == 0
+    assert _sql(real_db, "SELECT count(*)::int AS n FROM balances")[0]["n"] == 0
+    # And the offer was NOT marked accepted, so the borrower can still complete.
+    assert _sql(real_db, "SELECT accepted_at FROM offers WHERE app_id = 1")[0]["accepted_at"] is None
+    assert _sql(real_db, "SELECT status FROM applications WHERE id = 1")[0]["status"] == "approved"

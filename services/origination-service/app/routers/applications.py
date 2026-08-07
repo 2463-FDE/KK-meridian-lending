@@ -1130,8 +1130,29 @@ def accept_offer(
             "UPDATE offers SET accepted_at = now() WHERE app_id = %s AND accepted_at IS NULL",
             (app_id,),
         )
+        offer = offer_rows[0]
         try:
-            loan_id = intake.board_to_servicing_tx(cur, app_id, name, r["amount"], rate, r["term_months"])
+            loan_id = intake.board_to_servicing_tx(
+                cur, app_id, name, r["amount"], rate,
+                # The OFFER's contractual term, not the application's requested
+                # one. They agree today -- the offer is built from the
+                # application's term and the stored value is server-derived --
+                # but only one of them is the term the schedule below was
+                # actually solved for, and loans_schedule_term_agrees checks the
+                # count against whatever is boarded here. Reading the requested
+                # term would make a future counteroffer board a schedule filed
+                # under the wrong term.
+                offer["term_months"],
+                # Copied, never recomputed. Under Model B the final payment
+                # absorbs the cent residue and cannot be recovered from any
+                # other stored figure, so a servicing-side recomputation would
+                # not merely risk drift -- it could not reproduce these amounts
+                # at all.
+                regular_payment=offer["monthly_payment"],
+                regular_payment_count=offer["regular_payment_count"],
+                final_payment=offer["final_payment"],
+                schedule_version=offer["schedule_version"],
+            )
         except psycopg2.errors.UniqueViolation:
             # loans_app_id_key (db/migrations/0015) -- a loan already exists
             # for this application; surface that instead of a raw 500.

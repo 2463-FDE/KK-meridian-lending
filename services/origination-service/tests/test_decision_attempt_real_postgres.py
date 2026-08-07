@@ -134,8 +134,35 @@ def _full_schema_sql():
             principal NUMERIC(14,2) NOT NULL,
             apr NUMERIC(7,3) NOT NULL,
             term_months INTEGER NOT NULL,
+            -- The Model B contract as boarded (db/migrations/0030), WITH its
+            -- constraints. Copying only the columns would let these tests pass
+            -- on a boarding write that real Postgres rejects -- and the whole
+            -- point of a real-Postgres fixture is that it does not diverge
+            -- from the deployed schema in ways the tests cannot see.
+            regular_payment NUMERIC(14,2),
+            regular_payment_count INTEGER,
+            final_payment NUMERIC(14,2),
+            schedule_version TEXT,
             status TEXT DEFAULT 'current',
-            opened_at TIMESTAMPTZ DEFAULT now()
+            opened_at TIMESTAMPTZ DEFAULT now(),
+            CONSTRAINT loans_schedule_all_or_nothing CHECK (
+                (regular_payment IS NULL AND regular_payment_count IS NULL
+                 AND final_payment IS NULL AND schedule_version IS NULL)
+                OR
+                (regular_payment IS NOT NULL AND regular_payment_count IS NOT NULL
+                 AND final_payment IS NOT NULL AND schedule_version IS NOT NULL)
+            ),
+            CONSTRAINT loans_schedule_term_agrees CHECK (
+                regular_payment_count IS NULL OR regular_payment_count + 1 = term_months
+            ),
+            CONSTRAINT loans_schedule_amounts_positive CHECK (
+                (regular_payment IS NULL OR regular_payment > 0)
+                AND (final_payment IS NULL OR final_payment > 0)
+                AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+            ),
+            CONSTRAINT loans_schedule_version_supported CHECK (
+                schedule_version IS NULL OR schedule_version IN ('B1')
+            )
         );
         CREATE TABLE balances (
             loan_id INTEGER PRIMARY KEY REFERENCES loans(id),
