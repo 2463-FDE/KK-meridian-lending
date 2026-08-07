@@ -2,12 +2,12 @@
 
 ADR 0008 (Week 5 tokenization) stopped this system receiving card numbers at
 all: a payment carries `last4` from the processor's token response, never a
-PAN. `db/migrations/0029` then dropped the legacy `pan`/`cvv` columns outright,
-back-filling `last4` from `pan` first so historical payments still display.
+PAN. `db/migrations/0029` back-fills `last4` from `pan` so historical payments
+still display; the columns are dropped later, in the contract step (0031).
 
 That back-fill is why the old "fall back to masking a full pan" case is gone
-rather than merely deleted: after 0029 there is no column to fall back to, and
-no code path in this service can reach a full card number. The tests below pin
+rather than merely deleted: every row that needed it now carries `last4`, so no
+code path in this service reads a card number even though the column remains. The tests below pin
 what remains true -- last4 is displayed when present, its absence renders
 nothing rather than a guess, and nothing reads a card number.
 """
@@ -31,7 +31,7 @@ def test_a_row_with_no_last4_displays_nothing():
 
 
 def test_the_display_never_reads_a_pan_attribute():
-    """Regression guard for the 0029 drop. If a `pan` fallback is ever
+    """Regression guard for the removed `pan` read. If a fallback is ever
     reinstated this fails loudly: the object raises on any attribute other than
     `last4`, so touching `.pan` is an error rather than a silent revival of
     card-number handling."""

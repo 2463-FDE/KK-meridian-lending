@@ -10,11 +10,12 @@ PRECISION) -- exact base-10 decimal storage. `asdecimal=False` keeps the
 Python-side value a plain float, matching payments.py's own
 Decimal-internally/float-at-the-boundary quantization.
 
-ADR 0008 (Week 5 tokenization) removed card storage entirely; `pan`/`cvv`
-were dropped by db/migrations/0029 after `last4` was back-filled from them.
-What follows is the historical note on why they were dead-
-going-forward columns for rows that predate tokenization -- no code path
-writes to them anymore. New rows populate `last4`/`brand` instead, from the
+ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
+longer declares `pan`/`cvv`: no code path reads or writes either column. The
+columns themselves still exist in the database -- db/migrations/0029 (this
+release) only back-fills `last4` from `pan`; the DROP is the contract step,
+db/migrations/0031, on its own PR. They are dead-going-forward columns for rows
+that predate tokenization. New rows populate `last4`/`brand` instead, from the
 processor's own token response.
 
 Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/

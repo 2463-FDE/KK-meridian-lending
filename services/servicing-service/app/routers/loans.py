@@ -23,10 +23,12 @@ def _display_last4(payment) -> str | None:
     # rather than from a card number this service never sees.
     #
     # This used to fall back to `payment.pan[-4:]` for pre-tokenization rows.
-    # db/migrations/0029 dropped that column, having first back-filled `last4`
-    # from it -- storing and displaying the last four digits is permitted under
-    # PCI-DSS, storing the PAN is what was not. So legacy rows still display,
-    # and there is no longer a code path that can reach a full card number.
+    # db/migrations/0029 back-fills `last4` from `pan`, so that fallback is no
+    # longer needed and the read is gone -- storing and displaying the last four
+    # digits is permitted under PCI-DSS, storing the PAN is what was not. Legacy
+    # rows still display, and no code path here can reach a full card number.
+    # The `pan` column still exists until the contract step (0031); nothing in
+    # this service reads it.
     if payment.last4:
         return "•••• " + payment.last4
     return None

@@ -9,11 +9,11 @@ caller that reads these columns.
 
 The `balances` table is still a single mutable balance column (no ledger).
 
-ADR 0008 (Week 5 tokenization) removed card storage entirely; `pan`/`cvv`
-were dropped by db/migrations/0029 after `last4` was back-filled from them.
-What follows is the historical note on why they were dead-
-going-forward columns for rows that predate tokenization -- payment-service
-never receives a raw PAN/CVV to write here anymore. New rows populate
+ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
+longer declares `pan`/`cvv`, and payment-service never receives a raw PAN/CVV to
+write here. The columns still exist in the database -- db/migrations/0029 (this
+release) only back-fills `last4`; the DROP is the contract step,
+db/migrations/0031, on its own PR. New rows populate
 `last4`/`brand` instead.
 
 Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/
