@@ -19,18 +19,37 @@ router = APIRouter(prefix="/loans", tags=["loans"])
 
 
 def _display_last4(payment) -> str | None:
-    # ADR 0008: rows carry last4 directly, from the processor's token response
-    # rather than from a card number this service never sees.
-    #
-    # This used to fall back to `payment.pan[-4:]` for pre-tokenization rows.
-    # db/migrations/0029 back-fills `last4` from `pan`, so that fallback is no
-    # longer needed and the read is gone -- storing and displaying the last four
-    # digits is permitted under PCI-DSS, storing the PAN is what was not. Legacy
-    # rows still display, and no code path here can reach a full card number.
-    # The `pan` column still exists until the contract step (0031); nothing in
-    # this service reads it.
+    """Masked card for payment history. Never returns more than four digits.
+
+    ADR 0008: new rows carry `last4` directly, from the processor's token
+    response rather than from a card number this service never sees.
+
+    THE `pan` FALLBACK IS DELIBERATE AND TEMPORARY (expand phase, PR #11).
+    An earlier version of this PR removed it on the grounds that
+    db/migrations/0029 back-fills `last4` from `pan`. Automated review caught the
+    ordering assumption: nothing in this change enforces that the migration has
+    run before this service version serves traffic. Deploys are not atomic, so
+    there is a real window -- new code live, 0029 not yet applied, or applied to a
+    replica but not the primary -- in which `last4` is NULL and `pan` holds the
+    only display value. Removing the fallback there blanks the card column on
+    every historical payment: no error, just missing data, exactly the failure the
+    back-fill exists to prevent.
+
+    So the order is: read `last4`; fall back to the last four digits of `pan` only
+    when `last4` is absent. Storing and displaying the last four digits is
+    permitted under PCI-DSS -- storing the PAN is what was not, and this only
+    reads a column that already exists.
+
+    REMOVE THIS FALLBACK IN PR #15, the contract step, after 0029 is deployed and
+    verified. At that point `pan` no longer exists and the branch is dead code.
+    """
     if payment.last4:
         return "•••• " + payment.last4
+    # Expand-phase compatibility only. Guarded with getattr so this keeps working
+    # after 0031 drops the column and the attribute disappears from the model.
+    legacy_pan = getattr(payment, "pan", None)
+    if legacy_pan:
+        return "•••• " + str(legacy_pan)[-4:]
     return None
 
 
