@@ -100,6 +100,11 @@ interface DecisionResult {
 }
 
 interface Disclosure {
+  // The contractual interest rate the payment stream is priced at. Distinct
+  // from `apr`, which additionally carries the prepaid origination fee -- and
+  // always the smaller of the two once a fee exists. Showing only one of them
+  // is what let a 5.43% "APR" sit under a 7.99% loan without looking wrong.
+  note_rate_pct?: number;
   apr: number;
   finance_charge: number;
   monthly_payment: number;
@@ -1171,6 +1176,12 @@ function OfferPanel({
       <p className="hint" style={{ marginBottom: 12 }}>
         {usd(amount)} over {termMonths} months · monthly payment{" "}
         <strong>{usd(disclosure.monthly_payment)}</strong>
+        {disclosure.note_rate_pct != null && (
+          <>
+            {" · interest rate (note rate) "}
+            <strong>{pct(disclosure.note_rate_pct)}</strong>
+          </>
+        )}
       </p>
 
       {/* Classic 4-box Federal Truth-in-Lending disclosure layout. */}
@@ -1180,7 +1191,8 @@ function OfferPanel({
           <div className="tila-cell tila-cell-apr">
             <div className="tila-cell-label">Annual Percentage Rate</div>
             <div className="tila-cell-desc">
-              The cost of your credit as a yearly rate.
+              The cost of your credit as a yearly rate. Higher than the interest
+              rate because it includes the origination fee.
             </div>
             <div className="tila-cell-value">{pct(disclosure.apr)}</div>
           </div>

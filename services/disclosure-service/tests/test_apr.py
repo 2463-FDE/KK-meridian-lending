@@ -50,6 +50,7 @@ VECTORS = [
     (1200, "24.99", 6),     # small principal, high rate, very short
     (25000, "0.00", 36),    # promotional 0% -- the fee is the whole finance charge
     (9000, "7.99", 24),     # the seeded demo loan
+    (15000, "7.99", 36),    # RV-2: second reproduction of the finding, see below
 ]
 
 
@@ -137,6 +138,55 @@ def test_a_fee_can_only_push_the_apr_above_the_note_rate():
             f"{principal} at {rate}% over {term}mo disclosed {disclosed} -- "
             f"a prepaid fee cannot produce an APR at or below the note rate"
         )
+
+
+def test_the_second_reported_vector_by_name():
+    """RV-2 -- reproduced independently from the running UI, 2026-08-07.
+
+    Reported disclosure for 15,000 at a 7.99% note rate over 36 months with the
+    3% origination fee:
+
+        APR                5.43        <- wrong; and note 5.43 < 7.99, impossible
+        finance charge     1,919.15    <- interest only, fee omitted
+        amount financed   14,550.00
+        total of payments 16,919.15
+
+    The box did not foot: 14,550.00 + 1,919.15 = 16,469.15, short of the stated
+    16,919.15 by 450.00 -- exactly the origination fee. Two separate defects
+    showing in one disclosure: the APR came from the add-on ratio, and the
+    finance charge left the prepaid fee out.
+
+    Correct values, each recomputed here from the payment stream:
+        monthly payment   469.976287...  (469.98 displayed)
+        total of payments 16,919.15      (unrounded payment x 36, then rounded)
+        finance charge     2,369.15      (total - amount financed)
+        actuarial APR     10.07151977...  -> 10.072 displayed
+    """
+    box = offer.build_offer(15000, 7.99, 36)
+
+    # 2. the APR is the actuarial rate, not the add-on ratio
+    assert apr.compute_apr(15000, 7.99, 36) == pytest.approx(10.072, abs=0.001)
+    assert apr.compute_apr(15000, 7.99, 36) != pytest.approx(5.43, abs=0.01)
+    # 1./2. and it can never sit below the note rate it was priced at
+    assert apr.compute_apr(15000, 7.99, 36) > 7.99
+
+    # 3. finance charge includes the prepaid fee
+    assert box["finance_charge"] == pytest.approx(2369.15, abs=0.01)
+    assert box["finance_charge"] != pytest.approx(1919.15, abs=0.01)
+
+    # 4. amount financed is principal less the 3% fee
+    assert box["amount_financed"] == pytest.approx(14550.00, abs=0.01)
+
+    # 5. total of payments
+    assert box["total_of_payments"] == pytest.approx(16919.15, abs=0.01)
+
+    # 6. the box foots -- the identity the reported disclosure failed
+    assert box["amount_financed"] + box["finance_charge"] == pytest.approx(
+        box["total_of_payments"], abs=0.01
+    ), "amount financed + finance charge must equal total of payments"
+
+    # the disclosed monthly payment servicing has to reproduce
+    assert box["monthly_payment"] == pytest.approx(469.98, abs=0.01)
 
 
 def test_the_regression_case_by_name():

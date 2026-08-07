@@ -200,6 +200,62 @@ def test_the_boarded_loan_bills_the_disclosed_monthly_payment(real_db):
     )
 
 
+def test_rv2_vector_boards_the_note_rate_and_bills_the_disclosed_payment(real_db):
+    """RV-2 -- the second reported vector, end to end through accept and billing.
+
+    Reported from the running UI on 2026-08-07: 15,000 at a 7.99% note rate over
+    36 months disclosed an APR of 5.43% and a finance charge of 1,919.15, a box
+    that did not foot (14,550.00 + 1,919.15 = 16,469.15, short of the stated
+    16,919.15 by exactly the 450.00 fee).
+
+    Correct disclosure, recomputed from the payment stream:
+        note rate          7.99%          APR              10.072%
+        amount financed   14,550.00       finance charge    2,369.15
+        total of payments 16,919.15       monthly payment     469.98
+
+    Acceptance criteria 7 and 8: accepting boards the 7.99% NOTE rate, and
+    amortizing whatever reached `loans` reproduces the disclosed 469.98.
+    """
+    rv2 = {
+        "note_rate_pct": 7.99, "apr": 10.072, "finance_charge": 2369.15,
+        "monthly_payment": 469.98, "amount_financed": 14550.00,
+        "total_of_payments": 16919.15,
+    }
+    token = _approved_application(real_db, with_offer=True)
+    _sql(
+        real_db,
+        "UPDATE offers SET note_rate_pct = %s, apr = %s, finance_charge = %s, "
+        "monthly_payment = %s, amount_financed = %s, total_of_payments = %s "
+        "WHERE app_id = 1",
+        tuple(rv2[k] for k in ("note_rate_pct", "apr", "finance_charge",
+                               "monthly_payment", "amount_financed",
+                               "total_of_payments")),
+    )
+    _sql(real_db, "UPDATE applications SET amount = 15000, term_months = 36 WHERE id = 1")
+
+    # 6. the box foots -- the identity the reported disclosure failed
+    assert rv2["amount_financed"] + rv2["finance_charge"] == pytest.approx(
+        rv2["total_of_payments"], abs=0.01
+    )
+
+    assert _accept(token).status_code == 200
+
+    loan = _sql(real_db, "SELECT principal, apr, term_months FROM loans WHERE app_id = 1")[0]
+
+    # 7. the NOTE rate is what reached servicing, not the APR
+    assert float(loan["apr"]) == pytest.approx(7.99, abs=1e-3), (
+        f"boarded {loan['apr']} -- servicing must amortize the 7.99 note rate, "
+        f"not the 10.072 APR"
+    )
+    assert float(loan["apr"]) != pytest.approx(10.072, abs=1e-3)
+
+    # 8. servicing reproduces the disclosed payment
+    billed = _amortized_payment(float(loan["principal"]), float(loan["apr"]), loan["term_months"])
+    assert billed == pytest.approx(rv2["monthly_payment"], abs=0.01), (
+        f"servicing would bill {billed:.2f} against a disclosed 469.98"
+    )
+
+
 def test_boarding_uses_the_note_rate_not_the_disclosed_apr(real_db):
     """Pins which column is boarded, so the two can never be swapped back. They
     are deliberately different values in this fixture -- if they were equal the
