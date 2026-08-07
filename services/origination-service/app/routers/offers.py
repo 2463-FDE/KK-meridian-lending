@@ -59,6 +59,10 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
     d = resp.get("disclosure") or {}
     rows = resp.get("schedule") or d.get("schedule") or []
     disclosure = Disclosure(
+        # Forwarded, not defaulted: a missing note rate is meaningfully
+        # different from a note rate of zero, and a 0.0% rate printed beside a
+        # 9.584% APR would read as a promotional offer nobody made.
+        note_rate_pct=d.get("note_rate_pct"),
         apr=d.get("apr", 0), finance_charge=d.get("finance_charge", 0),
         monthly_payment=d.get("monthly_payment", 0),
         amount_financed=d.get("amount_financed", 0),

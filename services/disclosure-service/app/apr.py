@@ -35,7 +35,7 @@ is the cheapest possible check that the box is internally coherent.
 
 Decimal throughout; float only at the API/display boundary.
 """
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from .fees import ORIGINATION_FEE_PCT
 
@@ -69,15 +69,41 @@ def monthly_payment(principal, annual_rate_pct, term_months: int) -> float:
     return float(monthly_payment_decimal(principal, annual_rate_pct, term_months))
 
 
+def amount_financed_decimal(principal) -> Decimal:
+    """What the borrower actually gets: principal less prepaid finance charges,
+    QUANTIZED TO CENTS, half-up.
+
+    The quantization is the correction. This used to return a full-precision
+    Decimal -- for a principal of 1,002.50 the fee is 30.075 and the amount
+    financed 972.425 -- and every downstream figure was solved against that
+    fraction of a cent. But `offers.amount_financed` is NUMERIC(14,2), so what
+    is actually stored and disclosed is 972.43. The APR and the finance charge
+    were therefore priced against an amount financed that exists nowhere: the
+    TILA box could not foot against its own stored values.
+
+    Rounded HALF-UP to match Postgres NUMERIC. Python's round() is
+    half-to-even and would produce 972.42 on this exact input, which is the
+    same class of defect the schedule generators were corrected for.
+
+    Note the order of operations: the DIFFERENCE is rounded, not the fee. Fee
+    first would give 30.08 and an amount financed of 972.42 -- a cent adrift,
+    and inconsistent with the seed generator and with db/init, both of which
+    round `principal - principal * fee_pct`.
+    """
+    p = _to_decimal(principal)
+    return (p - p * ORIGINATION_FEE_PCT).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def prepaid_finance_charge_decimal(principal) -> Decimal:
     """The origination fee. A prepaid finance charge under Reg Z: part of the
-    finance charge, and withheld from what the borrower actually receives."""
-    return _to_decimal(principal) * ORIGINATION_FEE_PCT
+    finance charge, and withheld from what the borrower actually receives.
 
-
-def amount_financed_decimal(principal) -> Decimal:
-    """What the borrower actually gets: principal less prepaid finance charges."""
-    return _to_decimal(principal) - prepaid_finance_charge_decimal(principal)
+    Derived as principal - amount_financed rather than computed independently,
+    so that fee + amount financed equals the principal EXACTLY. Computing both
+    from the percentage and rounding each separately is how the two stop
+    summing to the third.
+    """
+    return _to_decimal(principal) - amount_financed_decimal(principal)
 
 
 def finance_charge_decimal(principal, annual_rate_pct, term_months: int) -> Decimal:

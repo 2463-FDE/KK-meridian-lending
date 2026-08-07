@@ -25,7 +25,21 @@ CANONICAL_TERMS = (
 
 _OFFER_COLUMNS = (
     "id", "app_id", "decision_id", "fee_pct_used", "note_rate_pct", "apr", "finance_charge",
-    "monthly_payment", "amount_financed", "total_of_payments", "accepted_at",
+    "monthly_payment", "amount_financed", "total_of_payments",
+    # The Model B contractual schedule (db/migrations/0030). Reviewed finding:
+    # these were persisted by the INSERT but absent from this projection, so
+    # every path that reads an offer through it -- immediate creation's
+    # RETURNING, the idempotent read-back, the repair statement, and the later
+    # GET -- handed back a row with no schedule. The Disclosure builder then
+    # reported regular_payment_count/final_payment as null, and the borrower saw
+    # "monthly payment $X" with no final payment: the exact presentation defect
+    # this work exists to remove, reintroduced one layer further out.
+    #
+    # One tuple feeds all four statements, so adding a column here is the only
+    # place it needs adding -- which is also why omitting it broke all four at
+    # once.
+    "regular_payment_count", "final_payment", "term_months", "schedule_version",
+    "accepted_at",
 )
 _OFFER_FIELDS = ", ".join(_OFFER_COLUMNS)
 # Qualified form, for the repair statement's UPDATE ... FROM decisions: `app_id`
@@ -33,9 +47,49 @@ _OFFER_FIELDS = ", ".join(_OFFER_COLUMNS)
 _OFFER_FIELDS_Q = ", ".join(f"o.{c}" for c in _OFFER_COLUMNS)
 
 
+# The contractual terms a row needs to be BOARDABLE, as opposed to merely
+# displayable. Separate from CANONICAL_TERMS because the two answer different
+# questions -- see origination's TILA_MONETARY_FIELDS / BOARDING_REQUIRED_FIELDS
+# split, which this mirrors on the write side.
+SCHEDULE_TERMS = (
+    "note_rate_pct", "regular_payment_count", "final_payment", "term_months",
+    "schedule_version",
+)
+
+
 def missing_terms(row) -> list[str]:
-    """Which canonical terms this offer row is missing, in disclosure order."""
+    """Which canonical DISCLOSURE terms this offer row is missing.
+
+    The five monetary amounts only. This is the "is it a disclosure at all"
+    question, and it stays narrow because that is what callers use it for.
+    """
     return [name for name in CANONICAL_TERMS if row[name] is None]
+
+
+def missing_schedule_terms(row) -> list[str]:
+    """Which Model B contractual terms this offer row is missing.
+
+    A row can have all five monetary amounts and still be unboardable: the
+    schedule columns arrived with db/migrations/0030 and are deliberately not
+    back-filled, so every offer written before it is in exactly that state.
+    """
+    return [name for name in SCHEDULE_TERMS if row.get(name) is None]
+
+
+def terms_needing_regeneration(row) -> list[str]:
+    """Everything missing, monetary and contractual.
+
+    Reviewed finding: the repair path tested `missing_terms(row)` alone, so an
+    unaccepted legacy offer holding all five monetary amounts but no stored
+    schedule was judged complete and left alone. It then displayed perfectly and
+    refused to board, with no path to fix it -- the half-repaired state the
+    boarding gate exists to make visible, reached by never repairing at all.
+
+    Both sets go through the SAME audited regeneration, which is what makes the
+    fix honest: a schedule-only gap is not quietly patched in place, it produces
+    a new disclosure and an audit_logs row saying so.
+    """
+    return missing_terms(row) + missing_schedule_terms(row)
 
 
 def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
@@ -119,7 +173,7 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
     now = db.query(
         f"SELECT {_OFFER_FIELDS} FROM offers WHERE decision_id = %s", (application_id,),
     )
-    if now and not missing_terms(now[0]):
+    if now and not terms_needing_regeneration(now[0]):
         return now[0]
     log.error(
         "could not repair incomplete offer application_id=%s missing=%s", application_id, ",".join(missing),
@@ -259,7 +313,7 @@ def create_offer(
         # that into a 500. Migration 0026 told the operator to "regenerate the
         # offer from its decision", which this endpoint could not actually do.
         # It can now, for unaccepted offers only.
-        missing = missing_terms(row)
+        missing = terms_needing_regeneration(row)
         if missing:
             row = _repair_incomplete_offer(row, missing, o, fee_pct_used, body.application_id)
             repaired = True

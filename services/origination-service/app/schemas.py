@@ -139,6 +139,18 @@ class ScheduleRow(BaseModel):
 
 
 class Disclosure(BaseModel):
+    # The CONTRACTUAL interest rate the payment stream is priced at, distinct
+    # from `apr` below, which additionally carries the prepaid origination fee
+    # and is therefore always the larger of the two once a fee exists.
+    #
+    # Reviewed finding: disclosure-service returned this and the LOS dropped it,
+    # so the borrower's own /apply page -- which already renders it when
+    # present -- never received it. Showing only one rate is what let a 5.43%
+    # "APR" sit under a 7.99% loan without looking wrong.
+    #
+    # Optional because a pre-0030 offer has no stored note rate; null omits the
+    # line rather than printing a guessed rate beside genuine disclosed amounts.
+    note_rate_pct: Optional[float] = None
     apr: float
     finance_charge: float
     # The REGULAR payment: billed in every period but the last. See

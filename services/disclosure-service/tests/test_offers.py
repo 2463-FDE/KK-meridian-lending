@@ -203,10 +203,19 @@ def test_create_offer_falls_back_to_read_when_insert_hits_the_app_id_constraint(
     through to the read-back, report created=False, never leak a raw
     UniqueViolation to the caller."""
     fake_db = _FakeDb()
+    # A COMPLETE stored row: the five amounts, the contractual schedule, and
+    # accepted_at. Constructed rows like this one are why the missing schedule
+    # columns went unnoticed -- a dict carries whatever keys the test sets, so
+    # the projection could omit them and every mocked test still passed. The
+    # real read now returns these, and this fixture matches it.
     fake_db.stored_offer = {
         "id": 55, "app_id": 10, "decision_id": 10, "fee_pct_used": 0.03,
-        "apr": 7.99, "finance_charge": 500.0, "monthly_payment": 400.0,
+        "note_rate_pct": 7.99,
+        "apr": 9.584, "finance_charge": 500.0, "monthly_payment": 400.0,
         "amount_financed": 8700.0, "total_of_payments": 9600.0,
+        "regular_payment_count": 23, "final_payment": 400.12,
+        "term_months": 24, "schedule_version": "B1",
+        "accepted_at": None,
     }
     real_query = fake_db.query
 

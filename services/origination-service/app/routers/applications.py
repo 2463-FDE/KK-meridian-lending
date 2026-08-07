@@ -153,6 +153,7 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
         )
         return None
     return Disclosure(
+        note_rate_pct=getattr(offer, "note_rate_pct", None),
         apr=offer.apr, finance_charge=offer.finance_charge,
         monthly_payment=offer.monthly_payment, amount_financed=offer.amount_financed,
         total_of_payments=offer.total_of_payments,

@@ -105,3 +105,54 @@ test("boarding copies the displayed payment plan onto the loan", async ({ page }
     await client.end();
   }
 });
+
+test("the borrower sees the note rate and the disclosed APR as two different numbers", async ({ page }) => {
+  /**
+   * disclosure-service has returned `note_rate_pct` since the Model B work, and
+   * the LOS dropped it on the way through: neither the origination Disclosure
+   * schema nor its mapper carried the field, so the /apply page -- which
+   * already renders it when present -- never received it.
+   *
+   * The borrower then saw a single percentage. Showing only one rate is what
+   * let a 5.43% "APR" sit under a 7.99% loan without looking wrong.
+   *
+   * For the RV-2-36 vector the two are 7.99% and 10.072%, far enough apart that
+   * a page conflating them cannot pass by coincidence.
+   */
+  const applicant = fictionalApplicant("Yuki", /* even ssn */ true, 100_000);
+  await submitApplication(page, applicant);
+  const appId = await currentAppId(page);
+
+  await getDecision(page);
+  await page.getByRole("button", { name: /View your offer/ }).click();
+  await expect(page.getByText(/FEDERAL TRUTH-IN-LENDING/i)).toBeVisible({ timeout: 15_000 });
+
+  // The note rate, labelled as an interest rate rather than as an APR.
+  await expect(page.getByText(/interest rate \(note rate\)/i)).toBeVisible();
+  await expect(page.getByText("7.99%").first()).toBeVisible();
+
+  // And the disclosed APR, which is a different, higher number because it
+  // carries the prepaid origination fee.
+  const client = dbClient();
+  await client.connect();
+  try {
+    const row = await client.query(
+      "SELECT note_rate_pct, apr FROM offers WHERE app_id = $1",
+      [appId],
+    );
+    expect(row.rowCount).toBe(1);
+    const note = Number(row.rows[0].note_rate_pct);
+    const apr = Number(row.rows[0].apr);
+    expect(note).toBe(7.99);
+    expect(apr).toBeGreaterThan(note);
+    // Both are on the page, and they are not the same figure. The UI formats
+    // percentages to 2dp via pct(), so the APR reads "10.07%" rather than the
+    // stored 10.072 -- assert the rendered form, not the raw column.
+    const aprText = `${apr.toFixed(2)}%`;
+    const noteText = `${note.toFixed(2)}%`;
+    expect(aprText).not.toBe(noteText);
+    await expect(page.getByText(aprText).first()).toBeVisible();
+  } finally {
+    await client.end();
+  }
+});

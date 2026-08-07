@@ -71,6 +71,17 @@ function LoanDetailContent() {
 
   const [loan, setLoan] = useState<Loan | null>(null);
   const [schedule, setSchedule] = useState<ScheduleRow[]>([]);
+  // Where the rows came from. "contract" = the payment amounts stored on the
+  // loan at boarding. "reconstructed" = solved now from principal, rate and
+  // term because no schedule was ever recorded (a pre-0030 loan).
+  //
+  // Reviewed finding: the server has reported this since the Model B work, and
+  // this page ignored it -- so a reconstruction was rendered under the heading
+  // "Amortization schedule" exactly like a contractual one. A reader could not
+  // tell an estimate from the agreed terms, which is the one thing the server
+  // went to the trouble of saying.
+  const [scheduleSource, setScheduleSource] = useState<string | null>(null);
+  const [scheduleNote, setScheduleNote] = useState<string | null>(null);
   const [payments, setPayments] = useState<PaymentRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -115,7 +126,14 @@ function LoanDetailContent() {
         apiGet(`/lss/loans/${loanId}/payments`),
       ]);
       if (sch.status === "fulfilled") {
-        setSchedule((sch.value as { schedule?: ScheduleRow[] })?.schedule ?? []);
+        const body = sch.value as {
+          schedule?: ScheduleRow[];
+          source?: string;
+          note?: string;
+        };
+        setSchedule(body?.schedule ?? []);
+        setScheduleSource(body?.source ?? null);
+        setScheduleNote(body?.note ?? null);
       }
       if (pay.status === "fulfilled") {
         setPayments((pay.value as { items?: PaymentRow[] })?.items ?? []);
@@ -318,7 +336,29 @@ function LoanDetailContent() {
       </div>
 
       {/* Amortization schedule */}
-      <h2>Amortization schedule</h2>
+      <h2>
+        Amortization schedule
+        {scheduleSource === "reconstructed" ? " (reconstructed)" : null}
+      </h2>
+      {/* The qualification goes ABOVE the table and outside the collapsed
+          section: a caveat inside a panel the reader has to expand is a caveat
+          they can miss, and this one changes what the numbers mean. */}
+      {scheduleNote ? (
+        <div
+          className={
+            scheduleSource === "reconstructed" ? "alert alert-warn" : "alert alert-error"
+          }
+          data-testid="schedule-note"
+          style={{ marginBottom: 12 }}
+        >
+          <strong>
+            {scheduleSource === "reconstructed"
+              ? "These are not the agreed terms."
+              : "This loan's recorded terms do not add up."}
+          </strong>{" "}
+          {scheduleNote}
+        </div>
+      ) : null}
       {schedule.length === 0 ? (
         <div className="card">
           <p className="muted" style={{ margin: 0 }}>
