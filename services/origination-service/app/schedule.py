@@ -22,23 +22,29 @@ def amortization(principal: float, annual_rate_pct: float, term_months: int,
     start = start or datetime.date.today()
     pmt = _monthly_payment(principal, annual_rate_pct, term_months)
     monthly_rate = (annual_rate_pct / 100.0) / 12.0
-    balance = principal
+    # Model B: regular periods bill the cent-rounded level payment; the final
+    # period bills remaining principal plus that period's interest. Same
+    # behaviour as disclosure-service's and servicing-service's copies, pinned by
+    # db/tools/golden_schedule_vectors.py and a parity test in each service.
+    regular = round(pmt, 2)
+    balance = round(principal, 2)
     rows: list[dict] = []
     for n in range(1, term_months + 1):
-        interest = balance * monthly_rate
-        principal_part = pmt - interest
-        balance = balance - principal_part
+        interest = round(balance * monthly_rate, 2)
         if n == term_months:
-            # absorb residual float drift into the final payment
-            principal_part += balance
-            balance = 0.0
+            principal_part = round(balance, 2)
+            payment = round(principal_part + interest, 2)
+        else:
+            payment = regular
+            principal_part = round(payment - interest, 2)
+        balance = round(balance - principal_part, 2)
         due = _add_months(start, n)
         rows.append({
             "n": n,
             "due_date": due.isoformat(),
-            "payment": round(pmt, 2),
-            "principal": round(principal_part, 2),
-            "interest": round(interest, 2),
+            "payment": payment,
+            "principal": principal_part,
+            "interest": interest,
             "balance": round(max(balance, 0.0), 2),
         })
     return rows

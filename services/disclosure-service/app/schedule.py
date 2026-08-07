@@ -15,26 +15,27 @@ def amortization(principal: float, annual_rate_pct: float, term_months: int,
                  start: datetime.date | None = None) -> list[dict]:
     start = start or datetime.date.today()
     p = Decimal(str(principal))
-    pmt = apr.monthly_payment_decimal(principal, annual_rate_pct, term_months)
+    regular = round(apr.monthly_payment_decimal(principal, annual_rate_pct, term_months), 2)
     monthly_rate = Decimal(str(annual_rate_pct)) / 100 / 12
     balance = p
     rows: list[dict] = []
     for n in range(1, term_months + 1):
-        interest = balance * monthly_rate
-        principal_part = pmt - interest
-        balance = balance - principal_part
+        interest = round(balance * monthly_rate, 2)
         if n == term_months:
-            # absorb residual Decimal remainder into the final payment
-            principal_part += balance
-            balance = Decimal("0")
+            principal_part = balance
+            payment = round(principal_part + interest, 2)
+        else:
+            payment = regular
+            principal_part = payment - interest
+        balance = round(balance - principal_part, 2)
         due = _add_months(start, n)
         rows.append({
             "n": n,
             "due_date": due.isoformat(),
-            "payment": float(round(pmt, 2)),
-            "principal": float(round(principal_part, 2)),
-            "interest": float(round(interest, 2)),
-            "balance": float(round(max(balance, Decimal("0")), 2)),
+            "payment": float(payment),
+            "principal": float(principal_part),
+            "interest": float(interest),
+            "balance": float(max(balance, Decimal("0"))),
         })
     return rows
 

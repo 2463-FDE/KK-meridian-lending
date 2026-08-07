@@ -73,6 +73,13 @@ def _schema_sql():
             monthly_payment NUMERIC(14,2),
             amount_financed NUMERIC(14,2),
             total_of_payments NUMERIC(14,2),
+            -- Model B schedule facts (db/migrations/0030). A repair must write
+            -- these too, or it produces a row that displays fine and still
+            -- cannot board.
+            regular_payment_count INTEGER,
+            final_payment NUMERIC(14,2),
+            term_months INTEGER,
+            schedule_version TEXT,
             created_at TIMESTAMPTZ DEFAULT now(),
             accepted_at TIMESTAMPTZ
         );
@@ -279,3 +286,49 @@ def test_audit_row_carries_no_applicant_identifiers(pg):
     detail = _rows(pg, "SELECT detail FROM audit_logs")[0]["detail"]
     for token in ("ssn", "SSN", "@", "name="):
         assert token not in detail, f"audit detail leaked {token!r}: {detail}"
+
+
+def test_a_repair_persists_every_model_b_schedule_field(pg):
+    """A repaired unaccepted offer must come out fully boardable.
+
+    Repairing the four-box amounts while leaving the schedule NULL would produce a
+    row that displays correctly and still cannot board -- the half-fixed state
+    BOARDING_REQUIRED_FIELDS exists to prevent. Every Model B field must be
+    populated, and consistently: count + 1 == term.
+    """
+    app_id = _seed_approved_application(pg)
+    _seed_offer(pg, app_id, missing=("apr", "finance_charge"))
+
+    resp = _post(app_id)
+    assert resp.status_code == 200, resp.text
+
+    after = _rows(pg, "SELECT * FROM offers WHERE app_id = %s", (app_id,))[0]
+    for field in ("note_rate_pct", "regular_payment_count", "final_payment",
+                  "term_months", "schedule_version"):
+        assert after[field] is not None, f"repair left {field} unset -- row cannot board"
+    assert after["schedule_version"] == "B1"
+    assert int(after["regular_payment_count"]) + 1 == int(after["term_months"])
+    assert float(after["final_payment"]) > 0
+
+
+def test_a_repair_never_writes_schedule_terms_into_an_accepted_offer(pg):
+    """Accepted disclosures are immutable, including the new schedule columns.
+
+    An accepted offer with NULL schedule fields is a legacy row whose contractual
+    schedule was never recorded. Writing today's generated terms into it would
+    persist invented terms as though they were the agreed ones.
+    """
+    app_id = _seed_approved_application(pg)
+    _seed_offer(pg, app_id, missing=("apr",), accepted=True)
+
+    cols = ("apr", "regular_payment_count", "final_payment", "term_months", "schedule_version")
+    before = {c: _rows(pg, f"SELECT {c} FROM offers WHERE app_id = %s", (app_id,))[0][c]
+              for c in cols}
+
+    resp = _post(app_id)
+    assert resp.status_code == 409, resp.text
+
+    after = {c: _rows(pg, f"SELECT {c} FROM offers WHERE app_id = %s", (app_id,))[0][c]
+             for c in cols}
+    assert after == before, "an accepted offer was modified by a repair attempt"
+    assert after["final_payment"] is None, "invented schedule terms were persisted"

@@ -198,11 +198,18 @@ def test_the_second_reported_vector_by_name():
     showing in one disclosure: the APR came from the add-on ratio, and the
     finance charge left the prepaid fee out.
 
-    Correct values, each recomputed here from the payment stream:
-        monthly payment   469.976287...  (469.98 displayed)
-        total of payments 16,919.15      (unrounded payment x 36, then rounded)
-        finance charge     2,369.15      (total - amount financed)
-        actuarial APR     10.07151977...  -> 10.072 displayed
+    Correct values under the CONTRACTUAL cash-flow model (Model B), each
+    recomputed here from the schedule the borrower actually receives:
+        35 regular payments  469.98
+        final payment        469.87   (absorbs the cent residue)
+        total of payments 16,919.17   (SUM of actual payments)
+        finance charge     2,369.17   (total - amount financed)
+        APR               10.072      (solved from the actual sequence)
+
+    Supersedes an earlier statement of 16,919.15 / 2,369.15. Those came from
+    unrounded payment x term, which is not what anybody pays: the schedule's own
+    payments summed to 16,919.17, so the disclosed total was 2 cents adrift from
+    the disclosure it was attached to. Authorized correction, 2026-08-07.
     """
     box = offer.build_offer(15000, 7.99, 36)
 
@@ -213,22 +220,25 @@ def test_the_second_reported_vector_by_name():
     assert apr.compute_apr(15000, 7.99, 36) > 7.99
 
     # 3. finance charge includes the prepaid fee
-    assert box["finance_charge"] == pytest.approx(2369.15, abs=0.01)
+    assert box["finance_charge"] == pytest.approx(2369.17, abs=0.01)
     assert box["finance_charge"] != pytest.approx(1919.15, abs=0.01)
 
     # 4. amount financed is principal less the 3% fee
     assert box["amount_financed"] == pytest.approx(14550.00, abs=0.01)
 
     # 5. total of payments
-    assert box["total_of_payments"] == pytest.approx(16919.15, abs=0.01)
+    assert box["total_of_payments"] == pytest.approx(16919.17, abs=0.01)
 
     # 6. the box foots -- the identity the reported disclosure failed
     assert box["amount_financed"] + box["finance_charge"] == pytest.approx(
         box["total_of_payments"], abs=0.01
     ), "amount financed + finance charge must equal total of payments"
 
-    # the disclosed monthly payment servicing has to reproduce
+    # the disclosed regular payment servicing has to reproduce, and the
+    # adjusted final payment the disclosure must also present
     assert box["monthly_payment"] == pytest.approx(469.98, abs=0.01)
+    assert box["final_payment"] == pytest.approx(469.87, abs=0.01)
+    assert box["regular_payment_count"] == 35
 
 
 def test_the_regression_case_by_name():

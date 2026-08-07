@@ -75,16 +75,23 @@ class _FakeDb:
             return self.application_rows
         if "INSERT INTO offers" in sql:
             if self.decision_approved and self.stored_offer is None:
-                # PR #10 review: the offer now records the CONTRACTUAL note rate
-                # alongside the disclosed APR, because boarding reads the former.
+                # PR #10 review: the offer records the CONTRACTUAL note rate
+                # alongside the disclosed APR (boarding reads the former), and the
+                # Model B payment schedule as stored fact -- regular payment count,
+                # the adjusted final payment, the term, and the rounding-policy
+                # version. 12 params, in INSERT column order.
                 (fee_pct_used, note_rate_pct, apr, finance_charge, monthly_payment,
-                 amount_financed, total_of_payments, application_id) = params
+                 amount_financed, total_of_payments, regular_payment_count,
+                 final_payment, term_months, schedule_version, application_id) = params
                 self.stored_offer = {
                     "id": self.insert_id, "app_id": application_id, "decision_id": application_id,
                     "fee_pct_used": fee_pct_used, "note_rate_pct": note_rate_pct,
                     "apr": apr, "finance_charge": finance_charge,
                     "monthly_payment": monthly_payment, "amount_financed": amount_financed,
-                    "total_of_payments": total_of_payments, "accepted_at": None,
+                    "total_of_payments": total_of_payments,
+                    "regular_payment_count": regular_payment_count,
+                    "final_payment": final_payment, "term_months": term_months,
+                    "schedule_version": schedule_version, "accepted_at": None,
                 }
                 return [self.stored_offer]
             return []
@@ -316,6 +323,12 @@ class _FakeOffer:
     """
 
     note_rate_pct = None
+    # Legacy (pre-0030) shape by default: no stored payment schedule. Tests that
+    # want a modern row pass these explicitly.
+    regular_payment_count = None
+    final_payment = None
+    term_months = None
+    schedule_version = None
 
     def __init__(self, **kw):
         for k, v in kw.items():

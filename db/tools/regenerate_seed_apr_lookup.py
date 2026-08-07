@@ -1,5 +1,20 @@
 """Regenerate the actuarial-APR lookup table used by db/init/003_seed_bulk.sql.
 
+SUPERSEDED -- DO NOT USE UNTIL REWRITTEN FOR MODEL B.
+    This keys APR by (fee, note rate, term), which was sound while the schedule
+    billed identical level payments: amount financed and payment both scaled
+    linearly in principal, so principal cancelled out.
+
+    Model B breaks that. The final payment absorbs each principal's own cent
+    residue, so the cash-flow sequence -- and therefore the APR -- differs by
+    principal. Measured spread across the seeded range: up to 0.003pp
+    (7.99%/48mo gives 9.582 at P=1,040 and 9.584 at P=15,000).
+
+    The replacement generates one APR per app_id from that row's actual
+    cent-rounded schedule. Until it lands, this file is kept only for the
+    cross-check helpers below.
+
+
 WHEN TO RUN THIS
     Whenever the origination fee changes, a new note rate is introduced, or a new
     term appears in the bulk seeds. The seed will refuse to load otherwise: its

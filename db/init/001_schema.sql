@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS offers (
     app_id      INTEGER REFERENCES applications(id) UNIQUE,
     decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,  -- W4: which decision this offer came from; UNIQUE makes offer creation idempotent per decision
     fee_pct_used NUMERIC(5,4),          -- W4: snapshot of ORIGINATION_FEE_PCT used at creation time
+    -- Contractual payment schedule, persisted as fact (db/migrations/0030).
+    -- Model B: regular periods bill `monthly_payment`; the final period bills
+    -- `final_payment`, which absorbs the cent residue and cannot be recovered
+    -- from any other stored figure. The read path used to regenerate the
+    -- schedule with whatever generator was deployed, so an accepted disclosure
+    -- was not a stored fact. NULL on legacy rows = "not recorded"; boarding
+    -- refuses those rather than inventing terms.
+    regular_payment_count INTEGER,
+    final_payment    NUMERIC(14,2),
+    term_months      INTEGER,
+    schedule_version TEXT,              -- 'B1' = cent-rounded level + final adjustment
     -- The contractual rate the payment schedule was calculated on. Distinct
     -- from `apr` below, which is the disclosed all-in rate and is higher
     -- whenever a prepaid fee exists. Boarding reads THIS one; servicing
@@ -156,6 +167,12 @@ CREATE TABLE IF NOT EXISTS loans (
     applicant_name  TEXT,
     principal       NUMERIC(14,2) NOT NULL,   -- D12: was DOUBLE PRECISION
     apr             NUMERIC(7,3) NOT NULL,     -- D12: was DOUBLE PRECISION
+    -- The contract as boarded (db/migrations/0030). Servicing bills THESE
+    -- amounts; recomputing them from principal/rate/term is what drifts.
+    regular_payment       NUMERIC(14,2),
+    regular_payment_count INTEGER,
+    final_payment         NUMERIC(14,2),
+    schedule_version      TEXT,
     term_months     INTEGER NOT NULL,
     status          TEXT DEFAULT 'current',
     opened_at       TIMESTAMPTZ DEFAULT now()

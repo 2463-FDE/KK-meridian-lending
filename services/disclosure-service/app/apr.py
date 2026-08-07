@@ -160,3 +160,30 @@ def note_rate_from_payment(principal, payment, term_months: int) -> float:
     """
     monthly = actuarial_monthly_rate(_to_decimal(principal), _to_decimal(payment), term_months)
     return float(monthly * 12 * 100)
+
+def apr_from_cash_flows(amount_financed, payments) -> float:
+    """Actuarial APR solved from the ACTUAL payment sequence.
+
+    Takes the sequence rather than (payment, term) deliberately. Under the
+    contractual model the final payment differs from the regular one -- it
+    absorbs the cent residue -- so pricing a level stream would solve for a cash
+    flow the borrower never makes. 12 CFR 1026.22(a)(1) permits only the
+    actuarial or U.S. Rule method; this is the actuarial one, over real flows.
+
+    Bisection on the periodic rate, annualized x12. Returns 3dp, the disclosed
+    precision.
+    """
+    af = _to_decimal(amount_financed)
+    flows = [_to_decimal(p) for p in payments]
+    lo, hi = Decimal(0), Decimal(1)
+    for _ in range(400):
+        mid = (lo + hi) / 2
+        if mid > 0:
+            pv = sum(f / (1 + mid) ** k for k, f in enumerate(flows, 1))
+        else:
+            pv = sum(flows)
+        if pv > af:
+            lo = mid
+        else:
+            hi = mid
+    return float(round((lo + hi) / 2 * 12 * 100, 3))

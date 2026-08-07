@@ -9,6 +9,13 @@ from decimal import Decimal
 
 ORIGINATION_FEE_PCT = Decimal("0.030")   # policy: 3.0%
 
+# Identifies the rounding policy that produced a stored payment schedule, so a
+# future policy change is distinguishable per row rather than retroactive.
+# 'B1' = cent-rounded level regular payments, final period bills the remaining
+# principal plus that period's interest. Bump this if that changes; never
+# reinterpret existing rows under a new policy.
+SCHEDULE_VERSION = "B1"
+
 # The contractual note rate every offer is written at. It was a bare `7.99`
 # inline in routers/offers.py -- the same shape as the fee constant before D6
 # drifted three copies apart. It lives here so there is one place to change it,
