@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { fictionalApplicant, currentAppId, dbClient } from "./fixtures";
 
 /**
@@ -18,7 +18,11 @@ import { fictionalApplicant, currentAppId, dbClient } from "./fixtures";
  */
 
 /** Fill steps 1-3 and stop on the review screen. */
-async function fillToReview(page, applicant, overrides: { employer?: string } = {}) {
+async function fillToReview(
+  page: Page,
+  applicant: ReturnType<typeof fictionalApplicant>,
+  overrides: { employer?: string } = {},
+) {
   await page.goto("/apply");
   await expect(page.getByText("Step 1 of 5")).toBeVisible();
   await page.getByPlaceholder("Jane Q. Borrower").fill(applicant.name);
@@ -67,7 +71,7 @@ test("a wrong answer can be corrected from the review screen and the correction 
   await plain.nth(0).fill("Corrected Employer Ltd");
 
   // One click back to the review -- not Next, Next, Next.
-  await page.getByRole("button", { name: "Save and return to review" }).click();
+  await page.getByRole("button", { name: "Return to review" }).click();
   await expect(page.getByText("Step 4 of 5")).toBeVisible();
   await expect(page.getByText("Corrected Employer Ltd")).toBeVisible();
   await expect(page.getByText("Wrong Employer Co")).not.toBeVisible();
@@ -97,7 +101,7 @@ test("editing a Step 1 field from the review takes one click each way", async ({
 
   const corrected = "Corrected Name";
   await page.getByPlaceholder("Jane Q. Borrower").fill(corrected);
-  await page.getByRole("button", { name: "Save and return to review" }).click();
+  await page.getByRole("button", { name: "Return to review" }).click();
 
   await expect(page.getByText("Step 4 of 5")).toBeVisible();
   await expect(page.getByText(corrected)).toBeVisible();
@@ -114,7 +118,7 @@ test("an edit that breaks validation cannot be returned to the review", async ({
   await expect(page.getByText("Step 1 of 5")).toBeVisible();
 
   await page.getByPlaceholder("you@example.com").fill("not-an-email");
-  await page.getByRole("button", { name: "Save and return to review" }).click();
+  await page.getByRole("button", { name: "Return to review" }).click();
 
   // Held on the step with the error shown, not returned to review.
   await expect(page.getByText("Step 1 of 5")).toBeVisible();
@@ -122,7 +126,7 @@ test("an edit that breaks validation cannot be returned to the review", async ({
 
   // Fixing it lets the return through.
   await page.getByPlaceholder("you@example.com").fill(applicant.email);
-  await page.getByRole("button", { name: "Save and return to review" }).click();
+  await page.getByRole("button", { name: "Return to review" }).click();
   await expect(page.getByText("Step 4 of 5")).toBeVisible();
 });
 
@@ -134,7 +138,7 @@ test("the normal forward path is unchanged by the edit affordance", async ({ pag
   await expect(page.getByText("Step 1 of 5")).toBeVisible();
   await expect(page.getByRole("button", { name: "Next" })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Save and return to review" }),
+    page.getByRole("button", { name: "Return to review" }),
   ).not.toBeVisible();
 
   await fillToReview(page, applicant, { employer: "Fictional Testing Co" });
@@ -142,4 +146,109 @@ test("the normal forward path is unchanged by the edit affordance", async ({ pag
   await expect(page.getByRole("button", { name: "Edit Personal" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit Employment & income" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit Loan details" })).toBeVisible();
+});
+
+
+test("Edit moves keyboard focus to the edited step's heading", async ({ page }) => {
+  // Activating Edit unmounts the button that had focus. Without an explicit
+  // move, focus falls to <body>: a keyboard user's next Tab starts from the top
+  // of the document and a screen reader announces nothing, so the page has
+  // silently changed under them.
+  await fillToReview(page, fictionalApplicant("Casey", true, 90_000));
+
+  await page.getByRole("button", { name: "Edit Employment & income" }).click();
+
+  const heading = page.getByRole("heading", { level: 2 });
+  await expect(heading).toBeFocused();
+  await expect(heading).toHaveText(/employment/i);
+});
+
+test("the whole edit round-trip is reachable with the keyboard alone", async ({ page }) => {
+  // No page.click() anywhere in this test on purpose -- Tab, Enter and typing
+  // only. If the affordance is mouse-only it fails here.
+  await fillToReview(page, fictionalApplicant("Devin", true, 90_000), { employer: "Typed With A Mouse" });
+
+  // Reach the Employment Edit button by tabbing, then activate with Enter.
+  const editBtn = page.getByRole("button", { name: "Edit Employment & income" });
+  await editBtn.focus();
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("heading", { level: 2 })).toBeFocused();
+
+  // Tab from the focused heading until the employer field has focus, then retype.
+  const employer = page.locator('main input:visible:not([placeholder]):not([type="range"])').nth(0);
+  for (let i = 0; i < 12 && !(await employer.evaluate((el) => el === document.activeElement)); i++) {
+    await page.keyboard.press("Tab");
+  }
+  await expect(employer).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("Keyboard Only Ltd");
+
+  const ret = page.getByRole("button", { name: "Return to review" });
+  await ret.focus();
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByText("Step 4 of 5")).toBeVisible();
+  await expect(page.getByText("Keyboard Only Ltd")).toBeVisible();
+});
+
+test("Back during an edit round-trip keeps the one-click way home", async ({ page }) => {
+  // Defined behaviour: Back walks one step backwards and does NOT cancel the
+  // round-trip, so someone who jumped to step 3 and then notices step 1 also
+  // needs fixing can Back to it and still return in one click.
+  await fillToReview(page, fictionalApplicant("Elliot", true, 90_000));
+
+  await page.getByRole("button", { name: "Edit Loan details" }).click();
+  await expect(page.getByText("Step 3 of 5")).toBeVisible();
+
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.getByText("Step 2 of 5")).toBeVisible();
+
+  // Still offering the direct return rather than reverting to "Next".
+  await expect(page.getByRole("button", { name: "Return to review" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Return to review" }).click();
+  await expect(page.getByText("Step 4 of 5")).toBeVisible();
+});
+
+test("Back cannot smuggle an invalid edit past the review", async ({ page }) => {
+  // The hole this closes: edit step 2, break it, Back to step 1, then return.
+  // returnToReview() used to validate only the step on screen, so step 1
+  // validated clean and the invalid step-2 value reached the review.
+  await fillToReview(page, fictionalApplicant("Frankie", true, 90_000));
+
+  await page.getByRole("button", { name: "Edit Employment & income" }).click();
+  const income = page.getByPlaceholder("65000");
+  await income.fill("0");                         // fails "Must be greater than 0"
+
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.getByText("Step 1 of 5")).toBeVisible();
+
+  // Returning from step 1 must not succeed while step 2 is invalid.
+  await page.getByRole("button", { name: "Return to review" }).click();
+  await expect(page.getByText("Step 2 of 5")).toBeVisible();
+  await expect(page.getByText("Must be greater than 0")).toBeVisible();
+  await expect(page.getByText("Step 4 of 5")).toHaveCount(0);
+});
+
+test("edits take effect immediately -- the button only navigates", async ({ page }) => {
+  // Why the control is named "Return to review" and not "Save and return":
+  // every field is a controlled input writing straight to form state, so the
+  // edit is already applied before the button is pressed. Leaving by Back
+  // instead of the return button keeps the edit -- there is no save boundary,
+  // and the label must not imply one.
+  await fillToReview(page, fictionalApplicant("Georgie", true, 90_000));
+
+  await page.getByRole("button", { name: "Edit Employment & income" }).click();
+  const jobTitle = page.locator('main input:visible:not([placeholder]):not([type="range"])').nth(1);
+  await jobTitle.fill("Edited Then Backed Out");
+
+  // Walk home with Back only -- never touching "Return to review".
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.getByText("Step 1 of 5")).toBeVisible();
+  await page.getByRole("button", { name: "Return to review" }).click();
+
+  await expect(page.getByText("Step 4 of 5")).toBeVisible();
+  await expect(page.getByText("Edited Then Backed Out")).toBeVisible();
 });

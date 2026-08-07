@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
 import { apiGet, apiPost, ApiError } from "../../lib/api";
@@ -155,6 +155,19 @@ export default function ApplyPage() {
   // own Edit control; this flag is what lets the edited step offer a direct
   // way back instead of making the user walk the wizard forward again.
   const [returningToReview, setReturningToReview] = useState(false);
+  // Focus target for the edit round-trip. Activating Edit unmounts the button
+  // that had focus, which drops focus to <body> -- a keyboard or screen-reader
+  // user is then given no indication that the page changed under them. The
+  // heading of the step we jumped to is the announcement point, so focus moves
+  // there and the step's name is read out.
+  const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const [focusStepHeading, setFocusStepHeading] = useState(false);
+  useEffect(() => {
+    if (focusStepHeading && stepHeadingRef.current) {
+      stepHeadingRef.current.focus();
+      setFocusStepHeading(false);
+    }
+  }, [focusStepHeading, step]);
   const [form, setForm] = useState<FormState>({
     name: "",
     dob: "",
@@ -237,6 +250,12 @@ export default function ApplyPage() {
     }
   }
   function back() {
+    // Back walks one step backwards, and during an edit round-trip it keeps
+    // `returningToReview` set on purpose: someone who jumped to step 3 and then
+    // realises step 1 also needs a correction can Back to it and still get home
+    // in one click. It is not a cancel -- edits are already in form state (see
+    // the "Return to review" button) -- and it cannot smuggle an invalid value
+    // into the review, because returnToReview() re-validates steps 1-3.
     setErrors({});
     setStep((s) => Math.max(1, s - 1));
   }
@@ -246,17 +265,30 @@ export default function ApplyPage() {
     setErrors({});
     setReturningToReview(true);
     setStep(target);
+    setFocusStepHeading(true);
   }
 
   /** Return to the review, but only if what was just edited is still valid --
    * otherwise an edit could put the application back into review carrying a
    * value the wizard would never have accepted going forward. */
   function returnToReview() {
-    if (validateStep(step)) {
-      setErrors({});
-      setReturningToReview(false);
-      setStep(4);
+    // Validate every step that feeds the review, not just the one on screen.
+    // Validating only the current step left a hole: edit step 3, type something
+    // invalid, press Back to step 2, then return -- step 2 validates clean and
+    // the invalid step-3 value reaches the review. Jump to the first offending
+    // step instead, with its errors showing.
+    for (const s of [1, 2, 3]) {
+      if (!validateStep(s)) {
+        if (s !== step) {
+          setStep(s);
+          setFocusStepHeading(true);
+        }
+        return;
+      }
     }
+    setErrors({});
+    setReturningToReview(false);
+    setStep(4);
   }
 
   async function submitApplication() {
@@ -413,6 +445,7 @@ export default function ApplyPage() {
         {step === 1 && (
           <>
             <StepHeader
+              headingRef={stepHeadingRef}
               eyebrow="Step 1 of 5"
               title="Personal information"
               desc="This is used to verify your identity and won't affect your credit."
@@ -538,6 +571,7 @@ export default function ApplyPage() {
         {step === 2 && (
           <>
             <StepHeader
+              headingRef={stepHeadingRef}
               eyebrow="Step 2 of 5"
               title="Employment & income"
               desc="Helps us confirm you can comfortably afford this loan."
@@ -587,6 +621,7 @@ export default function ApplyPage() {
         {step === 3 && (
           <>
             <StepHeader
+              headingRef={stepHeadingRef}
               eyebrow="Step 3 of 5"
               title="Loan details"
               desc="Choose the amount and term that fits your budget."
@@ -802,7 +837,11 @@ export default function ApplyPage() {
             {returningToReview ? (
               // Came here from the review: offer the one-click way home rather
               // than making the user press Next through the remaining steps.
-              <button onClick={returnToReview}>Save and return to review</button>
+              // Deliberately NOT "Save and return" -- there is no save boundary
+              // here. Every field is a controlled input writing straight to
+              // `form`, so an edit has already taken effect the moment it is
+              // typed; this button only navigates (after re-validating).
+              <button onClick={returnToReview}>Return to review</button>
             ) : (
               <button onClick={next}>Next</button>
             )}
@@ -875,15 +914,20 @@ function StepHeader({
   eyebrow,
   title,
   desc,
+  headingRef,
 }: {
   eyebrow: string;
   title: string;
   desc: string;
+  headingRef?: React.Ref<HTMLHeadingElement>;
 }) {
   return (
     <div>
       <div className="step-eyebrow">{eyebrow}</div>
-      <h2 className="step-heading">{title}</h2>
+      {/* tabIndex={-1} makes the heading programmatically focusable without
+          adding it to the tab order -- the standard pattern for announcing a
+          view change to assistive tech. */}
+      <h2 className="step-heading" ref={headingRef} tabIndex={-1}>{title}</h2>
       <p className="step-desc">{desc}</p>
     </div>
   );
