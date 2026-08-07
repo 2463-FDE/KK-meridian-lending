@@ -132,10 +132,20 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
     Gap F (PR #6 review): this read used to be `offer.apr or 0` per field, so a
     row with a NULL amount was presented as a real disclosure quoting 0.00 --
     invented terms indistinguishable from genuine ones. Missing terms now
-    render as "no offer", never as a number nobody calculated."""
+    render as "no offer", never as a number nobody calculated.
+
+    Gated on TILA_MONETARY_FIELDS, not BOARDING_REQUIRED_FIELDS: this function
+    answers "what was disclosed", and the four-box amounts are the whole of
+    that answer. It briefly used the boarding list, which made a legacy offer
+    render as no disclosure at all -- withholding figures that were genuinely
+    disclosed because newer bookkeeping columns were absent. Whether those
+    terms are complete enough to FUND is a different question, answered by
+    _complete_offer_exists and reported separately as offer_ready; the UI
+    disables Accept & board on that, so loosening this gate cannot let an
+    unboardable offer through to a 409."""
     if offer is None:
         return None
-    missing = [f for f in _CANONICAL_OFFER_FIELDS if getattr(offer, f, None) is None]
+    missing = [f for f in TILA_MONETARY_FIELDS if getattr(offer, f, None) is None]
     if missing:
         log.error(
             "incomplete offer row app_id=%s offer_id=%s missing=%s",
@@ -307,6 +317,11 @@ def get_application(
         # a staff detail view, so it degrades to "no offer yet" instead of
         # failing the whole application page.)
         offer=_offer_disclosure_or_none(offer, a.id),
+        # Read from SQL rather than from the ORM row above on purpose: this must
+        # agree with what accept_offer enforces, and accept re-reads the row
+        # under a lock. Deriving it from `offer` here would be a second
+        # implementation of the same rule -- the kind that drifts.
+        offer_ready=_complete_offer_exists(a.id),
     )
 
 

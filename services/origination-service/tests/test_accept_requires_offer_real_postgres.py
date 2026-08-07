@@ -27,7 +27,9 @@ import psycopg2.extras
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, decision_state, intake
+from sqlalchemy import select
+
+from app import config, database, db, decision_state, intake, models
 from app.main import app
 from .test_decision_attempt_real_postgres import _full_schema_sql, SCHEMA
 
@@ -55,10 +57,22 @@ def real_db(monkeypatch):
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
         cur.execute(_full_schema_sql())
+    scoped_url = f"{DATABASE_URL}?options=-csearch_path%3D{SCHEMA}"
     monkeypatch.setattr(db, "_conn", conn, raising=False)
-    monkeypatch.setattr(
-        db, "DATABASE_URL", f"{DATABASE_URL}?options=-csearch_path%3D{SCHEMA}", raising=False
-    )
+    monkeypatch.setattr(db, "DATABASE_URL", scoped_url, raising=False)
+    # The ORM read paths (application listing and detail) do NOT share the
+    # psycopg2 connection patched above -- app/database.py builds its own
+    # SQLAlchemy engine, lazily, from config.DATABASE_URL. Left unpatched it
+    # connects to the public schema, where this fixture's rows do not exist,
+    # and the detail endpoint answers "application not found" for a row that
+    # is plainly in the test schema.
+    #
+    # Both globals are reset so the next request builds an engine bound to
+    # SCHEMA; monkeypatch restores them on teardown, which also stops a later
+    # test inheriting an engine pointed at a schema this fixture has dropped.
+    monkeypatch.setattr(database, "DATABASE_URL", scoped_url, raising=False)
+    monkeypatch.setattr(database, "_engine", None, raising=False)
+    monkeypatch.setattr(database, "_Session", None, raising=False)
     yield conn
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
@@ -357,7 +371,38 @@ def test_a_legacy_offer_displays_but_cannot_board(real_db):
     for field in app_router.TILA_MONETARY_FIELDS:
         assert row[field] is not None, f"legacy disclosure lost {field}"
 
-    # 2. reports NOT ready for boarding
+    # 1b. and rendered as a disclosure when read the way the staff screen reads
+    #     it -- THROUGH THE ORM MAPPING, not by inspecting the table.
+    #
+    # This assertion is why the e2e failure reached CI. The loop above passes on
+    # a row that the detail endpoint renders as no offer at all, because it
+    # queries SQL directly and so exercises neither the ORM mapping nor the
+    # display gate -- the two things that were actually wrong.
+    #
+    # Read through a real Session rather than a constructed object on purpose:
+    # every unit test in this service builds offer rows as plain objects that
+    # carry whatever attributes the test sets, which is exactly why 648 of them
+    # stayed green while this was broken. Only a mapped read can catch a column
+    # the model forgot to declare.
+    database._init()
+    with database._Session() as session:
+        orm_offer = session.scalar(
+            select(models.Offer).where(models.Offer.app_id == 1)
+        )
+    assert orm_offer is not None
+
+    disclosure = app_router._offer_disclosure_or_none(orm_offer, 1)
+    assert disclosure is not None, (
+        "a legacy offer rendered as no disclosure at all, though every "
+        "disclosed amount is present in SQL -- this is what disabled Accept & "
+        "board for offers that were perfectly complete"
+    )
+    for field in app_router.TILA_MONETARY_FIELDS:
+        assert getattr(disclosure, field) == pytest.approx(float(row[field]))
+
+    # 2. reports NOT ready for boarding. The disclosure above renders and this
+    #    is still False: displaying what was disclosed and permitting funding
+    #    are separate questions, and the UI disables the button on this one.
     assert app_router._complete_offer_exists(1) is False
 
     # 3. acceptance refuses, naming the missing schedule

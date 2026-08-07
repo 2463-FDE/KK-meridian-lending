@@ -169,6 +169,16 @@ class ApplicationDetail(BaseModel):
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
     offer: Optional[Disclosure] = None
+    # Whether the offer above carries the full contractual schedule boarding
+    # needs (BOARDING_REQUIRED_FIELDS), which is NOT the same question as
+    # whether there is a disclosure to display. The staff screen used to infer
+    # boardability from `offer` being present; that conflated the two, so the
+    # only way to keep Accept & board correctly disabled for an offer with no
+    # stored schedule was to withhold its disclosure entirely. Reported
+    # explicitly so the amounts can be shown and the button still refuse.
+    # Mirrors DecisionOut.offer_ready and comes from the same function, so the
+    # two responses cannot disagree.
+    offer_ready: bool = False
     # Review fix: once staff decides (review_application), that decision is
     # final -- the frontend needs to know this to disable the Approve/Deny
     # controls, not just rely on the backend's own 409 after a doomed retry.

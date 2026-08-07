@@ -48,6 +48,9 @@ interface Application {
   created_at?: string;
   kyc?: Kyc;
   decision?: string;
+  // Whether this application's offer carries the full contractual schedule
+  // boarding needs -- a different question from whether `offer` is present.
+  offer_ready?: boolean;
   // Review fix: once staff decides, that decision is final -- this tells
   // the frontend to disable Approve/Deny up front instead of only finding
   // out via a 409 on submit.
@@ -103,6 +106,7 @@ function UnderwritingDetailContent() {
   // action state (mirrors the servicing detail action pattern)
   const [decision, setDecision] = useState<DecisionResult | null>(null);
   const [offer, setOffer] = useState<Offer | null>(null);
+  const [offerReady, setOfferReady] = useState(false);
   const [boardedLoanId, setBoardedLoanId] = useState<string | number | null>(
     null
   );
@@ -125,6 +129,10 @@ function UnderwritingDetailContent() {
       const a = (await apiGet(`/los/applications/${appId}`)) as Application;
       setApp(a);
       if (a.offer) setOffer(a.offer);
+      // Boardability is reported separately from the disclosure: an offer
+      // predating the stored Model B schedule still displays its disclosed
+      // amounts but cannot be funded from them.
+      setOfferReady(Boolean(a.offer_ready));
     } catch (err) {
       setError(errMsg(err, "Could not load this application."));
       setApp(null);
@@ -197,6 +205,12 @@ function UnderwritingDetailContent() {
       const disc = res.disclosure ?? res.offer ?? null;
       setOffer(disc);
       setActionMsg("Offer generated.");
+      // Re-read rather than assuming the new offer is boardable. Whether the
+      // full contractual schedule was persisted is a server-side fact, and
+      // /los/offer's response body does not report it -- inferring boardability
+      // from "an offer came back" is exactly the conflation offer_ready exists
+      // to remove.
+      await load();
     } catch (err) {
       setActionErr(errMsg(err, "Could not generate an offer."));
     } finally {
@@ -578,7 +592,7 @@ function UnderwritingDetailContent() {
             </p>
             <button
               onClick={acceptAndBoard}
-              disabled={actionBusy || currentDecision !== "approve" || !offer}
+              disabled={actionBusy || currentDecision !== "approve" || !offerReady}
               title={
                 currentDecision === "deny"
                   ? `This application cannot be boarded because it was denied.${decision?.adverse_action_reason ? ` Reason: ${decision.adverse_action_reason}` : ""}`
@@ -586,7 +600,9 @@ function UnderwritingDetailContent() {
                     ? "This application must receive final approval before it can be boarded."
                     : !offer
                       ? "Create an offer before boarding this application."
-                      : undefined
+                      : !offerReady
+                        ? "This offer predates the stored payment schedule, so it cannot be boarded. Regenerate the offer to record the schedule."
+                        : undefined
               }
             >
               {actionBusy ? "Working…" : "Accept & board"}

@@ -87,4 +87,23 @@ class Offer(Base):
     monthly_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     amount_financed: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     total_of_payments: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    # The persisted Model B contractual schedule (db/migrations/0030). Declared
+    # for the same reason note_rate_pct is, one line of code above: these are
+    # read through getattr() by the boarding gate, and an undeclared column
+    # reads as None no matter what SQL holds. That is not a theoretical risk --
+    # omitting them here made every freshly generated offer report
+    # "missing=regular_payment_count,final_payment,term_months,schedule_version"
+    # against a row where all four were populated, which disabled Accept & board
+    # in the UI and failed the borrower-workflow e2e. The whole-service unit
+    # suite stayed green throughout, because its offer rows are constructed
+    # objects that carry the attributes whether the model declares them or not;
+    # only Postgres-backed reads go through this mapping.
+    # test_models.py::test_boarding_required_fields_are_all_mapped_on_the_offer_model
+    # now fails at unit speed if a future canonical field is added without one.
+    regular_payment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    # The CONTRACTUAL term the schedule above was solved for -- not
+    # applications.term_months, which is only what was requested.
+    term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    schedule_version: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
