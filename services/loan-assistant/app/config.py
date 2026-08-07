@@ -36,3 +36,19 @@ MACRO_ENABLED = os.getenv("MACRO_ENABLED", "1") not in ("0", "false", "False", "
 MACRO_SERIES_ID = os.getenv("MACRO_SERIES_ID", "LNS14000000")
 MACRO_CACHE_TTL_SECONDS = int(os.getenv("MACRO_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
 MACRO_TIMEOUT_SECONDS = float(os.getenv("MACRO_TIMEOUT_SECONDS", "3.0"))
+# How long a FAILED fetch suppresses further attempts (negative cache).
+#
+# Without this, an outage costs every single summary request its own full
+# timeout: the failure was never recorded, so each request rediscovered it.
+# Short by design -- this is a suppression window, not a cache of data. Long
+# enough that a burst of summaries makes one attempt between them, short enough
+# that the signal returns promptly once BLS recovers.
+MACRO_FAILURE_TTL_SECONDS = float(os.getenv("MACRO_FAILURE_TTL_SECONDS", "60"))
+# How long past MACRO_CACHE_TTL_SECONDS a previously-fetched figure may still be
+# served while a refresh is impossible (in flight, or suppressed).
+#
+# Serving it is honest because MacroSignal carries its own `period` -- the
+# officer reads "June 2026" whether the fetch happened a minute or a day ago, so
+# nothing presents old data as current. Bounded anyway: past this window the
+# citation is dropped rather than shown indefinitely.
+MACRO_STALE_SERVE_SECONDS = float(os.getenv("MACRO_STALE_SERVE_SECONDS", str(24 * 60 * 60)))

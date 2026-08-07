@@ -105,16 +105,53 @@ def test_a_summary_is_still_produced_when_the_signal_is_unavailable(monkeypatch)
     assert "debt consolidation" in prompt      # the summary itself is unaffected
 
 
-def test_a_stale_value_is_never_served_after_a_failure(monkeypatch):
-    """A figure captioned 'June 2026' that is actually months old is worse than
-    no figure -- the officer cannot tell it is stale. Omit instead."""
+def test_a_past_ttl_value_is_still_served_after_a_failure(monkeypatch):
+    """DELIBERATE REVERSAL of an earlier rule, with the reason.
+
+    This test previously asserted the opposite -- that a past-TTL figure is
+    never served -- on the grounds that "a figure captioned 'June 2026' that is
+    actually months old is worse than no figure, the officer cannot tell it is
+    stale."
+
+    That premise is false. The caption IS the staleness disclosure: MacroSignal
+    carries `period`, and `cite()` prints it, so a figure fetched an hour ago
+    and one fetched yesterday both read "June 2026" and neither claims anything
+    about retrieval time. The series itself only updates monthly. Withholding a
+    true, correctly-labelled figure during a BLS outage removed real context and
+    bought nothing.
+
+    Changed because the module's behaviour changed, not to make a failing test
+    pass: serving the last known value is what "fail open" means, and the bound
+    below is what keeps it honest.
+    """
     provider = BlsMacroProvider()
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(_LIVE_SHAPE))
     assert provider.fetch().value == 4.2
 
     monkeypatch.setattr(macro, "MACRO_CACHE_TTL_SECONDS", 0, raising=False)
-    monkeypatch.setattr(provider, "_fresh", lambda: False)
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse({}, status=500))
+
+    served = provider.fetch()
+    assert served is not None, "fail-open must serve the last known figure"
+    assert served.value == 4.2
+    # The caption still names the period the figure describes, which is the
+    # whole basis for serving it.
+    assert "June 2026" in served.cite()
+    assert provider.stale_served_count == 1
+
+
+def test_a_value_older_than_the_stale_window_is_dropped(monkeypatch):
+    """The bound. Fail-open is not "show the last number forever" -- past
+    MACRO_STALE_SERVE_SECONDS the citation disappears rather than ageing
+    silently on the screen."""
+    provider = BlsMacroProvider()
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(_LIVE_SHAPE))
+    assert provider.fetch().value == 4.2
+
+    monkeypatch.setattr(macro, "MACRO_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(macro, "MACRO_STALE_SERVE_SECONDS", 0, raising=False)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse({}, status=500))
+
     assert provider.fetch() is None
 
 

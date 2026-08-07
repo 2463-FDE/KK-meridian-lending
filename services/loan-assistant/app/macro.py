@@ -59,7 +59,9 @@ import httpx
 from .config import (
     MACRO_CACHE_TTL_SECONDS,
     MACRO_ENABLED,
+    MACRO_FAILURE_TTL_SECONDS,
     MACRO_SERIES_ID,
+    MACRO_STALE_SERVE_SECONDS,
     MACRO_TIMEOUT_SECONDS,
 )
 log = logging.getLogger(__name__)
@@ -114,13 +116,65 @@ class StubMacroProvider:
 
 class BlsMacroProvider:
     """Live BLS public API v1. No API key: v1 is unauthenticated and capped at
-    25 requests/day per IP, which is why the cache below is not optional."""
+    25 requests/day per IP, which is why the cache below is not optional.
+
+    CONCURRENCY, and the outage this used to cause
+    ----------------------------------------------
+    The first version held one process-wide mutex across the outbound
+    `httpx.get`. Reviewed and correct: during a BLS outage that turns an
+    optional citation into a service-wide stall. N concurrent staff summaries
+    queue on the lock, and because a failure was never recorded each one then
+    spends its own full MACRO_TIMEOUT_SECONDS discovering the same outage --
+    roughly N x timeout of serialized delay before the LLM call even starts,
+    with a FastAPI worker thread blocked for every one of them.
+
+    The fix is not to drop the lock. That trades a stall for a thundering herd:
+    every concurrent request firing its own request at an API with a 25-per-day
+    cap, which would exhaust the quota during the one outage where retrying is
+    least useful.
+
+    So: single-flight, fail-open, and never blocking.
+
+      * `_state_lock` guards in-memory state ONLY and is never held across IO.
+        Every critical section under it is a few field reads.
+      * `_refresh_lock` is a single-flight token acquired with blocking=False.
+        Exactly one caller at a time performs the network call. Everyone else
+        returns IMMEDIATELY with whatever is known -- they never queue.
+      * A failure is recorded and suppresses further attempts for
+        MACRO_FAILURE_TTL_SECONDS. During an outage the steady state is one
+        attempt per window, not one per request.
+
+    So N concurrent requests against a slow-failing BLS cost approximately ONE
+    timeout in total, not N. That is the property
+    test_macro_concurrency.py asserts directly.
+
+    On serving a previously-fetched value past its TTL
+    --------------------------------------------------
+    An earlier revision refused to, reasoning that "a stale figure presented
+    with a current-looking period would be worse than no figure". That reasoning
+    does not survive inspection: MacroSignal carries its own `period`, and the
+    citation prints it, so a figure fetched yesterday still reads "June 2026"
+    and claims nothing about when it was retrieved. Withholding it during an
+    outage removes true, correctly-labelled context for no gain. It is served
+    within MACRO_STALE_SERVE_SECONDS and dropped after that.
+    """
 
     def __init__(self):
-        self._lock = threading.Lock()
+        # Guards state. NEVER held across a network call.
+        self._state_lock = threading.Lock()
+        # Single-flight token. Acquired non-blocking; a caller that misses it
+        # does not wait, it answers from what is already known.
+        self._refresh_lock = threading.Lock()
         self._cached: MacroSignal | None = None
         self._cached_at: float = 0.0
-        self.fetch_count = 0
+        self._failed_at: float = 0.0
+        # Observability: an outage should be visible in metrics and logs, not
+        # only in the absence of a citation nobody was looking for.
+        self.fetch_count = 0          # outbound calls actually attempted
+        self.failure_count = 0        # of those, how many failed
+        self.suppressed_count = 0     # requests that skipped the call entirely
+        self.stale_served_count = 0   # requests answered with a past-TTL value
+        self.degraded_since: float | None = None
 
     def _fresh(self) -> bool:
         return (
@@ -128,18 +182,87 @@ class BlsMacroProvider:
             and (time.monotonic() - self._cached_at) < MACRO_CACHE_TTL_SECONDS
         )
 
+    def _suppressed(self) -> bool:
+        """Whether a recent failure is still suppressing outbound attempts."""
+        return (
+            self._failed_at > 0.0
+            and (time.monotonic() - self._failed_at) < MACRO_FAILURE_TTL_SECONDS
+        )
+
+    def _servable_stale(self) -> MacroSignal | None:
+        """A previously-fetched figure still inside the stale-serve window."""
+        if self._cached is None:
+            return None
+        if (time.monotonic() - self._cached_at) < MACRO_STALE_SERVE_SECONDS:
+            return self._cached
+        return None
+
+    def _answer_without_calling(self) -> MacroSignal | None:
+        """What to return when no outbound call will be made. Caller must NOT
+        hold _state_lock."""
+        with self._state_lock:
+            stale = self._servable_stale()
+            if stale is not None:
+                self.stale_served_count += 1
+        if stale is not None:
+            log.info(
+                "macro signal served from cache past its TTL "
+                "(refresh in flight or suppressed) period=%s", stale.period,
+            )
+        return stale
+
     def fetch(self) -> MacroSignal | None:
-        with self._lock:
+        with self._state_lock:
             if self._fresh():
                 return self._cached
+            suppressed = self._suppressed()
+            if suppressed:
+                self.suppressed_count += 1
+        if suppressed:
+            # A recent failure is still being remembered. Do not call BLS, do
+            # not wait for anyone: answer now. This is the branch that turns
+            # N x timeout into one timeout per failure window.
+            return self._answer_without_calling()
+
+        if not self._refresh_lock.acquire(blocking=False):
+            # Another thread is already refreshing. Blocking here would rebuild
+            # exactly the queue this class exists to avoid.
+            return self._answer_without_calling()
+
+        try:
+            # Deliberately outside _state_lock: this is the only slow operation
+            # in the class, and holding a lock across it was the defect.
             signal = self._fetch_uncached()
+        finally:
+            self._refresh_lock.release()
+
+        now = time.monotonic()
+        with self._state_lock:
             if signal is not None:
                 self._cached = signal
-                self._cached_at = time.monotonic()
-            # On failure the previous value is deliberately NOT returned: a
-            # stale figure presented with a current-looking period would be
-            # worse than no figure. Returning None omits the citation instead.
-            return signal
+                self._cached_at = now
+                self._failed_at = 0.0
+                recovered_from = self.degraded_since
+                self.degraded_since = None
+            else:
+                self.failure_count += 1
+                self._failed_at = now
+                recovered_from = None
+                if self.degraded_since is None:
+                    self.degraded_since = now
+                began = self.degraded_since
+        if signal is None:
+            log.warning(
+                "macro signal degraded: suppressing BLS calls for %.0fs "
+                "degraded_for=%.1fs failures=%d",
+                MACRO_FAILURE_TTL_SECONDS, now - began, self.failure_count,
+            )
+            return self._answer_without_calling()
+        if recovered_from is not None:
+            log.info(
+                "macro signal recovered after %.1fs degraded", now - recovered_from
+            )
+        return signal
 
     def _fetch_uncached(self) -> MacroSignal | None:
         self.fetch_count += 1
