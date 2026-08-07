@@ -86,6 +86,22 @@ SELECT setval('loans_id_seq', 7299);
 -- Newton-Raphson, and disclosure-service's own compute_apr(). All 48 agree to
 -- 3dp with deviation 0. The consistency test re-derives every one of them from
 -- the seeded payment stream on each CI run, so a stale literal fails the build.
+--
+-- REGENERATING THESE. If the origination fee changes, or a new note rate or
+-- term appears in the seeds, run:
+--
+--     python db/tools/regenerate_seed_apr_lookup.py
+--
+-- and paste its output over the VALUES rows below. That script cross-checks
+-- every value three ways and exits non-zero rather than emitting one the
+-- methods disagree on. Then rebuild and re-run the consistency suite:
+--
+--     docker compose down -v && docker compose up -d --build
+--     python -m pytest db/tests/test_seed_offer_consistency.py -q
+--
+-- Do NOT approximate a missing combination: the DO block at the end of this
+-- file raises rather than seeding fewer offers, which is the intended
+-- behaviour -- a demo with holes in it looks like working software.
 WITH apr_lookup (fee_pct, note_rate_pct, term_months, apr) AS (VALUES
     (0.030, 7.99, 12, 13.760),
     (0.030, 7.99, 48, 9.584),
