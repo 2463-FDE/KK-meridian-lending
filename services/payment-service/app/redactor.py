@@ -34,7 +34,17 @@ _CVV_RE = re.compile(
 
 _SENSITIVE_KEYS = frozenset(
     {"pan", "cvv", "ssn", "card_number", "card_no", "social_security_number",
-     "processor_token"}
+     "processor_token",
+     # Cardholder name. Reviewed finding (D5d): charge() logged it in clear at
+     # INFO alongside payment context, because this set did not treat it as
+     # sensitive. A name beside a loan id, an amount and a last4 identifies a
+     # person and what they paid -- which is the thing log redaction exists to
+     # prevent, whether or not it is card data under PCI.
+     #
+     # The call site no longer passes it at all; this entry is the backstop, so
+     # that a future one cannot reintroduce the leak merely by including the
+     # field. Both spellings, since either is plausible for the same value.
+     "name", "cardholder_name"}
 )
 
 

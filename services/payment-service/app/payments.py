@@ -108,9 +108,16 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
     # redaction (D5). There's no raw PAN/CVV/SSN to log anymore (ADR 0008) --
     # redact_dict still guards processor_token, since a vaulted token is
     # itself sensitive even though it's opaque.
+    # The cardholder `name` is no longer included (D5d). It was logged in clear
+    # beside a loan id, an amount and a last4, which together identify a person
+    # and what they paid. It also served no diagnostic purpose: a charge is
+    # correlated by loan_id, last4 and idempotency_key. Omitted rather than
+    # merely redacted, so there is nothing to redact -- and `name` is in
+    # _SENSITIVE_KEYS as well, so reintroducing the field cannot reintroduce
+    # the leak.
     safe_req = redact_dict({
         "processor_token": processor_token, "last4": last4, "brand": brand,
-        "amount": amount, "loan_id": loan_id, "name": name,
+        "amount": amount, "loan_id": loan_id,
         "idempotency_key": idempotency_key,
     })
     log.info("POST /payments charge req=%s -> ok", safe_req)
