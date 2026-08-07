@@ -164,32 +164,85 @@ test("Edit moves keyboard focus to the edited step's heading", async ({ page }) 
 });
 
 test("the whole edit round-trip is reachable with the keyboard alone", async ({ page }) => {
-  // No page.click() anywhere in this test on purpose -- Tab, Enter and typing
-  // only. If the affordance is mouse-only it fails here.
-  await fillToReview(page, fictionalApplicant("Devin", true, 90_000), { employer: "Typed With A Mouse" });
+  // No focus() and no click() anywhere in this test. Focus is *navigated* with
+  // Tab/Shift+Tab from a documented starting point, because focus() would jump
+  // straight to the control and prove nothing about whether a keyboard user can
+  // actually reach it. Activation is Enter or Space only.
+  await fillToReview(page, fictionalApplicant("Devin", true, 90_000), {
+    employer: "Typed With A Mouse",
+  });
 
-  // Reach the Employment Edit button by tabbing, then activate with Enter.
-  const editBtn = page.getByRole("button", { name: "Edit Employment & income" });
-  await editBtn.focus();
+  /** Tab forward until `locator` is the active element. Fails if unreachable. */
+  async function tabTo(locator: import("@playwright/test").Locator, max = 40) {
+    for (let i = 0; i < max; i++) {
+      if (await locator.evaluate((el) => el === document.activeElement)) return;
+      await page.keyboard.press("Tab");
+    }
+    throw new Error("control was never reached by tabbing -- keyboard-unreachable");
+  }
+
+  // Documented starting position: the document body, i.e. a fresh page with
+  // nothing focused. The first Tab must therefore enter the page normally.
+  await page.locator("body").click({ position: { x: 2, y: 2 } }); // move focus out of any field
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+  const editEmployment = page.getByRole("button", { name: "Edit Employment & income" });
+  await tabTo(editEmployment);
+  await expect(editEmployment).toBeFocused();          // reached by Tab, not focus()
   await page.keyboard.press("Enter");
 
-  await expect(page.getByRole("heading", { level: 2 })).toBeFocused();
+  // Focus lands on the step heading, announcing the view change.
+  const heading = page.getByRole("heading", { level: 2 });
+  await expect(heading).toBeFocused();
+  await expect(heading).toHaveText(/employment/i);
 
-  // Tab from the focused heading until the employer field has focus, then retype.
-  const employer = page.locator('main input:visible:not([placeholder]):not([type="range"])').nth(0);
-  for (let i = 0; i < 12 && !(await employer.evaluate((el) => el === document.activeElement)); i++) {
-    await page.keyboard.press("Tab");
-  }
-  await expect(employer).toBeFocused();
+  // Tab from the heading to the employer field and retype.
+  const employer = page
+    .locator('main input:visible:not([placeholder]):not([type="range"])')
+    .nth(0);
+  await tabTo(employer);
   await page.keyboard.press("ControlOrMeta+a");
   await page.keyboard.type("Keyboard Only Ltd");
 
+  // Tab on to the return control and activate it with Space this time.
   const ret = page.getByRole("button", { name: "Return to review" });
-  await ret.focus();
-  await page.keyboard.press("Enter");
+  await tabTo(ret);
+  await expect(ret).toBeFocused();
+  await page.keyboard.press(" ");
 
   await expect(page.getByText("Step 4 of 5")).toBeVisible();
   await expect(page.getByText("Keyboard Only Ltd")).toBeVisible();
+});
+
+test("returning to the review restores focus to the Edit control it started from", async ({ page }) => {
+  // Without this, focus is on <body> after the round-trip: the keyboard user is
+  // dropped at the top of the document with no idea they are back on the review.
+  await fillToReview(page, fictionalApplicant("Harper", true, 90_000));
+
+  const editLoan = page.getByRole("button", { name: "Edit Loan details" });
+  await editLoan.click();
+  await expect(page.getByText("Step 3 of 5")).toBeVisible();
+
+  await page.getByRole("button", { name: "Return to review" }).click();
+  await expect(page.getByText("Step 4 of 5")).toBeVisible();
+
+  // Focus is back on the originating control, not lost to the body.
+  await expect(editLoan).toBeFocused();
+  await expect(page.locator("body")).not.toBeFocused();
+});
+
+test("focus returns to whichever Edit control was used, not always the first", async ({ page }) => {
+  await fillToReview(page, fictionalApplicant("Indigo", true, 90_000));
+
+  const editPersonal = page.getByRole("button", { name: "Edit Personal" });
+  await editPersonal.click();
+  await page.getByRole("button", { name: "Return to review" }).click();
+  await expect(editPersonal).toBeFocused();
+
+  const editEmployment = page.getByRole("button", { name: "Edit Employment & income" });
+  await editEmployment.click();
+  await page.getByRole("button", { name: "Return to review" }).click();
+  await expect(editEmployment).toBeFocused();
 });
 
 test("Back during an edit round-trip keeps the one-click way home", async ({ page }) => {

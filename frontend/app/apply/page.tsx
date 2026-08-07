@@ -162,12 +162,23 @@ export default function ApplyPage() {
   // there and the step's name is read out.
   const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const [focusStepHeading, setFocusStepHeading] = useState(false);
+  // Which summary group's Edit control to hand focus back to once the review is
+  // reached again. Leaving focus on <body> after the return trip is the same
+  // defect as leaving it there on the way out.
+  const [returnFocusStep, setReturnFocusStep] = useState<number | null>(null);
+  const [editOriginStep, setEditOriginStep] = useState<number | null>(null);
   useEffect(() => {
     if (focusStepHeading && stepHeadingRef.current) {
       stepHeadingRef.current.focus();
       setFocusStepHeading(false);
     }
   }, [focusStepHeading, step]);
+  useEffect(() => {
+    if (step === 4 && returnFocusStep !== null) {
+      document.getElementById(`edit-step-${returnFocusStep}`)?.focus();
+      setReturnFocusStep(null);
+    }
+  }, [step, returnFocusStep]);
   const [form, setForm] = useState<FormState>({
     name: "",
     dob: "",
@@ -266,6 +277,7 @@ export default function ApplyPage() {
     setReturningToReview(true);
     setStep(target);
     setFocusStepHeading(true);
+    setEditOriginStep(target);
   }
 
   /** Return to the review, but only if what was just edited is still valid --
@@ -289,6 +301,8 @@ export default function ApplyPage() {
     setErrors({});
     setReturningToReview(false);
     setStep(4);
+    // Hand focus back to the Edit control this round-trip started from.
+    setReturnFocusStep(editOriginStep);
   }
 
   async function submitApplication() {
@@ -683,7 +697,7 @@ export default function ApplyPage() {
               title="Review your application"
               desc="Double check everything below before you submit."
             />
-            <SummaryGroup title="Personal" onEdit={() => editStep(1)}>
+            <SummaryGroup title="Personal" editId="edit-step-1" onEdit={() => editStep(1)}>
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
               <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
@@ -694,7 +708,7 @@ export default function ApplyPage() {
               <SummaryRow label="State" value={form.state} />
               <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
-            <SummaryGroup title="Employment & income" onEdit={() => editStep(2)}>
+            <SummaryGroup title="Employment & income" editId="edit-step-2" onEdit={() => editStep(2)}>
               <SummaryRow label="Employer" value={form.employer} />
               <SummaryRow label="Job title" value={form.job_title} />
               <SummaryRow
@@ -706,7 +720,7 @@ export default function ApplyPage() {
                 value={form.employment_years}
               />
             </SummaryGroup>
-            <SummaryGroup title="Loan details" onEdit={() => editStep(3)}>
+            <SummaryGroup title="Loan details" editId="edit-step-3" onEdit={() => editStep(3)}>
               <SummaryRow label="Amount" value={usd(form.amount)} />
               <SummaryRow
                 label="Term"
@@ -1010,10 +1024,12 @@ function SummaryGroup({
   title,
   children,
   onEdit,
+  editId,
 }: {
   title: string;
   children: React.ReactNode;
   onEdit?: () => void;
+  editId?: string;
 }) {
   return (
     <div style={{ marginBottom: 18 }}>
@@ -1029,10 +1045,11 @@ function SummaryGroup({
       >
         <span>{title}</span>
         {onEdit && (
-          // Named for a screen reader too: four identical "Edit" buttons on one
+          // Named for a screen reader too: three identical "Edit" buttons on one
           // screen are indistinguishable without the section name.
           <button
             type="button"
+            id={editId}
             className="btn-ghost"
             onClick={onEdit}
             aria-label={`Edit ${title}`}
