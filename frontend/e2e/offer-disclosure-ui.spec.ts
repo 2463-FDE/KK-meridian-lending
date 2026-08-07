@@ -7,6 +7,11 @@ import {
   dbClient,
   signInAsStaff,
 } from "./fixtures";
+// Static import, not a dynamic await import(). Playwright transpiles the spec's
+// own imports; a runtime import() of a .ts module resolved to raw TypeScript in
+// CI and failed with "SyntaxError: Unexpected token 'export'" -- it happened to
+// work locally, which is exactly the kind of difference CI exists to catch.
+import { paymentPlanText } from "../lib/format";
 
 /**
  * Offer disclosure presentation.
@@ -158,11 +163,10 @@ test("the schedule text stays inside the disclosure border", async ({ page }) =>
   expect(inner!.x + inner!.width).toBeLessThanOrEqual(outer!.x + outer!.width + 1);
 });
 
-test("a singular regular payment reads '1 monthly payment', not '1 payments'", async () => {
+test("a singular regular payment reads '1 monthly payment', not '1 payments'", () => {
   // Pure formatter behaviour, so it needs no browser: the plural rule is the
   // thing under test, and reaching a one-period loan through the UI would test
   // the wizard instead.
-  const { paymentPlanText } = await import("../lib/format");
   expect(paymentPlanText(500, 1, 500.25)).toContain("1 monthly payment of");
   expect(paymentPlanText(500, 1, 500.25)).not.toContain("1 monthly payments");
   expect(paymentPlanText(500, 23, 500.25)).toContain("23 monthly payments of");
