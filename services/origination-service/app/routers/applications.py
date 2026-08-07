@@ -80,15 +80,34 @@ def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> Non
 
 # The five canonical TILA amounts. An offers row missing any of them is not a
 # disclosure -- see _offer_disclosure_or_none and Gap F.
-_CANONICAL_OFFER_FIELDS = (
-    # note_rate_pct is canonical: accept_offer refuses to board without it
-    # (it will not infer a contractual rate), so an offer lacking it is not
-    # usable no matter how complete the rest of the TILA box looks. Leaving it
-    # out here made offer_ready report True for an offer that then 409'd on
-    # accept -- the caller was told to proceed into a guaranteed failure.
-    "note_rate_pct",
+# Two different questions, deliberately not one list.
+#
+# TILA_MONETARY_FIELDS -- the historical four-box amounts. An accepted legacy
+# offer that has these can still be DISPLAYED: those figures are what was
+# disclosed, and hiding them because newer columns are absent would withhold a
+# real disclosure over a bookkeeping gap.
+TILA_MONETARY_FIELDS = (
     "apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments",
 )
+
+# BOARDING_REQUIRED_FIELDS -- everything needed to board a contract that
+# servicing can bill without inventing anything. The monetary amounts plus the
+# contractual note rate and the persisted Model B schedule.
+#
+# Why the schedule fields belong here: under Model B the final payment differs
+# from the regular one and cannot be recovered from any stored figure. Boarding
+# an offer without it would leave servicing to regenerate the schedule with
+# whatever generator is deployed -- which is the drift this PR exists to remove.
+# NULL means "never recorded", so such an offer cannot board; an unaccepted one
+# can be regenerated through the audited repair path instead.
+BOARDING_REQUIRED_FIELDS = TILA_MONETARY_FIELDS + (
+    "note_rate_pct", "regular_payment_count", "final_payment", "term_months",
+    "schedule_version",
+)
+
+# Boarding readiness is what offer_ready reports and what accept enforces, so
+# they cannot disagree: a caller told "ready" must not then hit a 409.
+_CANONICAL_OFFER_FIELDS = BOARDING_REQUIRED_FIELDS
 
 
 def _complete_offer_exists(app_id: int) -> bool:
@@ -895,6 +914,7 @@ def accept_offer(
     rows = db.query(
         f"SELECT a.amount, a.term_months, a.status, {_ACCEPT_TOKEN_FIELDS}, ap.name, "
         "o.id AS offer_id, o.note_rate_pct, o.apr, o.finance_charge, o.monthly_payment, "
+        "o.regular_payment_count, o.final_payment, o.term_months, o.schedule_version, "
         "o.amount_financed, o.total_of_payments, o.accepted_at, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "
@@ -1029,7 +1049,8 @@ def accept_offer(
         # condition matters: a second racing request must not board against
         # an offer this same transaction is about to mark accepted.
         cur.execute(
-            "SELECT note_rate_pct, apr, finance_charge, monthly_payment, amount_financed, "
+            "SELECT note_rate_pct, regular_payment_count, final_payment, term_months, "
+            "schedule_version, apr, finance_charge, monthly_payment, amount_financed, "
             "total_of_payments "
             "FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
             (app_id,),

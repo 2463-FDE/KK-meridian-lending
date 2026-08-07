@@ -439,3 +439,30 @@ def test_a_legacy_offer_without_a_stored_note_rate_recovers(monkeypatch):
     assert resp.status_code == 200
     assert called, "recovery was not reached for a row with no stored note rate"
     assert resp.json()["disclosure"]["note_rate_pct"] == pytest.approx(7.99, abs=1e-3)
+
+
+def test_a_mismatched_body_term_does_not_reach_the_stored_schedule(monkeypatch):
+    """The stored contractual term must come from the application, not the caller.
+
+    The schedule and every derived amount are built from the server-side term, so
+    persisting body.term_months would store a term contradicting the schedule it
+    describes. Client-supplied principal/term/rate have been ignored since the
+    PR #6 security review; the stored schedule term follows the same rule.
+    """
+    fake_db = _FakeDb(application_rows=[{"amount": 15000.0, "term_months": 36}])
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    # Caller asks for 60 months and a 49,000 principal; the application says 36
+    # months / 15,000. Both request values are inside the schema's own bounds, so
+    # this exercises the trust boundary rather than input validation.
+    resp = client.post("/offers", json={"application_id": 10, "principal": 49000,
+                                        "term_months": 60, "annual_rate": 24.0})
+
+    assert resp.status_code == 200, resp.text
+    stored = fake_db.stored_offer
+    assert int(stored["term_months"]) == 36, (
+        f"stored term {stored['term_months']} came from the request body, "
+        f"not the application row"
+    )
+    assert int(stored["regular_payment_count"]) + 1 == int(stored["term_months"])
+    assert stored["schedule_version"] == "B1"

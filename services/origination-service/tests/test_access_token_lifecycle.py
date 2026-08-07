@@ -78,6 +78,12 @@ def real_db(monkeypatch):
                 apr NUMERIC(7,3), finance_charge NUMERIC(14,2),
                 monthly_payment NUMERIC(14,2), amount_financed NUMERIC(14,2),
                 total_of_payments NUMERIC(14,2),
+                -- Model B schedule facts (db/migrations/0030). Boarding requires
+                -- these, so a fixture omitting them cannot board.
+                regular_payment_count INTEGER,
+                final_payment NUMERIC(14,2),
+                term_months INTEGER,
+                schedule_version TEXT,
                 accepted_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT now()
             );

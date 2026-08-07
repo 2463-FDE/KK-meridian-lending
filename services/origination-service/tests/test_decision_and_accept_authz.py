@@ -470,6 +470,12 @@ def _accept_row(status="approved", outcome="approve", apr=9.99,
         "monthly_payment": 400.0 if apr is not None else None,
         "amount_financed": 8700.0 if apr is not None else None,
         "total_of_payments": 9600.0 if apr is not None else None,
+        # Stored Model B schedule -- boarding refuses an offer without it, so a
+        # complete fixture offer must carry the whole set.
+        "regular_payment_count": 23 if apr is not None else None,
+        "final_payment": 400.12 if apr is not None else None,
+        "term_months": 24 if apr is not None else None,
+        "schedule_version": "B1" if apr is not None else None,
         "accept_token_hash": token_hash, "accept_token_consumed_at": token_consumed_at,
         "token_live": token_live,
     }
@@ -530,7 +536,7 @@ class _FakeAcceptTxCursor:
             }]
         elif stmt.startswith("SELECT outcome FROM decisions"):
             self._last = [{"outcome": self.locked_outcome}] if self.locked_outcome else []
-        elif stmt.startswith("SELECT note_rate_pct, apr, finance_charge, monthly_payment"):
+        elif stmt.startswith("SELECT note_rate_pct, regular_payment_count, final_payment"):
             # Gap F: all five canonical terms are re-read under the lock now.
             self._last = [{
                 # PR #10 review: boarding reads the contractual note rate, and
@@ -540,6 +546,10 @@ class _FakeAcceptTxCursor:
                 "apr": self.offer_apr, "finance_charge": 500.0,
                 "monthly_payment": 400.0, "amount_financed": 8700.0,
                 "total_of_payments": 9600.0,
+                # The locked re-read now covers every BOARDING_REQUIRED_FIELD,
+                # including the stored schedule.
+                "regular_payment_count": 23, "final_payment": 400.12,
+                "term_months": 24, "schedule_version": "B1",
             }] if self.offer_apr is not None else []
         elif stmt.startswith("UPDATE applications SET status = 'funded'"):
             self._last = None

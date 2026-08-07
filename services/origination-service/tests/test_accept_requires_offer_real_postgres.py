@@ -88,9 +88,12 @@ def _approved_application(conn, *, with_offer: bool):
 
     if with_offer:
         _sql(conn,
+             # Boarding requires the stored Model B schedule, so a fixture offer must
+             # carry it -- an offer without one is a legacy row that cannot board.
              "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
-             "finance_charge, monthly_payment, amount_financed, total_of_payments) "
-             "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s)",
+             "finance_charge, monthly_payment, amount_financed, total_of_payments, "
+             "regular_payment_count, final_payment, term_months, schedule_version) "
+             "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1')",
              tuple(_COMPLETE_TERMS[k] for k in
                    ("apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments")))
     return raw_token
@@ -139,8 +142,9 @@ def test_the_refusal_is_recoverable_once_the_offer_exists(real_db):
 
     _sql(real_db,
          "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
-         "finance_charge, monthly_payment, amount_financed, total_of_payments) "
-         "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s)",
+         "finance_charge, monthly_payment, amount_financed, total_of_payments, "
+         "regular_payment_count, final_payment, term_months, schedule_version) "
+         "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1')",
          tuple(_COMPLETE_TERMS[k] for k in
                ("apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments")))
 
@@ -225,7 +229,9 @@ def test_rv2_vector_boards_the_note_rate_and_bills_the_disclosed_payment(real_db
     _sql(
         real_db,
         "UPDATE offers SET note_rate_pct = %s, apr = %s, finance_charge = %s, "
-        "monthly_payment = %s, amount_financed = %s, total_of_payments = %s "
+        "monthly_payment = %s, amount_financed = %s, total_of_payments = %s, "
+        "regular_payment_count = 35, final_payment = 469.87, term_months = 36, "
+        "schedule_version = 'B1' "
         "WHERE app_id = 1",
         tuple(rv2[k] for k in ("note_rate_pct", "apr", "finance_charge",
                                "monthly_payment", "amount_financed",
@@ -321,3 +327,74 @@ def test_offer_ready_is_false_when_only_the_note_rate_is_missing(real_db):
     assert resp.status_code == 409
     assert "note_rate_pct" in resp.json()["detail"], resp.json()["detail"]
     assert _sql(real_db, "SELECT count(*)::int AS n FROM loans")[0]["n"] == 0
+
+
+def test_a_legacy_offer_displays_but_cannot_board(real_db):
+    """The BOARDING_REQUIRED_FIELDS / TILA_MONETARY_FIELDS split, end to end.
+
+    A legacy offer has all four box amounts and a note rate, but its contractual
+    schedule was never recorded (0030 deliberately does not back-fill: the exact
+    terms of an already-accepted disclosure are unknown, and generating them today
+    would persist invented terms as the agreed ones).
+
+    Such a row must stay READABLE -- those amounts are what was disclosed, and
+    withholding a real disclosure over a bookkeeping gap would be its own defect
+    -- while being unboardable, because servicing cannot bill a schedule nobody
+    stored.
+    """
+    from app.routers import applications as app_router
+
+    token = _approved_application(real_db, with_offer=True)
+    _sql(real_db,
+         "UPDATE offers SET regular_payment_count = NULL, final_payment = NULL, "
+         "term_months = NULL, schedule_version = NULL WHERE app_id = 1")
+
+    row = _sql(real_db,
+               "SELECT apr, finance_charge, monthly_payment, amount_financed, "
+               "total_of_payments, note_rate_pct FROM offers WHERE app_id = 1")[0]
+
+    # 1. still a readable historical disclosure -- every four-box amount present
+    for field in app_router.TILA_MONETARY_FIELDS:
+        assert row[field] is not None, f"legacy disclosure lost {field}"
+
+    # 2. reports NOT ready for boarding
+    assert app_router._complete_offer_exists(1) is False
+
+    # 3. acceptance refuses, naming the missing schedule
+    resp = _accept(token)
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "final_payment" in detail or "schedule" in detail.lower(), detail
+
+    # 4. no loan and no balance were created
+    assert _sql(real_db, "SELECT count(*)::int AS n FROM loans")[0]["n"] == 0
+    assert _sql(real_db, "SELECT count(*)::int AS n FROM balances")[0]["n"] == 0
+
+    # 5. and it becomes boardable only once the schedule is explicitly recorded --
+    #    the audited regeneration path, not an inference at accept time
+    _sql(real_db,
+         "UPDATE offers SET regular_payment_count = 23, final_payment = 407.12, "
+         "term_months = 24, schedule_version = 'B1' WHERE app_id = 1")
+    assert app_router._complete_offer_exists(1) is True
+    assert _accept(token).status_code == 200
+
+
+def test_boarding_required_fields_is_a_strict_superset_of_the_tila_amounts():
+    """The two sets must not drift into one another.
+
+    If BOARDING_REQUIRED_FIELDS ever stopped containing the monetary fields, an
+    offer could board without a complete disclosure. If they became equal, the
+    schedule facts would stop being required and the legacy-boarding hole would
+    reopen.
+    """
+    from app.routers import applications as app_router
+
+    tila = set(app_router.TILA_MONETARY_FIELDS)
+    boarding = set(app_router.BOARDING_REQUIRED_FIELDS)
+    assert tila < boarding, "boarding must require strictly more than the four-box amounts"
+    assert {"note_rate_pct", "regular_payment_count", "final_payment",
+            "term_months", "schedule_version"} <= boarding
+    assert app_router._CANONICAL_OFFER_FIELDS == app_router.BOARDING_REQUIRED_FIELDS, (
+        "offer_ready and accept must enforce the same set, or a caller is told "
+        "'ready' and then gets a 409"
+    )

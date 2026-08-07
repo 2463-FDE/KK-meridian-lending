@@ -221,7 +221,14 @@ def create_offer(
             f"RETURNING {_OFFER_FIELDS}",
             (fee_pct_used, annual_rate, o["apr"], o["finance_charge"], o["monthly_payment"],
              o["amount_financed"], o["total_of_payments"],
-             o["regular_payment_count"], o["final_payment"], body.term_months,
+             # term_months comes from the APPLICATION row (read above), never from
+             # body.term_months. The schedule and every derived amount were built
+             # from the server-side term; persisting the caller's value would
+             # store a term inconsistent with the schedule it describes, which is
+             # the exact conflation this PR exists to remove. Client-supplied
+             # principal/term/rate have been ignored since the PR #6 security
+             # review -- the stored schedule term must follow the same rule.
+             o["regular_payment_count"], o["final_payment"], term_months,
              fees.SCHEDULE_VERSION, body.application_id),
         )
     except psycopg2.errors.UniqueViolation:
