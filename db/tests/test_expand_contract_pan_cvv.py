@@ -61,6 +61,13 @@ _LEGACY_SETUP = f"""
 def _run(conn, sql):
     with conn.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
+        # 0031 refuses to run without this acknowledgement -- it destroys data
+        # and can break servicing instances still reading payments.pan. A test
+        # harness IS the operator here, so it acknowledges explicitly rather
+        # than the gate being weakened to let automation through. Set on every
+        # statement because a GUC set with SET is session-scoped and these
+        # helpers do not assume one long-lived session.
+        cur.execute("SET meridian.pan_drop_acknowledged = 'yes'")
         cur.execute(sql)
     conn.commit()
 
