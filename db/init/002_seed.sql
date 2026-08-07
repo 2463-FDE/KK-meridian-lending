@@ -64,9 +64,10 @@ INSERT INTO balances (loan_id, balance, past_due) VALUES
   (6011, 13135.64, 0),
   (6014, 49000.0, 0);
 
--- Payments. Seeds last4/brand only: there is nowhere to put a PAN or a CVV
--- any more (ADR 0008, db/migrations/0029), and seeding card numbers into a
--- demo database is how one ended up committed in a log file in the first place.
+-- Payments. Seeds no longer populate PAN/CVV. The nullable legacy columns
+-- remain until PR #15's contract migration (db/migrations/0031); nothing writes
+-- them (ADR 0008), and seeding card numbers into a demo database is how one
+-- ended up committed in a log file in the first place.
 -- 5582 still has TWO rows for one retried charge -- that double-charge is the
 -- Week 7 reconciliation scenario and is deliberately preserved.
 INSERT INTO payments (loan_id, last4, brand, amount, method, created_at) VALUES

@@ -67,8 +67,9 @@ SELECT l.id,
   CASE WHEN l.status = 'delinquent' THEN round((50 + (l.id % 400))::numeric, 2)::double precision ELSE 0 END
 FROM loans l WHERE l.id BETWEEN 7000 AND 7299;
 
--- 1..6 payments per loan (~600 rows). Card rows carry last4/brand only -- the
--- PAN/CVV columns are gone (ADR 0008, db/migrations/0029).
+-- 1..6 payments per loan (~600 rows). Card rows carry last4/brand only. Seeds
+-- no longer populate PAN/CVV. The nullable legacy columns remain until PR #15's
+-- contract migration (db/migrations/0031); nothing writes them (ADR 0008).
 INSERT INTO payments (loan_id, last4, brand, amount, method, created_at)
 SELECT l.id,
   CASE WHEN (l.id + s) % 3 = 0 THEN NULL ELSE '1111' END,
