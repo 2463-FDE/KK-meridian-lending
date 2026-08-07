@@ -164,18 +164,23 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments. pan/cvv are legacy-only columns now -- see the tokenization note below.
+-- Payments. Card capture is tokenized in the browser, so no code path writes a
+-- PAN or a CVV any more (ADR 0008, supersedes ADR 0003) -- new rows carry only
+-- last4/brand from the processor's token response.
+--
+-- pan/cvv still exist here on purpose, for one release. Removing them from a
+-- fresh install while db/migrations has only reached the EXPAND step (0029,
+-- back-fill last4) would make a fresh database and a migrated one disagree,
+-- and db/tests/test_migration_paths_converge.py compares exactly that. They go
+-- in the CONTRACT step, db/migrations/0031, and come out of this file in the
+-- same release.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
-    -- Week 5 tokenization fix (ADR 0008, supersedes ADR 0003): pan/cvv are
-    -- legacy columns, kept nullable for rows that predate tokenization --
-    -- never written to by any code path anymore (payment-service never
-    -- receives a raw PAN/CVV to store in the first place). New rows use
-    -- last4/brand instead, populated from the processor's own token
-    -- response, never from a raw card number.
-    pan         TEXT,                 -- full PAN stored (legacy rows only)
-    cvv         TEXT,                 -- CVV stored (legacy rows only, SAD — flat PCI prohibition)
+    -- Legacy, write-path-dead, dropped by db/migrations/0031. No application
+    -- code reads or writes either column as of this release.
+    pan         TEXT,
+    cvv         TEXT,
     last4       TEXT,                 -- display only; never enough to reconstruct a PAN
     brand       TEXT,                 -- e.g. "visa", "mastercard" -- display only
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION

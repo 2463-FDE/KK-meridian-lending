@@ -10,9 +10,12 @@ PRECISION) -- exact base-10 decimal storage. `asdecimal=False` keeps the
 Python-side value a plain float, matching payments.py's own
 Decimal-internally/float-at-the-boundary quantization.
 
-ADR 0008 (Week 5 tokenization): `pan`/`cvv` are legacy, nullable, dead-
-going-forward columns for rows that predate tokenization -- no code path
-writes to them anymore. New rows populate `last4`/`brand` instead, from the
+ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
+longer declares `pan`/`cvv`: no code path reads or writes either column. The
+columns themselves still exist in the database -- db/migrations/0029 (this
+release) only back-fills `last4` from `pan`; the DROP is the contract step,
+db/migrations/0031, on its own PR. They are dead-going-forward columns for rows
+that predate tokenization. New rows populate `last4`/`brand` instead, from the
 processor's own token response.
 
 Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/
@@ -36,8 +39,6 @@ class Payment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     loan_id: Mapped[int | None] = mapped_column(ForeignKey("loans.id"), nullable=True)
-    pan: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
-    cvv: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
     last4: Mapped[str | None] = mapped_column(String, nullable=True)
     brand: Mapped[str | None] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))

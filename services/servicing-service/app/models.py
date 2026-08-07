@@ -9,9 +9,11 @@ caller that reads these columns.
 
 The `balances` table is still a single mutable balance column (no ledger).
 
-ADR 0008 (Week 5 tokenization): `pan`/`cvv` are legacy, nullable, dead-
-going-forward columns for rows that predate tokenization -- payment-service
-never receives a raw PAN/CVV to write here anymore. New rows populate
+ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
+longer declares `pan`/`cvv`, and payment-service never receives a raw PAN/CVV to
+write here. The columns still exist in the database -- db/migrations/0029 (this
+release) only back-fills `last4`; the DROP is the contract step,
+db/migrations/0031, on its own PR. New rows populate
 `last4`/`brand` instead.
 
 Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/
@@ -53,8 +55,14 @@ class Payment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     loan_id: Mapped[int | None] = mapped_column(ForeignKey("loans.id"), nullable=True)
-    pan: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
-    cvv: Mapped[str | None] = mapped_column(String, nullable=True)   # legacy rows only (debt)
+    # EXPAND-PHASE ONLY, read-only. Declared so _display_last4() can fall back to
+    # the last four digits of a legacy PAN during the window where this service
+    # version is live but db/migrations/0029 has not yet back-filled `last4`.
+    # Deploys are not atomic and this change does not enforce migration ordering,
+    # so without it every historical payment's card column blanks silently.
+    # Nothing writes this column. REMOVE together with the fallback in PR #15,
+    # the contract step, once 0029 is deployed and verified.
+    pan: Mapped[str | None] = mapped_column(String, nullable=True)
     last4: Mapped[str | None] = mapped_column(String, nullable=True)
     brand: Mapped[str | None] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
