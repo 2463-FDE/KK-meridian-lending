@@ -1,16 +1,9 @@
-"""Logging setup -- handler wiring only (stream + file). Logs nothing itself.
+"""Logging setup -- wires a stream handler and a file handler. Logs nothing itself.
 
 Output goes to logs/kyc-service.log (gitignored; docker-compose mounts ./logs).
-
-Stale-docstring fix, same as the origination-service and decision-service copies.
-The old text claimed "Logs the full request body on every POST -- including PII.
-No redaction. (D5)". There is no request-body middleware in this service, and
-`run_cip` logs the applicant id and the four CIP booleans, not the identity fields
-it checked.
-
-Note what is genuinely open here, so this correction is not misread as closing it:
-D11 -- KYC is CIP-only, with no OFAC/sanctions screening, no UBO capture and no
-ongoing monitoring. That is a scope limit, not a logging defect.
+`run_cip` logs the four CIP booleans, and the router logs `application_id`/
+`applicant_id` -- not the identity fields being checked.
+Why this docstring used to say otherwise: DEBT.md D5c.
 """
 import logging
 import os

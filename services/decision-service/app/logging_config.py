@@ -1,14 +1,8 @@
-"""Logging setup -- handler wiring only (stream + file). Logs nothing itself.
+"""Logging setup -- wires a stream handler and a file handler. Logs nothing itself.
 
-Stale-docstring fix, same as origination-service's copy of this file. The old text
-claimed "Logs the full request body on every POST -- including PII. No redaction.
-(D5)". This service has no request-body middleware and no call site that logs a
-payload; `decision.py` logs `app_id`, scores and reason codes, never applicant
-PII, and `decision_events` deliberately stores no SSN or PAN either.
-
-The wrong claim was copy-pasted across four services' logging_config.py, which is
-how one inaccurate comment became four -- and why D5a read as an open finding long
-after the behaviour was fixed.
+`decision.py` and `graph.py` log `app_id`, scores and reason codes; `decision_events`
+stores no SSN or PAN. No request-body middleware in this service.
+Why this docstring used to say otherwise: DEBT.md D5c.
 """
 import logging
 import os

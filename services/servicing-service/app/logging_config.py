@@ -1,17 +1,10 @@
-"""Logging setup -- handler wiring only (stream + file). Logs nothing itself.
+"""Logging setup -- wires a stream handler and a file handler. Logs nothing itself.
 
-Output goes to logs/payment-service.log -- this service's legacy duplicate of
-payment-service's charge path writes to the same filename that was handed over in
-the repo. The file is gitignored now (PR #9); it was tracked, and remains in git
-history (D18).
-
-Stale-docstring fix. The old text claimed this module "writes the full charge
-request body (PAN, CVV, SSN) at INFO. No redaction. (D5, #7)". Two things make
-that wrong now: this module only wires handlers, and the legacy
-`payments.charge()` it serves no longer receives PAN, CVV or SSN at all -- it
-takes an opaque `processor_token` plus `last4`/`brand` for display, so there is
-nothing left to redact (ADR 0008; the servicing half of D5a closed with the Week 5
-tokenization work).
+Output goes to logs/payment-service.log: this service's legacy duplicate of
+payment-service's charge path writes to the filename handed over in the repo.
+Gitignored since PR #9; the file itself remains in git history (DEBT.md D18).
+`payments.charge()` receives only processor_token/last4/brand (ADR 0008), so no
+card data reaches this logger. Why this docstring used to say otherwise: D5c.
 """
 import logging
 import os
