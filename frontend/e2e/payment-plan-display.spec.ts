@@ -40,7 +40,7 @@ test("the offer states the regular payments and the different final payment, not
   // which is the defect.
   await expect(
     page.getByText(
-      `${REGULAR_COUNT} monthly payments of ${REGULAR}, then a final payment of ${FINAL}`,
+      `${REGULAR_COUNT} monthly payments of ${REGULAR}, followed by one final payment of ${FINAL}`,
     ),
   ).toBeVisible({ timeout: 15_000 });
 

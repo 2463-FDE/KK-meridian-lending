@@ -734,9 +734,10 @@ export default function ApplyPage() {
                 </select>
               </Field>
             </div>
-            <p className="hint" style={{ marginTop: 12 }}>
-              Estimated rate {pct(OFFER_RATE_PCT)} APR (illustrative — your final
-              rate is set at offer).
+            <p className="hint hint-strong" style={{ marginTop: 12 }}>
+              Estimated interest rate (note rate) {pct(OFFER_RATE_PCT)} —
+              illustrative; your final rate is set at offer. Your APR will be
+              higher, because it also includes the origination fee.
             </p>
           </>
         )}
@@ -1179,22 +1180,27 @@ function OfferPanel({
   return (
     <div style={{ marginTop: 22 }}>
       <h3>Your offer</h3>
-      <p className="hint" style={{ marginBottom: 12 }}>
-        {usd(amount)} over {termMonths} months ·{" "}
-        <strong>
-          {paymentPlanText(
-            disclosure.monthly_payment,
-            disclosure.regular_payment_count,
-            disclosure.final_payment,
-          )}
-        </strong>
-        {disclosure.note_rate_pct != null && (
-          <>
-            {" · interest rate (note rate) "}
-            <strong>{pct(disclosure.note_rate_pct)}</strong>
-          </>
-        )}
+      <p className="hint hint-strong" style={{ marginBottom: 12 }}>
+        {usd(amount)} over {termMonths} months. The rates and the payment
+        schedule are set out below.
       </p>
+
+      {/* Both rates, before the federal box. They are different numbers and
+          neither substitutes for the other. */}
+      <div className="rate-summary" data-testid="rate-summary">
+        <div className="rate-summary-item">
+          <span className="rate-summary-label">Interest rate (note rate)</span>
+          <span className="rate-summary-value" data-testid="note-rate">
+            {disclosure.note_rate_pct != null ? pct(disclosure.note_rate_pct) : "—"}
+          </span>
+        </div>
+        <div className="rate-summary-item">
+          <span className="rate-summary-label">Federal APR</span>
+          <span className="rate-summary-value" data-testid="federal-apr">
+            {pct(disclosure.apr)}
+          </span>
+        </div>
+      </div>
 
       {/* Classic 4-box Federal Truth-in-Lending disclosure layout. */}
       <div className="tila">
@@ -1203,8 +1209,8 @@ function OfferPanel({
           <div className="tila-cell tila-cell-apr">
             <div className="tila-cell-label">Annual Percentage Rate</div>
             <div className="tila-cell-desc">
-              The cost of your credit as a yearly rate. Higher than the interest
-              rate because it includes the origination fee.
+              The total cost of your credit as a yearly rate, including the
+              origination fee.
             </div>
             <div className="tila-cell-value">{pct(disclosure.apr)}</div>
           </div>
@@ -1234,6 +1240,20 @@ function OfferPanel({
             <div className="tila-cell-value">
               {usd(disclosure.total_of_payments)}
             </div>
+          </div>
+        </div>
+        {/* Payment schedule: a full-width row inside the box, beneath the four
+            federal cells. The four boxes are the federal disclosure and carry
+            no schedule, so without this the borrower is told a single monthly
+            figure for a contract whose final payment differs. */}
+        <div className="tila-schedule" data-testid="payment-schedule">
+          <div className="tila-schedule-label">Payment schedule</div>
+          <div className="tila-schedule-value">
+            {paymentPlanText(
+              disclosure.monthly_payment,
+              disclosure.regular_payment_count,
+              disclosure.final_payment,
+            )}
           </div>
         </div>
       </div>

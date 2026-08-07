@@ -74,5 +74,5 @@ export function paymentPlanText(
     regularPaymentCount === 1
       ? `1 monthly payment of ${usd(regularPayment)}`
       : `${regularPaymentCount} monthly payments of ${usd(regularPayment)}`;
-  return `${series}, then a final payment of ${usd(finalPayment)}`;
+  return `${series}, followed by one final payment of ${usd(finalPayment)}`;
 }

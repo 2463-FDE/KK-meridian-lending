@@ -348,6 +348,30 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
   color: var(--muted-2);
   margin-top: 5px;
 }
+/* .hint at --muted-2 measures 4.62:1 on the card background -- over the 4.5:1
+   AA floor, but by less than a palette tweak would survive. Sentences a user
+   has to READ rather than glance at use this instead: 8.06:1, and 13px. */
+.hint-strong {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+/* A fact, not a control. Used where an action is unavailable because it has
+   already happened -- a disabled button would invite clicks on something that
+   can never respond, and announce an unavailable action rather than a state. */
+.status-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
 
 /* ---- buttons ------------------------------------------------------------ */
 
@@ -633,10 +657,16 @@ tbody tr:hover {
   margin-bottom: 8px;
 }
 .tila-cell-desc {
-  font-size: 11px;
-  color: var(--muted-2);
+  font-size: 12px;
+  /* --muted, not --muted-2. Against the .tila background (#0e1828) the old
+     value gave 4.62:1 -- over the 4.5:1 AA floor by a margin thinner than a
+     future palette tweak, on the text that explains what each federal figure
+     means. --muted measures 8.06:1. Size also raised 11px -> 12px; these are
+     explanatory sentences, not captions. */
+  color: var(--muted);
   margin-bottom: 10px;
   min-height: 28px;
+  line-height: 1.45;
 }
 .tila-cell-value {
   font-size: 22px;
@@ -647,12 +677,76 @@ tbody tr:hover {
   font-size: 28px;
   color: var(--accent-ink);
 }
+/* Payment schedule: a full-width row INSIDE the disclosure box, beneath the
+   four federal cells.
+
+   It used to be a bare <p> appended inside .tila, which has overflow:hidden and
+   no padding of its own -- so the text sat flush against the 2px border and
+   clipped. Fixed with real padding on a real row rather than by nudging: no
+   absolute positioning and no negative margins, so the text cannot escape the
+   border at any width. */
+.tila-schedule {
+  border-top: 2px solid var(--ink);   /* the divider, matching .tila-title's */
+  padding: 16px 20px 18px;
+  text-align: center;
+}
+.tila-schedule-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.tila-schedule-value {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+  /* Wrap rather than clip. `anywhere` so a long unbroken figure still breaks
+     instead of forcing horizontal overflow on a narrow screen. */
+  overflow-wrap: anywhere;
+}
+
+/* Both rates, side by side, above the federal box. The note rate and the APR
+   are different numbers and one is not a substitute for the other, so they are
+   shown together with their own labels rather than a single "rate". */
+.rate-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 32px;
+  margin-bottom: 12px;
+}
+.rate-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rate-summary-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+.rate-summary-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
 @media (max-width: 720px) {
   .tila-grid {
     grid-template-columns: repeat(2, 1fr);
   }
   .tila-cell:nth-child(2) {
     border-right: 0;
+  }
+  .tila-schedule {
+    padding: 14px 14px 16px;
+    text-align: left;
+  }
+  .rate-summary {
+    gap: 10px 20px;
   }
 }
 

@@ -47,7 +47,25 @@ test("a legacy loan's schedule is labelled as reconstructed, not contractual", a
   }
 
   await signInAsStaff(page);
-  await page.goto(`/servicing/${legacyLoanId}`);
+  // Wait for the schedule RESPONSE, not just for the element.
+  //
+  // The page fetches the schedule best-effort (Promise.allSettled), so a slow
+  // or failed request leaves the note unrendered with no retry -- and a test
+  // that only waits on the DOM then reports "element not found" for what is
+  // really an unanswered request. Asserting the response makes the two
+  // distinguishable, and removes the race that made this intermittent in a
+  // full-suite run while passing in isolation.
+  const [scheduleResponse] = await Promise.all([
+    page.waitForResponse(
+      (r: { url: () => string }) =>
+        r.url().includes(`/loans/${legacyLoanId}/schedule`),
+      { timeout: 30_000 },
+    ),
+    page.goto(`/servicing/${legacyLoanId}`),
+  ]);
+  expect(scheduleResponse.ok(), "the schedule endpoint did not answer").toBe(true);
+  const payload = await scheduleResponse.json();
+  expect(payload.source, "this loan should have no stored schedule").toBe("reconstructed");
 
   const note = page.getByTestId("schedule-note");
   await expect(note).toBeVisible({ timeout: 15_000 });

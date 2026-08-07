@@ -17,6 +17,12 @@ interface Kyc {
 }
 
 interface Offer {
+  // The CONTRACTUAL interest rate the payments are priced at -- NOT the APR.
+  // Optional: a pre-0030 offer has no stored note rate, and the summary shows
+  // an em dash rather than presenting the APR as if it were the note rate.
+  note_rate_pct?: number | null;
+  // The federal APR: the note rate plus the prepaid origination fee, so always
+  // the larger of the two once a fee exists.
   apr: number;
   finance_charge: number;
   // The REGULAR payment. Model B bills final_payment in the last period.
@@ -507,36 +513,69 @@ function UnderwritingDetailContent() {
       <h2>Offer</h2>
       <div className="card">
         <div className="spread" style={{ marginBottom: offer ? 16 : 0 }}>
-          <p className="hint" style={{ margin: 0 }}>
-            Generate a Truth-in-Lending offer at {pct(OFFER_RATE_PCT)} APR for{" "}
-            {usd(app?.amount)} over {app?.term_months} months.
+          <p className="hint hint-strong" style={{ margin: 0 }}>
+            Generate a Truth-in-Lending offer using a {pct(OFFER_RATE_PCT)} note
+            rate for {usd(app?.amount)} over {app?.term_months} months.
           </p>
-          <button
-            className="btn-ghost"
-            onClick={makeOffer}
-            disabled={actionBusy || Boolean(offer) || currentDecision !== "approve"}
-            title={
-              offer
-                ? "An offer has already been created for this application."
-                : currentDecision === "deny"
+          {offer ? (
+            // Not a control. "Offer already created" describes state and can
+            // never be actioned -- rendering it as a disabled button invited
+            // clicks on something that was never going to respond, and read to
+            // a screen reader as an unavailable action rather than a fact.
+            // A status message says the same thing honestly.
+            <span className="status-note" role="status" data-testid="offer-exists">
+              Offer already created
+            </span>
+          ) : (
+            <button
+              className="btn-ghost"
+              onClick={makeOffer}
+              disabled={actionBusy || currentDecision !== "approve"}
+              // aria-disabled alongside `disabled` so assistive technology is
+              // told why the control is unavailable rather than skipping it
+              // silently; the title carries the reason for pointer users.
+              aria-disabled={actionBusy || currentDecision !== "approve"}
+              title={
+                currentDecision === "deny"
                   ? `An offer cannot be created because this application was denied.${decision?.adverse_action_reason ? ` Decision reason: ${decision.adverse_action_reason}` : ""}`
                   : currentDecision !== "approve"
                     ? "An offer cannot be created until the application receives a final approval."
                     : undefined
-            }
-          >
-            {actionBusy ? "Working…" : offer ? "Offer already created" : "Make offer"}
-          </button>
+              }
+            >
+              {actionBusy ? "Working…" : "Make offer"}
+            </button>
+          )}
         </div>
 
         {offer ? (
+          <>
+          {/* Both rates, before the federal box. They are different numbers --
+              the note rate prices the payments, the APR adds the prepaid
+              origination fee -- and showing one alone is what let a 5.43%
+              "APR" sit under a 7.99% loan without looking wrong. */}
+          <div className="rate-summary" data-testid="rate-summary">
+            <div className="rate-summary-item">
+              <span className="rate-summary-label">Interest rate (note rate)</span>
+              <span className="rate-summary-value" data-testid="note-rate">
+                {offer.note_rate_pct != null ? pct(offer.note_rate_pct) : "—"}
+              </span>
+            </div>
+            <div className="rate-summary-item">
+              <span className="rate-summary-label">Federal APR</span>
+              <span className="rate-summary-value" data-testid="federal-apr">
+                {pct(offer.apr)}
+              </span>
+            </div>
+          </div>
           <div className="tila">
             <div className="tila-title">Federal Truth-in-Lending Disclosure</div>
             <div className="tila-grid">
               <div className="tila-cell tila-cell-apr">
                 <div className="tila-cell-label">Annual Percentage Rate</div>
                 <div className="tila-cell-desc">
-                  The cost of your credit as a yearly rate.
+                  The total cost of your credit as a yearly rate, including the
+                  origination fee.
                 </div>
                 <div className="tila-cell-value">{pct(offer.apr)}</div>
               </div>
@@ -568,33 +607,36 @@ function UnderwritingDetailContent() {
                 </div>
               </div>
             </div>
-            {/* Payment plan, spelled out. The four boxes above are the federal
-                disclosure and do not carry the payment schedule, so staff had
-                no way to see that the final payment differs from the regular
-                one -- which under Model B it almost always does. A legacy offer
-                with no recorded schedule says so instead of showing a
-                reconstructed figure beside four genuinely disclosed ones. */}
-            <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>
-              {offer.regular_payment_count != null && offer.final_payment != null ? (
-                <>
-                  Payment plan:{" "}
-                  <strong>
-                    {paymentPlanText(
-                      offer.monthly_payment,
-                      offer.regular_payment_count,
-                      offer.final_payment,
-                    )}
-                  </strong>
-                </>
-              ) : (
-                <>
-                  Monthly payment <strong>{usd(offer.monthly_payment)}</strong>. No
-                  contractual payment schedule was recorded for this offer, so the
-                  final payment is not known and it cannot be boarded.
-                </>
-              )}
-            </p>
+            {/* Payment schedule: a full-width row INSIDE the box, beneath the
+                four federal cells. The four boxes are the federal disclosure
+                and do not carry the schedule, so staff had no way to see that
+                the final payment differs from the regular one -- which under
+                Model B it almost always does.
+
+                Previously a bare <p> appended here, which .tila's
+                overflow:hidden and zero padding pushed against the border. Now
+                a real row with real padding, so nothing can sit on the border
+                at any viewport width. */}
+            <div className="tila-schedule" data-testid="payment-schedule">
+              <div className="tila-schedule-label">Payment schedule</div>
+              <div className="tila-schedule-value">
+                {offer.regular_payment_count != null && offer.final_payment != null ? (
+                  paymentPlanText(
+                    offer.monthly_payment,
+                    offer.regular_payment_count,
+                    offer.final_payment,
+                  )
+                ) : (
+                  <>
+                    Monthly payment {usd(offer.monthly_payment)}. No contractual
+                    payment schedule was recorded for this offer, so the final
+                    payment is not known and it cannot be boarded.
+                  </>
+                )}
+              </div>
+            </div>
           </div>
+          </>
         ) : null}
       </div>
 

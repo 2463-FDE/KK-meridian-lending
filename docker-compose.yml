@@ -251,6 +251,20 @@ services:
       # Forwarded as X-Internal-Token on the staff-ops /decision/* proxy path
       # (see app/main.py) -- must match decision-service's copy above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      # Rate limit, raised for THIS STACK ONLY.
+      #
+      # The application default stays 120 requests / 60s per client IP
+      # (services/gateway/app/config.py) -- that is the shipped control and it
+      # is not weakened here. This compose file runs the demo and the Playwright
+      # suite, and the whole suite hits the gateway from ONE source IP: it is a
+      # dozen browser journeys, not a dozen users. It began returning 429 on
+      # /auth/me and /los/applications once the suite grew, which surfaced as
+      # unrelated specs failing to sign in.
+      #
+      # Overridable, so an operator can exercise the real limit by exporting
+      # GATEWAY_RATE_LIMIT_MAX=120 before `docker compose up`.
+      RATE_LIMIT_MAX_REQUESTS: ${GATEWAY_RATE_LIMIT_MAX:-2000}
+      RATE_LIMIT_WINDOW_SECONDS: ${GATEWAY_RATE_LIMIT_WINDOW:-60}
     ports:
       - "8000:8000"
     depends_on:
