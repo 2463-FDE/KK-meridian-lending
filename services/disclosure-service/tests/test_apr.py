@@ -35,7 +35,7 @@ from decimal import Decimal, getcontext
 
 import pytest
 
-from app import apr, fees, offer
+from app import apr, fees, offer, schedule
 
 getcontext().prec = 28
 
@@ -258,19 +258,65 @@ def test_the_regression_case_by_name():
 # Filled in from a manual run of the FFIEC APR tool. Every field is required:
 # a vector with no recorded provenance is not outside evidence, it is a number
 # somebody typed.
+# The vector describes the ACTUAL Model B cash flow, which is NOT 48 level
+# payments. It is 47 payments of 439.35 and a final payment of 439.25 -- the
+# final period bills remaining principal plus that period's interest.
+#
+# This mattered: the vector previously said "48 monthly payments of 439.35",
+# and capturing that from the FFIEC tool would have certified an APR for a cash
+# flow this system does not produce. The tool would have returned a correct
+# answer to the wrong question, and the result would have looked like outside
+# verification. The irregular final payment must be entered as its own payment
+# stream.
+#
+# Cross-check while capturing: the sum of the entered payments must be
+# 21,088.70 (= 47 x 439.35 + 439.25). If the tool's own total differs, the
+# stream was entered wrongly and the APR it reports is not this loan's.
+#
+# Every provenance field is required. A vector with no recorded provenance is
+# not outside evidence, it is a number somebody typed.
 FFIEC_VECTOR = {
     "tool": None,              # e.g. "FFIEC APR Computational Tool", incl. version
     "url": None,               # where it was obtained
     "amount_financed": Decimal("17460.00"),
-    "payment": Decimal("439.35"),
-    "payments": 48,
+    # Two streams, in order. Entered separately in the tool, not averaged.
+    "regular_payment": Decimal("439.35"),
+    "regular_payment_count": 47,
+    "final_payment": Decimal("439.25"),
+    "total_of_payments": Decimal("21088.70"),   # operator cross-check
     "frequency": "monthly",
     "first_period": "regular",
-    "balloon": None,           # none
+    "balloon": None,           # none -- the final payment is an adjustment, not a balloon
     "expected_apr": None,      # <-- the APR the tool displayed
     "verified_on": None,       # date of the run
     "tolerance": TILA_APR_TOLERANCE,   # 12 CFR 1026.22(a)(1), regular transaction
 }
+
+
+def _ffiec_payment_sequence(v: dict) -> list:
+    return [v["regular_payment"]] * v["regular_payment_count"] + [v["final_payment"]]
+
+
+def test_the_ffiec_vector_describes_the_cash_flow_this_system_actually_discloses():
+    """Guards the vector itself, and runs whether or not the capture has happened.
+
+    An outside oracle is only evidence if it was asked about the right cash
+    flow. This asserts the payment stream written above is the one the
+    production generator produces for this loan -- so if Model B's rounding ever
+    changes, the vector goes stale loudly instead of continuing to certify a
+    superseded schedule.
+    """
+    v = FFIEC_VECTOR
+    principal = v["amount_financed"] / (1 - Decimal(str(fees.ORIGINATION_FEE_PCT)))
+    rows = schedule.amortization(
+        float(principal), fees.NOTE_RATE_PCT, v["regular_payment_count"] + 1
+    )
+    produced = [Decimal(str(r["payment"])) for r in rows]
+    assert produced == _ffiec_payment_sequence(v), (
+        "the FFIEC vector no longer matches what this system discloses for this "
+        "loan -- recapture it before relying on the recorded APR"
+    )
+    assert sum(produced) == v["total_of_payments"]
 
 
 @pytest.mark.skipif(
@@ -279,8 +325,11 @@ FFIEC_VECTOR = {
         "FFIEC APR tool result not yet captured. This is the only OUTSIDE oracle in "
         "this file and PR #10 must not merge while it is skipped -- sections 1-3 are "
         "all internal to this repository. To close: run the FFIEC APR tool with "
-        "amount financed 17,460.00 / 48 monthly payments / 439.35 / regular first "
-        "period / no balloon, then fill in tool, url, expected_apr and verified_on."
+        "amount financed 17,460.00, monthly, regular first period, no balloon, and "
+        "the payment stream entered as 47 payments of 439.35 FOLLOWED BY one "
+        "payment of 439.25 (total 21,088.70 -- check the tool agrees). Then fill in "
+        "tool, url, expected_apr and verified_on. Do not enter 48 level payments: "
+        "that is a different cash flow and its APR would not be this loan's."
     ),
 )
 def test_the_apr_matches_a_federally_published_tool():
@@ -296,13 +345,13 @@ def test_the_apr_matches_a_federally_published_tool():
     assert v["tool"] and v["url"] and v["verified_on"], (
         "an FFIEC vector without tool, url and date is not outside evidence"
     )
-    # Recover the note rate that produces this payment on the gross principal,
-    # then disclose through the same path production uses.
-    principal = v["amount_financed"] / (1 - fees.ORIGINATION_FEE_PCT)
-    note_rate = Decimal(str(apr.note_rate_from_payment(
-        float(principal), float(v["payment"]), v["payments"]
+    # Solved over the actual sequence, through the same function production
+    # uses. compute_apr's level-payment path is deliberately NOT used here: it
+    # prices a cash flow with no adjusted final payment, so agreeing with the
+    # tool through it would prove nothing about what is disclosed.
+    disclosed = Decimal(str(apr.apr_from_cash_flows(
+        v["amount_financed"], _ffiec_payment_sequence(v)
     )))
-    disclosed = Decimal(str(apr.compute_apr(float(principal), float(note_rate), v["payments"])))
 
     delta = abs(disclosed - v["expected_apr"])
     assert delta <= v["tolerance"], (

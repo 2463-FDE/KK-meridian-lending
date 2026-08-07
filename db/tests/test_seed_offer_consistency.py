@@ -64,6 +64,37 @@ def _actuarial_apr(amount_financed: Decimal, payment: Decimal, term: int) -> Dec
     return (lo + hi) / 2 * 12 * 100
 
 
+def _actuarial_apr_from_sequence(amount_financed: Decimal, payments: list) -> Decimal:
+    """Solve the rate over the ACTUAL Model B payment sequence.
+
+    _actuarial_apr above assumes every payment is identical. Under Model B the
+    final one is not, so that solve prices a cash flow nobody receives -- it is
+    close enough to pass a loose tolerance, which is exactly why it is not good
+    enough to verify a disclosed APR with. This one takes the real sequence and
+    lets the seeded value be asserted to the last published digit.
+    """
+    lo, hi = Decimal(0), Decimal(1)
+    for _ in range(400):
+        mid = (lo + hi) / 2
+        if mid > 0:
+            pv = sum(p / (1 + mid) ** k for k, p in enumerate(payments, 1))
+        else:
+            pv = sum(payments)
+        if pv > amount_financed:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2 * 12 * 100
+
+
+def _model_b_payments(o: dict) -> list:
+    """The stored contract as a payment sequence: count x regular, then final."""
+    return (
+        [Decimal(str(o["monthly_payment"]))] * int(o["regular_payment_count"])
+        + [Decimal(str(o["final_payment"]))]
+    )
+
+
 SCHEMA = "seed_offer_consistency"
 INIT_DIR = pathlib.Path(__file__).resolve().parents[1] / "init"
 # Every file docker-compose's fresh Postgres volume runs, in filename order --
@@ -114,7 +145,9 @@ def seeded_offers(seeded_db):
         cur.execute(
             "SELECT o.app_id, a.amount, a.term_months, o.note_rate_pct, o.apr, "
             "       o.monthly_payment, o.amount_financed, o.finance_charge, "
-            "       o.total_of_payments, o.fee_pct_used, l.apr AS loan_rate "
+            "       o.total_of_payments, o.fee_pct_used, l.apr AS loan_rate, "
+            "       o.regular_payment_count, o.final_payment, o.schedule_version, "
+            "       o.term_months AS offer_term_months "
             "FROM offers o "
             "JOIN applications a ON a.id = o.app_id "
             "LEFT JOIN loans l ON l.app_id = o.app_id "
@@ -222,8 +255,13 @@ def test_the_tila_box_foots_for_every_seeded_offer(seeded_offers):
 
 def test_the_disclosed_apr_is_actuarial_not_an_add_on_ratio(seeded_offers):
     """Re-derives every seeded APR from its own payment stream. This is what
-    catches a stale literal in 003_seed_bulk.sql's apr_lookup table, and what
-    would have caught the original add-on formula."""
+    would have caught the original add-on formula.
+
+    Kept at the Reg Z tolerance because it solves over a LEVEL payment, which
+    Model B's cash flow is not. The exact check is the test below; this one
+    remains as the coarse, independent statement that the stored value is an
+    actuarial rate at all rather than a ratio.
+    """
     for o in seeded_offers:
         af = Decimal(str(o["amount_financed"]))
         payment = _payment_unrounded(
@@ -235,6 +273,129 @@ def test_the_disclosed_apr_is_actuarial_not_an_add_on_ratio(seeded_offers):
             f"app {o['app_id']}: stored APR {stored}, actuarially {expected:.4f} "
             f"-- outside the {APR_TOLERANCE}pp Reg Z tolerance"
         )
+
+
+def test_every_seeded_apr_is_solved_from_its_own_model_b_cash_flow(seeded_offers):
+    """The exact check: each stored APR re-solved over that row's ACTUAL payment
+    sequence, and asserted to the published 3dp with no tolerance.
+
+    A tolerance is the right thing for the Reg Z comparison above and the wrong
+    thing here. These are seeded literals; there is no measurement error to
+    absorb, so anything other than equality means the committed value and the
+    generator disagree. A 0.125pp tolerance would happily accept an APR
+    belonging to a different row -- which is precisely the failure mode the old
+    (fee, rate, term) lookup had, since it gave every row in a group the same
+    APR while their cash flows differ.
+    """
+    for o in seeded_offers:
+        af = Decimal(str(o["amount_financed"]))
+        expected = _actuarial_apr_from_sequence(af, _model_b_payments(o))
+        stored = Decimal(str(o["apr"]))
+        assert stored == expected.quantize(Decimal("0.001"), ROUND_HALF_UP), (
+            f"app {o['app_id']}: stored APR {stored} but its own payment "
+            f"sequence solves to {expected:.6f}. Regenerate with "
+            f"python db/tools/regenerate_seed_offers.py --write"
+        )
+
+
+def test_every_seeded_offer_records_a_complete_model_b_schedule(seeded_offers):
+    """No seeded row may be a legacy row.
+
+    Legacy rows are legitimate in a deployed database -- 0030 does not
+    back-fill -- but a FRESH volume has no history to be missing. A seeded offer
+    without a stored schedule cannot be boarded, so the demo would present
+    offers that refuse to fund.
+    """
+    incomplete = [
+        o["app_id"] for o in seeded_offers
+        if o["schedule_version"] is None or o["final_payment"] is None
+        or o["regular_payment_count"] is None or o["offer_term_months"] is None
+    ]
+    assert not incomplete, f"{len(incomplete)} seeded offer(s) have no schedule: {incomplete[:5]}"
+    assert all(o["schedule_version"] == "B1" for o in seeded_offers)
+
+
+def test_the_stored_total_is_the_sum_of_the_stored_payments(seeded_offers):
+    """count x regular + final == total_of_payments, for every row.
+
+    This is the identity the pre-Model-B seed failed: it derived the total from
+    the UNROUNDED payment times the term, so the total disagreed with the
+    schedule printed beside it. Asserted from the stored schedule rather than
+    recomputed from principal and rate, so it tests the row and not the
+    generator.
+    """
+    for o in seeded_offers:
+        total = Decimal(str(o["total_of_payments"]))
+        summed = sum(_model_b_payments(o))
+        assert summed == total, (
+            f"app {o['app_id']}: payments sum to {summed} but total_of_payments "
+            f"is {total}"
+        )
+
+
+def test_the_payment_count_agrees_with_the_offers_own_term(seeded_offers):
+    """regular_payment_count + 1 == term_months. Also a CHECK constraint; here
+    so a failure names the offending applications instead of aborting the seed
+    on the first bad insert."""
+    bad = [
+        o["app_id"] for o in seeded_offers
+        if int(o["regular_payment_count"]) + 1 != int(o["offer_term_months"])
+    ]
+    assert not bad, f"payment count contradicts the term for: {bad[:5]}"
+
+
+def test_the_offer_term_matches_the_application_it_was_written_for(seeded_offers):
+    """The contractual term and the requested term agree across the seed.
+
+    They are separate columns because they answer different questions and a
+    counteroffer could legitimately part them. Nothing in the seed is a
+    counteroffer, so a divergence here means a generated row was filed against
+    the wrong application.
+    """
+    mismatched = [
+        o["app_id"] for o in seeded_offers
+        if int(o["offer_term_months"]) != int(o["term_months"])
+    ]
+    assert not mismatched, f"offer term differs from the application term for: {mismatched[:5]}"
+
+
+def test_the_seed_covers_exactly_the_expected_population(seeded_offers):
+    """180 bulk rows and 4 curated anchors.
+
+    Pinned as exact counts because both directions are bugs: fewer means the
+    generated block fell out of step with the application formulas, and more
+    means rows were seeded for applications that were never funded. An earlier
+    count of 188 in this project's own notes was runtime e2e rows being mistaken
+    for seed data, which is the mistake a `>=` assertion invites.
+    """
+    bulk = [o for o in seeded_offers if 7000 <= o["app_id"] <= 7299]
+    curated = [o for o in seeded_offers if o["app_id"] < 7000]
+    assert len(bulk) == 180, f"{len(bulk)} bulk offers, expected 180"
+    assert len(curated) == 4, f"{len(curated)} curated offers, expected 4"
+    assert sorted(o["app_id"] for o in curated) == [4471, 5582, 6011, 6014]
+
+
+def test_each_bulk_apr_belongs_to_its_own_row_not_its_rate_term_group(seeded_offers):
+    """The reason the (fee, rate, term) APR lookup was retired.
+
+    Under Model B the final payment absorbs a residue whose size depends on the
+    principal, so rows sharing a rate and term have different cash flows. This
+    asserts the seeded APRs actually reflect that -- at least one group must
+    contain more than one distinct APR. If they were all equal within a group,
+    the data would have silently reverted to the old lookup's behaviour while
+    every other test here still passed.
+    """
+    groups: dict = {}
+    for o in seeded_offers:
+        if not (7000 <= o["app_id"] <= 7299):
+            continue
+        key = (Decimal(str(o["note_rate_pct"])), int(o["offer_term_months"]))
+        groups.setdefault(key, set()).add(Decimal(str(o["apr"])))
+    multi = {k: v for k, v in groups.items() if len(v) > 1}
+    assert multi, (
+        "every (rate, term) group has a single APR -- the seed looks like it was "
+        "generated from a per-group lookup rather than per application"
+    )
 
 
 def test_loans_apr_holds_the_note_rate_not_the_disclosed_apr(seeded_offers):

@@ -56,12 +56,22 @@ INSERT INTO decisions (app_id, outcome) VALUES
 -- cannot fail to foot. Verified by db/tests/test_seed_offer_consistency.py.
 --
 --   app   note   apr     finance_charge  payment  amount_financed  total
-INSERT INTO offers (app_id, note_rate_pct, apr, finance_charge, monthly_payment,
-                    amount_financed, total_of_payments, fee_pct_used) VALUES
-  (4471,  7.99,  9.584,   3628.71,  439.35, 17460.00, 21088.71, 0.0300),
-  (5582,  9.99, 12.096,   2297.40,  387.15, 11640.00, 13937.40, 0.0300),
-  (6011,  7.99, 10.072,   2369.15,  469.98, 14550.00, 16919.15, 0.0300),
-  (6014, 11.25, 12.590,  17101.92, 1093.37, 48500.00, 65601.92, 0.0300);
+-- BEGIN GENERATED OFFER ROWS (db/tools/regenerate_seed_offers.py)
+-- The four curated anchors. Do not hand-edit: regenerate with
+-- `python db/tools/regenerate_seed_offers.py --write`.
+--
+-- These previously carried pre-Model-B values -- 4471's total was 21088.71
+-- against an actual 21088.70, and 6011's 16919.15 against 16919.17. A cent
+-- or two, on the figures a demo points at to show the disclosure footing.
+INSERT INTO offers (app_id, note_rate_pct, fee_pct_used, apr,
+                    finance_charge, monthly_payment, amount_financed,
+                    total_of_payments, regular_payment_count, final_payment,
+                    term_months, schedule_version) VALUES
+  (4471, 7.99, 0.0300, 9.584, 3628.70, 439.35, 17460.00, 21088.70, 47, 439.25, 48, 'B1'),
+  (5582, 9.99, 0.0300, 12.096, 2297.39, 387.15, 11640.00, 13937.39, 35, 387.14, 36, 'B1'),
+  (6011, 7.99, 0.0300, 10.072, 2369.17, 469.98, 14550.00, 16919.17, 35, 469.87, 36, 'B1'),
+  (6014, 11.25, 0.0300, 12.590, 17101.83, 1093.37, 48500.00, 65601.83, 59, 1093.00, 60, 'B1');
+-- END GENERATED OFFER ROWS
 
 -- `loans.apr` holds the CONTRACTUAL note rate despite the column name (D19) --
 -- it is what servicing/schedule.py::amortization() bills from. 4471 and 6011
