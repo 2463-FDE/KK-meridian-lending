@@ -695,9 +695,11 @@ indexes, foreign keys and defaults. Four migrations could not replay onto a
 fresh database at all before this; the legacy-versus-fresh comparison then found
 five indexes that `db/init` creates and no migration ever did.
 
-**Browser end-to-end** (`frontend/e2e/`, 9 specs): approved, denied,
-existing-offer, both halves of the manual-review path, and the review-step
-edit affordance. Each verifies
+**Browser end-to-end** (`frontend/e2e/`, 7 spec files): approved, denied,
+existing-offer, both halves of the manual-review path, the review-step edit
+affordance, and the submission edit lock (in-flight and post-failure). The
+count is of `*.spec.ts` files in that directory — `fixtures.ts` is shared
+helpers, not a spec. Each verifies
 PostgreSQL rows directly rather than trusting the screen. The interactive
 verification these replace was never checked in, so it was not repeatable by
 anyone else — the same closure gap as the roadmap itself.

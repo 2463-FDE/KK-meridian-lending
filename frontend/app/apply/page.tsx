@@ -281,6 +281,11 @@ export default function ApplyPage() {
     setStep((s) => Math.max(1, s - 1));
   }
 
+  // What the Edit controls disable on. It has to be the SAME condition
+  // editStep() refuses on, or the buttons lie: they read as available while
+  // every click is dropped on the floor. `busy` alone was that lie.
+  const editLocked = busy || submitted !== null;
+
   /** Jump straight from the review to the step that owns a field. */
   function editStep(target: number) {
     // Guarded in the function, not only on the button. The disabled attribute
@@ -350,6 +355,15 @@ export default function ApplyPage() {
       setApp(res);
       setStep(5);
     } catch (err) {
+      // Release the snapshot. It exists to freeze the values the backend
+      // ACCEPTED; if the POST never got that far, there is nothing to freeze,
+      // and leaving it set locked the borrower out permanently -- editStep()
+      // and returnToReview() both refuse while `submitted` is non-null, so
+      // after a validation error or a dropped connection every Edit control on
+      // the review silently did nothing. Clearing it here is what makes the
+      // retry path work; the success path never reaches this branch, so the
+      // in-flight race the snapshot closes stays closed.
+      setSubmitted(null);
       setApiError(errMsg(err, "Could not submit your application."));
     } finally {
       setBusy(false);
@@ -724,7 +738,7 @@ export default function ApplyPage() {
               title="Review your application"
               desc="Double check everything below before you submit."
             />
-            <SummaryGroup title="Personal" editId="edit-step-1" onEdit={() => editStep(1)} editDisabled={busy}>
+            <SummaryGroup title="Personal" editId="edit-step-1" onEdit={() => editStep(1)} editDisabled={editLocked}>
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
               <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
@@ -735,7 +749,7 @@ export default function ApplyPage() {
               <SummaryRow label="State" value={form.state} />
               <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
-            <SummaryGroup title="Employment & income" editId="edit-step-2" onEdit={() => editStep(2)} editDisabled={busy}>
+            <SummaryGroup title="Employment & income" editId="edit-step-2" onEdit={() => editStep(2)} editDisabled={editLocked}>
               <SummaryRow label="Employer" value={form.employer} />
               <SummaryRow label="Job title" value={form.job_title} />
               <SummaryRow
@@ -747,7 +761,7 @@ export default function ApplyPage() {
                 value={form.employment_years}
               />
             </SummaryGroup>
-            <SummaryGroup title="Loan details" editId="edit-step-3" onEdit={() => editStep(3)} editDisabled={busy}>
+            <SummaryGroup title="Loan details" editId="edit-step-3" onEdit={() => editStep(3)} editDisabled={editLocked}>
               <SummaryRow label="Amount" value={usd(form.amount)} />
               <SummaryRow
                 label="Term"

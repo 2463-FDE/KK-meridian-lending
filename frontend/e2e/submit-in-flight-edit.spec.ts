@@ -108,6 +108,93 @@ test("an edit attempted while the submission is in flight cannot change the appl
   }
 });
 
+test("a failed submission releases the edit lock, and the corrected retry is what gets stored", async ({ page }) => {
+  // The other side of the lock, and the defect the first version of it
+  // introduced. `submitted` was set BEFORE the POST and only ever cleared by
+  // success, so a rejected or dropped request left every Edit control refusing
+  // for the rest of the session -- while still LOOKING available, because the
+  // disabled attribute tracked `busy` and `busy` came back false. A borrower
+  // whose application was rejected for a bad field could see the error, click
+  // Edit to fix that exact field, and have nothing happen at all.
+  const applicant = fictionalApplicant("Rowan", /* even ssn */ true, 100_000);
+
+  // Fail the first POST at the API boundary, then get out of the way. Failing
+  // exactly once is what makes the retry meaningful: a permanently broken route
+  // would prove the lock released but never that the correction reached the
+  // database.
+  let attempts = 0;
+  await page.route("**/los/applications", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    attempts += 1;
+    if (attempts === 1) {
+      return route.fulfill({
+        status: 422,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Simulated rejection: check the loan amount." }),
+      });
+    }
+    return route.fallback();
+  });
+
+  await submitApplication(page, applicant, { stopAtReview: true });
+  await page.getByRole("button", { name: /Submit application/ }).click();
+
+  // The failure is reported, and the wizard stays on the review screen.
+  await expect(page.getByText(/Simulated rejection/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Step 4 of 5")).toBeVisible();
+
+  // --- the lock is released, in the affordance AND in the behaviour ---------
+  // Both halves matter. Asserting only that the button is enabled would pass
+  // against the exact defect being fixed here, where the button was enabled and
+  // the click was dropped; asserting only the navigation would miss a button
+  // left visually disabled over a working handler.
+  for (const group of ["Personal", "Employment & income", "Loan details"]) {
+    await expect(
+      page.getByRole("button", { name: `Edit ${group}` }),
+      `Edit ${group} must be usable again after a failed submission`,
+    ).toBeEnabled();
+  }
+  await page.getByRole("button", { name: "Edit Loan details" }).click();
+  await expect(
+    page.getByText("Step 3 of 5"),
+    "Edit must actually navigate, not silently return",
+  ).toBeVisible();
+
+  // Correct the value the simulated rejection complained about. The amount is a
+  // range input, so it is set by keyboard -- a click at a coordinate would make
+  // the resulting value depend on the viewport width.
+  const amount = page.locator('input[type="range"]#amount');
+  await amount.focus();
+  await amount.press("ArrowRight");
+  const corrected = Number(await amount.inputValue());
+
+  await page.getByRole("button", { name: "Return to review" }).click();
+  await expect(page.getByText("Step 4 of 5")).toBeVisible();
+
+  // --- the retry goes through, carrying the correction ----------------------
+  await page.getByRole("button", { name: /Submit application/ }).click();
+  await expect(page.getByText("Step 5 of 5")).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText("received")).toBeVisible({ timeout: 20_000 });
+  expect(attempts, "one rejected POST and one accepted retry").toBe(2);
+
+  const appId = await currentAppId(page);
+  const client = dbClient();
+  await client.connect();
+  try {
+    const row = await client.query(
+      "SELECT amount FROM applications WHERE id = $1",
+      [appId],
+    );
+    expect(row.rowCount).toBe(1);
+    // The stored amount is the EDITED one. Under a stale snapshot the retry
+    // would have re-sent the originally captured values, so this is the
+    // assertion that the correction was not merely allowed but honoured.
+    expect(Number(row.rows[0].amount)).toBe(corrected);
+  } finally {
+    await client.end();
+  }
+});
+
 test("the offer is created on the submitted terms, not on later form state", async ({ page }) => {
   const applicant = fictionalApplicant("Alexis", /* even ssn */ true, 100_000);
 
