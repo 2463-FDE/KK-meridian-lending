@@ -34,6 +34,7 @@ from app import config, db
 from app import apr as apr_mod
 from app import offer as offer_mod
 from app import schedule as schedule_mod
+from app.routers import offers as offers_router
 from app.database import get_session
 from app.main import app
 import pytest
@@ -220,6 +221,10 @@ def test_create_offer_falls_back_to_read_when_insert_hits_the_app_id_constraint(
         "amount_financed": 8700.0, "total_of_payments": 9600.0,
         "regular_payment_count": 23, "final_payment": 400.12,
         "term_months": 24, "schedule_version": "B1",
+        # Part of a COMPLETE offer since boarding began reading it -- a fixture
+        # without it now describes a row that repair would (correctly) try to
+        # regenerate, which is not what this test is about.
+        "principal": 9000.0,
         "accepted_at": None,
     }
     real_query = fake_db.query
@@ -455,7 +460,18 @@ def test_a_legacy_offer_without_a_stored_note_rate_recovers(monkeypatch):
 
     assert resp.status_code == 200
     assert called, "recovery was not reached for a row with no stored note rate"
-    assert resp.json()["disclosure"]["note_rate_pct"] == pytest.approx(7.99, abs=1e-3)
+    # Recovery still runs -- it is what draws the reconstructed SCHEDULE for a
+    # legacy row -- but the recovered value is NOT reported as the contractual
+    # rate. It is an inference from an already-rounded payment and is not exact
+    # (a genuine 7.99% $1,000/12-month offer recovers as 7.98177%, which the
+    # borrower UI would print as "7.98%" under "Interest rate (note rate)"), and
+    # migration 0030 deliberately leaves an unprovable legacy rate NULL rather
+    # than guessing it. Reporting a guess here would have re-manufactured
+    # exactly what the migration refused to write. Reviewed on PR #10.
+    assert resp.json()["disclosure"]["note_rate_pct"] is None
+    # ...and the reconstruction it drives is still returned, so the legacy offer
+    # still displays a schedule.
+    assert len(resp.json()["schedule"]) > 0
 
 
 def test_a_mismatched_body_term_does_not_reach_the_stored_schedule(monkeypatch):
@@ -594,3 +610,59 @@ def test_the_stored_schedule_is_expanded_not_regenerated(monkeypatch):
     # internally consistent rather than being payments with no breakdown.
     for row in rows:
         assert row["principal"] + row["interest"] == pytest.approx(row["payment"], abs=0.005)
+
+
+def test_a_recovered_rate_is_never_reported_as_the_contractual_rate():
+    """Migration 0030 leaves an unprovable legacy rate NULL; so does this.
+
+    Recovery solves a rate from an already-rounded payment, so it is close but
+    not exact: a genuine 7.99% $1,000/12-month offer with an $86.98 stored
+    payment comes back as ~7.98177%, which the borrower UI prints as "7.98%"
+    under the label "Interest rate (note rate)" -- a contractual term the
+    borrower was never quoted. Reviewed on PR #10.
+    """
+    offer = _FakeOffer(
+        id=93, app_id=93, decision_id=93, fee_pct_used=0.03,
+        note_rate_pct=None,                       # legacy: nothing stored
+        apr=9.10, finance_charge=41.76, monthly_payment=86.98,
+        amount_financed=970.0, total_of_payments=1043.76,
+    )
+    body = _offer_response_for(offer, 93)
+
+    assert body["disclosure"]["note_rate_pct"] is None, (
+        "a rate inferred from a rounded payment was reported as contractual"
+    )
+    # The inference still does its one legitimate job: drawing the schedule a
+    # legacy offer would otherwise not have at all.
+    assert len(body["schedule"]) > 0
+
+
+def test_principal_alone_missing_still_triggers_regeneration():
+    """The gap that was detectable and unfixable at the same time.
+
+    An unaccepted offer with a complete schedule but no `principal` is refused
+    by origination's boarding gate forever, and `terms_needing_regeneration()`
+    used to report no gap -- so POST returned it unchanged and nothing could
+    fill it in. The database's all-or-nothing CHECK does not cover principal, so
+    the state is reachable. Reviewed on PR #10.
+    """
+    row = {
+        "apr": 9.584, "finance_charge": 500.0, "monthly_payment": 400.0,
+        "amount_financed": 8700.0, "total_of_payments": 9600.0,
+        "note_rate_pct": 7.99, "regular_payment_count": 23,
+        "final_payment": 400.12, "term_months": 24, "schedule_version": "B1",
+        "principal": None,
+    }
+    assert offers_router.terms_needing_regeneration(row) == ["principal"]
+
+
+def test_the_repair_statement_can_actually_fix_a_missing_principal():
+    """Detecting the gap is only half of it.
+
+    If `principal IS NULL` were absent from the UPDATE's predicate, the caller
+    would detect the gap, call repair, and the statement would match no rows --
+    returning the same unboardable row forever.
+    """
+    import inspect
+    source = inspect.getsource(offers_router._repair_incomplete_offer)
+    assert "o.principal IS NULL" in source

@@ -57,6 +57,12 @@ _OFFER_FIELDS_Q = ", ".join(f"o.{c}" for c in _OFFER_COLUMNS)
 SCHEDULE_TERMS = (
     "note_rate_pct", "regular_payment_count", "final_payment", "term_months",
     "schedule_version",
+    # Boarding requires it (origination's BOARDING_REQUIRED_FIELDS), so leaving
+    # it out here created a row that repair called complete and accept refused
+    # forever: POST returned it unchanged, and nothing else could fill it in.
+    # The database's schedule all-or-nothing CHECK does not cover principal
+    # either, so that state is reachable. Reviewed on PR #10.
+    "principal",
 )
 
 
@@ -157,7 +163,12 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, principal, appli
         "     AND (o.apr IS NULL OR o.finance_charge IS NULL OR o.monthly_payment IS NULL"
         "          OR o.amount_financed IS NULL OR o.total_of_payments IS NULL"
         "          OR o.note_rate_pct IS NULL OR o.final_payment IS NULL"
-        "          OR o.regular_payment_count IS NULL OR o.term_months IS NULL)"
+        # `principal` belongs in this list for the same reason it belongs in
+        # SCHEDULE_TERMS: without it the caller detects the gap, calls repair,
+        # and the UPDATE matches nothing -- so the row comes back unchanged,
+        # still unboardable, with no path to fix it. Reviewed on PR #10.
+        "          OR o.regular_payment_count IS NULL OR o.term_months IS NULL"
+        "          OR o.principal IS NULL)"
         f"  RETURNING {_OFFER_FIELDS_Q}"
         "), audited AS ("
         "  INSERT INTO audit_logs (actor, action, detail)"
@@ -333,6 +344,22 @@ def create_offer(
             )
             repaired = True
 
+    # The rows must describe the row being RETURNED, not the request that came
+    # in. `rows` above was generated from the application's current inputs with
+    # the currently deployed generator; when this call found an existing offer
+    # (the idempotent path), the response would then advertise the stored
+    # regular/final payments beside a schedule whose payments and totals came
+    # from somewhere else -- after a generator change, or after the
+    # application's amount or term was corrected. Reviewed on PR #10.
+    if all(row.get(f) is not None for f in ("principal", "term_months",
+                                            "monthly_payment", "final_payment",
+                                            "note_rate_pct")):
+        rows = schedule.amortization_from_contract(
+            float(row["principal"]), float(row["note_rate_pct"]), int(row["term_months"]),
+            regular_payment=float(row["monthly_payment"]),
+            final_payment=float(row["final_payment"]),
+        )
+
     disclosure = Disclosure(
         note_rate_pct=(float(row["note_rate_pct"]) if row.get("note_rate_pct") is not None else None),
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
@@ -492,7 +519,18 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
 
     disclosure = Disclosure(
-        note_rate_pct=(note_rate or None),
+        # STORED only. `note_rate` above may be a value recovered from an
+        # already-rounded payment, and recovery is not exact -- a genuine 7.99%
+        # $1,000/12-month offer with an $86.98 stored payment comes back as
+        # 7.98177%, which the borrower UI would print as "7.98%" under the
+        # label "Interest rate (note rate)". That is a contractual term the
+        # borrower was never quoted, and it contradicts migration 0030's
+        # deliberate policy of leaving an unprovable legacy rate NULL rather
+        # than guessing it. The recovered value still draws the reconstructed
+        # SCHEDULE below, which is labelled as a reconstruction; it must not be
+        # reported as the rate. Reviewed on PR #10.
+        note_rate_pct=(float(offer.note_rate_pct)
+                       if offer.note_rate_pct is not None else None),
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, amount_financed=amount_financed,
         total_of_payments=total_of_payments,

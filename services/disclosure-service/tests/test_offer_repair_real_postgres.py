@@ -160,8 +160,9 @@ def _seed_offer(conn, app_id, *, missing=(), accepted=False, fee_pct=0.030,
         conn,
         "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
         "finance_charge, monthly_payment, amount_financed, total_of_payments, "
-        "regular_payment_count, final_payment, term_months, schedule_version, accepted_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "regular_payment_count, final_payment, term_months, schedule_version, principal, "
+        "accepted_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (app_id, app_id, fee_pct,
          7.990 if schedule else None,
          values["apr"], values["finance_charge"],
@@ -170,6 +171,10 @@ def _seed_offer(conn, app_id, *, missing=(), accepted=False, fee_pct=0.030,
          407.12 if schedule else None,
          24 if schedule else None,
          "B1" if schedule else None,
+         # The principal the schedule was solved for. Part of a COMPLETE offer
+         # now: boarding reads it, so an offer without it can neither board nor
+         # be judged complete.
+         9000.00 if schedule else None,
          "2026-01-01T00:00:00+00:00" if accepted else None),
     )
     return _rows(conn, "SELECT * FROM offers WHERE app_id = %s", (app_id,))[0]
@@ -621,3 +626,39 @@ def test_an_unboarded_legacy_offer_is_still_repairable(pg):
     assert after["principal"] is not None, "the repair must store the principal too"
     audits = _rows(pg, "SELECT * FROM audit_logs WHERE action = 'offer.incomplete_terms_repaired'")
     assert len(audits) == 1
+
+
+def test_an_idempotent_post_returns_the_stored_schedule_not_a_regenerated_one(pg):
+    """The rows must describe the row being RETURNED.
+
+    On the idempotent path POST finds an existing offer and returns its stored
+    payment-plan fields -- but the detailed `schedule` was still the one
+    generated from the application's current inputs with the currently deployed
+    generator. So after a generator change, or after the application's amount or
+    term was corrected, the same response advertised the stored regular/final
+    payments beside rows carrying different ones. Reviewed on PR #10.
+
+    Simulated by moving the application out from under the stored offer, which
+    is the shape a corrected amount produces.
+    """
+    app_id = _seed_approved_application(pg, app_id=81, amount=9000, term=24)
+    _seed_offer(pg, app_id)   # complete: 9,000 over 24 at 7.99, final 407.12
+
+    # The application is corrected AFTER the offer was written.
+    _rows(pg, "UPDATE applications SET amount = 12000 WHERE id = %s", (app_id,))
+
+    resp = _post(app_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    stored = _rows(pg, "SELECT monthly_payment, final_payment, term_months FROM offers "
+                       "WHERE app_id = %s", (app_id,))[0]
+    rows = body["schedule"]
+    assert len(rows) == int(stored["term_months"])
+    assert rows[-1]["payment"] == pytest.approx(float(stored["final_payment"]), abs=0.005)
+    assert all(
+        r["payment"] == pytest.approx(float(stored["monthly_payment"]), abs=0.005)
+        for r in rows[:-1]
+    ), "the returned rows were generated from the corrected application, not the stored offer"
+    # And the summary fields agree with the rows they are printed beside.
+    assert body["disclosure"]["final_payment"] == pytest.approx(rows[-1]["payment"], abs=0.005)
