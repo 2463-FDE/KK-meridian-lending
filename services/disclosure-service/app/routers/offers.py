@@ -39,6 +39,9 @@ _OFFER_COLUMNS = (
     # place it needs adding -- which is also why omitting it broke all four at
     # once.
     "regular_payment_count", "final_payment", "term_months", "schedule_version",
+    # The principal the schedule was calculated on. Cannot be recovered from
+    # amount_financed (cent-rounded), which is what the GET path used to do.
+    "principal",
     "accepted_at",
 )
 _OFFER_FIELDS = ", ".join(_OFFER_COLUMNS)
@@ -92,7 +95,7 @@ def terms_needing_regeneration(row) -> list[str]:
     return missing_terms(row) + missing_schedule_terms(row)
 
 
-def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
+def _repair_incomplete_offer(row, missing, terms, fee_pct_used, principal, application_id):
     """Regenerate the canonical terms of an existing INCOMPLETE offer, in place.
 
     Only reachable for a row that is already missing at least one canonical
@@ -137,10 +140,20 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
         # would produce a row that displays fine and still cannot board -- the
         # exact half-fixed state BOARDING_REQUIRED_FIELDS exists to prevent.
         "         regular_payment_count = %s, final_payment = %s, term_months = %s,"
-        "         schedule_version = %s"
+        "         schedule_version = %s, principal = %s"
         "    FROM decisions d"
         "   WHERE o.decision_id = d.app_id AND d.app_id = %s AND d.outcome = 'approve'"
         "     AND o.accepted_at IS NULL"
+        # accepted_at alone is not enough on an UPGRADED database. Migration
+        # 0021 added the column without back-filling, so an offer boarded
+        # before it has a loan and a NULL accepted_at -- and 0030 leaves its
+        # schedule columns NULL by design, which is exactly the shape that now
+        # qualifies for schedule-only repair. Without this clause an authorised
+        # POST /offers retry could rewrite every monetary and contractual term
+        # of an offer somebody has already been funded against. 0030 back-fills
+        # accepted_at from the loan as well; this guard does not depend on that
+        # migration having run. Review finding on PR #10.
+        "     AND NOT EXISTS (SELECT 1 FROM loans l WHERE l.app_id = o.app_id)"
         "     AND (o.apr IS NULL OR o.finance_charge IS NULL OR o.monthly_payment IS NULL"
         "          OR o.amount_financed IS NULL OR o.total_of_payments IS NULL"
         "          OR o.note_rate_pct IS NULL OR o.final_payment IS NULL"
@@ -157,7 +170,7 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
         (fee_pct_used, float(fees.NOTE_RATE_PCT), terms["apr"], terms["finance_charge"],
          terms["monthly_payment"], terms["amount_financed"], terms["total_of_payments"],
          terms["regular_payment_count"], terms["final_payment"],
-         terms["regular_payment_count"] + 1, fees.SCHEDULE_VERSION,
+         terms["regular_payment_count"] + 1, fees.SCHEDULE_VERSION, principal,
          application_id, ",".join(missing)),
     )
     if repaired:
@@ -268,8 +281,8 @@ def create_offer(
         inserted = db.query(
             "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
             "finance_charge, monthly_payment, amount_financed, total_of_payments, "
-            "regular_payment_count, final_payment, term_months, schedule_version) "
-            "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
+            "regular_payment_count, final_payment, term_months, schedule_version, principal) "
+            "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
             "FROM decisions d WHERE d.app_id = %s AND d.outcome = 'approve' "
             "ON CONFLICT (decision_id) DO NOTHING "
             f"RETURNING {_OFFER_FIELDS}",
@@ -283,7 +296,7 @@ def create_offer(
              # principal/term/rate have been ignored since the PR #6 security
              # review -- the stored schedule term must follow the same rule.
              o["regular_payment_count"], o["final_payment"], term_months,
-             fees.SCHEDULE_VERSION, body.application_id),
+             fees.SCHEDULE_VERSION, principal, body.application_id),
         )
     except psycopg2.errors.UniqueViolation:
         inserted = []
@@ -315,7 +328,9 @@ def create_offer(
         # It can now, for unaccepted offers only.
         missing = terms_needing_regeneration(row)
         if missing:
-            row = _repair_incomplete_offer(row, missing, o, fee_pct_used, body.application_id)
+            row = _repair_incomplete_offer(
+                row, missing, o, fee_pct_used, principal, body.application_id
+            )
             repaired = True
 
     disclosure = Disclosure(
@@ -417,7 +432,19 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         term_months = int(offer.term_months)
     else:
         term_months = round(total_of_payments / monthly_payment) if monthly_payment else 0
-    principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
+    # The stored principal is the one the payments were calculated on. Inverting
+    # amount_financed through the fee is a LEGACY fallback and nothing more:
+    # amount_financed is cent-rounded, so the inversion lands on a neighbouring
+    # principal -- a $1,002.50 loan stores $972.43, which inverts to $1,002.51 --
+    # and the schedule regenerated from it disagreed with the disclosure printed
+    # directly above it ($24.39 final and $1,174.48 total against a stored $24.37
+    # and $1,174.46). `schedule_is_stored` was computed here and never consulted,
+    # so every borrower viewing an auto-generated offer got the inferred one.
+    # Review finding on PR #10.
+    if offer.principal is not None:
+        principal = float(offer.principal)
+    else:
+        principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
     # Review fix: this used to build the schedule at `offer.apr`. The APR and
     # the note rate are not interchangeable once a prepaid fee exists -- the APR
     # is solved against the amount financed, the payments run on the full
@@ -439,6 +466,24 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     else:
         note_rate = 0.0
     rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
+    if schedule_is_stored and rows:
+        # The stored contract is the authority; the generator only re-expands it
+        # for display. With the stored principal above, the two agree by
+        # construction -- so a disagreement here means a generator or rounding
+        # policy has moved under an already-disclosed offer. The billed figure
+        # is corrected to the stored one and the drift is logged, because the
+        # borrower must never be shown a final payment that is not the one on
+        # their disclosure.
+        stored_final = float(offer.final_payment)
+        if abs(float(rows[-1]["payment"]) - stored_final) >= 0.005:
+            log.error(
+                "regenerated schedule disagrees with the stored contract "
+                "offer_id=%s application_id=%s generated_final=%.2f stored_final=%.2f "
+                "schedule_version=%s",
+                offer.id, application_id, float(rows[-1]["payment"]), stored_final,
+                offer.schedule_version,
+            )
+            rows[-1] = {**rows[-1], "payment": stored_final}
     disclosure = Disclosure(
         note_rate_pct=(note_rate or None),
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),

@@ -161,6 +161,11 @@ def offer_row(app_id: int, principal: Decimal, note_rate_pct: Decimal, term: int
         "regular_payment_count": term - 1,
         "final_payment": payments[-1],
         "term_months": term,
+        # The principal the schedule was calculated on, stored rather than left
+        # to be inverted out of amount_financed at read time -- that inversion
+        # lands on a neighbouring principal and regenerates a contradictory
+        # final row (db/migrations/0030).
+        "principal": principal,
     }
 
 
@@ -169,7 +174,7 @@ def _values_line(r: dict) -> str:
         f"  ({r['app_id']}, {r['note_rate_pct']}, 0.0300, {r['apr']}, "
         f"{r['finance_charge']}, {r['monthly_payment']}, {r['amount_financed']}, "
         f"{r['total_of_payments']}, {r['regular_payment_count']}, "
-        f"{r['final_payment']}, {r['term_months']}, 'B1')"
+        f"{r['final_payment']}, {r['term_months']}, 'B1', {r['principal']})"
     )
 
 
@@ -187,7 +192,7 @@ def bulk_block() -> str:
         "INSERT INTO offers (app_id, note_rate_pct, fee_pct_used, apr,",
         "                    finance_charge, monthly_payment, amount_financed,",
         "                    total_of_payments, regular_payment_count, final_payment,",
-        "                    term_months, schedule_version) VALUES",
+        "                    term_months, schedule_version, principal) VALUES",
     ]
     body = ",\n".join(_values_line(r) for r in rows)
     return "\n".join(lines) + "\n" + body + ";\n" + END
@@ -206,7 +211,7 @@ def curated_block() -> str:
         "INSERT INTO offers (app_id, note_rate_pct, fee_pct_used, apr,",
         "                    finance_charge, monthly_payment, amount_financed,",
         "                    total_of_payments, regular_payment_count, final_payment,",
-        "                    term_months, schedule_version) VALUES",
+        "                    term_months, schedule_version, principal) VALUES",
     ]
     body = ",\n".join(_values_line(r) for r in rows)
     return "\n".join(lines) + "\n" + body + ";\n" + END

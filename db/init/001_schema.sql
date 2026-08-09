@@ -125,6 +125,11 @@ CREATE TABLE IF NOT EXISTS offers (
     final_payment    NUMERIC(14,2),
     term_months      INTEGER,
     schedule_version TEXT,              -- 'B1' = cent-rounded level + final adjustment
+    -- The principal the schedule was calculated on. Stored because it cannot be
+    -- recovered: amount_financed is cent-rounded, so inverting it through the
+    -- fee lands on a DIFFERENT principal and regenerates a schedule whose final
+    -- row contradicts the disclosure above it (db/migrations/0030).
+    principal        NUMERIC(14,2),
     -- The contractual rate the payment schedule was calculated on. Distinct
     -- from `apr` below, which is the disclosed all-in rate and is higher
     -- whenever a prepaid fee exists. Boarding reads THIS one; servicing

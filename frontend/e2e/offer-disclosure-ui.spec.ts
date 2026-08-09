@@ -149,18 +149,43 @@ test("the schedule text stays inside the disclosure border", async ({ page }) =>
 
   const box = page.locator(".tila");
   const schedule = page.getByTestId("payment-schedule");
+  // The TEXT, not its wrapper. Measuring the wrapper proved nothing: it is an
+  // ordinary in-flow child, so its border box is contained by `.tila` whether
+  // or not it has any padding -- deleting `.tila-schedule`'s padding entirely
+  // left this test green while the text went back to sitting on the disclosure
+  // border, which is the reported defect. Review finding on PR #10.
+  const text = schedule.locator(".tila-schedule-value");
   const outer = await box.boundingBox();
-  const inner = await schedule.boundingBox();
+  const inner = await text.boundingBox();
   expect(outer).not.toBeNull();
   expect(inner).not.toBeNull();
 
-  // The reported defect: text overlapping the bottom border. Allowing 2px for
-  // the border itself, the schedule row must sit within its container on every
-  // edge.
+  // Containment first: the text must be inside the box on every edge.
   expect(inner!.y).toBeGreaterThanOrEqual(outer!.y - 1);
   expect(inner!.x).toBeGreaterThanOrEqual(outer!.x - 1);
   expect(inner!.y + inner!.height).toBeLessThanOrEqual(outer!.y + outer!.height + 1);
   expect(inner!.x + inner!.width).toBeLessThanOrEqual(outer!.x + outer!.width + 1);
+
+  // Then the inset itself, which is the thing that regresses. A real gap on
+  // every side, measured from rendered geometry rather than read back from the
+  // stylesheet -- a rule that is overridden further down the cascade would
+  // still read as present.
+  const MIN_INSET = 8;
+  expect(inner!.x - outer!.x, "left inset").toBeGreaterThanOrEqual(MIN_INSET);
+  expect(outer!.x + outer!.width - (inner!.x + inner!.width), "right inset")
+    .toBeGreaterThanOrEqual(MIN_INSET);
+  expect(outer!.y + outer!.height - (inner!.y + inner!.height), "bottom inset")
+    .toBeGreaterThanOrEqual(MIN_INSET);
+
+  // And the divider above it: the schedule sits under a 2px rule, so the text
+  // must clear that too rather than resting on it.
+  const dividerGap = await schedule.evaluate((el) => {
+    const value = el.querySelector(".tila-schedule-value") as HTMLElement | null;
+    if (!value) return -1;
+    return value.getBoundingClientRect().top - el.getBoundingClientRect().top;
+  });
+  expect(dividerGap, "gap between the divider and the schedule text")
+    .toBeGreaterThanOrEqual(MIN_INSET);
 });
 
 test("a singular regular payment reads '1 monthly payment', not '1 payments'", () => {
@@ -233,10 +258,19 @@ test("the disclosure does not overflow horizontally on a phone viewport", async 
   );
   expect(overflows, "the page scrolls horizontally at 375px").toBe(false);
 
+  // Same blind spot as the desktop assertion had: measure the text.
   const box = await page.locator(".tila").boundingBox();
-  const inner = await schedule.boundingBox();
+  const inner = await schedule.locator(".tila-schedule-value").boundingBox();
   expect(inner!.x + inner!.width).toBeLessThanOrEqual(box!.x + box!.width + 1);
   expect(inner!.y + inner!.height).toBeLessThanOrEqual(box!.y + box!.height + 1);
+
+  // The INSET regression is asserted at desktop width, in the test above: at
+  // 375px `.tila` contributes horizontal padding of its own, so a gap measured
+  // here survives `.tila-schedule`'s padding being deleted and would be an
+  // assertion that cannot fail. Verified by deleting that padding and watching
+  // only the desktop test go red. What this viewport is for is overflow and
+  // containment, both of which are now measured on the TEXT rather than on its
+  // wrapper -- the blind spot the wrapper-only version had.
 });
 
 // --- keyboard / screen reader ------------------------------------------------

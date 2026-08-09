@@ -26,17 +26,46 @@
 ALTER TABLE offers
     ADD COLUMN IF NOT EXISTS note_rate_pct NUMERIC(7,3);
 
--- Back-fill. Every offer this system has ever written was built at a single
--- hard-coded 7.99% -- it was a literal in disclosure-service's create_offer and
--- there has never been a second value, so this is recovering a known constant
--- rather than guessing a rate per row. (It is now
--- `disclosure-service/app/fees.py::NOTE_RATE_PCT`, for the same
--- one-source-of-truth reason the origination fee was consolidated after D6.)
+-- Back-fill, from a per-row source or not at all.
 --
--- Deliberately NOT derived from each row's stored payment: solving the rate per
--- row would be more impressive and less honest, since it would silently invent
--- plausible per-row rates for any row whose payment was itself written wrong.
-UPDATE offers SET note_rate_pct = 7.99 WHERE note_rate_pct IS NULL;
+-- An earlier version of this migration set EVERY existing offer to 7.99, on the
+-- reasoning that create_offer had only ever written that one literal. That
+-- reasoning was wrong about the data it would actually meet: `db/init`'s seeds
+-- are part of that data, and they carry other rates -- 003_seed_bulk.sql
+-- generates `7.99 + (id % 16)`, i.e. 7.99 through 22.99, and 002_seed.sql
+-- shipped 9.99% and 11.25% loans. On an upgraded database this constant would
+-- have overwritten those with a rate the borrower was never given, and the new
+-- UI presents note_rate_pct as a stored contractual FACT. Review finding on
+-- PR #10; a false rate on a disclosure is the defect this PR exists to fix,
+-- not one it may introduce.
+--
+-- The reliable per-row source is the boarded loan. `loans.apr` is written at
+-- boarding from the rate the schedule was calculated on
+-- (origination-service/app/intake.py: `annual_rate_pct` into the `apr` column,
+-- a legacy misnomer tracked separately), so for any offer whose application has
+-- a loan, that column IS this offer's note rate rather than an inference from
+-- it.
+UPDATE offers o
+   SET note_rate_pct = l.apr
+  FROM loans l
+ WHERE l.app_id = o.app_id
+   AND o.note_rate_pct IS NULL
+   AND l.apr IS NOT NULL;
+
+-- Everything else stays NULL on purpose. An unboarded legacy offer has no
+-- second record of what it was priced at, and there is no way to recover it
+-- that is not a guess:
+--
+--   * a constant would assert a rate for rows that demonstrably had others;
+--   * solving the rate from the stored payment would look more rigorous and be
+--     less honest, since it would manufacture a plausible per-row rate for any
+--     row whose payment was itself written wrong.
+--
+-- NULL is readable by everything downstream: `accept_offer` refuses to board a
+-- row without a stored note rate, and the offer endpoint reports it as absent
+-- rather than inventing one. The row can be regenerated through POST /offers,
+-- which produces a NEW disclosure at today's rate and an audit_logs entry
+-- saying so -- which is the honest way to give a legacy offer a rate.
 
 DO $$
 DECLARE
@@ -79,7 +108,36 @@ ALTER TABLE offers
     ADD COLUMN IF NOT EXISTS regular_payment_count INTEGER,
     ADD COLUMN IF NOT EXISTS final_payment         NUMERIC(14,2),
     ADD COLUMN IF NOT EXISTS term_months           INTEGER,
-    ADD COLUMN IF NOT EXISTS schedule_version      TEXT;
+    ADD COLUMN IF NOT EXISTS schedule_version      TEXT,
+    -- The principal the schedule was calculated on. Stored because it CANNOT be
+    -- recovered from the other stored figures: amount_financed is rounded to
+    -- cents, so inverting it through the fee (`amount_financed / (1 - fee_pct)`)
+    -- lands on a different principal than the one the payments came from -- a
+    -- $1,002.50 loan stores $972.43 and inverts to $1,002.51, whose regenerated
+    -- final row is $24.39 against the disclosed $24.37. The GET endpoint was
+    -- doing exactly that, so a borrower could be shown a schedule that
+    -- contradicted the disclosure printed above it. Review finding on PR #10.
+    ADD COLUMN IF NOT EXISTS principal             NUMERIC(14,2);
+
+-- Acceptance back-fill for rows boarded before 0021.
+--
+-- 0021 added `offers.accepted_at` without back-filling, so an offer boarded
+-- before it has a loan and a NULL accepted_at. Every guard that asks "has this
+-- offer been accepted?" reads that column -- including the repair path, which
+-- refuses to touch an accepted offer. Left as-is, an authorised POST /offers
+-- retry could rewrite the monetary and contractual terms of an offer somebody
+-- has already been funded against. Review finding on PR #10.
+--
+-- `loans.opened_at` is the closest true record of when the offer was accepted;
+-- it is used rather than now() so the column does not claim the acceptance
+-- happened during this migration. A loan with a NULL opened_at still gets a
+-- non-null marker, because the fact being recorded is "this was accepted", and
+-- the timestamp is secondary to the guard reading IS NOT NULL.
+UPDATE offers o
+   SET accepted_at = COALESCE(l.opened_at, now())
+  FROM loans l
+ WHERE l.app_id = o.app_id
+   AND o.accepted_at IS NULL;
 
 -- The contract as boarded. Servicing must bill these amounts, not recompute them
 -- from principal/rate/term -- that recomputation is exactly what would drift.

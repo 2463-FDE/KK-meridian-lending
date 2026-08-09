@@ -42,6 +42,9 @@ class Offer(Base):
     final_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     schedule_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    # The principal the schedule was calculated on (db/migrations/0030). Stored
+    # because amount_financed is cent-rounded and does not invert back to it.
+    principal: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # db/migrations/0021. Non-NULL means the borrower is bound to these terms:
     # the offer is immutable from that point, including to the repair path.

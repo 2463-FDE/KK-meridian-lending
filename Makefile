@@ -1,7 +1,13 @@
-.PHONY: up down logs build seed ps test fmt
+.PHONY: up up-e2e down logs build seed ps test fmt
 
 up:
 	docker compose up -d --build
+
+# The browser suite only. Same stack, with the gateway rate limit raised so a
+# dozen journeys from one source IP do not trip the shipped 120/60s control --
+# see docker-compose.e2e.yml. `make up` deliberately does NOT include it.
+up-e2e:
+	docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
 
 build:
 	docker compose build

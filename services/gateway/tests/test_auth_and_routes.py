@@ -283,6 +283,41 @@ def test_lss_loans_list_borrower_decimal_rows_serialize(monkeypatch):
     assert item["balance"] == 9000.0
 
 
+def test_lss_loans_list_borrower_reports_the_note_rate(monkeypatch):
+    """The borrower's own rate has to arrive under the name the UI reads.
+
+    This path is BUILT here, not proxied, so it never picked up
+    servicing-service's rename of the legacy `loans.apr` column (which holds
+    the contractual note rate) to `note_rate_pct`. `/my-loan` reads
+    `note_rate_pct`, got undefined, and rendered the borrower's interest rate as
+    an em dash -- on the one screen whose entire job is telling them their loan
+    terms. Review finding on PR #10.
+
+    Both names are asserted: the accurate one because the UI needs it, and the
+    legacy one because dropping it would be a second, unrelated break for any
+    client still reading it.
+    """
+    class _FakeDb:
+        def query(self, sql, params=None):
+            return [{
+                "id": 5, "applicant_name": "Maria Gonzalez",
+                "principal": Decimal("10000.00"), "apr": Decimal("12.500"),
+                "term_months": 36, "status": "current",
+                "balance": Decimal("9000.00"), "past_due": Decimal("0.00"),
+                "opened_at": None,
+            }]
+
+    monkeypatch.setattr(main, "db", _FakeDb())
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.get("/lss/loans", headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["note_rate_pct"] == 12.5, "the borrower list must name the note rate"
+    assert item["apr"] == 12.5
+
+
 def test_lss_loans_list_borrower_without_applicant_id_is_forbidden(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER_NO_APPLICANT)
 

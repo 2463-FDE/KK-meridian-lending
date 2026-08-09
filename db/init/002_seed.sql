@@ -66,11 +66,11 @@ INSERT INTO decisions (app_id, outcome) VALUES
 INSERT INTO offers (app_id, note_rate_pct, fee_pct_used, apr,
                     finance_charge, monthly_payment, amount_financed,
                     total_of_payments, regular_payment_count, final_payment,
-                    term_months, schedule_version) VALUES
-  (4471, 7.99, 0.0300, 9.584, 3628.70, 439.35, 17460.00, 21088.70, 47, 439.25, 48, 'B1'),
-  (5582, 9.99, 0.0300, 12.096, 2297.39, 387.15, 11640.00, 13937.39, 35, 387.14, 36, 'B1'),
-  (6011, 7.99, 0.0300, 10.072, 2369.17, 469.98, 14550.00, 16919.17, 35, 469.87, 36, 'B1'),
-  (6014, 11.25, 0.0300, 12.590, 17101.83, 1093.37, 48500.00, 65601.83, 59, 1093.00, 60, 'B1');
+                    term_months, schedule_version, principal) VALUES
+  (4471, 7.99, 0.0300, 9.584, 3628.70, 439.35, 17460.00, 21088.70, 47, 439.25, 48, 'B1', 18000),
+  (5582, 9.99, 0.0300, 12.096, 2297.39, 387.15, 11640.00, 13937.39, 35, 387.14, 36, 'B1', 12000),
+  (6011, 7.99, 0.0300, 10.072, 2369.17, 469.98, 14550.00, 16919.17, 35, 469.87, 36, 'B1', 15000),
+  (6014, 11.25, 0.0300, 12.590, 17101.83, 1093.37, 48500.00, 65601.83, 59, 1093.00, 60, 'B1', 50000);
 -- END GENERATED OFFER ROWS
 
 -- `loans.apr` holds the CONTRACTUAL note rate despite the column name (D19) --

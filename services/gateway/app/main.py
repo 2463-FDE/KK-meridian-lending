@@ -209,6 +209,17 @@ def _borrower_loans(applicant_id: int) -> dict:
             # Decimal. Cast to float at this boundary, same fix as everywhere
             # else a raw-DB-read money value crosses a JSON response/request.
             "principal": float(r["principal"]),
+            # `loans.apr` is a legacy misnomer: the column holds the CONTRACTUAL
+            # note rate, written at boarding from the rate the schedule was
+            # calculated on. servicing-service's LoanListItem renames it on the
+            # way out (validation_alias="apr", serialization_alias=
+            # "note_rate_pct") -- but this borrower path is built here, not
+            # proxied, so it kept emitting `apr` and /my-loan rendered the
+            # borrower's own interest rate as an em dash. Emitted under both
+            # names: the accurate one the frontend reads, and the old one so a
+            # client that has not been updated does not break on this change.
+            # Review finding on PR #10.
+            "note_rate_pct": float(r["apr"]),
             "apr": float(r["apr"]),
             "term_months": r["term_months"],
             "status": r["status"],

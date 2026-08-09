@@ -80,8 +80,22 @@ def _schema_sql():
             final_payment NUMERIC(14,2),
             term_months INTEGER,
             schedule_version TEXT,
+            -- The principal the schedule was calculated on (db/migrations/0030).
+            principal NUMERIC(14,2),
             created_at TIMESTAMPTZ DEFAULT now(),
             accepted_at TIMESTAMPTZ
+        );
+        -- Present because the repair guard reads it: an offer with a loan has
+        -- been boarded, whatever accepted_at says on an upgraded database.
+        CREATE TABLE loans (
+            id SERIAL PRIMARY KEY,
+            app_id INTEGER UNIQUE,
+            applicant_name TEXT,
+            principal NUMERIC(14,2) NOT NULL,
+            apr NUMERIC(7,3) NOT NULL,
+            term_months INTEGER NOT NULL,
+            status TEXT DEFAULT 'current',
+            opened_at TIMESTAMPTZ DEFAULT now()
         );
         CREATE TABLE audit_logs (
             id SERIAL PRIMARY KEY,
@@ -538,3 +552,72 @@ def test_a_fully_complete_offer_is_still_never_repaired(pg):
     for field in CANONICAL + _SCHEDULE_COLUMNS:
         assert after[field] == before[field], f"{field} was rewritten"
     assert _rows(pg, "SELECT count(*) AS n FROM audit_logs")[0]["n"] == 0
+
+
+# --- an offer that has already been boarded is not repairable ----------------
+
+def _board(conn, app_id, *, principal=9000, rate=7.99, term=24):
+    """A loan for this application, with accepted_at left NULL on the offer.
+
+    That combination is not hypothetical: migration 0021 added accepted_at
+    without back-filling, so every offer boarded before it looks exactly like
+    this on an upgraded database.
+    """
+    _rows(
+        conn,
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+        "VALUES (%s, 'Boarded Borrower', %s, %s, %s)",
+        (app_id, principal, rate, term),
+    )
+
+
+def test_a_boarded_offer_is_not_rewritten_even_with_accepted_at_null(pg):
+    """The reviewed hole, in the shape an upgraded database actually produces.
+
+    A pre-0021 boarded offer has a loan and a NULL accepted_at, and 0030 leaves
+    its schedule columns NULL by design -- which is precisely the shape the
+    widened schedule-only repair now accepts. Without a loan check, an
+    authorised POST /offers retry rewrites every monetary and contractual term
+    of an offer somebody has already been funded against.
+    """
+    app_id = _seed_approved_application(pg, app_id=71)
+    before = _seed_offer(pg, app_id, schedule=False)
+    _board(pg, app_id)
+
+    resp = _post(app_id)
+
+    after = _rows(pg, "SELECT * FROM offers WHERE app_id = %s", (app_id,))[0]
+    for field in ("apr", "finance_charge", "monthly_payment", "amount_financed",
+                  "total_of_payments", "fee_pct_used"):
+        assert after[field] == before[field], (
+            f"{field} was rewritten on an offer that has already been boarded"
+        )
+    # The response still answers -- refusing to REPAIR is not refusing to READ.
+    # What it must not do is hand back terms it just invented.
+    assert resp.status_code in (200, 409), resp.text
+    if resp.status_code == 200:
+        assert resp.json()["apr"] == float(before["apr"])
+    # No repair was audited, because none happened.
+    audits = _rows(pg, "SELECT * FROM audit_logs WHERE action = 'offer.incomplete_terms_repaired'")
+    assert audits == []
+
+
+def test_an_unboarded_legacy_offer_is_still_repairable(pg):
+    """The other side of the guard: no loan means the repair path still works.
+
+    Narrowing the boundary must not re-break the schedule-only repair that the
+    previous round added -- an unaccepted, unboarded pre-0030 row is exactly
+    what it exists for.
+    """
+    app_id = _seed_approved_application(pg, app_id=72)
+    _seed_offer(pg, app_id, schedule=False)
+
+    resp = _post(app_id)
+
+    assert resp.status_code == 200, resp.text
+    after = _rows(pg, "SELECT * FROM offers WHERE app_id = %s", (app_id,))[0]
+    assert after["final_payment"] is not None
+    assert after["note_rate_pct"] is not None
+    assert after["principal"] is not None, "the repair must store the principal too"
+    audits = _rows(pg, "SELECT * FROM audit_logs WHERE action = 'offer.incomplete_terms_repaired'")
+    assert len(audits) == 1

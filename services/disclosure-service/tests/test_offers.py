@@ -79,10 +79,13 @@ class _FakeDb:
                 # alongside the disclosed APR (boarding reads the former), and the
                 # Model B payment schedule as stored fact -- regular payment count,
                 # the adjusted final payment, the term, and the rounding-policy
-                # version. 12 params, in INSERT column order.
+                # version, and the principal those payments were calculated on
+                # (which amount_financed cannot be inverted back to, since it is
+                # cent-rounded). 13 params, in INSERT column order.
                 (fee_pct_used, note_rate_pct, apr, finance_charge, monthly_payment,
                  amount_financed, total_of_payments, regular_payment_count,
-                 final_payment, term_months, schedule_version, application_id) = params
+                 final_payment, term_months, schedule_version, principal,
+                 application_id) = params
                 self.stored_offer = {
                     "id": self.insert_id, "app_id": application_id, "decision_id": application_id,
                     "fee_pct_used": fee_pct_used, "note_rate_pct": note_rate_pct,
@@ -91,7 +94,8 @@ class _FakeDb:
                     "total_of_payments": total_of_payments,
                     "regular_payment_count": regular_payment_count,
                     "final_payment": final_payment, "term_months": term_months,
-                    "schedule_version": schedule_version, "accepted_at": None,
+                    "schedule_version": schedule_version, "principal": principal,
+                    "accepted_at": None,
                 }
                 return [self.stored_offer]
             return []
@@ -338,6 +342,9 @@ class _FakeOffer:
     final_payment = None
     term_months = None
     schedule_version = None
+    # Pre-0030 rows never stored the principal either, so the default is the
+    # legacy shape and the read path's inversion fallback is what it exercises.
+    principal = None
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -475,3 +482,74 @@ def test_a_mismatched_body_term_does_not_reach_the_stored_schedule(monkeypatch):
     )
     assert int(stored["regular_payment_count"]) + 1 == int(stored["term_months"])
     assert stored["schedule_version"] == "B1"
+
+
+# --- the redisplayed schedule comes from the stored contract ------------------
+
+def _offer_response_for(offer, app_id: int):
+    """GET /applications/{id}/offer against one stand-in row."""
+    def _fake_get_session():
+        yield _FakeSession(offer)
+
+    app.dependency_overrides[get_session] = _fake_get_session
+    try:
+        resp = client.get(f"/applications/{app_id}/offer")
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_the_schedule_is_built_from_the_stored_principal_not_an_inversion():
+    """The reviewed defect, at the principal that exposes it.
+
+    $1,002.50 at 3% stores amount_financed $972.43 -- cent-rounded, half-up.
+    Inverting that through the fee gives $1,002.51, a different loan, whose
+    regenerated final row is $24.39 and whose rows total $1,174.48. The same
+    response's stored disclosure says $24.37 and $1,174.46, so a borrower was
+    shown a payment schedule that contradicted the disclosure printed directly
+    above it. `schedule_is_stored` was computed for this and never consulted.
+    """
+    offer = _FakeOffer(
+        id=90, app_id=90, decision_id=90, fee_pct_used=0.03,
+        note_rate_pct=7.99, apr=13.51, finance_charge=202.03,
+        monthly_payment=24.47, amount_financed=972.43, total_of_payments=1174.46,
+        regular_payment_count=47, final_payment=24.37, term_months=48,
+        schedule_version="B1", principal=1002.50,
+    )
+    body = _offer_response_for(offer, 90)
+
+    rows = body["schedule"]
+    assert len(rows) == 48
+    # The last row IS the disclosed final payment, not a neighbouring cent.
+    assert rows[-1]["payment"] == pytest.approx(24.37, abs=1e-9)
+    # And the rows foot to the disclosed total, which is the property the
+    # borrower can actually check by adding them up.
+    assert sum(r["payment"] for r in rows) == pytest.approx(1174.46, abs=0.005)
+    # The discriminating assertion: the principal actually amortized is the
+    # STORED one. The inversion produces $1,002.51 here -- a different loan --
+    # and repaying a cent more principal is the shape of the whole defect.
+    # Asserted on the principal components rather than on the final payment,
+    # because the read path also corrects a drifting final payment to the stored
+    # value, which would mask an inverted principal behind a patched last row.
+    assert sum(r["principal"] for r in rows) == pytest.approx(1002.50, abs=0.005)
+    assert body["disclosure"]["final_payment"] == pytest.approx(24.37, abs=1e-9)
+
+
+def test_a_pre_0030_offer_still_renders_through_the_inversion_fallback():
+    """The other half: a legacy row has no stored principal and must still show.
+
+    Its schedule is explicitly a reconstruction -- the row carries no stored
+    final payment to contradict -- and boarding refuses it separately.
+    """
+    offer = _FakeOffer(
+        id=91, app_id=91, decision_id=91, fee_pct_used=0.03,
+        note_rate_pct=7.99, apr=10.072, finance_charge=2369.15,
+        monthly_payment=469.98, amount_financed=14550.0, total_of_payments=16919.15,
+    )
+    body = _offer_response_for(offer, 91)
+
+    assert len(body["schedule"]) > 0
+    # Nothing is invented for the contractual fields.
+    assert body["disclosure"]["final_payment"] is None
+    assert body["disclosure"]["regular_payment_count"] is None

@@ -251,19 +251,28 @@ services:
       # Forwarded as X-Internal-Token on the staff-ops /decision/* proxy path
       # (see app/main.py) -- must match decision-service's copy above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
-      # Rate limit, raised for THIS STACK ONLY.
+      # Rate limit. The DEFAULT STACK SHIPS THE REAL CONTROL: 120 requests /
+      # 60s per client IP, the same number services/gateway/app/config.py
+      # falls back to.
       #
-      # The application default stays 120 requests / 60s per client IP
-      # (services/gateway/app/config.py) -- that is the shipped control and it
-      # is not weakened here. This compose file runs the demo and the Playwright
-      # suite, and the whole suite hits the gateway from ONE source IP: it is a
-      # dozen browser journeys, not a dozen users. It began returning 429 on
-      # /auth/me and /los/applications once the suite grew, which surfaced as
-      # unrelated specs failing to sign in.
+      # This used to default to 2000 here, with a comment claiming the shipped
+      # control was "not weakened" because config.py still said 120. Compose
+      # substitutes its default and exports it, so the variable always won:
+      # anyone running `make up` or `docker compose up` got a gateway that
+      # permitted 2,000 requests a minute, and the 120 existed only in a file
+      # nothing read. A control that the documented run path overrides is not a
+      # control. Review finding on PR #10.
       #
-      # Overridable, so an operator can exercise the real limit by exporting
-      # GATEWAY_RATE_LIMIT_MAX=120 before `docker compose up`.
-      RATE_LIMIT_MAX_REQUESTS: ${GATEWAY_RATE_LIMIT_MAX:-2000}
+      # The Playwright suite genuinely needs a higher ceiling -- a dozen browser
+      # journeys from ONE source IP, which started returning 429 on /auth/me and
+      # /los/applications as the suite grew. That now lives in
+      # docker-compose.e2e.yml, applied explicitly by the e2e job and by anyone
+      # running the suite locally:
+      #
+      #   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
+      #
+      # so raising the limit is a visible act rather than the default.
+      RATE_LIMIT_MAX_REQUESTS: ${GATEWAY_RATE_LIMIT_MAX:-120}
       RATE_LIMIT_WINDOW_SECONDS: ${GATEWAY_RATE_LIMIT_WINDOW:-60}
     ports:
       - "8000:8000"
