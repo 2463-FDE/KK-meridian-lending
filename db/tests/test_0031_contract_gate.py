@@ -179,8 +179,12 @@ def _run_checker_over(tmp_path, source: str):
     spec.loader.exec_module(mod)
 
     svc = tmp_path / "services" / "fake-service" / "app"
-    svc.mkdir(parents=True)
-    (svc / "reader.py").write_text(source, encoding="utf-8")
+    svc.mkdir(parents=True, exist_ok=True)
+    # Unique per call so one test can check several sources.
+    name = f"reader_{len(list(svc.glob('reader_*.py')))}.py"
+    for stale in svc.glob("reader_*.py"):
+        stale.unlink()
+    (svc / name).write_text(source, encoding="utf-8")
     # Both roots, or scan() reports paths relative to the real repository and
     # raises on a tmp_path that is not under it.
     mod.SERVICES = tmp_path / "services"
@@ -499,3 +503,106 @@ def test_a_mapping_read_of_an_allowed_column_is_not_flagged(tmp_path):
         '    return row["last4"], row["brand"]\n'
     ))
     assert hits == [], f"unexpected hits: {hits}"
+
+
+# --- SQL that is assembled rather than written out ----------------------------
+#
+# Reviewed on PR #15: a checker that only reads bare literals misses every
+# common way a query gets built. Each of these is statically resolvable, so the
+# checker can prove the read without running anything.
+
+def test_adjacent_string_literals_are_scanned(tmp_path):
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.execute(\n'
+        '        "SELECT id, "\n'
+        '        "pan "\n'
+        '        "FROM payments"\n'
+        "    )\n"
+    ))
+    assert hits, "adjacent literals were reported clean"
+
+
+def test_explicit_concatenation_is_scanned(tmp_path):
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.execute("SELECT " + "pan FROM payments")\n'
+    ))
+    assert hits, "concatenated SQL was reported clean"
+
+
+def test_multiline_concatenation_is_scanned(tmp_path):
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    sql = ("SELECT id, "\n'
+        '           + "pan, "\n'
+        '           + "last4 "\n'
+        '           + "FROM payments")\n'
+        "    return conn.execute(sql)\n"
+    ))
+    assert hits, "multiline concatenation was reported clean"
+
+
+def test_an_fstring_query_is_scanned(tmp_path):
+    """The literal parts are what name the columns; the hole is a value."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn, loan_id):\n"
+        '    return conn.execute(f"SELECT pan FROM payments WHERE loan_id = {loan_id}")\n'
+    ))
+    assert hits, "an f-string query was reported clean"
+
+
+def test_format_and_percent_templates_are_scanned(tmp_path):
+    """The template is the statement; the arguments are parameters."""
+    formatted = _run_checker_over(tmp_path, (
+        "def read(conn, table):\n"
+        '    return conn.execute("SELECT pan FROM {}".format(table))\n'
+    ))
+    assert formatted, "a .format() template was reported clean"
+
+    percent = _run_checker_over(tmp_path, (
+        "def read(conn, loan_id):\n"
+        '    return conn.execute("SELECT cvv FROM payments WHERE id = %s" % (loan_id,))\n'
+    ))
+    assert percent, "a %-formatted template was reported clean"
+
+
+def test_sql_assigned_to_a_variable_then_executed_is_scanned(tmp_path):
+    """The shape the reviewer named: built here, executed there."""
+    hits = _run_checker_over(tmp_path, (
+        'LEGACY = "SELECT pan, cvv FROM payments WHERE loan_id = %s"\n'
+        "\n"
+        "def read(conn, loan_id):\n"
+        "    return conn.execute(LEGACY, (loan_id,))\n"
+    ))
+    assert hits, "SQL carried by a variable was reported clean"
+
+
+def test_clean_assembled_sql_passes(tmp_path):
+    """Every one of those forms, reading only what the code is allowed to."""
+    hits = _run_checker_over(tmp_path, (
+        'BASE = "SELECT id, last4, brand "\n'
+        "\n"
+        "def read(conn, loan_id):\n"
+        '    sql = BASE + "FROM payments WHERE loan_id = %s"\n'
+        "    return conn.execute(sql, (loan_id,))\n"
+        "\n"
+        "def other(conn, loan_id):\n"
+        '    return conn.execute(f"SELECT last4 FROM payments WHERE id = {loan_id}")\n'
+    ))
+    assert hits == [], f"clean assembled SQL was flagged: {hits}"
+
+
+def test_documentation_about_the_columns_is_still_ignored(tmp_path):
+    """Prose is excluded by position, and that must survive the folding."""
+    hits = _run_checker_over(tmp_path, (
+        '"""This service used to SELECT pan, cvv FROM payments.\n'
+        "\n"
+        "The columns are dropped by 0031; see docs/DEBT.md D5b.\n"
+        '"""\n'
+        "\n"
+        "def read(conn):\n"
+        '    """Return display fields only -- never SELECT pan or cvv."""\n'
+        '    return conn.execute("SELECT last4 FROM payments")\n'
+    ))
+    assert hits == [], f"documentation was reported as a live read: {hits}"
