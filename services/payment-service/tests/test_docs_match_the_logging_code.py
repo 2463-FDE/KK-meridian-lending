@@ -36,6 +36,7 @@ import re
 import pytest
 
 from app import schemas
+from app.redactor import redact_dict
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
@@ -106,8 +107,19 @@ FALSE_CLAIMS = [
         # The original D5c docstring, verbatim in its load-bearing half. This is
         # the sentence that produced two false findings; it is guarded in the
         # source files as well as the Markdown.
-        re.compile(r"logs\s+the\s+full\s+request\s+body", re.IGNORECASE),
+        re.compile(
+            r"(logs|writes)\s+the\s+full\s+(charge\s+)?request\s+body", re.IGNORECASE
+        ),
         "no service has request-body middleware; logging_config wires handlers only (D5c)",
+    ),
+    (
+        # Servicing's variant of the same docstring, which named the fields
+        # instead of saying "PII": "writes the full charge request body (PAN,
+        # CVV, SSN) at INFO. No redaction." The clause above catches its opening
+        # words; this catches the field list, so a partial restoration of either
+        # half fails. `payments.charge()` there logs loan_id/amount/method.
+        re.compile(r"\(\s*PAN\s*,\s*CVV\s*,\s*SSN\s*\)\s*at\s+INFO", re.IGNORECASE),
+        "servicing's charge logs loan_id/amount/method; it never receives a PAN (ADR 0008)",
     ),
 ]
 
@@ -143,31 +155,45 @@ RETRACTION_CUES = re.compile(
 # allowed between the terminator and the space: a sentence ending `...code.*`
 # is still a sentence end, and missing that was how the first version of this
 # fix still passed the mutation it was written against.
-CLAUSE_BOUNDARY = re.compile(r"[.;][*_`\"')\]]*\s+|\|")
+#
+# A blank line ends a clause too: two paragraphs are never one sentence, and
+# without that a retraction in one paragraph would reach into the next.
+CLAUSE_BOUNDARY = re.compile(r"[.;][*_`\"')\]]*\s+|\|\s*|\n[ \t]*\n")
 
 
-def _clause_around(line: str, start: int, end: int) -> str:
-    """The sentence/cell of `line` that contains the span [start, end)."""
+def _clause_around(text: str, start: int, end: int) -> str:
+    """The sentence/cell/paragraph of `text` containing the span [start, end)."""
     cut_before = 0
-    cut_after = len(line)
-    for boundary in CLAUSE_BOUNDARY.finditer(line):
+    cut_after = len(text)
+    for boundary in CLAUSE_BOUNDARY.finditer(text):
         if boundary.end() <= start:
             cut_before = boundary.end()
         elif boundary.start() >= end:
             cut_after = boundary.start()
             break
-    return line[cut_before:cut_after]
+    return text[cut_before:cut_after]
 
 
 def live_claim_lines(text: str, pattern: re.Pattern) -> list:
-    """Line numbers where `pattern` matches with no retraction in its clause."""
+    """Line numbers where `pattern` matches with no retraction in its clause.
+
+    Scanned over the WHOLE text, not line by line. Every pattern here joins its
+    words with `\\s+`, which matches a newline -- but a per-line scan never gives
+    it the chance, so `payment-service logs full\\nPAN at INFO` slipped through
+    both halves of a wrapped sentence. These documents wrap prose at roughly 95
+    columns as a matter of course, so that was not a corner case: it was most of
+    the corpus. Matching across the wrap and reporting the line the match STARTS
+    on keeps the failure message pointing at something a reader can open.
+    """
     hits = []
-    for n, line in enumerate(text.splitlines(), 1):
-        for match in pattern.finditer(line):
-            if RETRACTION_CUES.search(_clause_around(line, match.start(), match.end())):
-                continue
-            hits.append(n)
-            break
+    seen_lines = set()
+    for match in pattern.finditer(text):
+        if RETRACTION_CUES.search(_clause_around(text, match.start(), match.end())):
+            continue
+        line_no = text.count("\n", 0, match.start()) + 1
+        if line_no not in seen_lines:
+            seen_lines.add(line_no)
+            hits.append(line_no)
     return hits
 
 
@@ -211,8 +237,65 @@ def test_no_document_repeats_a_disproved_logging_claim(pattern, why):
 
 
 PAN_CLAIM = FALSE_CLAIMS[0][0]
-INFO_LOG_CLAIM = next(p for p, _ in FALSE_CLAIMS if "INFO" in p.pattern)
-REQUEST_BODY_CLAIM = FALSE_CLAIMS[-1][0]
+INFO_LOG_CLAIM = next(p for p, _ in FALSE_CLAIMS if "logs\\s+them" in p.pattern)
+REQUEST_BODY_CLAIM = next(p for p, _ in FALSE_CLAIMS if "request\\s+body" in p.pattern)
+SERVICING_FIELDS_CLAIM = next(p for p, _ in FALSE_CLAIMS if r"\(\s*PAN" in p.pattern)
+
+# Exactly what `services/servicing-service/app/logging_config.py` said before
+# e889255, recovered with `git show e889255~1:` rather than paraphrased. A
+# regression test for a specific past wording is worth only as much as its
+# fidelity to that wording.
+SERVICING_DOCSTRING_BEFORE_D5C = (
+    '"""Logging — writes the full charge request body (PAN, CVV, SSN) at INFO. '
+    "No redaction.\n\n"
+    "Output goes to logs/payment-service.log, the same file handed over in the repo. "
+    '(D5, #7)\n"""\n'
+)
+
+
+def test_the_servicing_docstrings_former_wording_is_caught_if_it_returns():
+    """The source regression this suite exists for, in the file it came from.
+
+    Servicing's copy of the D5c docstring named the fields rather than saying
+    "PII", so neither the "still logs"/"still formats" patterns nor the
+    request-body one reached it: restoring it verbatim left the suite green.
+    Both of its halves are guarded now, so a partial restoration fails too.
+    """
+    assert live_claim_lines(SERVICING_DOCSTRING_BEFORE_D5C, REQUEST_BODY_CLAIM) == [1]
+    assert live_claim_lines(SERVICING_DOCSTRING_BEFORE_D5C, SERVICING_FIELDS_CLAIM) == [1]
+
+
+def test_a_claim_wrapped_across_two_lines_is_still_caught():
+    """The scan is over the text, not over each line.
+
+    These documents wrap at about 95 columns, so a guarded sentence lands on two
+    physical lines as a matter of routine. A per-line scan matched neither half
+    and reported nothing -- the quietest possible failure for a guard.
+    """
+    wrapped = (
+        "Storage and logging are both open here: `payment-service` logs full\n"
+        "PAN at INFO on every charge, which is a flat PCI violation.\n"
+    )
+    assert live_claim_lines(wrapped, PAN_CLAIM) == [1]
+
+
+def test_a_retraction_wrapped_with_its_claim_still_excuses_it():
+    """...and the cue may wrap with it, because it is one sentence either way."""
+    wrapped = (
+        "This entry previously said that `payment-service` logs full\n"
+        "PAN at INFO; it is false against the current code.\n"
+    )
+    assert live_claim_lines(wrapped, PAN_CLAIM) == []
+
+
+def test_a_retraction_in_the_previous_paragraph_does_not_reach_forward():
+    """A blank line ends the clause -- otherwise wrap-tolerance reopens the hatch."""
+    two_paragraphs = (
+        "This entry previously said several things that were false.\n"
+        "\n"
+        "`payment-service` logs full PAN at INFO.\n"
+    )
+    assert live_claim_lines(two_paragraphs, PAN_CLAIM) == [3]
 
 
 def test_the_readme_logging_claim_is_caught_if_it_returns():
@@ -291,12 +374,16 @@ def test_the_shipped_source_docstrings_do_not_carry_that_wording():
         )
 
 
-def test_the_request_schema_makes_a_raw_pan_unreachable():
-    """The code half of the same claim.
+def test_the_request_schema_rejects_the_card_fields_by_name():
+    """The code half of the same claim -- stated at its real strength.
 
-    The documentation assertions above are only meaningful while this holds: if
-    the schema ever accepted `pan` again, the docs would be right and this test
-    would be the thing that is wrong. Asserted here so the two move together.
+    This proves exactly one thing: no FIELD CALLED pan/cvv/ssn is accepted, and
+    a client that sends one gets a 422 rather than a silent drop. It does NOT
+    prove that no card number can enter the process, and an earlier version of
+    this docstring said it did. `extra="forbid"` matches on field names, not on
+    content, so `processor_token="4111111111111111"` is a perfectly valid
+    payload -- which is why the content guarantee is a separate test below and
+    a separate sentence in the documents.
     """
     fields = set(schemas.PaymentIn.model_fields)
     for forbidden in ("pan", "cvv", "ssn"):
@@ -304,9 +391,39 @@ def test_the_request_schema_makes_a_raw_pan_unreachable():
             f"PaymentIn accepts {forbidden!r} again -- the documents this test "
             f"guards would now be telling the truth"
         )
-    # extra="forbid": a client still sending pan/cvv/ssn gets a 422 rather than
-    # a silent drop, so the field cannot arrive and be logged by accident.
     assert schemas.PaymentIn.model_config.get("extra") == "forbid"
+
+
+def test_card_data_smuggled_through_an_allowed_field_is_redacted_before_logging():
+    """The guarantee that actually covers the gap the schema check leaves.
+
+    A caller can put a PAN in `processor_token`, or an SSN in `brand`, and the
+    schema will accept it: those are allowed fields and pydantic validates
+    shape, not sensitivity. What stops it reaching the log is `charge()`
+    building its line through `redact_dict`, which masks sensitive KEYS
+    outright and runs the PAN/SSN/CVV patterns over every other string VALUE.
+    Exercised on the same dict shape `charge()` logs.
+    """
+    safe = redact_dict({
+        "processor_token": "4111111111111111",   # a real-format PAN, Luhn-valid
+        "last4": "1111",
+        "brand": "cardholder ssn 123-45-6789",
+        "amount": 10.0,
+        "loan_id": 1,
+        "idempotency_key": "k",
+    })
+    rendered = str(safe)
+    # By key: a vaulted token is sensitive whatever it contains, so it is
+    # replaced wholesale rather than pattern-matched.
+    assert safe["processor_token"] == "[REDACTED]"
+    # By content: an allowed free-text field carrying a PAN or an SSN is masked
+    # on the way through, which is the half `extra="forbid"` cannot do.
+    assert "4111111111111111" not in rendered
+    assert "123-45-6789" not in rendered
+    assert "[SSN-REDACTED]" in safe["brand"]
+    # Non-sensitive context survives -- a redactor that ate the correlation
+    # fields would be traded for an unusable log.
+    assert safe["last4"] == "1111" and safe["loan_id"] == 1
 
 
 def test_a_rejected_payload_carrying_a_pan_never_becomes_a_log_line():

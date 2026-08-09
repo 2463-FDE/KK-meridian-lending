@@ -92,8 +92,12 @@ orchestrates the LOS flow and calls them over HTTP.
   logs full PII at intake. Both are false against the current code and were verified
   line by line:
   `payment-service`'s `PaymentIn` sets `extra="forbid"` and accepts only a processor
-  token plus `last4`/`brand`, so a raw PAN/CVV/SSN cannot reach the service at all
-  (ADR 0008); `charge()` logs `redact_dict` output with the cardholder name omitted;
+  token plus `last4`/`brand`, so a field *named* `pan`/`cvv`/`ssn` is rejected with a
+  422 (ADR 0008) — that is a check on field names, not on content, so it is the
+  redactor and not the schema that covers card data pushed through an allowed field
+  (a PAN in `processor_token`). `charge()` logs `redact_dict` output, which masks
+  sensitive keys and runs the PAN/SSN/CVV patterns over every other string value, with
+  the cardholder name omitted entirely;
   `servicing-service`'s legacy charge logs `loan_id`/`amount`/`method` only; and
   `origination-service`'s intake logs `app_id`/`applicant_id` (PR #6 review, Gap C).
   **What logs still carry:** identifiers and financial decision data — applicant,

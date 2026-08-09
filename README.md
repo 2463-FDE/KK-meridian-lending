@@ -113,8 +113,12 @@ independent of encryption; it predates the current engagement (vendor debt, see
 This section previously said that `payment-service` logs them at INFO and persists the PAN
 and CVV itself. Both claims are false against the current code, and were verified against
 it: `PaymentIn` sets `extra="forbid"` and accepts only a processor token plus
-`last4`/`brand` (ADR 0008), so a raw PAN or CVV cannot reach the service at all; its INSERT
-writes `last4`/`brand` and never the card number; and `charge()` logs `redact_dict` output.
+`last4`/`brand` (ADR 0008), so a field *named* `pan`, `cvv` or `ssn` is rejected with a 422
+rather than dropped silently; its INSERT writes `last4`/`brand` and never the card number;
+and `charge()` builds its log line through `redact_dict`, which masks sensitive keys and
+runs the PAN/SSN/CVV patterns over every other string value — so card data pushed through
+an *allowed* field (a PAN in `processor_token`, say) is redacted before it is logged, which
+the schema alone would not prevent.
 The remaining exposure is the schema and the seed data, not the application's write or log
 path — see `docs/DEBT.md` D5a for the per-call-site logging verification.
 
