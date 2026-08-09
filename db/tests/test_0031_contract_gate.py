@@ -643,3 +643,48 @@ def test_a_statically_known_substitution_of_an_allowed_column_passes(tmp_path):
         '    return conn.execute(f"SELECT {COL} FROM payments")\n'
     ))
     assert hits == [], f"clean SQL was flagged: {hits}"
+
+
+def test_a_local_binding_does_not_vouch_for_another_function(tmp_path):
+    """A name means what it means WHERE IT IS WRITTEN.
+
+    Bindings were collected in one pass over the whole file, so a clean
+    `COL = "last4"` in one function could be the value used when folding a
+    different function's `f"SELECT {COL} FROM payments"` -- masking a live read,
+    or inventing one. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def clean(conn):\n"
+        '    COL = "last4"\n'
+        '    return conn.execute(f"SELECT {COL} FROM payments")\n'
+        "\n"
+        "def legacy(conn):\n"
+        '    COL = "pan"\n'
+        '    return conn.execute(f"SELECT {COL} FROM payments")\n'
+    ))
+    assert len(hits) == 1, f"expected exactly the legacy read, got: {hits}"
+    # line 7 is `legacy`'s f-string; `clean`'s identical statement is line 3.
+    assert hits[0][1] == 7, f"the hit is on the wrong line: {hits}"
+
+
+def test_a_module_level_binding_is_visible_inside_a_function(tmp_path):
+    """Inheritance still works: an outer name resolves in an inner scope."""
+    hits = _run_checker_over(tmp_path, (
+        'COL = "pan"\n'
+        "\n"
+        "def read(conn):\n"
+        '    return conn.execute(f"SELECT {COL} FROM payments")\n'
+    ))
+    assert hits, "a module-level binding was not visible inside the function"
+
+
+def test_an_inner_rebinding_shadows_the_module_value(tmp_path):
+    """Innermost wins, as it would at runtime."""
+    hits = _run_checker_over(tmp_path, (
+        'COL = "pan"\n'
+        "\n"
+        "def read(conn):\n"
+        '    COL = "last4"\n'
+        '    return conn.execute(f"SELECT {COL} FROM payments")\n'
+    ))
+    assert hits == [], f"a shadowed module value produced a false hit: {hits}"

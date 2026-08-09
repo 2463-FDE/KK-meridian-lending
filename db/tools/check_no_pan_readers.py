@@ -225,75 +225,108 @@ def _fold(node: ast.AST, names: dict[str, str], depth: int = 0) -> str | None:
     return None
 
 
-def _static_strings(tree: ast.AST) -> dict[str, str]:
-    """Names bound to SQL that can be resolved statically.
+_SCOPES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
 
-    Covers the common shape the reviewer named: a query assigned to a variable
-    and handed to `execute` further down. Assignments are walked in source
-    order so a later rebinding wins, which is the reading a human would give
-    the file.
+
+def _nodes_in_scope(scope: ast.AST):
+    """Every node belonging to `scope`, without descending into nested scopes.
+
+    A nested function is its own scope with its own bindings; walking into it
+    from here would let one function's `COL = "last4"` mask another's
+    `COL = "pan"`. Reviewed on PR #15.
     """
-    names: dict[str, str] = {}
-    for node in ast.walk(tree):
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, _SCOPES):
+            continue
+        yield child
+        for inner in ast.walk(child):
+            if inner is child:
+                continue
+            if isinstance(inner, _SCOPES):
+                continue
+            yield inner
+
+
+def _child_scopes(scope: ast.AST):
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, _SCOPES):
+            yield child
+        else:
+            for inner in ast.walk(child):
+                if isinstance(inner, _SCOPES):
+                    yield inner
+
+
+def _bindings_for_scope(scope: ast.AST, inherited: dict[str, str]) -> dict[str, str]:
+    """Names bound to static SQL in this scope, over what it inherits.
+
+    Innermost wins, which is how the name would actually resolve at runtime.
+    Collected in source order so a later rebinding replaces an earlier one.
+    """
+    names = dict(inherited)
+    for node in _nodes_in_scope(scope):
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Name):
                 text = _fold(node.value, names)
                 if text is not None:
                     names[target.id] = text
+                else:
+                    # Rebound to something we cannot resolve: the old value is
+                    # no longer what this name means here.
+                    names.pop(target.id, None)
     return names
+
+
+def _scan_scope(scope, inherited, doc_nodes, hits) -> None:
+    """Collect hits in one scope, then recurse into the scopes it contains."""
+    names = _bindings_for_scope(scope, inherited)
+
+    for node in _nodes_in_scope(scope):
+        if isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp, ast.Call)):
+            if id(node) not in doc_nodes:
+                text = _fold(node, names)
+                if text and _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
+                    excerpt = " ".join(
+                        line.strip() for line in text.splitlines()
+                        if _BARE_COLUMN.search(line)
+                    ) or text.strip()
+                    hits[(node.lineno, excerpt[:160])] = None
+
+        # A name carrying SQL is reported where it is EXECUTED: the assignment
+        # may be far away, and the execution is the live read.
+        if isinstance(node, ast.Call):
+            func = node.func
+            attr = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if attr in _EXECUTE_CALLS:
+                for arg in node.args:
+                    if not isinstance(arg, ast.Name):
+                        continue
+                    text = names.get(arg.id)
+                    if text and _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
+                        hits[(node.lineno, f"{arg.id} = {text.strip()[:140]}")] = None
+
+    for child in _child_scopes(scope):
+        _scan_scope(child, names, doc_nodes, hits)
 
 
 def _sql_literal_hits(source: str) -> list[tuple[int, str]]:
     """(line, text) for every statically-resolvable SQL expression naming a
     legacy column.
 
-    Whole EXPRESSIONS, not lines and not bare literals: a projection spread
-    over ten lines, built by concatenation, or interpolated into an f-string is
-    one expression, and the line window this replaced could only ever guess at
-    its extent. Docstrings are excluded by position rather than by quoting
-    style.
+    Whole EXPRESSIONS, resolved in their own lexical scope. A projection spread
+    over ten lines, built by concatenation, or interpolated from a name is one
+    expression; and a name means what it means WHERE IT IS WRITTEN, so one
+    function's `COL = "last4"` cannot vouch for another's `COL = "pan"`.
+    Docstrings are excluded by position rather than by quoting style.
     """
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
 
-    doc_nodes = _docstring_nodes(tree)
-    names = _static_strings(tree)
-
     hits: dict[tuple[int, str], None] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp, ast.Call)):
-            continue
-        if id(node) in doc_nodes:
-            continue
-        text = _fold(node, names)
-        if not text:
-            continue
-        if _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
-            excerpt = " ".join(
-                line.strip() for line in text.splitlines()
-                if _BARE_COLUMN.search(line)
-            ) or text.strip()
-            hits[(node.lineno, excerpt[:160])] = None
-
-    # A name carrying SQL is reported where it is EXECUTED, since that is the
-    # live read -- the assignment may be far away or in another module.
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        attr = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if attr not in _EXECUTE_CALLS:
-            continue
-        for arg in node.args:
-            if not isinstance(arg, ast.Name):
-                continue
-            text = names.get(arg.id)
-            if text and _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
-                hits[(node.lineno, f"{arg.id} = {text.strip()[:140]}")] = None
-
+    _scan_scope(tree, {}, _docstring_nodes(tree), hits)
     return sorted(hits)
 
 
