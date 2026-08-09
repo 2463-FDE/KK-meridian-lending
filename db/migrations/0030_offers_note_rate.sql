@@ -39,18 +39,43 @@ ALTER TABLE offers
 -- PR #10; a false rate on a disclosure is the defect this PR exists to fix,
 -- not one it may introduce.
 --
--- The reliable per-row source is the boarded loan. `loans.apr` is written at
--- boarding from the rate the schedule was calculated on
--- (origination-service/app/intake.py: `annual_rate_pct` into the `apr` column,
--- a legacy misnomer tracked separately), so for any offer whose application has
--- a loan, that column IS this offer's note rate rather than an inference from
--- it.
+-- The only per-row source is the boarded loan, and it has to be PROVEN rather
+-- than trusted. `loans.apr` is a legacy misnomer that has held two different
+-- things over this system's life:
+--
+--   * loans boarded by the pre-change acceptance path got `offers.apr` copied
+--     into it -- the DISCLOSED APR, which is higher than the note rate whenever
+--     a prepaid fee exists. The $18,000/48-month seed offer boarded
+--     `loans.apr = 5.196` against a contractual 7.99%. Reading that as the note
+--     rate would write the exact APR/note-rate conflation this migration exists
+--     to end, and the UI would then present it as a stored contractual fact.
+--   * seeded loans carry the note rate there, because the seeds were generated
+--     from it.
+--
+-- The two are indistinguishable by provenance on an upgraded database, so this
+-- distinguishes them ARITHMETICALLY: the value is accepted only if amortizing
+-- the loan's principal at that rate over its term reproduces the offer's stored
+-- monthly payment. A note rate does; an APR does not, because the APR is solved
+-- against the amount financed rather than against the principal the payments
+-- actually run on. Review finding on PR #10.
 UPDATE offers o
    SET note_rate_pct = l.apr
   FROM loans l
  WHERE l.app_id = o.app_id
    AND o.note_rate_pct IS NULL
-   AND l.apr IS NOT NULL;
+   AND l.apr IS NOT NULL
+   AND l.principal IS NOT NULL
+   AND l.term_months IS NOT NULL
+   AND l.term_months > 0
+   AND o.monthly_payment IS NOT NULL
+   AND abs(
+         CASE
+           WHEN l.apr = 0 THEN l.principal / l.term_months
+           ELSE (l.principal * (l.apr / 100 / 12))
+                / (1 - power(1 + (l.apr / 100 / 12), -l.term_months))
+         END
+         - o.monthly_payment
+       ) <= 0.02;
 
 -- Everything else stays NULL on purpose. An unboarded legacy offer has no
 -- second record of what it was priced at, and there is no way to recover it

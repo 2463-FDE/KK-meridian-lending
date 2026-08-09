@@ -33,6 +33,7 @@ import psycopg2.errors
 from app import config, db
 from app import apr as apr_mod
 from app import offer as offer_mod
+from app import schedule as schedule_mod
 from app.database import get_session
 from app.main import app
 import pytest
@@ -553,3 +554,43 @@ def test_a_pre_0030_offer_still_renders_through_the_inversion_fallback():
     # Nothing is invented for the contractual fields.
     assert body["disclosure"]["final_payment"] is None
     assert body["disclosure"]["regular_payment_count"] is None
+
+
+def test_the_stored_schedule_is_expanded_not_regenerated(monkeypatch):
+    """A generator change must not move the rows of a stored disclosure.
+
+    The read path used to rebuild every row with the deployed algorithm and then
+    patch only the final one back to the stored value -- so the regular rows,
+    and the patched row's own principal/interest split, still came from whatever
+    generator happened to be running. That is the drift `schedule_version` and
+    the stored payment columns exist to prevent. Review finding on PR #10.
+
+    Simulated by making the generator return something else entirely: under the
+    old behaviour its numbers reach the borrower, under the fix they cannot,
+    because the stored payments are what get expanded.
+    """
+    def _a_different_generator(*args, **kwargs):
+        raise AssertionError(
+            "the read path re-solved a stored schedule instead of expanding it"
+        )
+
+    monkeypatch.setattr(schedule_mod, "amortization", _a_different_generator)
+
+    offer = _FakeOffer(
+        id=92, app_id=92, decision_id=92, fee_pct_used=0.03,
+        note_rate_pct=7.99, apr=13.51, finance_charge=202.03,
+        monthly_payment=24.47, amount_financed=972.43, total_of_payments=1174.46,
+        regular_payment_count=47, final_payment=24.37, term_months=48,
+        schedule_version="B1", principal=1002.50,
+    )
+    body = _offer_response_for(offer, 92)
+
+    rows = body["schedule"]
+    assert len(rows) == 48
+    # Every regular row is the STORED regular payment, not a re-solved one.
+    assert all(r["payment"] == pytest.approx(24.47, abs=1e-9) for r in rows[:-1])
+    assert rows[-1]["payment"] == pytest.approx(24.37, abs=1e-9)
+    # The split is still arithmetic on the contractual rate, so the rows remain
+    # internally consistent rather than being payments with no breakdown.
+    for row in rows:
+        assert row["principal"] + row["interest"] == pytest.approx(row["payment"], abs=0.005)

@@ -83,19 +83,26 @@ def _legacy_database(conn):
                 opened_at TIMESTAMPTZ DEFAULT now()
             );
 
-            -- Three offers with three different histories:
-            --   1 boarded at 11.25%   (loan exists, accepted_at NULL: pre-0021)
-            --   2 boarded at 22.99%   (the top of the bulk seed's range)
-            --   3 never boarded       (no loan, so no recoverable rate)
+            -- Four offers with four different histories. The monthly payments
+            -- are the real amortized figures for each (principal, rate, term),
+            -- because the backfill now PROVES the rate by reproducing them.
+            --   1 seeded-style: loans.apr IS the note rate (11.25%)
+            --   2 seeded-style: loans.apr IS the note rate (22.99%)
+            --   3 never boarded: no loan, so nothing to recover
+            --   4 boarded by the PRE-CHANGE path: loans.apr holds the DISCLOSED
+            --     APR (5.196) while the payments were calculated at 7.99% --
+            --     reading it as the note rate is the reviewed defect
             INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge,
                                 monthly_payment, amount_financed, total_of_payments)
-            VALUES (1, 1, 0.03, 13.10, 2000.00, 400.00, 9700.00, 11700.00),
-                   (2, 2, 0.03, 25.40, 5000.00, 500.00, 19400.00, 24400.00),
-                   (3, 3, 0.03, 10.07, 2369.15, 469.98, 14550.00, 16919.15);
+            VALUES (1, 1, 0.03, 13.10, 1828.52, 328.57, 9700.00, 11828.52),
+                   (2, 2, 0.03, 25.40, 11364.16, 640.92, 19400.00, 30764.16),
+                   (3, 3, 0.03, 10.07, 2369.15, 469.98, 14550.00, 16919.15),
+                   (4, 4, 0.03, 5.196, 3628.70, 439.35, 17460.00, 21088.70);
 
             INSERT INTO loans (app_id, applicant_name, principal, apr, term_months, opened_at)
             VALUES (1, 'Boarded Eleven', 10000.00, 11.250, 36, '2026-01-02T00:00:00Z'),
-                   (2, 'Boarded TwentyTwo', 20000.00, 22.990, 48, '2026-02-03T00:00:00Z');
+                   (2, 'Boarded TwentyTwo', 20000.00, 22.990, 48, '2026-02-03T00:00:00Z'),
+                   (4, 'Boarded ByApr', 18000.00, 5.196, 48, '2026-03-04T00:00:00Z');
         """)
     conn.commit()
 
@@ -174,3 +181,30 @@ def test_the_migration_is_idempotent_over_the_backfill(conn):
     assert {k: v["note_rate_pct"] for k, v in first.items()} == {
         k: v["note_rate_pct"] for k, v in second.items()
     }
+
+
+def test_a_disclosed_apr_in_loans_apr_is_not_taken_as_the_note_rate(conn):
+    """`loans.apr` has held two different things, and only one of them is a rate.
+
+    The pre-change acceptance path copied `offers.apr` -- the DISCLOSED APR --
+    into that column, so an $18,000/48-month offer written at a contractual
+    7.99% boarded `loans.apr = 5.196`. Backfilling from it indiscriminately
+    would record 5.196% as the contractual fact the UI now displays: precisely
+    the APR/note-rate conflation this migration exists to end. Review finding on
+    PR #10.
+
+    The two histories are told apart arithmetically: the value is accepted only
+    if amortizing the loan's principal at that rate reproduces the offer's
+    stored monthly payment. 5.196% over 18,000/48 gives 416.13, not the stored
+    439.35, so it is refused and the row is left NULL for regeneration.
+    """
+    _legacy_database(conn)
+    _apply_0030(conn)
+    rows = _offers(conn)
+
+    assert rows[4]["note_rate_pct"] is None, (
+        "the disclosed APR was recorded as the contractual note rate"
+    )
+    # And the rows whose stored rate DOES reproduce their payment still recover.
+    assert float(rows[1]["note_rate_pct"]) == pytest.approx(11.250, abs=1e-3)
+    assert float(rows[2]["note_rate_pct"]) == pytest.approx(22.990, abs=1e-3)

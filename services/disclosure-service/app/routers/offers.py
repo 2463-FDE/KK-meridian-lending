@@ -465,25 +465,32 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         note_rate = apr.note_rate_from_payment(principal, monthly_payment, term_months)
     else:
         note_rate = 0.0
-    rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
-    if schedule_is_stored and rows:
-        # The stored contract is the authority; the generator only re-expands it
-        # for display. With the stored principal above, the two agree by
-        # construction -- so a disagreement here means a generator or rounding
-        # policy has moved under an already-disclosed offer. The billed figure
-        # is corrected to the stored one and the drift is logged, because the
-        # borrower must never be shown a final payment that is not the one on
-        # their disclosure.
-        stored_final = float(offer.final_payment)
-        if abs(float(rows[-1]["payment"]) - stored_final) >= 0.005:
+    if schedule_is_stored and term_months:
+        # Expanded from the STORED contract, not re-solved. Regenerating and
+        # then patching the final row back left every regular row -- and the
+        # patched row's own principal/interest split -- computed by whatever
+        # generator is deployed now, which is the drift schedule_version exists
+        # to make impossible. Review finding on PR #10.
+        rows = schedule.amortization_from_contract(
+            principal, note_rate, term_months,
+            regular_payment=monthly_payment, final_payment=float(offer.final_payment),
+        )
+        residue = rows[-1]["balance"] if rows else 0.0
+        if abs(residue) >= 0.005:
+            # The stored amounts do not amortize the stored principal. That is a
+            # real inconsistency in a signed disclosure, so it is logged rather
+            # than smoothed away; the rows still show what was actually agreed.
             log.error(
-                "regenerated schedule disagrees with the stored contract "
-                "offer_id=%s application_id=%s generated_final=%.2f stored_final=%.2f "
-                "schedule_version=%s",
-                offer.id, application_id, float(rows[-1]["payment"]), stored_final,
-                offer.schedule_version,
+                "stored contract does not amortize to zero offer_id=%s "
+                "application_id=%s residue=%.2f schedule_version=%s",
+                offer.id, application_id, residue, offer.schedule_version,
             )
-            rows[-1] = {**rows[-1], "payment": stored_final}
+    else:
+        # Legacy rows only: nothing was stored, so the schedule is explicitly a
+        # reconstruction and the caller is told so by the null contractual
+        # fields below.
+        rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
+
     disclosure = Disclosure(
         note_rate_pct=(note_rate or None),
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
