@@ -40,6 +40,9 @@ from app import schemas
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 DOCS = [
+    # README first: it is the document a reader meets before any of the others,
+    # and it was the last one still carrying the claim.
+    REPO_ROOT / "README.md",
     REPO_ROOT / "docs" / "runbook.md",
     REPO_ROOT / "docs" / "ROADMAP.md",
     REPO_ROOT / "docs" / "DEBT.md",
@@ -87,6 +90,17 @@ FALSE_CLAIMS = [
     (
         re.compile(r"origination\s+still\s+logs\s+full\s+PII", re.IGNORECASE),
         "origination's intake logs app_id/applicant_id only (PR #6 review, Gap C)",
+    ),
+    (
+        # README's own wording. The claim survived four other documents being
+        # corrected because it phrases the same assertion differently -- "logs
+        # them at INFO", with the card fields named in the preceding clause --
+        # so none of the patterns above reached it.
+        re.compile(
+            r"logs\s+them\s+at\s+INFO|logs\s+(the\s+)?(full\s+)?PAN[^.;|]{0,24}at\s+INFO",
+            re.IGNORECASE,
+        ),
+        "payment-service logs redact_dict output; PaymentIn forbids pan/cvv (ADR 0008)",
     ),
     (
         # The original D5c docstring, verbatim in its load-bearing half. This is
@@ -197,7 +211,29 @@ def test_no_document_repeats_a_disproved_logging_claim(pattern, why):
 
 
 PAN_CLAIM = FALSE_CLAIMS[0][0]
+INFO_LOG_CLAIM = next(p for p, _ in FALSE_CLAIMS if "INFO" in p.pattern)
 REQUEST_BODY_CLAIM = FALSE_CLAIMS[-1][0]
+
+
+def test_the_readme_logging_claim_is_caught_if_it_returns():
+    """README outlived four corrected documents by wording it differently.
+
+    Its Compliance section said `payment-service` "persists the full PAN and
+    CVV ... and logs them at INFO". The storage half is true and stays; the
+    logging half was false, and no pattern written for the other documents
+    came close to matching this phrasing -- which is how the most-read file in
+    the repository ended up as the last one still asserting it.
+    """
+    regressed = (
+        "**Not PCI-DSS compliant** -- `payment-service` persists the full PAN "
+        "and CVV unencrypted and logs them at INFO."
+    )
+    assert live_claim_lines(regressed, INFO_LOG_CLAIM) == [1]
+
+
+def test_the_readme_is_in_the_guarded_corpus():
+    """The pattern above is worthless if the file it was written for is unscanned."""
+    assert (REPO_ROOT / "README.md") in DOCS
 
 # The exact row the escape hatch used to leak through, trimmed to its shape: a
 # real `docs/DEBT.md` D5a-style table row whose retraction is about something
