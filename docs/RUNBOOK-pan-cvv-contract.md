@@ -31,12 +31,19 @@ which a merge to `main` erases. Hence the gate below.
 |---|---|---|
 | 1 | PR #11 merged: `last4` back-filled, servicing reads `last4` first and falls back to `pan` only for pre-`0029` rows | `db/tests/test_expand_contract_pan_cvv.py`, `services/servicing-service/tests/test_pan_mask.py` |
 | 2 | PR #11 **deployed everywhere**. Not merged — deployed. No instance may still be serving the pre-cutover image | operator; see below |
-| 3 | Seed writers removed. `db/init/002_seed.sql` and `db/init/003_seed_bulk.sql` still insert full PAN/CVV, and `002_seed.sql` seeds an audit row containing a raw PAN. A fresh database reintroduces card data | `docs/DEBT.md` D5b / D13 |
+| 3 | ~~Seed writers removed~~ — **already done, no action.** `db/init/002_seed.sql` and `db/init/003_seed_bulk.sql` insert only `last4`/`brand`, and the seeded audit row reads `charge req last4=1111`. A fresh database no longer reintroduces card data | read the two seed files; `db/tests/test_expand_contract_pan_cvv.py` |
 | 4 | Source check passes | `python db/tools/check_no_pan_readers.py` |
 | 5 | Run `0031` with the acknowledgement set | the migration's own gate |
 
-Steps 3 and 4 are independent. Step 4 can pass while step 3 has not been done:
-the checker reads service source, and the seeds are not service source.
+Step 3 is kept in the table rather than deleted so an operator working from an
+older copy of this runbook can see it was retired deliberately, and why. It
+described the tree as it was before the expand step landed; asserting it still
+holds sent operators to wait for cleanup that had already happened, while the
+card data this migration removes stayed in the database. Reviewed on PR #15.
+
+Step 4 remains independent of it: the checker reads service source, and the
+seeds are not service source — so a green checker never proved anything about
+the seeds either way.
 
 ## Step 4 — the source check
 

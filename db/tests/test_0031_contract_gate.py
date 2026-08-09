@@ -32,6 +32,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against")
 
 MIGRATIONS = pathlib.Path(__file__).resolve().parents[1] / "migrations"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA = "contract_gate_0031"
 
 _0031 = (MIGRATIONS / "0031_drop_payments_pan_cvv.sql").read_text()
@@ -164,3 +165,133 @@ def test_the_migration_is_idempotent_once_it_has_run(conn):
     _run_0031(conn, acknowledged=True)
     _run_0031(conn, acknowledged=True)
     assert "pan" not in _columns(conn)
+
+
+# --- the checker whose green result authorises the drop ----------------------
+
+def _run_checker_over(tmp_path, source: str):
+    """Run check_no_pan_readers' scan against one synthetic service file."""
+    import importlib.util
+
+    tool = REPO_ROOT / "db" / "tools" / "check_no_pan_readers.py"
+    spec = importlib.util.spec_from_file_location("check_no_pan_readers", tool)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    svc = tmp_path / "services" / "fake-service" / "app"
+    svc.mkdir(parents=True)
+    (svc / "reader.py").write_text(source, encoding="utf-8")
+    # Both roots, or scan() reports paths relative to the real repository and
+    # raises on a tmp_path that is not under it.
+    mod.SERVICES = tmp_path / "services"
+    mod.REPO_ROOT = tmp_path
+    return mod.scan()
+
+
+def test_a_projection_split_across_lines_is_detected(tmp_path):
+    """The form raw SQL is actually written in here.
+
+    Adjacent string literals put the keyword and the column on different lines,
+    so a same-line check saw neither -- and the checker printed OK over a live
+    reader. That green result is the runbook's prerequisite for acknowledging a
+    destructive migration. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        "    return conn.query(\n"
+        '        "SELECT id, "\n'
+        '        "pan, "\n'
+        '        "last4 FROM payments"\n'
+        "    )\n"
+    ))
+    assert hits, "a multiline projection reading pan was reported clean"
+    assert any("pan" in h[3] for h in hits)
+
+
+def test_an_uppercase_column_is_detected(tmp_path):
+    """PostgreSQL folds an unquoted identifier, so `PAN` reads the same column."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.query("SELECT PAN, CVV FROM payments")\n'
+    ))
+    assert hits, "an uppercase pan/cvv read was reported clean"
+
+
+def test_an_unrelated_word_far_from_any_sql_is_not_a_hit(tmp_path):
+    """The window is a statement body, not a licence to flag the word anywhere."""
+    hits = _run_checker_over(tmp_path, (
+        'def helper():\n'
+        '    return conn.query("SELECT id FROM payments")\n'
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "def pan_display_name():\n"
+        "    return 'pan'\n"
+    ))
+    assert hits == [], f"unexpected hits: {hits}"
+
+
+# --- the gate and the ALTER must resolve the SAME table ----------------------
+
+_EMPTY_SCHEMA = "contract_gate_0031_empty"
+
+
+def test_the_gate_holds_when_an_earlier_schema_lacks_the_table(conn):
+    """An ordinary search_path defeated the gate entirely.
+
+    `current_schema()` is the FIRST schema on the path; an unqualified
+    `payments` resolves to the first schema that CONTAINS it. With a path like
+    `"$user", public` and an existing per-user schema, the gate looked in the
+    empty schema, found no `pan`, and returned satisfied -- while the ALTER went
+    on to resolve the real table and drop its columns with neither the back-fill
+    check nor the acknowledgement run. Data destroyed by a migration that
+    reported it had nothing to do. Reviewed on PR #15.
+
+    The empty schema is placed FIRST here, exactly as a per-user schema sits
+    ahead of public.
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {_EMPTY_SCHEMA} CASCADE")
+        cur.execute(f"CREATE SCHEMA {_EMPTY_SCHEMA}")
+        # A legacy row that has NOT been back-filled: the gate must refuse.
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO payments (loan_id, pan, cvv, last4, amount, method) "
+                    "VALUES (1, '4111111111111111', '123', NULL, 10.00, 'card')")
+        cur.execute(f"SET search_path TO {_EMPTY_SCHEMA}, {SCHEMA}")
+        cur.execute("SET meridian.pan_drop_acknowledged = 'yes'")
+
+        with pytest.raises(psycopg2.errors.RaiseException) as exc:
+            cur.execute(_0031)
+        assert "0029 back-fill has not completed" in str(exc.value)
+
+    # And the columns are still there: nothing was dropped behind the gate.
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = 'payments' "
+                    "AND column_name IN ('pan','cvv')", (SCHEMA,))
+        assert cur.fetchone()[0] == 2, "the drop ran despite an unsatisfied gate"
+        cur.execute(f"DROP SCHEMA IF EXISTS {_EMPTY_SCHEMA} CASCADE")
+
+
+def test_the_drop_targets_the_same_table_the_gate_checked(conn):
+    """The satisfied path, through the same shadowing search_path."""
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {_EMPTY_SCHEMA} CASCADE")
+        cur.execute(f"CREATE SCHEMA {_EMPTY_SCHEMA}")
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO payments (loan_id, pan, cvv, last4, amount, method) "
+                    "VALUES (1, '4111111111111111', '123', '1111', 10.00, 'card')")
+        cur.execute(f"SET search_path TO {_EMPTY_SCHEMA}, {SCHEMA}")
+        cur.execute("SET meridian.pan_drop_acknowledged = 'yes'")
+        cur.execute(_0031)
+
+        cur.execute("SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = 'payments' "
+                    "AND column_name IN ('pan','cvv')", (SCHEMA,))
+        assert cur.fetchone()[0] == 0, "the columns were not dropped from the real table"
+        cur.execute(f"DROP SCHEMA IF EXISTS {_EMPTY_SCHEMA} CASCADE")

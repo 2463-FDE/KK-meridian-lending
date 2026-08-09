@@ -58,7 +58,25 @@ PATTERNS = [
 # A bare `pan` / `cvv` token counts as a column reference only on a line that is
 # also doing SQL. Without that qualifier the word appears in ordinary prose.
 _SQL_CONTEXT = re.compile(r"\b(select|insert|update|delete|set|where|values)\b", re.IGNORECASE)
-_BARE_COLUMN = re.compile(r"\b(pan|cvv)\b")
+# Case-insensitive: PostgreSQL folds an unquoted identifier to lower case, so
+# `SELECT PAN` reads the very column being dropped. This was case-sensitive and
+# missed it. Reviewed on PR #15.
+_BARE_COLUMN = re.compile(r"\b(pan|cvv)\b", re.IGNORECASE)
+
+# How many lines above a bare column still count as the same SQL statement.
+# Raw SQL here is written as adjacent string literals, and a projection is
+# routinely split across them:
+#
+#     "SELECT id, "
+#     "pan, "
+#     "last4 FROM payments"
+#
+# Requiring the keyword and the column on the SAME line missed every one of
+# those, so the checker printed OK over a live reader -- and that green result
+# is the runbook's prerequisite for acknowledging the destructive migration.
+# Small on purpose: a statement-body window, not a file-wide search, so an
+# unrelated `pan` far below a SELECT is still not a hit. Reviewed on PR #15.
+_SQL_WINDOW = 6
 
 SKIP_DIRS = {"__pycache__", "tests", "node_modules", ".git"}
 
@@ -95,8 +113,18 @@ def scan() -> list[tuple[str, int, str, str]]:
                 if pattern.search(line):
                     matched = kind
                     break
-            if matched is None and _SQL_CONTEXT.search(line) and _BARE_COLUMN.search(line):
-                matched = "SQL column reference"
+            if matched is None and _BARE_COLUMN.search(line):
+                # The keyword may be on this line or on one of the few above it,
+                # because a projection split across adjacent string literals is
+                # one statement written over several lines.
+                start = max(0, n - 1 - _SQL_WINDOW)
+                window = lines[start:n]
+                if any(
+                    _SQL_CONTEXT.search(w)
+                    for w in window
+                    if not _is_comment(w)
+                ):
+                    matched = "SQL column reference"
             if matched:
                 hits.append((str(path.relative_to(REPO_ROOT)), n, matched, line.strip()))
     return hits

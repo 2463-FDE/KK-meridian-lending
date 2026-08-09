@@ -27,12 +27,26 @@ DO $$
 DECLARE
     pan_rows INTEGER;
     cvv_rows INTEGER;
+    -- The EXACT relation an unqualified `payments` resolves to, by the same
+    -- search_path rules the ALTER below obeys. `current_schema()` is only the
+    -- FIRST schema on the path, which is not necessarily the one holding the
+    -- table: with an ordinary `"$user", public` path and an existing per-user
+    -- schema, this gate looked in the per-user schema, found no `pan`, and
+    -- returned -- while the ALTER went on to resolve `public.payments` and drop
+    -- its columns with neither the back-fill check nor the acknowledgement.
+    -- Reviewed on PR #15.
+    target REGCLASS := to_regclass('payments');
 BEGIN
+    IF target IS NULL THEN
+        RAISE NOTICE '0031: no payments table on the search_path; nothing to do.';
+        RETURN;
+    END IF;
+
     IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'payments'
-           AND column_name = 'pan'
+        SELECT 1 FROM pg_attribute
+         WHERE attrelid = target
+           AND attname = 'pan'
+           AND NOT attisdropped
     ) THEN
         RAISE NOTICE '0031: payments.pan/cvv already absent; nothing to do.';
         RETURN;
@@ -87,16 +101,23 @@ DECLARE
     unbackfilled INTEGER;
     ack TEXT;
     still_present BOOLEAN;
+    -- Same relation the ALTER will target; see the note on the first gate.
+    target REGCLASS := to_regclass('payments');
 BEGIN
+    IF target IS NULL THEN
+        RAISE NOTICE '0031: no payments table on the search_path; nothing to do.';
+        RETURN;
+    END IF;
+
     -- Already dropped? Then this is a replay and there is nothing to gate.
     -- Without this the gate itself references a column that no longer exists
     -- and the migration fails on its second run -- which the runner is entitled
     -- to do, and which the idempotency test caught.
     SELECT EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'payments'
-           AND column_name = 'pan'
+        SELECT 1 FROM pg_attribute
+         WHERE attrelid = target
+           AND attname = 'pan'
+           AND NOT attisdropped
     ) INTO still_present;
     IF NOT still_present THEN
         RAISE NOTICE '0031: payments.pan is already gone -- nothing to do.';
@@ -126,5 +147,17 @@ BEGIN
     RAISE NOTICE '0031: gate satisfied -- back-fill complete and drop acknowledged.';
 END $$;
 
-ALTER TABLE payments DROP COLUMN IF EXISTS pan;
-ALTER TABLE payments DROP COLUMN IF EXISTS cvv;
+-- Dropped from the relation the gates above resolved and checked, not from
+-- whatever an unqualified name happens to resolve to at this point in the
+-- file. `%s` on a regclass renders a name that resolves back to the same oid.
+DO $$
+DECLARE
+    target REGCLASS := to_regclass('payments');
+BEGIN
+    IF target IS NULL THEN
+        RAISE NOTICE '0031: no payments table on the search_path; nothing to drop.';
+        RETURN;
+    END IF;
+    EXECUTE format('ALTER TABLE %s DROP COLUMN IF EXISTS pan', target);
+    EXECUTE format('ALTER TABLE %s DROP COLUMN IF EXISTS cvv', target);
+END $$;
