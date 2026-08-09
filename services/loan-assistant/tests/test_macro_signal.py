@@ -210,30 +210,107 @@ def test_the_prompt_labels_the_signal_as_not_from_the_applicant():
     assert signal.cite() in prompt
 
 
-def test_the_cited_figure_comes_from_the_provider_not_the_model(monkeypatch):
-    """If the model restates the rate differently in its prose, the officer must
-    still see the published number. Same rule as applicant_name."""
-    signal = MacroSignal(
+def _signal():
+    return MacroSignal(
         "U.S. Bureau of Labor Statistics", "LNS14000000",
         "US unemployment rate (seasonally adjusted)", 4.2, "percent",
         "June 2026", "https://example.test",
     )
+
+
+def _summarize_with(monkeypatch, summary: str, flags="[]"):
+    signal = _signal()
     monkeypatch.setattr(macro, "current_signal", lambda: signal)
     monkeypatch.setattr(llm_client, "make_client", lambda: object())
-    # The model "reports" a different, wrong rate in its own text.
     monkeypatch.setattr(llm_client, "call_api", lambda c, p: (
         '{"loan_amount": 18000, "term_months": 48, "purpose": "debt consolidation",'
-        ' "risk_tier": "medium", "summary": "Unemployment is 11.9% which is alarming.",'
-        ' "flags": []}'
+        f' "risk_tier": "medium", "summary": "{summary}",'
+        f' "flags": {flags}}}'
     ))
+    return llm_client.summarize_application(dict(_APP, applicant={"name": "Robin Fictional"}))
 
-    result = llm_client.summarize_application(dict(_APP, applicant={"name": "Robin Fictional"}))
+
+def test_the_cited_figure_comes_from_the_provider_not_the_model(monkeypatch):
+    """If the model restates the rate differently in its prose, the officer must
+    still see the published number. Same rule as applicant_name."""
+    result = _summarize_with(
+        monkeypatch,
+        "Stable employment and adequate income. Unemployment is 11.9% which is alarming.",
+    )
 
     assert len(result.external_signals) == 1
     cited = result.external_signals[0]
     assert cited.value == 4.2, "the citation followed the model instead of the provider"
     assert "11.9" not in cited.citation
     assert cited.series_id == "LNS14000000"
+
+
+def test_a_contradicting_figure_never_reaches_the_officers_summary(monkeypatch):
+    """The other half, and the reviewed defect.
+
+    A correct citation is not enough while the prose beside it says something
+    else: LoanSummaryCard renders both, so the officer was shown "unemployment
+    is 11.9%" directly above the provider's cited 4.2%. A grounded figure that
+    is contradicted on the same screen is worse than no figure at all, because
+    the reader has no way to tell which one is the sourced one.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "Stable employment and adequate income. Unemployment is 11.9% which is alarming.",
+    )
+
+    assert "11.9" not in result.summary
+    # The sentence that was actually about the application survives -- this is a
+    # scalpel, not a mute button.
+    assert "Stable employment" in result.summary
+
+
+def test_an_accurate_restatement_is_left_alone(monkeypatch):
+    """Only CONTRADICTIONS are removed.
+
+    The prompt asks the model not to repeat the figure, but repeating it
+    correctly misleads nobody, and stripping it would be the service editing
+    prose for style rather than for truth.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "Unemployment at 4.2% is low. Income comfortably covers the payment.",
+    )
+
+    assert "4.2" in result.summary
+    assert "Income comfortably covers" in result.summary
+
+
+def test_a_qualitative_reference_is_left_alone(monkeypatch):
+    """Words about the signal carry no figure to contradict."""
+    result = _summarize_with(
+        monkeypatch,
+        "The labour market is soft, which raises repayment risk slightly.",
+    )
+
+    assert "labour market is soft" in result.summary
+
+
+def test_a_contradicting_flag_is_removed_too(monkeypatch):
+    """Flags are officer-facing prose as well, and were unguarded."""
+    result = _summarize_with(
+        monkeypatch,
+        "Adequate income for the requested amount.",
+        flags='["Unemployment at 11.9% is a concern", "Debt-to-income near the limit"]',
+    )
+
+    assert all("11.9" not in f for f in result.flags)
+    assert "Debt-to-income near the limit" in result.flags
+
+
+def test_a_summary_that_is_nothing_but_a_false_claim_fails_closed(monkeypatch):
+    """Nothing honest is left to show, and inventing a replacement is authoring.
+
+    Every other guardrail in this service fails closed; a summary whose entire
+    content was a false statement about a published figure is not a summary.
+    """
+    with pytest.raises(llm_client.LLMResponseError):
+        _summarize_with(monkeypatch, "Unemployment is 11.9% which is alarming.")
 
 
 def test_no_signal_means_no_citation_rather_than_a_placeholder(monkeypatch):

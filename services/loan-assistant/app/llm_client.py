@@ -270,6 +270,94 @@ def call_api(
         raise LLMTimeoutError(f"LLM call timed out after {TIMEOUT_SECONDS}s") from exc
 
 
+# Words that mark a sentence as being ABOUT the external signal. Derived from
+# the signal's own label rather than hardcoded, so adding a series to
+# macro._SERIES_METADATA does not silently leave its prose unguarded. The
+# generic parts of a label carry no topic, so they are dropped.
+_LABEL_STOPWORDS = frozenset({
+    "us", "u.s.", "the", "and", "rate", "index", "seasonally", "adjusted",
+    "national", "total", "all", "persons", "of",
+})
+# A percentage or bare decimal, e.g. "11.9%", "11.9 percent", "4.2".
+_FIGURE_RE = re.compile(r"\d+(?:\.\d+)?")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _signal_topic_words(signal) -> set[str]:
+    words = {
+        w.strip("(),.").lower()
+        for w in f"{signal.label} {signal.source}".split()
+    }
+    words |= {"bls", signal.series_id.lower()}
+    return {w for w in words if len(w) > 2 and w not in _LABEL_STOPWORDS}
+
+
+def _drops_a_contradicting_claim(text: str, signal) -> bool:
+    """Whether `text` states a figure for the signal that is not the published one.
+
+    Narrow on purpose. It only fires on a sentence that both NAMES the signal's
+    subject and carries a number that is not the published value -- so "the
+    labour market is weakening" survives, and so does an accurate restatement.
+    """
+    topic = _signal_topic_words(signal)
+    lowered = text.lower()
+    if not any(word in lowered for word in topic):
+        return False
+    figures = [float(m) for m in _FIGURE_RE.findall(text)]
+    if not figures:
+        return False
+    return not any(abs(f - float(signal.value)) < 0.05 for f in figures)
+
+
+def _strip_contradicting_macro_claims(summary: str, flags: list, signal):
+    """Remove model prose that gives the external figure a different value.
+
+    The prompt asks the model not to repeat the number at all. This is what
+    happens when it does so anyway and gets it wrong -- which a prompt cannot
+    prevent, only discourage. Reviewed on PR #13: the officer was shown the
+    model's "unemployment is 11.9%" directly above the provider's cited 4.2%,
+    and the whole point of a grounded citation is that it is not contradicted
+    on the same screen.
+
+    Removal rather than correction: rewriting a number inside a sentence would
+    make the service the author of a claim it cannot stand behind, and the
+    published figure is already displayed in full beside the summary.
+    """
+    if signal is None:
+        return summary, flags, 0
+
+    dropped = 0
+    kept_sentences = []
+    for sentence in _SENTENCE_SPLIT_RE.split(summary):
+        if sentence and _drops_a_contradicting_claim(sentence, signal):
+            dropped += 1
+            continue
+        kept_sentences.append(sentence)
+    kept_flags = []
+    for flag in flags:
+        if isinstance(flag, str) and _drops_a_contradicting_claim(flag, signal):
+            dropped += 1
+            continue
+        kept_flags.append(flag)
+
+    cleaned = " ".join(s for s in kept_sentences if s).strip()
+    if dropped:
+        log.warning(
+            "removed %d model claim(s) contradicting the published %s "
+            "(published=%s%s, period=%s)",
+            dropped, signal.label, signal.value, signal.unit, signal.period,
+        )
+    if not cleaned:
+        # Everything the model wrote was a false statement about the signal.
+        # There is no summary left to show, and inventing one here would make
+        # this service the author. Fail closed, like every other guardrail.
+        raise LLMResponseError(
+            "the model's summary consisted only of claims contradicting the "
+            "published external figure"
+        )
+    return cleaned, kept_flags, dropped
+
+
 def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     """
     Summarize a loan application for a loan officer.
@@ -354,10 +442,18 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
             )
         )
 
+    # The prose must not contradict the figure printed beside it. The prompt
+    # asks the model not to repeat the number at all; this is the half that
+    # holds when it does anyway and gets it wrong.
+    fields = llm_output.model_dump()
+    fields["summary"], fields["flags"], _ = _strip_contradicting_macro_claims(
+        fields["summary"], fields.get("flags") or [], signal,
+    )
+
     return LoanSummary(
         applicant_name=_applicant_name(app_data),
         external_signals=signals,
-        **llm_output.model_dump(),
+        **fields,
     )
 
 
