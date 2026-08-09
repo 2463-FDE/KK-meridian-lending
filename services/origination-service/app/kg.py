@@ -15,9 +15,9 @@ relational joins are good at. The traversal that would justify a graph store --
 attribute, to unbounded depth" (fraud rings, beneficial ownership) -- cannot be
 written here at all, because there is no depth to hard-code. PostgreSQL can
 express it with a recursive CTE, and on the single benchmark run ADR 0009 is
-transcribed from (db/bench/results.json, 2026-08-09T00:28Z, 10k applicants,
-PostgreSQL 16.14) a root-scoped version answers depth 3 in **0.026 s**, depth 4
-in **0.071 s** and depth 5 in **0.115 s**, reaching 2,944 applicants.
+transcribed from (db/bench/results.json, 2026-08-09T00:50Z, 10k applicants,
+PostgreSQL 16.14) a root-scoped version answers depth 3 in **0.025 s**, depth 4
+in **0.073 s** and depth 5 in **0.185 s**, reaching 2,944 applicants.
 
 Those numbers replace "16.9-38.7 s at depth 4, no return at depth 5", which
 replaced a "44 seconds at depth 4" before that. Both earlier figures were

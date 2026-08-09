@@ -143,7 +143,7 @@ means worse, so these are a lower bound on the problem.
 All timings on this page come from a single run, recorded as
 `db/bench/results.json` with the plans in `db/bench/run-output.txt`:
 
-- **2026-08-09T00:28Z** (`run_started_utc` in the artifact), N = 10,000
+- **2026-08-09T00:50Z** (`run_started_utc` in the artifact), N = 10,000
   applicants, root = 1, 240 s statement timeout
 - PostgreSQL **16.14** — `shared_buffers` 128MB, `work_mem` 4MB,
   `effective_cache_size` 4GB, `max_parallel_workers_per_gather` 2, `jit` on
@@ -177,11 +177,11 @@ comparison is sound.
 
 | Depth | Reached | frontier-attr | materialized | global-edge *(pessimistic)* |
 |---|---|---|---|---|
-| 1 | 55 | **0.002** | 0.001 | 0.86 |
-| 2 | 466 | **0.009** | 0.004 | 1.32 |
-| 3 | 850 | **0.026** | 0.009 | 1.49 |
-| 4 | 1,621 | **0.071** | 0.038 | 1.75 |
-| 5 | 2,944 | **0.115** | 0.036 | 1.95 |
+| 1 | 55 | **0.002** | 0.001 | 0.59 |
+| 2 | 466 | **0.005** | 0.004 | 0.47 |
+| 3 | 850 | **0.025** | 0.008 | 0.68 |
+| 4 | 1,621 | **0.073** | 0.023 | 0.73 |
+| 5 | 2,944 | **0.185** | 0.048 | 0.78 |
 
 One-off build costs, kept out of the per-query numbers on purpose — a derived
 structure that takes a second to build and answers in milliseconds is a
@@ -189,13 +189,18 @@ different engineering proposition from one that is free:
 
 | Structure | Build | Rows |
 |---|---|---|
-| `identity_attr` (postings) | 0.149 s | 40,140 |
-| `edges` (materialised pairs) | 0.873 s | 553,928 |
+| `identity_attr` (postings) | 0.300 s | 40,140 |
+| `edges` (materialised pairs) | 2.546 s | 553,928 |
 
-The `global-edge` column is now flat at roughly 1–2 s: with the walk fixed, the
-only thing it still pays for is rebuilding the whole 553,928-row adjacency
-relation on every query, which is a constant. That is the variable it was
-supposed to isolate all along.
+The `global-edge` column is now flat at roughly 0.5–0.8 s: with the walk fixed
+and the CTE forced to materialise, the only thing it still pays for is building
+the whole 553,928-row adjacency relation once per query, which is a constant.
+That is the variable it was supposed to isolate all along — and it did not,
+until this run. Declared without `AS MATERIALIZED`, PostgreSQL inlined the CTE
+into the recursive term and rebuilt all 553,928 rows on every iteration (the
+previous plan showed `loops=6` on that Append), so the "pessimistic baseline"
+was measuring one global build *per hop*. Reviewed on PR #12; the plan is now
+asserted in `db/tests/`.
 
 ### What that changes, and what it does not
 
@@ -216,18 +221,18 @@ question the ADR ever asked.
 
 The walk now deduplicates nodes (`UNION` over `(id, depth)`, no path array), so
 each node is expanded at most once per depth level. **Same reachability counts,
-three orders of magnitude less work:** depth 4 goes from 38.72 s to **0.071 s**,
-and depth 5 — which never returned before — answers in **0.115 s**, reaching
+three orders of magnitude less work:** depth 4 goes from 38.72 s to **0.073 s**,
+and depth 5 — which never returned before — answers in **0.185 s**, reaching
 2,944 applicants. The identical 55 / 466 / 850 / 1,621 counts at depths 1–4 are
 what establishes this is the same question answered a cheaper way.
 
-Even the pessimistic baseline is rescued: rebuilding the entire adjacency
-relation per query costs a flat ~1–2 s at every depth, because that build is a
-constant and the walk on top of it is now cheap. Its old 15–22 s at depth 4 was
-the same path-enumeration defect, not the cost of the rebuild.
+Even the pessimistic baseline is rescued: building the entire adjacency
+relation once per query costs a flat ~0.5–0.8 s at every depth, because that
+build is a constant and the walk on top of it is now cheap. Its old 15–22 s at
+depth 4 was the same path-enumeration defect, not the cost of the build.
 
 **What the numbers now say:** on a 10,000-applicant book, PostgreSQL answers
-this traversal to depth 5 in about a tenth of a second, with no graph store and
+this traversal to depth 5 in under two tenths of a second, with no graph store and
 no exotic indexing. This ADR has now had its central measurement wrong twice, in
 two unrelated ways, and both times the prose reasoned impeccably from it. That
 is the argument for keeping the harness — and for the assertions now guarding
@@ -248,7 +253,7 @@ measured and it was cheap. A limit would need a run that finds one.
    rule is one — are where a recursive CTE stops being the natural shape.
 3. **The measured latency actually fails a stated requirement.** This is now an
    empirical bar with a number attached, not an assumption: on 10k applicants
-   the traversal costs 0.071 s at depth 4 and 0.115 s at depth 5, so a
+   the traversal costs 0.073 s at depth 4 and 0.185 s at depth 5, so a
    requirement would have to be far tighter than any interactive budget, or the
    book far larger, before this argument carries.
 
@@ -281,7 +286,7 @@ a permanent refusal:
 - a production traversal is measured missing its interactive budget on a real
   book size. Stated as "re-measure", not as a depth: the depth-based version of
   this trigger ("depth > 3 at interactive latency") was derived from a benchmark
-  that measured path enumeration, and depth 5 now costs 0.115 s.
+  that measured path enumeration, and depth 5 now costs 0.185 s.
 
 If it is revisited, the likely shape is a **derived read model, not a second
 source of truth** — the graph projected from Postgres and rebuilt from it, so

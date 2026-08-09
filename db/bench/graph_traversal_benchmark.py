@@ -82,8 +82,8 @@ ONE RUN IS THE SOURCE
 
 DETERMINISM
     No random() anywhere, so two runs on the same Postgres produce identical
-    reachability counts. Timings vary with hardware; the SHAPE (a cliff, not a
-    slope) is the finding, not the absolute milliseconds. The synthetic
+    reachability counts. Timings vary with hardware, so the comparison BETWEEN
+    the candidates is the finding, not the absolute milliseconds. The synthetic
     population is deliberately sparser than a real fraud ring -- households of
     three, a shared phone every seventh row, 200 employers, identity collisions
     at 1% -- so these numbers are a lower bound on the difficulty.
@@ -169,14 +169,21 @@ SELECT count(DISTINCT id) AS reached FROM walk
 # Retained so the cost of the naive formulation is visible. Never quote this as
 # the relational option's cost.
 #
-# It isolates ONE variable: building the whole adjacency relation per query
-# instead of expanding a frontier. It therefore walks the same node-deduplicated
-# way as the other two -- when it did not, it was pessimistic for two unrelated
-# reasons at once and the comparison said nothing about either. Caught by
-# db/tests/test_graph_traversal_benchmark_counts_nodes.py after the first two
-# candidates were fixed and this one was left behind.
+# It isolates ONE variable: building the whole adjacency relation ONCE PER
+# QUERY instead of expanding a frontier. It therefore walks the same
+# node-deduplicated way as the other two -- when it did not, it was pessimistic
+# for two unrelated reasons at once and the comparison said nothing about
+# either. Caught by db/tests/test_graph_traversal_benchmark_counts_nodes.py
+# after the first two candidates were fixed and this one was left behind.
+#
+# AS MATERIALIZED is load-bearing, not decoration. Without it PostgreSQL inlines
+# the CTE into the recursive term and rebuilds all 553,928 rows on EVERY
+# iteration -- the previous run's depth-5 plan showed `loops=6` on that Append --
+# so the candidate measured "one global build per hop", which is neither what it
+# claims nor anything an implementation would do. Reviewed on PR #12; asserted
+# from the plan now rather than assumed.
 GLOBAL_EDGE_SQL = f"""
-WITH RECURSIVE edge_rel AS ({EDGE_SQL}),
+WITH RECURSIVE edge_rel AS MATERIALIZED ({EDGE_SQL}),
 walk(id, depth) AS (
     SELECT %(root)s::int, 0
     UNION

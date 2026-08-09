@@ -175,6 +175,31 @@ def test_the_walk_does_not_grow_with_depth_once_the_graph_is_exhausted(cur):
     )
 
 
+def test_the_global_edge_candidate_builds_its_relation_once_per_query(cur):
+    """It exists to isolate one variable; it has to isolate exactly that one.
+
+    Without AS MATERIALIZED, PostgreSQL inlines the CTE into the recursive term
+    and rebuilds the whole adjacency relation on every iteration -- the
+    committed depth-5 plan showed `loops=6` on that Append. The candidate then
+    measures "one global build per hop", which no implementation does and which
+    makes its timing depth-dependent for a reason unrelated to the variable
+    under test.
+
+    Asserted from the plan, because this is a planner behaviour: a source-level
+    check for the keyword would pass while a future PostgreSQL still inlined it.
+    """
+    _build_graph(cur)
+    cur.execute("EXPLAIN (ANALYZE) " + bench.GLOBAL_EDGE_SQL, {"root": 1, "max_depth": 4})
+    plan = "\n".join(line for (line,) in cur.fetchall())
+
+    assert "CTE edge_rel" in plan, (
+        "the adjacency relation was inlined into the recursive term instead of "
+        f"being built once -- plan:\n{plan}"
+    )
+    cte_lines = [ln for ln in plan.splitlines() if "CTE Scan on edge_rel" in ln]
+    assert cte_lines, f"no CTE Scan on edge_rel in the plan:\n{plan}"
+
+
 def test_no_candidate_carries_a_path_array():
     """The defect had one syntactic tell; catch a reintroduction at the source.
 
