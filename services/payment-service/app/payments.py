@@ -74,7 +74,7 @@ from .logging_config import get_logger
 from . import db, processor
 from .config import SERVICING_URL
 from .processor import ChargeDeclinedError
-from .redactor import redact_dict
+from .redactor import redact_dict, redact_str
 
 log = get_logger("payment")   # writes to logs/payment-service.log
 
@@ -103,6 +103,14 @@ def _to_cents(amount) -> float:
 def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempotency_key: str,
            brand: str = None, name: str = None, method: str = "card") -> dict:
     amount = _to_cents(amount)
+    # The key is caller-supplied free text, and every branch below writes it
+    # into a log line or an error message. The FIRST log goes through
+    # redact_dict; the duplicate-retry branches interpolated it directly, so a
+    # caller using a PAN or an SSN as their key had it masked on the initial
+    # request and written in the clear on the retry -- the one request that is
+    # guaranteed to happen twice. Redacted once here and used everywhere the
+    # raw value would otherwise be formatted. Reviewed on PR #16.
+    safe_key = redact_str(idempotency_key)
 
     # Review fix: the log line used to write full PAN/CVV/SSN at INFO with zero
     # redaction (D5). There's no raw PAN/CVV/SSN to log anymore (ADR 0008) --
@@ -171,7 +179,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # of returning the original result. Compare both sides as Decimal.
         if row["loan_id"] != loan_id or row["amount"] != Decimal(str(amount)):
             raise IdempotencyKeyConflict(
-                f"idempotency_key={idempotency_key!r} was already used for "
+                f"idempotency_key={safe_key!r} was already used for "
                 f"loan_id={row['loan_id']} amount={row['amount']} -- this "
                 f"request is loan_id={loan_id} amount={amount}"
             )
@@ -196,14 +204,14 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
                 "still pending authorization, checking processor before retrying",
-                idempotency_key, payment_id,
+                safe_key, payment_id,
             )
             existing_auth_id = processor.get_authorization(idempotency_key)
             if existing_auth_id:
                 log.info(
                     "processor already has an authorization on record for "
                     "idempotency_key=%s -> payment_id=%s, reusing it instead of "
-                    "re-charging", idempotency_key, payment_id,
+                    "re-charging", safe_key, payment_id,
                 )
                 auth_id = existing_auth_id
             else:
@@ -232,7 +240,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
                 "not yet applied, retrying apply",
-                idempotency_key, payment_id,
+                safe_key, payment_id,
             )
             # Review fix: reconcile against the ORIGINALLY stored loan_id, not
             # the retry request's own loan_id parameter -- a retry that (by
@@ -244,7 +252,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> returning original "
                 "payment_id=%s (already applied)",
-                idempotency_key, payment_id,
+                safe_key, payment_id,
             )
 
     return {

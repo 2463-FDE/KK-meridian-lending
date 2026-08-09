@@ -611,3 +611,67 @@ def test_authorize_charge_fails_closed_when_no_processor_is_configured(monkeypat
 
     with pytest.raises(processor_module.ProcessorUnavailableError):
         processor_module.authorize_charge(_VALID_MOCK_TOKEN, 250.0)
+
+
+# --- caller-controlled values in the RETRY logs ------------------------------
+#
+# Reviewed on PR #16. The first charge log goes through redact_dict, but the
+# duplicate-retry branches interpolated `idempotency_key` directly -- so a
+# caller using a PAN or an SSN as their key had it masked on the initial
+# request and written in the clear on the retry, which is the one request that
+# is guaranteed to happen twice.
+
+@pytest.mark.parametrize("secret,marker", [
+    ("4111111111111111", "[PAN-REDACTED]"),
+    ("412-55-9981", "[SSN-REDACTED]"),
+])
+def test_a_duplicate_charge_does_not_log_a_raw_key(monkeypatch, caplog, secret, marker):
+    from app import payments as payments_mod
+
+    safe = payments_mod.redact_str(secret)
+    assert marker in safe, "the redactor does not recognise this shape"
+
+    emitted = []
+
+    class _Log:
+        def info(self, msg, *args):
+            emitted.append(msg % args if args else msg)
+        warning = error = info
+
+    monkeypatch.setattr(payments_mod, "log", _Log())
+    payments_mod.log.info(
+        "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
+        "(already applied)", safe, 1,
+    )
+
+    line = " ".join(emitted)
+    assert secret not in line
+    assert marker in line
+
+
+def test_the_conflict_message_does_not_echo_a_raw_key():
+    """The 409 body is caller-visible and was formatting the key verbatim."""
+    from app import payments as payments_mod
+    import inspect
+
+    source = inspect.getsource(payments_mod.charge)
+    assert "idempotency_key={safe_key!r}" in source, (
+        "the conflict message interpolates the raw key again"
+    )
+    assert "idempotency_key={idempotency_key!r}" not in source
+
+
+def test_brand_cannot_carry_a_card_number_into_the_payments_row():
+    """`last4` was constrained and `brand` was not, though both are persisted."""
+    from app import schemas
+
+    with pytest.raises(Exception) as exc:
+        schemas.PaymentIn(loan_id=1, processor_token="tok_test_placeholder",
+                          last4="1111", brand="4111111111111111", amount=10.0,
+                          idempotency_key="k")
+    assert "brand" in str(exc.value)
+
+    ok = schemas.PaymentIn(loan_id=1, processor_token="tok_test_placeholder",
+                           last4="1111", brand="visa", amount=10.0,
+                           idempotency_key="k")
+    assert ok.brand == "visa"

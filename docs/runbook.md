@@ -87,10 +87,16 @@ orchestrates the LOS flow and calls them over HTTP.
   intake requests pile up. (No circuit breaker / fallback.)
 - **Month-end close.** `reconciliation.peek` totals do not tie out and nothing runs on a
   schedule. Finance reconciles by hand in a spreadsheet.
-- **Logs no longer contain card or SSN data — but they are not PII-free.** This entry
-  previously said `payment-service` logs full PAN/CVV/SSN at INFO and that origination
-  logs full PII at intake. Both are false against the current code and were verified
-  line by line:
+- **No log line writes a card-number-shaped value — and that is narrower than "no SSN".**
+  This entry previously said `payment-service` logs full PAN/CVV/SSN at INFO and that
+  origination logs full PII at intake. Both are false against the current code and were
+  verified line by line. The guarantee is stated as card-number-shaped data rather than
+  "no SSN" because one gap is unclosable by validation: servicing's legacy charge logs
+  `loan_id` before the insert that would reject a nonexistent loan, and a nine-digit
+  integer is both a plausible loan id and an SSN — `412559981` is accepted by any bound
+  that does not also refuse real ids (see `servicing-service/app/logging_config.py`).
+  Treat an SSN-shaped identifier in that log as possible; everything below is what was
+  actually verified:
   `payment-service`'s `PaymentIn` sets `extra="forbid"` and accepts only a processor
   token plus `last4`/`brand`, so a field *named* `pan`/`cvv`/`ssn` is rejected with a
   422 (ADR 0008) — that is a check on field names, not on content, so it is the

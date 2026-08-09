@@ -29,7 +29,13 @@ class PaymentIn(BaseModel):
     loan_id: int
     processor_token: str = Field(min_length=1, max_length=255)
     last4: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
-    brand: Optional[str] = None
+    # Shape-constrained like `last4` above, and for the same reason: the field
+    # named `pan` is forbidden, but an unconstrained string is a channel for the
+    # same data. charge() INSERTs this verbatim into the payments row before
+    # authorization, so `brand="4111111111111111"` stored a raw card number in
+    # the `brand` column -- while the README claimed the INSERT never writes
+    # one. Card brands are words. Reviewed on PR #16.
+    brand: Optional[str] = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ]{0,19}$")
     amount: float = Field(gt=0, le=_MAX_AMOUNT)
     name: Optional[str] = None
     method: str = "card"
