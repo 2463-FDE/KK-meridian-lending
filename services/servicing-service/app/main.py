@@ -49,7 +49,13 @@ class PaymentIn(BaseModel):
     # `extra="forbid"` makes that a real rejection, not a silent field drop.
     model_config = {"extra": "forbid"}
 
-    loan_id: int
+    # Bounded, because charge() writes it into the log line BEFORE the insert
+    # that would reject a nonexistent loan -- so an unbounded integer is a
+    # channel too: `{"loan_id": 4111111111111111}` wrote a raw PAN to
+    # payment-service.log even though the charge then failed. `loans.id` is a
+    # SERIAL, i.e. int4, so this is the range the column can actually hold and
+    # nothing legitimate is refused. Reviewed on PR #16.
+    loan_id: int = Field(ge=1, le=2_147_483_647)
     processor_token: str
     # Shape-constrained, not merely name-constrained. `extra="forbid"` rejects
     # unknown FIELD NAMES and says nothing about values, so an unconstrained
@@ -64,7 +70,10 @@ class PaymentIn(BaseModel):
     # field rather than dropping it silently.
     last4: Optional[str] = Field(default=None, pattern=r"^\d{4}$")
     brand: Optional[str] = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ]{0,19}$")
-    amount: float
+    # Also logged, so also bounded. A consumer instalment payment has no
+    # business being a sixteen-digit figure, and an unbounded float carries one
+    # just as well as a string does.
+    amount: float = Field(gt=0, le=10_000_000)
     name: Optional[str] = None
     method: Literal["card", "ach"] = "card"
 

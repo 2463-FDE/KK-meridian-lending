@@ -141,3 +141,72 @@ def test_no_permitted_field_can_put_a_pan_in_the_log_line(monkeypatch, caplog):
     assert "4111" not in emitted.replace("last4=1111", "")
     assert "tok_test_placeholder" not in emitted
     assert "method=card" in emitted
+
+
+# --- the numeric fields are channels too -------------------------------------
+#
+# Second round of the same finding on PR #16. Constraining `method` was not
+# enough: charge() logs `loan_id` BEFORE the insert that would reject a
+# nonexistent loan, so an unbounded integer carried a PAN into the log just as
+# well as a string did -- and the charge failing afterwards does not unwrite a
+# log line.
+
+@pytest.mark.parametrize("loan_id", [
+    4111111111111111,          # a Luhn-valid PAN as an integer
+    9_999_999_999_999,         # any 13-digit-plus run, the PAN length floor
+])
+def test_loan_id_cannot_carry_a_card_number(loan_id):
+    """PAN-length only, and deliberately not more than that.
+
+    A nine-digit integer is an SSN and is also a perfectly plausible loan id;
+    no bound can separate them, so this asserts what the int4 range actually
+    buys -- a card number will not fit -- rather than a protection the schema
+    cannot provide. The SSN limit is named in logging_config.py instead.
+    """
+    with pytest.raises(Exception) as exc:
+        PaymentIn(loan_id=loan_id, processor_token="tok_test_placeholder",
+                  last4="1111", brand="visa", amount=10.0)
+    assert "loan_id" in str(exc.value)
+
+
+@pytest.mark.parametrize("amount", [4111111111111111.0, 412559981.0])
+def test_amount_cannot_carry_card_or_identity_data(amount):
+    with pytest.raises(Exception) as exc:
+        PaymentIn(loan_id=1, processor_token="tok_test_placeholder",
+                  last4="1111", brand="visa", amount=amount)
+    assert "amount" in str(exc.value)
+
+
+def test_a_real_loan_id_and_amount_are_still_accepted():
+    """The bounds are the column's own range, so nothing legitimate is refused."""
+    ok = PaymentIn(loan_id=2_147_483_647, processor_token="tok_test_placeholder",
+                   last4="1111", brand="visa", amount=1250.75)
+    assert ok.loan_id == 2_147_483_647 and ok.amount == 1250.75
+
+
+def test_every_logged_field_is_shape_bounded():
+    """The claim in logging_config.py, stated as an assertion.
+
+    charge() logs exactly loan_id, amount and method. If a field is ever added
+    to that line, this test should fail until its shape is bounded too --
+    which is the property the docstring asserts, rather than "there is no pan
+    field".
+    """
+    import inspect
+    source = inspect.getsource(payments.charge)
+    logged = {"loan_id", "amount", "method"}
+    line = [ln for ln in source.splitlines() if "log.info" in ln or "loan_id=%s" in ln]
+    assert line, "charge() no longer has the log line this test describes"
+
+    import typing
+    fields = PaymentIn.model_fields
+    for name in logged:
+        field = fields[name]
+        # Either numeric bounds (metadata) or a closed set of values
+        # (Literal). Both make the field incapable of carrying a card number;
+        # a bare `int`/`str` does not.
+        bounded = bool(field.metadata) or typing.get_origin(field.annotation) is typing.Literal
+        assert bounded, (
+            f"{name} is written to the log line but has no shape constraint -- "
+            f"an unbounded field is a channel whatever it is called"
+        )
