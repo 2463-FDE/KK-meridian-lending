@@ -471,3 +471,31 @@ def test_adjacent_literals_are_each_scanned(tmp_path):
         "    )\n"
     ))
     assert hits, "a projection split across adjacent literals was reported clean"
+
+
+@pytest.mark.parametrize("read", [
+    'row["pan"]',
+    "row['cvv']",
+    'record.get("pan")',
+])
+def test_a_mapping_read_of_a_legacy_column_is_detected(tmp_path, read):
+    """A raw query consumed as a mapping is a live read.
+
+    `row["pan"]` carries no SQL keyword of its own -- the SELECT that produced
+    the row is elsewhere, often in another function -- and the dotted-attribute
+    patterns did not match it either, so it passed clean. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def display(row):\n"
+        f"    return {read}\n"
+    ))
+    assert hits, f"a live mapping read {read} was reported clean"
+
+
+def test_a_mapping_read_of_an_allowed_column_is_not_flagged(tmp_path):
+    """The other direction: last4 is what the code is supposed to read."""
+    hits = _run_checker_over(tmp_path, (
+        "def display(row):\n"
+        '    return row["last4"], row["brand"]\n'
+    ))
+    assert hits == [], f"unexpected hits: {hits}"

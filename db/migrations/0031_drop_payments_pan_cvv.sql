@@ -130,6 +130,15 @@ BEGIN
     -- Without this the gate itself references a column that no longer exists
     -- and the migration fails on its second run -- which the runner is entitled
     -- to do, and which the idempotency test caught.
+    -- Locked BEFORE anything is inspected. Taking it after the presence check
+    -- left a window in which a concurrent transaction could add and populate
+    -- `pan` between `has_pan := false` and the lock, so the gate would skip the
+    -- back-fill check for a column that exists by the time the ALTER runs.
+    -- ALTER TABLE takes this lock anyway; taking it first is what makes every
+    -- observation below true of the relation actually altered. Reviewed on
+    -- PR #15.
+    EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', target);
+
     -- Per column, for the same reason as the first gate: either one still
     -- present means there is something to drop, and something to gate.
     has_pan := EXISTS (SELECT 1 FROM pg_attribute
@@ -142,11 +151,6 @@ BEGIN
         RAISE NOTICE '0031: payments.pan/cvv are already gone -- nothing to do.';
         RETURN;
     END IF;
-
-    -- Pin it. Everything below -- the back-fill count, the acknowledgement and
-    -- the ALTER -- must apply to THIS relation, and nothing else may replace or
-    -- rename it in between.
-    EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', target);
 
     -- The back-fill question only exists while `pan` does: it asks whether any
     -- row would lose its only record of the card. With `pan` already dropped

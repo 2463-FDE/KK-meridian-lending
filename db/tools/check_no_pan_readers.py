@@ -57,6 +57,12 @@ PATTERNS = [
     (re.compile(r"^\s*(pan|cvv)\s*:\s*Mapped\["), "ORM column mapping"),
     (re.compile(r"\.(pan|cvv)\b"), "attribute read"),
     (re.compile(r"""getattr\(\s*[^,]+,\s*["'](pan|cvv)["']"""), "dynamic attribute read"),
+    # A raw query consumed as a mapping. `row["pan"]` is as live a read as
+    # `payment.pan`, and it carries no SQL keyword of its own -- the SELECT that
+    # produced the row is elsewhere, often in another function. Reviewed on
+    # PR #15.
+    (re.compile(r"""\[\s*["'](pan|cvv)["']\s*\]"""), "mapping key read"),
+    (re.compile(r"""\.get\(\s*["'](pan|cvv)["']"""), "mapping get read"),
 ]
 
 # A bare `pan` / `cvv` token counts as a column reference only on a line that is
