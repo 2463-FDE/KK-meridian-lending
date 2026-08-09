@@ -190,10 +190,21 @@ class BlsMacroProvider:
         )
 
     def _servable_stale(self) -> MacroSignal | None:
-        """A previously-fetched figure still inside the stale-serve window."""
+        """A previously-fetched figure still inside the stale-serve window.
+
+        The window is measured PAST the freshness TTL, which is how config.py
+        documents it ("how long past MACRO_CACHE_TTL_SECONDS a figure may still
+        be served"). Comparing the total age against MACRO_STALE_SERVE_SECONDS
+        alone quietly redefined it as a maximum total age: on the defaults that
+        made the promised 24 hours into 18, and any deployment configuring a
+        stale window shorter than its TTL would have served nothing stale at
+        all -- the feature silently off, in the outage it exists for. Reviewed
+        on PR #13.
+        """
         if self._cached is None:
             return None
-        if (time.monotonic() - self._cached_at) < MACRO_STALE_SERVE_SECONDS:
+        age = time.monotonic() - self._cached_at
+        if age < (MACRO_CACHE_TTL_SECONDS + MACRO_STALE_SERVE_SECONDS):
             return self._cached
         return None
 
@@ -230,6 +241,25 @@ class BlsMacroProvider:
             return self._answer_without_calling()
 
         try:
+            # Re-check now that the token is actually held. The checks above
+            # happened under a lock this thread has since dropped, so between
+            # them and the acquire another thread can have completed an entire
+            # refresh -- fetched, committed, released -- and this thread would
+            # then fetch again for a figure already cached, spending a second
+            # request from a 25-a-day budget. Cheap: two comparisons against a
+            # lock nobody holds for long. Reviewed on PR #13.
+            with self._state_lock:
+                if self._fresh():
+                    return self._cached
+                now_suppressed = self._suppressed()
+                if now_suppressed:
+                    self.suppressed_count += 1
+            if now_suppressed:
+                # Someone else just failed. Their negative cache applies to this
+                # thread too -- retrying immediately is what the suppression
+                # window exists to prevent.
+                return self._answer_without_calling()
+
             # Deliberately outside _state_lock: this is the only slow operation
             # in the class, and holding a lock across it was the defect.
             signal = self._fetch_uncached()

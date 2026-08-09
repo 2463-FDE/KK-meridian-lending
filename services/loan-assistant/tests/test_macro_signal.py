@@ -9,6 +9,8 @@ Nothing here touches the network. `BlsMacroProvider` is exercised against a
 faked httpx, so a CI run neither depends on BLS being up nor consumes any of the
 25 requests/day the unauthenticated v1 API allows.
 """
+import time
+
 import httpx
 import pytest
 
@@ -264,3 +266,49 @@ def test_the_signal_is_inside_the_cost_guard_not_outside_it():
     assert delta > 0, "the signal reached the prompt but not the token estimate"
     assert delta < 200, f"signal cost {delta} tokens -- larger than the measured 92, re-measure"
     assert with_signal < llm_client.MAX_INPUT_TOKENS
+
+
+# --- the stale-serve window is measured PAST the TTL -------------------------
+
+def _cached_provider(monkeypatch, age_seconds: float, ttl: float, stale: float):
+    """A provider holding one figure fetched `age_seconds` ago."""
+    monkeypatch.setattr(macro, "MACRO_CACHE_TTL_SECONDS", ttl, raising=False)
+    monkeypatch.setattr(macro, "MACRO_STALE_SERVE_SECONDS", stale, raising=False)
+    provider = BlsMacroProvider()
+    provider._cached = MacroSignal(
+        source="U.S. Bureau of Labor Statistics", series_id="LNS14000000",
+        label="unemployment rate", value=4.2, unit="%", period="June 2026",
+        url="https://data.bls.gov/timeseries/LNS14000000",
+    )
+    provider._cached_at = time.monotonic() - age_seconds
+    return provider
+
+
+def test_the_stale_window_starts_where_the_ttl_ends(monkeypatch):
+    """config.py documents it as time PAST MACRO_CACHE_TTL_SECONDS.
+
+    The comparison used to be against the total age, which silently turned the
+    documented 24 hours past a 6-hour TTL into 18 hours of stale serving. Here:
+    TTL 10s, stale window 100s, figure 105s old -- 95s past the TTL, so inside
+    the window and servable. The old comparison (105 < 100) dropped it.
+    """
+    provider = _cached_provider(monkeypatch, age_seconds=105, ttl=10, stale=100)
+    assert provider._servable_stale() is not None
+
+
+def test_a_stale_window_shorter_than_the_ttl_still_serves(monkeypatch):
+    """The configuration that used to disable the feature outright.
+
+    With a 100s TTL and a 10s stale window, ANY figure old enough to be stale
+    was already older than the stale window under the old comparison, so nothing
+    was ever served past its TTL -- the fail-open path silently absent in
+    exactly the outage it exists for.
+    """
+    provider = _cached_provider(monkeypatch, age_seconds=105, ttl=100, stale=10)
+    assert provider._servable_stale() is not None
+
+
+def test_past_the_combined_window_the_citation_is_dropped(monkeypatch):
+    """Still bounded. Stale-serving is a grace period, not an indefinite cache."""
+    provider = _cached_provider(monkeypatch, age_seconds=200, ttl=10, stale=100)
+    assert provider._servable_stale() is None

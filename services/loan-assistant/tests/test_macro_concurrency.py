@@ -365,3 +365,93 @@ def test_a_request_arriving_as_the_token_is_released_makes_no_second_call(monkey
         f"was released saw neither a cached value nor a suppressed state, so "
         f"single-flight did not hold across the commit"
     )
+
+
+class _GatedAcquire:
+    """Wraps the refresh lock and runs a callback BEFORE the token is taken.
+
+    The complement of _GatedLock above: that one admits a second request at the
+    moment of release, this one lets a whole second refresh complete while a
+    first request is between its pre-check and its acquire.
+    """
+
+    def __init__(self, inner, on_acquire):
+        self._inner = inner
+        self._on_acquire = on_acquire
+        self._fired = False
+
+    def acquire(self, blocking=True, timeout=-1):
+        if not self._fired:
+            self._fired = True
+            self._on_acquire()
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self):
+        self._inner.release()
+
+
+def test_a_thread_descheduled_before_acquiring_rechecks_and_does_not_refetch(monkeypatch):
+    """Winning the token is not evidence that a refresh is still needed.
+
+    The fresh/suppressed checks happen under a lock that is dropped before the
+    token is acquired. In that gap another thread can fetch, commit and release
+    a complete refresh -- so the first thread then takes a free token and calls
+    out again for a figure that is already cached, spending a second request
+    from a 25-a-day budget on it. Reviewed on PR #13.
+    """
+    transport = _SucceedingTransport()
+    monkeypatch.setattr(httpx, "get", transport)
+    provider = BlsMacroProvider()
+
+    def _let_another_thread_finish_first():
+        # A complete, uncontended refresh by someone else. Synchronous, so by
+        # the time the descheduled thread proceeds the cache really is fresh --
+        # no sleep, no timing assumption.
+        other = threading.Thread(target=provider.fetch)
+        other.start()
+        other.join(timeout=5)
+
+    provider._refresh_lock = _GatedAcquire(
+        provider._refresh_lock, _let_another_thread_finish_first
+    )
+
+    signal = provider.fetch()
+
+    assert signal is not None and signal.value == 4.2
+    assert transport.calls == 1, (
+        f"{transport.calls} outbound calls -- the thread that woke up holding "
+        f"the token refetched a figure another thread had already cached"
+    )
+
+
+def test_a_suppressing_failure_committed_in_the_gap_is_honoured(monkeypatch):
+    """Same gap, the other outcome: someone else's failure applies here too.
+
+    Retrying immediately after another thread's failure is exactly what the
+    negative cache exists to prevent, so the recheck has to look at both halves
+    of the state, not only at freshness.
+    """
+    calls = {"n": 0}
+
+    def _always_fails(*a, **k):
+        calls["n"] += 1
+        raise httpx.ConnectError("simulated BLS outage")
+
+    monkeypatch.setattr(httpx, "get", _always_fails)
+    monkeypatch.setattr(macro, "MACRO_FAILURE_TTL_SECONDS", 30.0, raising=False)
+    provider = BlsMacroProvider()
+
+    def _let_another_thread_fail_first():
+        other = threading.Thread(target=provider.fetch)
+        other.start()
+        other.join(timeout=5)
+
+    provider._refresh_lock = _GatedAcquire(
+        provider._refresh_lock, _let_another_thread_fail_first
+    )
+
+    assert provider.fetch() is None
+    assert calls["n"] == 1, (
+        f"{calls['n']} outbound calls during one failure window -- the thread "
+        f"holding the token ignored the failure committed while it waited"
+    )
