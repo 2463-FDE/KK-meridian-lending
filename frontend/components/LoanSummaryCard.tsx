@@ -3,6 +3,21 @@
 import { useState } from "react";
 import { apiPost } from "../lib/api";
 
+// Mirrors services/loan-assistant/app/schemas.py ExternalSignal. The citation
+// string is composed server-side from what the provider returned, never by the
+// model, so it is rendered as given rather than reassembled here from the
+// parts -- reassembling would put a second author on a grounded figure.
+interface ExternalSignal {
+  source: string;
+  series_id: string;
+  label: string;
+  value: number;
+  unit: string;
+  period: string;
+  url: string;
+  citation: string;
+}
+
 interface LoanSummary {
   applicant_name: string;
   loan_amount: number;
@@ -11,6 +26,9 @@ interface LoanSummary {
   risk_tier: "low" | "medium" | "high" | "decline";
   summary: string;
   flags: string[];
+  // Optional in the type because an older response, or a provider that is off
+  // or unreachable, simply omits it -- the summary is still valid without it.
+  external_signals?: ExternalSignal[];
 }
 
 const RISK_TONE: Record<LoanSummary["risk_tier"], string> = {
@@ -116,6 +134,29 @@ export default function LoanSummaryCard({
                 <li key={i}>{flag}</li>
               ))}
             </ul>
+          ) : null}
+          {/* The grounded half of the summary. Kept visibly separate from the
+              model's prose above: this figure was published by a named source
+              and is checkable at the link, and an officer weighing the summary
+              needs to be able to tell those two things apart. Absent entirely
+              when the provider is off or unreachable -- an empty section would
+              imply something was withheld. */}
+          {summary.external_signals && summary.external_signals.length > 0 ? (
+            <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                External context (not model-generated)
+              </div>
+              <ul style={{ margin: 0 }}>
+                {summary.external_signals.map((signal) => (
+                  <li key={`${signal.source}-${signal.series_id}-${signal.period}`}>
+                    {signal.citation}{" "}
+                    <a href={signal.url} target="_blank" rel="noreferrer noopener">
+                      Verify at {signal.source}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : null}
         </div>
       ) : null}

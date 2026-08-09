@@ -233,24 +233,36 @@ class BlsMacroProvider:
             # Deliberately outside _state_lock: this is the only slow operation
             # in the class, and holding a lock across it was the defect.
             signal = self._fetch_uncached()
+
+            # The result is COMMITTED BEFORE THE TOKEN IS RELEASED. Releasing
+            # first left a window in which the outcome existed but no thread
+            # could see it: a request arriving there found neither a fresh
+            # `_cached` nor a suppressing `_failed_at`, took the free refresh
+            # token, and started a second outbound call. That is exactly the
+            # single flight this class promises, and against a 25-request daily
+            # quota a burst of summaries could spend several of them on the same
+            # figure. Reviewed on PR #13.
+            #
+            # Committing inside the try also means a raising `_fetch_uncached`
+            # still releases the token in `finally` -- it just never publishes a
+            # state it does not have.
+            now = time.monotonic()
+            with self._state_lock:
+                if signal is not None:
+                    self._cached = signal
+                    self._cached_at = now
+                    self._failed_at = 0.0
+                    recovered_from = self.degraded_since
+                    self.degraded_since = None
+                else:
+                    self.failure_count += 1
+                    self._failed_at = now
+                    recovered_from = None
+                    if self.degraded_since is None:
+                        self.degraded_since = now
+                    began = self.degraded_since
         finally:
             self._refresh_lock.release()
-
-        now = time.monotonic()
-        with self._state_lock:
-            if signal is not None:
-                self._cached = signal
-                self._cached_at = now
-                self._failed_at = 0.0
-                recovered_from = self.degraded_since
-                self.degraded_since = None
-            else:
-                self.failure_count += 1
-                self._failed_at = now
-                recovered_from = None
-                if self.degraded_since is None:
-                    self.degraded_since = now
-                began = self.degraded_since
         if signal is None:
             log.warning(
                 "macro signal degraded: suppressing BLS calls for %.0fs "

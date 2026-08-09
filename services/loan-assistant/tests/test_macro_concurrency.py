@@ -255,3 +255,113 @@ def test_no_applicant_data_is_sent_to_bls(monkeypatch):
     assert "params" not in seen["kwargs"] or not seen["kwargs"]["params"]
     assert "json" not in seen["kwargs"]
     assert "data" not in seen["kwargs"]
+
+
+# --- the publish/release ordering -------------------------------------------
+#
+# Review finding (PR #13): the refresh token was released BEFORE the result was
+# committed under _state_lock. A request arriving in that window saw neither a
+# fresh `_cached` nor a suppressing `_failed_at`, found the token free, and
+# started a second outbound call for a figure that had just been fetched. The
+# tests above cannot see it: they assert what happens while a fetch is IN
+# FLIGHT, and this window opens after it returns.
+
+_SUCCESS_SHAPE = {
+    "status": "REQUEST_SUCCEEDED",
+    "Results": {"series": [{
+        "seriesID": "LNS14000000",
+        "data": [
+            {"year": "2026", "period": "M06", "periodName": "June",
+             "latest": "true", "value": "4.2"},
+        ],
+    }]},
+}
+
+
+class _SucceedingTransport:
+    """Counts calls and always returns a parseable BLS payload."""
+
+    def __init__(self):
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, *a, **k):
+        with self._lock:
+            self.calls += 1
+        return _FakeOkResponse(_SUCCESS_SHAPE)
+
+
+class _FakeOkResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _GatedLock:
+    """Wraps the refresh lock and runs a callback at the moment of release.
+
+    This is what makes the window observable instead of a race the test would
+    hit one run in fifty: the second request is admitted exactly when the token
+    becomes free. Where the release sits relative to the state commit is then
+    the only thing that decides whether it makes a call.
+    """
+
+    def __init__(self, inner, on_release):
+        self._inner = inner
+        self._on_release = on_release
+
+    def acquire(self, blocking=True, timeout=-1):
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self):
+        self._inner.release()
+        self._on_release()
+
+
+def test_a_request_arriving_as_the_token_is_released_makes_no_second_call(monkeypatch):
+    """Single-flight has to hold across the commit, not just across the fetch.
+
+    With the commit inside the token's critical section, the second request
+    finds the freshly cached figure and returns it. With the commit outside --
+    the reviewed defect -- it finds an empty state and a free token, and spends
+    another of the 25 daily requests re-fetching what the first request had
+    already retrieved.
+    """
+    transport = _SucceedingTransport()
+    monkeypatch.setattr(httpx, "get", transport)
+    provider = BlsMacroProvider()
+
+    token_released = threading.Event()
+    second_done = threading.Event()
+
+    def _second_request():
+        # Runs while the first request is at the release point.
+        provider.fetch()
+        second_done.set()
+
+    def _on_release():
+        token_released.set()
+        threading.Thread(target=_second_request, daemon=True).start()
+        # Wait for the second request to finish its decision before letting the
+        # first one continue. Bounded so a hang fails the test rather than the
+        # suite.
+        second_done.wait(timeout=5)
+
+    provider._refresh_lock = _GatedLock(provider._refresh_lock, _on_release)
+
+    first = provider.fetch()
+
+    assert token_released.is_set(), "the refresh token was never released"
+    assert second_done.wait(timeout=5), "the second request never completed"
+    assert first is not None and first.value == 4.2
+    assert transport.calls == 1, (
+        f"{transport.calls} outbound calls -- a request arriving as the token "
+        f"was released saw neither a cached value nor a suppressed state, so "
+        f"single-flight did not hold across the commit"
+    )
