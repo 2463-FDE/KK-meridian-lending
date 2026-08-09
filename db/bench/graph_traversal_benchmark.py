@@ -194,6 +194,49 @@ walk(id, depth) AS (
 SELECT count(DISTINCT id) AS reached FROM walk
 """
 
+# --- the UNBOUNDED traversal, which is the question the ADR actually poses ---
+#
+# The three candidates above key their union on (id, depth), so a node is
+# deduplicated within a depth level and not across the whole walk. That is the
+# right shape for "who is within d hops" and the wrong shape for "who is in this
+# ring": drop max_depth from them and the root is rediscovered at depth 2, every
+# (same_id, new_depth) pair stays distinct, and the walk never terminates.
+# Reviewed on PR #12, and correct -- while `docs/ROADMAP.md` was claiming the
+# unbounded question answered.
+#
+# Dropping `depth` from the row fixes it exactly. The union then deduplicates by
+# applicant GLOBALLY, the recursive term stops producing new rows once the
+# connected component is exhausted, and the query terminates with no bound at
+# all. Distance is not tracked -- it is not part of "who else is in this ring",
+# and a query that needs both is a different query with a different cost.
+UNBOUNDED_ATTR_SQL = """
+WITH RECURSIVE walk(id) AS (
+    SELECT %(root)s::int
+    UNION
+    SELECT DISTINCT x2.applicant_id
+      FROM walk w
+      JOIN identity_attr x1 ON x1.applicant_id = w.id
+      JOIN identity_attr x2 ON x2.kind = x1.kind
+                           AND x2.value = x1.value
+                           AND x2.applicant_id <> w.id
+)
+SELECT count(*) AS reached FROM walk
+"""
+
+UNBOUNDED_EDGE_SQL = """
+WITH RECURSIVE walk(id) AS (
+    SELECT %(root)s::int
+    UNION
+    SELECT e.dst FROM walk w JOIN edges e ON e.src = w.id
+)
+SELECT count(*) AS reached FROM walk
+"""
+
+UNBOUNDED = [
+    ("frontier-attr", UNBOUNDED_ATTR_SQL),
+    ("materialized", UNBOUNDED_EDGE_SQL),
+]
+
 CANDIDATES = [
     ("frontier-attr", FRONTIER_ATTR_SQL,
      "expands only the current frontier against an indexed posting table"),
@@ -439,6 +482,40 @@ def main() -> int:
                         print("!" * 70)
                         return 3
             print("  ".join(row))
+
+        # The unbounded traversal, timed separately because it answers a
+        # different question: not "within d hops" but "the whole component".
+        print()
+        print("unbounded (no depth bound -- terminates when the component is exhausted)")
+        artifact["unbounded"] = {}
+        unbounded_reached = None
+        for name, sql in UNBOUNDED:
+            with conn.cursor() as cur:
+                cur.execute(f"SET search_path TO {SCHEMA}")
+                cur.execute(f"SET statement_timeout = {args.timeout * 1000}")
+                t0 = time.monotonic()
+                try:
+                    cur.execute(sql, {"root": args.root})
+                    reached = cur.fetchone()[0]
+                except psycopg2.errors.QueryCanceled:
+                    artifact["unbounded"][name] = {
+                        "seconds": None, "reached": None,
+                        "aborted_after_seconds": args.timeout,
+                    }
+                    print(f"  {name:>16} : >{args.timeout}s abort")
+                    continue
+                elapsed = time.monotonic() - t0
+            artifact["unbounded"][name] = {"seconds": round(elapsed, 3), "reached": reached}
+            print(f"  {name:>16} : {elapsed:>8.3f} s  ({reached} applicants)")
+            if unbounded_reached is None:
+                unbounded_reached = reached
+            elif unbounded_reached != reached:
+                print("\n" + "!" * 70)
+                print(f"ABORT: unbounded candidates disagree -- {unbounded_reached} "
+                      f"vs {reached}. Same edge set, same answer, or neither "
+                      f"number means anything.")
+                print("!" * 70)
+                return 5
 
         if args.explain:
             for name, sql, _ in CANDIDATES:

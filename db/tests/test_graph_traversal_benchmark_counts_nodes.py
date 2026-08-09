@@ -216,3 +216,51 @@ def test_no_candidate_carries_a_path_array():
         assert "UNION ALL" not in sql.upper(), (
             f"{name} uses UNION ALL -- node deduplication is what bounds this walk"
         )
+
+
+def test_the_unbounded_walk_terminates_and_returns_the_whole_component(cur):
+    """The question the ADR poses is unbounded; the bounded walk cannot answer it.
+
+    The depth-bounded candidates key their union on (id, depth), so dropping the
+    bound would not terminate: the root is rediscovered at depth 2 and every
+    (same_id, new_depth) pair is a new row forever. That is fine for "within d
+    hops" and wrong for "who else is in this ring" -- reviewed on PR #12, while
+    the roadmap was claiming the unbounded question answered.
+
+    Dropping `depth` from the row deduplicates by applicant globally, so the
+    recursive term dries up when the component is exhausted. All four applicants
+    in the fixture graph are connected, and the walk stops.
+    """
+    _build_graph(cur)
+    for name, sql in bench.UNBOUNDED:
+        cur.execute(sql, {"root": 1})
+        assert cur.fetchone()[0] == 4, f"{name} did not return the whole component"
+
+
+def test_the_unbounded_walk_carries_no_depth_bound_at_all(cur):
+    """A bound that happens to be large is not the same as no bound.
+
+    Guards against someone "fixing" a hang by reintroducing max_depth here,
+    which would quietly turn the unbounded answer back into a bounded one under
+    a name that says otherwise.
+    """
+    for name, sql in bench.UNBOUNDED:
+        assert "depth" not in sql.lower(), (
+            f"{name}'s unbounded walk mentions depth -- if it needs a bound it "
+            f"is not answering the unbounded question"
+        )
+        assert "max_depth" not in sql, name
+
+
+def test_the_unbounded_and_bounded_walks_agree_where_they_overlap(cur):
+    """Two shapes, one graph: a deep enough bound must reach the component.
+
+    Without this the unbounded form could be traversing a different edge set and
+    nothing would say so -- the same failure the depth-wise reachability check
+    exists to prevent.
+    """
+    _build_graph(cur)
+    cur.execute(bench.UNBOUNDED[1][1], {"root": 1})
+    unbounded = cur.fetchone()[0]
+    bounded = _reached(cur, bench.MATERIALIZED_SQL, depth=10)
+    assert unbounded == bounded == 4

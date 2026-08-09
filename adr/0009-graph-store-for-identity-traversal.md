@@ -21,10 +21,12 @@ store in all cases, including the ones where it is the correct tool.
 This ADR replaces it with two specific things: a traversal `kg.py` cannot
 express, and a measurement of what that traversal actually costs in PostgreSQL.
 
-**Scope of the measurement.** The benchmark times depth-bounded *reachability* —
-which applicants are within d hops — and not path reconstruction. The question
-as stated below also asks for the connecting path; that is a strictly larger
-answer, and no number here is evidence about its cost.
+**Scope of the measurement.** The benchmark times *reachability* — which
+applicants are reachable — in two forms: depth-bounded (within d hops) and
+unbounded (the whole connected component, which is the form the question below
+actually asks for). It does not time path reconstruction or per-applicant
+distance. Both are strictly larger answers, and no number here is evidence
+about their cost.
 
 ## The traversal kg.py cannot express
 
@@ -143,7 +145,7 @@ means worse, so these are a lower bound on the problem.
 All timings on this page come from a single run, recorded as
 `db/bench/results.json` with the plans in `db/bench/run-output.txt`:
 
-- **2026-08-09T00:50Z** (`run_started_utc` in the artifact), N = 10,000
+- **2026-08-09T01:02Z** (`run_started_utc` in the artifact), N = 10,000
   applicants, root = 1, 240 s statement timeout
 - PostgreSQL **16.14** — `shared_buffers` 128MB, `work_mem` 4MB,
   `effective_cache_size` 4GB, `max_parallel_workers_per_gather` 2, `jit` on
@@ -177,26 +179,68 @@ comparison is sound.
 
 | Depth | Reached | frontier-attr | materialized | global-edge *(pessimistic)* |
 |---|---|---|---|---|
-| 1 | 55 | **0.002** | 0.001 | 0.59 |
-| 2 | 466 | **0.005** | 0.004 | 0.47 |
-| 3 | 850 | **0.025** | 0.008 | 0.68 |
-| 4 | 1,621 | **0.073** | 0.023 | 0.73 |
-| 5 | 2,944 | **0.185** | 0.048 | 0.78 |
+| 1 | 55 | **0.002** | 0.001 | 0.56 |
+| 2 | 466 | **0.017** | 0.011 | 0.57 |
+| 3 | 850 | **0.033** | 0.011 | 0.66 |
+| 4 | 1,621 | **0.064** | 0.023 | 0.67 |
+| 5 | 2,944 | **0.152** | 0.042 | 0.81 |
 
 One-off build costs, kept out of the per-query numbers on purpose — a derived
 structure that takes a second to build and answers in milliseconds is a
 different engineering proposition from one that is free:
 
+### The unbounded traversal, which is the one this ADR actually asked about
+
+Everything above is depth-bounded, and the question at the top of this page is
+not: *"every applicant reachable ... to unbounded depth"*. Those two are not the
+same query, and the depth-bounded form cannot be turned into the unbounded one
+by removing the bound. Its union keys on `(id, depth)`, so an applicant is
+deduplicated within a level rather than across the walk; drop `max_depth` and
+the root is rediscovered at depth 2, every `(same_id, new_depth)` pair is a new
+row, and it never terminates. Review finding on PR #12, raised while
+`docs/ROADMAP.md` was marking the unbounded question answered.
+
+Removing `depth` from the row is the whole fix. The union then deduplicates by
+applicant globally, the recursive term dries up when the connected component is
+exhausted, and the query ends on its own with no bound anywhere in it:
+
+```sql
+WITH RECURSIVE walk(id) AS (
+    SELECT :root
+    UNION                       -- global dedupe: no depth in the key
+    SELECT e.dst FROM walk w JOIN edges e ON e.src = w.id
+)
+SELECT count(*) FROM walk;
+```
+
+| Traversal | frontier-attr | materialized | Reached |
+|---|---|---|---|
+| unbounded (whole component) | **0.406 s** | 0.136 s | 10,000 |
+
+On this population every applicant is in one component — households, shared
+phones and 200 employers connect the lot — so the unbounded answer is the entire
+book of 10,000, found in well under half a second. That is the strongest form of
+the finding: not "Postgres keeps up to depth 5", but "Postgres answers the
+unbounded question directly".
+
+What it does not return is the connecting path, or the distance to each
+applicant. Both are strictly larger answers and neither is measured here.
+
 | Structure | Build | Rows |
 |---|---|---|
-| `identity_attr` (postings) | 0.300 s | 40,140 |
-| `edges` (materialised pairs) | 2.546 s | 553,928 |
+| `identity_attr` (postings) | 0.238 s | 40,140 |
+| `edges` (materialised pairs) | 2.317 s | 553,928 |
 
-The `global-edge` column is now flat at roughly 0.5–0.8 s: with the walk fixed
-and the CTE forced to materialise, the only thing it still pays for is building
-the whole 553,928-row adjacency relation once per query, which is a constant.
-That is the variable it was supposed to isolate all along — and it did not,
-until this run. Declared without `AS MATERIALIZED`, PostgreSQL inlined the CTE
+The `global-edge` column now runs 0.56–0.81 s, rising gently with depth. Two
+costs, and it is worth naming both rather than calling it flat: the 553,928-row
+adjacency relation is built **once** per query (that is the constant, and the
+variable this candidate exists to isolate), and then each hop performs a full
+unindexed `CTE Scan` over it — `loops=5` at depth 5 in the committed plan. A
+materialised CTE cannot carry an index, which is precisely the difference
+between this candidate and the `materialized` one, where the same relation is a
+real table with an index on `src`. So the slope here is the price of having no
+index on the walk, and the offset is the build. Reviewed on PR #12; an earlier
+revision of this paragraph called the column flat and was wrong about why. Declared without `AS MATERIALIZED`, PostgreSQL inlined the CTE
 into the recursive term and rebuilt all 553,928 rows on every iteration (the
 previous plan showed `loops=6` on that Append), so the "pessimistic baseline"
 was measuring one global build *per hop*. Reviewed on PR #12; the plan is now
@@ -221,18 +265,19 @@ question the ADR ever asked.
 
 The walk now deduplicates nodes (`UNION` over `(id, depth)`, no path array), so
 each node is expanded at most once per depth level. **Same reachability counts,
-three orders of magnitude less work:** depth 4 goes from 38.72 s to **0.073 s**,
-and depth 5 — which never returned before — answers in **0.185 s**, reaching
+three orders of magnitude less work:** depth 4 goes from 38.72 s to **0.064 s**,
+and depth 5 — which never returned before — answers in **0.152 s**, reaching
 2,944 applicants. The identical 55 / 466 / 850 / 1,621 counts at depths 1–4 are
 what establishes this is the same question answered a cheaper way.
 
 Even the pessimistic baseline is rescued: building the entire adjacency
-relation once per query costs a flat ~0.5–0.8 s at every depth, because that
-build is a constant and the walk on top of it is now cheap. Its old 15–22 s at
-depth 4 was the same path-enumeration defect, not the cost of the build.
+relation once per query, then rescanning it per hop, costs 0.56–0.81 s across
+depths 1–5. Its old 15–22 s at depth 4 was the same path-enumeration defect,
+not the cost of the build.
 
 **What the numbers now say:** on a 10,000-applicant book, PostgreSQL answers
-this traversal to depth 5 in under two tenths of a second, with no graph store and
+this traversal to depth 5 in under two tenths of a second, and the unbounded
+form in under half a second, with no graph store and
 no exotic indexing. This ADR has now had its central measurement wrong twice, in
 two unrelated ways, and both times the prose reasoned impeccably from it. That
 is the argument for keeping the harness — and for the assertions now guarding
@@ -248,12 +293,13 @@ measured and it was cheap. A limit would need a run that finds one.
 1. **Traversal is the query, not a step in it.** Reading one loan's history is a
    tree walk; Postgres wins, and no graph store is warranted.
 2. **The query is one PostgreSQL cannot express**, rather than one it merely
-   runs slowly. Depth-bounded reachability it expresses fine, and answers in
-   milliseconds. Weighted-path computations — FinCEN's 25%-plus-control-person
+   runs slowly. Both the depth-bounded and the unbounded reachability queries it
+   expresses fine, and answers in milliseconds. Weighted-path computations — FinCEN's 25%-plus-control-person
    rule is one — are where a recursive CTE stops being the natural shape.
 3. **The measured latency actually fails a stated requirement.** This is now an
    empirical bar with a number attached, not an assumption: on 10k applicants
-   the traversal costs 0.073 s at depth 4 and 0.185 s at depth 5, so a
+   the traversal costs 0.064 s at depth 4, 0.152 s at depth 5, and 0.41 s
+   unbounded, so a
    requirement would have to be far tighter than any interactive budget, or the
    book far larger, before this argument carries.
 
@@ -286,7 +332,8 @@ a permanent refusal:
 - a production traversal is measured missing its interactive budget on a real
   book size. Stated as "re-measure", not as a depth: the depth-based version of
   this trigger ("depth > 3 at interactive latency") was derived from a benchmark
-  that measured path enumeration, and depth 5 now costs 0.185 s.
+  that measured path enumeration, depth 5 now costs 0.152 s, and the unbounded
+  walk 0.41 s.
 
 If it is revisited, the likely shape is a **derived read model, not a second
 source of truth** — the graph projected from Postgres and rebuilt from it, so
