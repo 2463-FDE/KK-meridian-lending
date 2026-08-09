@@ -312,11 +312,16 @@ def _split_sentences(text: str) -> list:
 
 
 def _signal_topic_words(signal) -> set[str]:
-    words = {
-        w.strip("(),.").lower()
-        for w in f"{signal.label} {signal.source}".split()
-    }
-    words |= {"bls", signal.series_id.lower()}
+    """Words that make a sentence ABOUT this signal.
+
+    The signal's LABEL only, plus its series id. The source name used to be in
+    here too, and "U.S. Bureau of Labor Statistics" contributed `labor` -- which
+    matches "5 years of labor experience", an ordinary sentence about the
+    applicant. A publisher's name says who published a figure, not what the
+    figure is about. Reviewed on PR #13.
+    """
+    words = {w.strip("(),.").lower() for w in signal.label.split()}
+    words |= {signal.series_id.lower()}
     return {w for w in words if len(w) > 2 and w not in _LABEL_STOPWORDS}
 
 
@@ -332,13 +337,26 @@ def _drops_a_contradicting_claim(text: str, signal) -> bool:
     if not any(word in lowered for word in topic):
         return False
 
-    # Figures written AS the signal's unit are the claims about it. Preferring
-    # them keeps an unrelated number in the same sentence -- an income, a loan
-    # amount -- from being read as a rate. If the sentence carries none, every
-    # figure in it is a candidate, which is the conservative reading.
+    # A claim about the signal is a figure written AS the signal's unit --
+    # "4.2%", "4.2 percent". Nothing else counts.
+    #
+    # This used to fall back to EVERY number in the sentence when no
+    # unit-shaped figure was found, which turned a topic-word match into a
+    # licence to delete: "The applicant has 5 years of labor experience and
+    # adequate income" matched on a topic word, had its `5` compared against
+    # the published 4.2, and was removed -- and if it was the only sentence,
+    # the summary failed closed with a 502 over a sentence that said nothing
+    # about unemployment at all. Reviewed on PR #13.
+    #
+    # Dropping the fallback narrows what this can delete rather than adding
+    # another pattern to catch the exception. The cost is stated plainly: a
+    # bare "unemployment is 11.9" with no unit is not treated as a claim,
+    # because a bare number beside a topic word is not distinguishable from a
+    # count of years, applications or anything else. The prompt asks the model
+    # not to restate the figure at all; this is the backstop for when it does
+    # so in the form a reader would actually read as a rate.
     published = float(signal.value)
-    unit_figures = [float(m) for m in _UNIT_FIGURE_RE.findall(text)]
-    claims = unit_figures or [float(m) for m in _FIGURE_RE.findall(text)]
+    claims = [float(m) for m in _UNIT_FIGURE_RE.findall(text)]
     if not claims:
         return False
 

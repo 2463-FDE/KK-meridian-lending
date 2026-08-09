@@ -602,3 +602,58 @@ def test_a_spelled_out_contradiction_is_still_removed(monkeypatch):
 
     assert "11.9" not in result.summary
     assert "Income is adequate" in result.summary
+
+
+# --- a topic word is not a licence to delete ---------------------------------
+
+def test_a_sentence_about_the_applicant_is_not_treated_as_a_macro_claim(monkeypatch):
+    """The reviewed sentence, verbatim.
+
+    `labor` reached the topic words from the SOURCE name ("U.S. Bureau of Labor
+    Statistics"), so this ordinary sentence about the applicant matched; the
+    all-figures fallback then compared its `5` against the published 4.2 and
+    deleted it. As the only sentence, that turned a valid summary into a 502.
+    Reviewed on PR #13.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "The applicant has 5 years of labor experience and adequate income.",
+    )
+
+    assert result.summary == "The applicant has 5 years of labor experience and adequate income."
+
+
+def test_the_publishers_name_alone_does_not_make_a_sentence_a_claim(monkeypatch):
+    """Who published a figure is not what the figure is about."""
+    result = _summarize_with(
+        monkeypatch,
+        "Bureau records show 12 months of continuous employment.",
+    )
+
+    assert "12 months" in result.summary
+
+
+def test_a_unit_shaped_contradiction_is_still_removed(monkeypatch):
+    """Narrowing must not disarm the guard."""
+    result = _summarize_with(
+        monkeypatch,
+        "Income is adequate. Unemployment is 11.9% and rising.",
+    )
+
+    assert "11.9" not in result.summary
+    assert "Income is adequate" in result.summary
+
+
+def test_a_bare_number_beside_a_topic_word_is_a_stated_limitation(monkeypatch):
+    """What dropping the fallback costs, asserted rather than left implicit.
+
+    "unemployment is 11.9" with no unit is NOT treated as a claim, because a
+    bare number beside a topic word is indistinguishable from a count of years
+    or applications -- which is exactly how the deletion bug happened. The
+    prompt asks the model not to restate the figure at all; this is the
+    backstop for the form a reader would actually read as a rate. If this
+    behaviour is ever tightened, this test should be the thing that changes.
+    """
+    result = _summarize_with(monkeypatch, "Unemployment is 11.9 and rising.")
+
+    assert "11.9" in result.summary
