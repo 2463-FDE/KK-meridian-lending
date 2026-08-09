@@ -432,3 +432,42 @@ def test_a_leftover_pan_still_requires_the_acknowledgement(conn):
                     "WHERE table_schema = %s AND table_name = 'payments' "
                     "AND column_name = 'pan'", (SCHEMA,))
         assert cur.fetchone()[0] == 1, "pan was dropped despite an incomplete back-fill"
+
+
+def test_a_column_far_down_a_long_projection_is_detected(tmp_path):
+    """No line-distance limit: the literal is the unit.
+
+    A fixed six-line window still missed a projection with seven fields before
+    `pan`. A string literal has a real beginning and end, so there is nothing
+    left to guess. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.query("""\n'
+        "        SELECT id,\n"
+        "               loan_id,\n"
+        "               amount,\n"
+        "               method,\n"
+        "               brand,\n"
+        "               last4,\n"
+        "               created_at,\n"
+        "               auth_status,\n"
+        "               idempotency_key,\n"
+        "               pan\n"
+        "          FROM payments\n"
+        '    """)\n'
+    ))
+    assert hits, "a column ten lines below SELECT was reported clean"
+
+
+def test_adjacent_literals_are_each_scanned(tmp_path):
+    """Implicit concatenation is several literals; each is checked on its own."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.query(\n'
+        '        "SELECT id, "\n'
+        '        "pan, "\n'
+        '        "last4 FROM payments"\n'
+        "    )\n"
+    ))
+    assert hits, "a projection split across adjacent literals was reported clean"

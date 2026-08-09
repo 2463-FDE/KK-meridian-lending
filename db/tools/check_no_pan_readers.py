@@ -67,20 +67,12 @@ _SQL_CONTEXT = re.compile(r"\b(select|insert|update|delete|set|where|values)\b",
 # missed it. Reviewed on PR #15.
 _BARE_COLUMN = re.compile(r"\b(pan|cvv)\b", re.IGNORECASE)
 
-# How many lines above a bare column still count as the same SQL statement.
-# Raw SQL here is written as adjacent string literals, and a projection is
-# routinely split across them:
-#
-#     "SELECT id, "
-#     "pan, "
-#     "last4 FROM payments"
-#
-# Requiring the keyword and the column on the SAME line missed every one of
-# those, so the checker printed OK over a live reader -- and that green result
-# is the runbook's prerequisite for acknowledging the destructive migration.
-# Small on purpose: a statement-body window, not a file-wide search, so an
-# unrelated `pan` far below a SELECT is still not a hit. Reviewed on PR #15.
-_SQL_WINDOW = 6
+# SQL is scanned as whole STRING LITERALS, taken from the syntax tree, not as
+# lines within a sliding window. A window is a guess about how far a projection
+# can run: the first version required the keyword and the column on one line and
+# missed every multiline query; widening it to six lines still missed a
+# projection with seven fields before `pan`. A literal has an actual beginning
+# and end, so there is nothing left to guess. Reviewed on PR #15.
 
 SKIP_DIRS = {"__pycache__", "tests", "node_modules", ".git"}
 
@@ -133,6 +125,42 @@ def _docstring_lines(source: str) -> set[int]:
     return lines
 
 
+def _sql_literal_hits(source: str) -> list[tuple[int, str]]:
+    """(line, text) for every string literal that is SQL naming a legacy column.
+
+    The whole literal is one unit: a projection split across ten lines, or one
+    written as adjacent implicitly-concatenated pieces, is a single Constant in
+    the tree. Docstrings are excluded by position, not by quoting style.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    doc_nodes = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                doc_nodes.add(id(body[0].value))
+
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in doc_nodes:
+            continue
+        text = node.value
+        if _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
+            excerpt = " ".join(
+                line.strip() for line in text.splitlines()
+                if _BARE_COLUMN.search(line)
+            ) or text.strip()
+            hits.append((node.lineno, excerpt[:160]))
+    return hits
+
+
 def scan() -> list[tuple[str, int, str, str]]:
     hits: list[tuple[str, int, str, str]] = []
     for path in sorted(SERVICES.rglob("*.py")):
@@ -143,36 +171,24 @@ def scan() -> list[tuple[str, int, str, str]]:
         except UnicodeDecodeError:
             continue
         lines = source.splitlines()
+        rel = str(path.relative_to(REPO_ROOT))
 
-        # Real docstrings only. This codebase documents the PAN/CVV defect at
-        # length in module docstrings; those sentences are documentation, not
-        # reads, and counting them buries the real hits. A triple-quoted SQL
-        # constant is NOT one of them -- see _docstring_lines.
+        # SQL, as whole literals.
+        for lineno, excerpt in _sql_literal_hits(source):
+            hits.append((rel, lineno, "SQL column reference", excerpt))
+
+        # Everything that is not SQL -- ORM mappings, attribute reads -- is a
+        # per-line question and stays one. Real docstrings are excluded by
+        # position; see _docstring_lines.
         doc_lines = _docstring_lines(source)
         for n, line in enumerate(lines, 1):
             if n in doc_lines or _is_comment(line):
                 continue
-
-            matched = None
             for pattern, kind in PATTERNS:
                 if pattern.search(line):
-                    matched = kind
+                    hits.append((rel, n, kind, line.strip()))
                     break
-            if matched is None and _BARE_COLUMN.search(line):
-                # The keyword may be on this line or on one of the few above it,
-                # because a projection split across adjacent string literals is
-                # one statement written over several lines.
-                start = max(0, n - 1 - _SQL_WINDOW)
-                window = lines[start:n]
-                if any(
-                    _SQL_CONTEXT.search(w)
-                    for w in window
-                    if not _is_comment(w)
-                ):
-                    matched = "SQL column reference"
-            if matched:
-                hits.append((str(path.relative_to(REPO_ROOT)), n, matched, line.strip()))
-    return hits
+    return sorted(hits)
 
 
 def main() -> int:

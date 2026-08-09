@@ -143,6 +143,11 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Pin it. Everything below -- the back-fill count, the acknowledgement and
+    -- the ALTER -- must apply to THIS relation, and nothing else may replace or
+    -- rename it in between.
+    EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', target);
+
     -- The back-fill question only exists while `pan` does: it asks whether any
     -- row would lose its only record of the card. With `pan` already dropped
     -- there is nothing left to lose, and querying it would fail.
@@ -171,19 +176,22 @@ BEGIN
     END IF;
 
     RAISE NOTICE '0031: gate satisfied -- back-fill complete and drop acknowledged.';
-END $$;
 
--- Dropped from the relation the gates above resolved and checked, not from
--- whatever an unqualified name happens to resolve to at this point in the
--- file. `%s` on a regclass renders a name that resolves back to the same oid.
-DO $$
-DECLARE
-    target REGCLASS := to_regclass('payments');
-BEGIN
-    IF target IS NULL THEN
-        RAISE NOTICE '0031: no payments table on the search_path; nothing to drop.';
-        RETURN;
-    END IF;
+    -- The drop happens HERE, against the relation this block resolved and
+    -- locked, not in a later statement that resolves the name again.
+    --
+    -- Split across two DO blocks, the gate finished and released nothing: with
+    -- no surrounding transaction -- which is how the runbook documents running
+    -- this -- another session could create a `payments` in an earlier
+    -- search_path schema, or rename the checked table, between the two
+    -- statements, and the second block would drop columns from a relation that
+    -- never passed the back-fill or the acknowledgement. Reviewed on PR #15.
+    --
+    -- The ACCESS EXCLUSIVE lock above is what makes "the relation that was
+    -- checked" and "the relation being altered" the same object rather than the
+    -- same name: it is held until this block's transaction ends, and ALTER
+    -- TABLE would take it anyway.
     EXECUTE format('ALTER TABLE %s DROP COLUMN IF EXISTS pan', target);
     EXECUTE format('ALTER TABLE %s DROP COLUMN IF EXISTS cvv', target);
+    RAISE NOTICE '0031: payments.pan/cvv dropped.';
 END $$;
