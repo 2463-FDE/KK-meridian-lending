@@ -65,6 +65,14 @@ SOURCES = [
         "payment-service",
         "disclosure-service",
     )
+] + [
+    # The call site, not just the logging module. `applications.py` carried
+    # `# creates applicant+application rows, logs full PII (D5 — KEEP)`
+    # directly above the intake call -- a comment a reader trusts MORE than a
+    # module docstring, because it sits on the line it describes, and one that
+    # survived every earlier pass because the corpus was docstrings only.
+    # Reviewed on PR #16.
+    REPO_ROOT / "services" / "origination-service" / "app" / "routers" / "applications.py",
 ]
 
 GUARDED = DOCS + SOURCES
@@ -90,6 +98,16 @@ FALSE_CLAIMS = [
     ),
     (
         re.compile(r"origination\s+still\s+logs\s+full\s+PII", re.IGNORECASE),
+        "origination's intake logs app_id/applicant_id only (PR #6 review, Gap C)",
+    ),
+    (
+        # The call-site comment's own wording: `logs full PII (D5 — KEEP)`,
+        # unqualified, sitting directly above intake.create_application(). The
+        # pattern above needs the word "origination" and this comment does not
+        # contain it -- it does not need to, because the file it lives in IS
+        # origination. Matched on the bare claim, with the D5 citation optional
+        # so a partial restoration fails too. Reviewed on PR #16.
+        re.compile(r"logs\s+full\s+PII", re.IGNORECASE),
         "origination's intake logs app_id/applicant_id only (PR #6 review, Gap C)",
     ),
     (
@@ -158,7 +176,19 @@ RETRACTION_CUES = re.compile(
 #
 # A blank line ends a clause too: two paragraphs are never one sentence, and
 # without that a retraction in one paragraph would reach into the next.
-CLAUSE_BOUNDARY = re.compile(r"[.;][*_`\"')\]]*\s+|\|\s*|\n[ \t]*\n")
+CLAUSE_BOUNDARY = re.compile(
+    r"[.;][*_`\"')\]]*\s+"      # sentence end, allowing a closing emphasis mark
+    r"|\|\s*"                   # Markdown table cell
+    r"|\n[ \t]*\n"              # paragraph break
+    # A CONTRASTIVE conjunction ends the clause a cue is allowed to excuse.
+    # "payment-service no longer persists PAN, but payment-service logs full
+    # PAN at INFO" is one sentence carrying a retraction AND a live claim; the
+    # cue belongs to the half before the "but", and splitting only on sentence
+    # ends handed the second half an alibi it had not earned. Reviewed on
+    # PR #16.
+    r"|,?\s*\b(?:but|yet|however|whereas|while|though|although)\b\s*",
+    re.IGNORECASE,
+)
 
 
 def _clause_around(text: str, start: int, end: int) -> str:
@@ -240,6 +270,68 @@ PAN_CLAIM = FALSE_CLAIMS[0][0]
 INFO_LOG_CLAIM = next(p for p, _ in FALSE_CLAIMS if "logs\\s+them" in p.pattern)
 REQUEST_BODY_CLAIM = next(p for p, _ in FALSE_CLAIMS if "request\\s+body" in p.pattern)
 SERVICING_FIELDS_CLAIM = next(p for p, _ in FALSE_CLAIMS if r"\(\s*PAN" in p.pattern)
+FULL_PII_CLAIM = next(p for p, _ in FALSE_CLAIMS if p.pattern == r"logs\s+full\s+PII")
+
+# The exact comment that sat above intake.create_application() before e889255,
+# recovered with `git show` rather than paraphrased.
+ORIGINATION_COMMENT_BEFORE = (
+    "    payload = body.model_dump()\n"
+    "    # creates applicant+application rows, logs full PII (D5 — KEEP)\n"
+    "    app_id, access_token = intake.create_application(payload)\n"
+)
+
+
+def test_the_origination_call_site_comment_is_caught_if_it_returns():
+    """A comment on the line it describes is trusted more than a docstring.
+
+    `logs full PII (D5 — KEEP)` sat directly above the intake call and survived
+    every earlier pass, because the guarded corpus was Markdown plus the six
+    `logging_config.py` docstrings. The wording also dodges the existing
+    origination pattern, which requires the word "origination" -- a comment
+    inside origination-service has no reason to say it. Reviewed on PR #16.
+    """
+    assert live_claim_lines(ORIGINATION_COMMENT_BEFORE, FULL_PII_CLAIM) == [2]
+
+
+def test_the_origination_router_is_in_the_guarded_corpus():
+    """The pattern is worthless if the file it was written for is unscanned."""
+    router = REPO_ROOT / "services" / "origination-service" / "app" / "routers" / "applications.py"
+    assert router in SOURCES
+    assert router.is_file()
+
+
+def test_the_shipped_router_comment_does_not_carry_that_claim():
+    """...and it does not carry it today."""
+    router = REPO_ROOT / "services" / "origination-service" / "app" / "routers" / "applications.py"
+    assert live_claim_lines(router.read_text(encoding="utf-8"), FULL_PII_CLAIM) == []
+
+
+def test_a_cue_in_the_other_half_of_a_contrastive_sentence_does_not_excuse_it():
+    """One sentence can retract one thing and assert another.
+
+    "payment-service no longer persists PAN, but payment-service logs full PAN
+    at INFO" carries a real retraction and a live false claim. The cue belongs
+    to the half before the "but"; the clause check used to hand the second half
+    that alibi, because both halves were one clause. Reviewed on PR #16.
+    """
+    mixed = (
+        "payment-service no longer persists PAN, but payment-service logs full "
+        "PAN at INFO.\n"
+    )
+    assert live_claim_lines(mixed, PAN_CLAIM) == [1]
+
+
+def test_a_contrastive_sentence_whose_cue_covers_the_claim_still_passes():
+    """The conjunction split must not break an honest retraction either.
+
+    Here the cue sits with the claim it retracts, so nothing is excused that
+    should not be.
+    """
+    honest = (
+        "The seed data still writes card values, but this entry previously said "
+        "payment-service logs full PAN at INFO, which is false.\n"
+    )
+    assert live_claim_lines(honest, PAN_CLAIM) == []
 
 # Exactly what `services/servicing-service/app/logging_config.py` said before
 # e889255, recovered with `git show e889255~1:` rather than paraphrased. A
