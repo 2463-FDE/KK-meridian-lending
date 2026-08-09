@@ -606,3 +606,40 @@ def test_documentation_about_the_columns_is_still_ignored(tmp_path):
         '    return conn.execute("SELECT last4 FROM payments")\n'
     ))
     assert hits == [], f"documentation was reported as a live read: {hits}"
+
+
+def test_a_statically_known_fstring_substitution_is_resolved(tmp_path):
+    """`COL = "pan"` then `f"SELECT {COL} FROM payments"` is a live read.
+
+    Leaving the substitution as a hole hid it: the standalone `"pan"` carries no
+    SQL context of its own, so nothing else would catch it, and the checker
+    returned clean. Only names already resolved statically are substituted --
+    anything genuinely runtime stays a hole. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        'COL = "pan"\n'
+        "\n"
+        "def read(conn):\n"
+        '    return conn.execute(f"SELECT {COL} FROM payments")\n'
+    ))
+    assert hits, "an f-string substituting a known column name was reported clean"
+
+
+def test_a_runtime_substitution_remains_a_hole(tmp_path):
+    """The boundary: an unknown value is not guessed at."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn, column):\n"
+        '    return conn.execute(f"SELECT {column} FROM payments")\n'
+    ))
+    assert hits == [], f"a runtime value was treated as if it were known: {hits}"
+
+
+def test_a_statically_known_substitution_of_an_allowed_column_passes(tmp_path):
+    """...and resolving it must not invent a hit either."""
+    hits = _run_checker_over(tmp_path, (
+        'COL = "last4"\n'
+        "\n"
+        "def read(conn):\n"
+        '    return conn.execute(f"SELECT {COL} FROM payments")\n'
+    ))
+    assert hits == [], f"clean SQL was flagged: {hits}"

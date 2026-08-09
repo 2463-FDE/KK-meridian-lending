@@ -184,8 +184,15 @@ def _fold(node: ast.AST, names: dict[str, str], depth: int = 0) -> str | None:
         for value in node.values:
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 parts.append(value.value)
-            else:
-                parts.append(_RUNTIME_HOLE)
+                continue
+            # A substitution whose value IS statically known gets substituted:
+            # `COL = "pan"` then `f"SELECT {COL} FROM payments"` is a live read
+            # of pan, and leaving a hole there hid it -- the standalone "pan"
+            # carries no SQL context of its own, so nothing else would catch
+            # it. Only names this file already resolved; anything else stays a
+            # hole. Reviewed on PR #15.
+            inner = _fold(value.value, names, depth + 1) if isinstance(value, ast.FormattedValue) else None
+            parts.append(inner if inner is not None else _RUNTIME_HOLE)
         return "".join(parts)
     if isinstance(node, ast.BinOp):
         if isinstance(node.op, ast.Add):
