@@ -295,3 +295,76 @@ def test_the_drop_targets_the_same_table_the_gate_checked(conn):
                     "AND column_name IN ('pan','cvv')", (SCHEMA,))
         assert cur.fetchone()[0] == 0, "the columns were not dropped from the real table"
         cur.execute(f"DROP SCHEMA IF EXISTS {_EMPTY_SCHEMA} CASCADE")
+
+
+def test_a_triple_quoted_query_is_scanned_not_skipped(tmp_path):
+    """A multiline query is code, however it is quoted.
+
+    Tracking triple-quote fences treated `conn.query(\"\"\"SELECT ... pan ...\"\"\")`
+    as a docstring and skipped every line of it, so the checker returned exit 0
+    over a live reader -- and that green result is the runbook's prerequisite
+    for acknowledging the drop. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.query("""\n'
+        "        SELECT id, pan, last4\n"
+        "          FROM payments\n"
+        '    """)\n'
+    ))
+    assert hits, "a triple-quoted query reading pan was reported clean"
+    assert any("pan" in h[3] for h in hits)
+
+
+def test_a_triple_quoted_module_constant_is_scanned(tmp_path):
+    """The same string assigned to a name rather than passed inline."""
+    hits = _run_checker_over(tmp_path, (
+        'LEGACY_SQL = """\n'
+        "    SELECT pan FROM payments WHERE id = %s\n"
+        '"""\n'
+    ))
+    assert hits, "a triple-quoted SQL constant reading pan was reported clean"
+
+
+def test_an_uppercase_triple_quoted_query_is_scanned(tmp_path):
+    """PostgreSQL folds the identifier, so case must not decide this."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.query("""SELECT ID, PAN FROM PAYMENTS""")\n'
+    ))
+    assert hits, "an uppercase triple-quoted read was reported clean"
+
+
+def test_a_real_docstring_mentioning_pan_is_not_a_hit(tmp_path):
+    """Prose is excluded by WHERE it sits, not by how it is capitalised.
+
+    This codebase documents the PAN/CVV defect at length; counting those
+    sentences would bury the real hits and train people to ignore the checker.
+    """
+    hits = _run_checker_over(tmp_path, (
+        '"""This module used to SELECT pan from payments.\n'
+        "\n"
+        "It no longer does; see docs/DEBT.md D5b for the history of pan and cvv.\n"
+        '"""\n'
+        "\n"
+        "def read(conn):\n"
+        '    """Return the masked card for display.\n'
+        "\n"
+        "    Never selects pan or cvv -- last4 only.\n"
+        '    """\n'
+        '    return conn.query("SELECT last4, brand FROM payments")\n'
+    ))
+    assert hits == [], f"documentation was reported as a live read: {hits}"
+
+
+def test_clean_sql_passes(tmp_path):
+    """The other half: a compliant reader must not be flagged."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.query("""\n'
+        "        SELECT id, last4, brand, amount\n"
+        "          FROM payments\n"
+        "         WHERE loan_id = %s\n"
+        '    """)\n'
+    ))
+    assert hits == [], f"clean SQL was flagged: {hits}"

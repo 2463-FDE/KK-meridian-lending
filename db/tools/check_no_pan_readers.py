@@ -22,26 +22,30 @@ A green run means "the code at this revision is clean", NOT "production is
 clean". Both are required before the drop. Treating the first as the second is
 the mistake this file exists to make hard rather than easy.
 
-Matching is case-SENSITIVE and lowercase throughout. Every real reference in
-this codebase is lowercase (`payment.pan`, `SELECT pan`), while the prose about
-this defect writes "PAN, CVV" in capitals. A first version matched
-case-insensitively and reported six hits, every one of them a docstring
-explaining that PANs must not be logged. A checker that cries wolf is one people
-learn to ignore, which is worse than not having it -- so this is deliberately
-biased toward silence on prose and noise on code.
+Matching is case-INSENSITIVE, because PostgreSQL folds an unquoted identifier:
+`SELECT PAN` reads the very column being dropped. An early version matched only
+lowercase on the argument that real references here are lowercase while the
+prose is capitalised -- which was true of the prose and not of SQL, and it meant
+an uppercase reader passed. Prose is excluded by WHERE it sits (see below)
+rather than by how it is capitalised, which is the distinction that actually
+holds. Reviewed on PR #15.
 
 Excluded from the search, each for a reason:
   * db/migrations/**  -- a migration necessarily names the columns it acts on
-  * db/init/**        -- schema and seeds, handled separately. Note that the
-                         seeds still WRITE pan/cvv (docs/DEBT.md D5b), which
-                         independently blocks this drop
+  * db/init/**        -- schema and seeds, handled separately
   * tests/**          -- a test asserting the legacy fallback still works is not
                          a live reader
-  * comments and docstrings -- prose about the columns is not a read
+  * comments          -- prose about the columns is not a read
+  * REAL docstrings   -- module, class and function docstrings, identified from
+                         the syntax tree. NOT triple-quoted strings in general:
+                         `conn.query(\"\"\"SELECT pan ...\"\"\")` is a live reader that
+                         happens to be quoted the same way, and skipping it
+                         returned a false all-clear (PR #15).
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import sys
 from pathlib import Path
@@ -86,26 +90,67 @@ def _is_comment(line: str) -> bool:
     return stripped.startswith("#") or stripped.startswith("--") or stripped.startswith("*")
 
 
+def _docstring_lines(source: str) -> set[int]:
+    """Line numbers belonging to REAL docstrings -- module, class, function.
+
+    The previous version tracked triple-quote fences and skipped everything
+    between them. That treats a perfectly ordinary multiline query --
+
+        conn.query(\"\"\"SELECT id, pan FROM payments\"\"\")
+
+    -- as documentation and skips every line of it, so the checker returned exit
+    0 over a live reader and could authorise dropping a column deployed code
+    still selects. Reviewed on PR #15.
+
+    A docstring is a position in the syntax tree, not a quoting style, so it is
+    identified as one: the first statement of a module, class or function when
+    that statement is a bare string. Every other string literal -- including a
+    triple-quoted SQL constant or one passed to a database call -- is code, and
+    is scanned.
+
+    Returns an empty set for a file that does not parse, in which case nothing
+    is skipped: over-reporting on an unparseable file is the safe direction for
+    a check that gates a destructive migration.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            end = getattr(first, "end_lineno", first.lineno)
+            lines.update(range(first.lineno, end + 1))
+    return lines
+
+
 def scan() -> list[tuple[str, int, str, str]]:
     hits: list[tuple[str, int, str, str]] = []
     for path in sorted(SERVICES.rglob("*.py")):
         if any(part in SKIP_DIRS for part in path.parts):
             continue
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            source = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
+        lines = source.splitlines()
 
-        in_docstring = False
+        # Real docstrings only. This codebase documents the PAN/CVV defect at
+        # length in module docstrings; those sentences are documentation, not
+        # reads, and counting them buries the real hits. A triple-quoted SQL
+        # constant is NOT one of them -- see _docstring_lines.
+        doc_lines = _docstring_lines(source)
         for n, line in enumerate(lines, 1):
-            # Track triple-quoted blocks. This codebase documents the PAN/CVV
-            # defect at length in module docstrings; those sentences are
-            # documentation, not reads, and counting them buries the real hits.
-            fences = line.count('"""') + line.count("'''")
-            was_inside = in_docstring
-            if fences % 2 == 1:
-                in_docstring = not in_docstring
-            if was_inside or in_docstring or _is_comment(line):
+            if n in doc_lines or _is_comment(line):
                 continue
 
             matched = None
