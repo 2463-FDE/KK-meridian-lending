@@ -368,3 +368,67 @@ def test_clean_sql_passes(tmp_path):
         '    """)\n'
     ))
     assert hits == [], f"clean SQL was flagged: {hits}"
+
+
+# --- a partially cleaned database ---------------------------------------------
+
+def test_a_leftover_cvv_still_requires_the_acknowledgement(conn):
+    """`pan` gone, `cvv` still there: the gate must still gate.
+
+    Both gates tested `pan` alone, so this state reported "nothing to do" and
+    returned -- and the ALTER below then dropped `cvv` with no acknowledgement
+    and no operator sign-off. A partially cleaned database is exactly where a
+    destructive migration needs its brakes most. Reviewed on PR #15.
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("ALTER TABLE payments DROP COLUMN pan")
+        cur.execute("INSERT INTO payments (loan_id, cvv, last4, amount, method) "
+                    "VALUES (1, '123', '1111', 10.00, 'card')")
+
+        with pytest.raises(psycopg2.errors.RaiseException) as exc:
+            cur.execute(_0031)
+        assert "acknowledged" in str(exc.value).lower() or "refused" in str(exc.value).lower()
+
+        cur.execute("SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = 'payments' "
+                    "AND column_name = 'cvv'", (SCHEMA,))
+        assert cur.fetchone()[0] == 1, "cvv was dropped without the acknowledgement"
+
+
+def test_a_leftover_cvv_drops_once_acknowledged(conn):
+    """...and with the acknowledgement it completes, without touching pan.
+
+    The back-fill question only exists while `pan` does -- with it already gone
+    there is nothing left to lose, and querying it would fail outright.
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("ALTER TABLE payments DROP COLUMN pan")
+        cur.execute("INSERT INTO payments (loan_id, cvv, last4, amount, method) "
+                    "VALUES (1, '123', '1111', 10.00, 'card')")
+        cur.execute("SET meridian.pan_drop_acknowledged = 'yes'")
+        cur.execute(_0031)
+
+        cur.execute("SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = 'payments' "
+                    "AND column_name IN ('pan','cvv')", (SCHEMA,))
+        assert cur.fetchone()[0] == 0
+
+
+def test_a_leftover_pan_still_requires_the_acknowledgement(conn):
+    """The mirror case: `cvv` gone, `pan` still present and unbacked-filled."""
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("ALTER TABLE payments DROP COLUMN cvv")
+        cur.execute("INSERT INTO payments (loan_id, pan, last4, amount, method) "
+                    "VALUES (1, '4111111111111111', NULL, 10.00, 'card')")
+
+        with pytest.raises(psycopg2.errors.RaiseException) as exc:
+            cur.execute(_0031)
+        assert "back-fill has not completed" in str(exc.value)
+
+        cur.execute("SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = 'payments' "
+                    "AND column_name = 'pan'", (SCHEMA,))
+        assert cur.fetchone()[0] == 1, "pan was dropped despite an incomplete back-fill"

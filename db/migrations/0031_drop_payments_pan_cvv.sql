@@ -27,6 +27,8 @@ DO $$
 DECLARE
     pan_rows INTEGER;
     cvv_rows INTEGER;
+    has_pan BOOLEAN;
+    has_cvv BOOLEAN;
     -- The EXACT relation an unqualified `payments` resolves to, by the same
     -- search_path rules the ALTER below obeys. `current_schema()` is only the
     -- FIRST schema on the path, which is not necessarily the one holding the
@@ -42,18 +44,32 @@ BEGIN
         RETURN;
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_attribute
-         WHERE attrelid = target
-           AND attname = 'pan'
-           AND NOT attisdropped
-    ) THEN
+    -- EACH column independently. A `pan`-only presence test made a partially
+    -- cleaned database unsafe: with `pan` already gone and `cvv` still there,
+    -- this returned "nothing to do" and the ALTER below dropped `cvv` with no
+    -- acknowledgement -- and in the mirror case it queried a `cvv` that no
+    -- longer existed. Reviewed on PR #15.
+    has_pan := EXISTS (SELECT 1 FROM pg_attribute
+                        WHERE attrelid = target AND attname = 'pan'
+                          AND NOT attisdropped);
+    has_cvv := EXISTS (SELECT 1 FROM pg_attribute
+                        WHERE attrelid = target AND attname = 'cvv'
+                          AND NOT attisdropped);
+    IF NOT has_pan AND NOT has_cvv THEN
         RAISE NOTICE '0031: payments.pan/cvv already absent; nothing to do.';
         RETURN;
     END IF;
 
-    EXECUTE 'SELECT count(*) FROM payments WHERE pan IS NOT NULL' INTO pan_rows;
-    EXECUTE 'SELECT count(*) FROM payments WHERE cvv IS NOT NULL' INTO cvv_rows;
+    pan_rows := 0;
+    cvv_rows := 0;
+    IF has_pan THEN
+        EXECUTE format('SELECT count(*) FROM %s WHERE pan IS NOT NULL', target)
+           INTO pan_rows;
+    END IF;
+    IF has_cvv THEN
+        EXECUTE format('SELECT count(*) FROM %s WHERE cvv IS NOT NULL', target)
+           INTO cvv_rows;
+    END IF;
     IF pan_rows = 0 AND cvv_rows = 0 THEN
         RAISE NOTICE '0031: no stored PAN/CVV values to remove.';
     ELSE
@@ -100,7 +116,8 @@ DO $$
 DECLARE
     unbackfilled INTEGER;
     ack TEXT;
-    still_present BOOLEAN;
+    has_pan BOOLEAN;
+    has_cvv BOOLEAN;
     -- Same relation the ALTER will target; see the note on the first gate.
     target REGCLASS := to_regclass('payments');
 BEGIN
@@ -113,19 +130,28 @@ BEGIN
     -- Without this the gate itself references a column that no longer exists
     -- and the migration fails on its second run -- which the runner is entitled
     -- to do, and which the idempotency test caught.
-    SELECT EXISTS (
-        SELECT 1 FROM pg_attribute
-         WHERE attrelid = target
-           AND attname = 'pan'
-           AND NOT attisdropped
-    ) INTO still_present;
-    IF NOT still_present THEN
-        RAISE NOTICE '0031: payments.pan is already gone -- nothing to do.';
+    -- Per column, for the same reason as the first gate: either one still
+    -- present means there is something to drop, and something to gate.
+    has_pan := EXISTS (SELECT 1 FROM pg_attribute
+                        WHERE attrelid = target AND attname = 'pan'
+                          AND NOT attisdropped);
+    has_cvv := EXISTS (SELECT 1 FROM pg_attribute
+                        WHERE attrelid = target AND attname = 'cvv'
+                          AND NOT attisdropped);
+    IF NOT has_pan AND NOT has_cvv THEN
+        RAISE NOTICE '0031: payments.pan/cvv are already gone -- nothing to do.';
         RETURN;
     END IF;
 
-    EXECUTE 'SELECT count(*) FROM payments WHERE pan IS NOT NULL AND last4 IS NULL'
-       INTO unbackfilled;
+    -- The back-fill question only exists while `pan` does: it asks whether any
+    -- row would lose its only record of the card. With `pan` already dropped
+    -- there is nothing left to lose, and querying it would fail.
+    unbackfilled := 0;
+    IF has_pan THEN
+        EXECUTE format(
+            'SELECT count(*) FROM %s WHERE pan IS NOT NULL AND last4 IS NULL', target)
+           INTO unbackfilled;
+    END IF;
     IF unbackfilled > 0 THEN
         RAISE EXCEPTION
           '0031 refused: % payment row(s) still hold a pan with no last4. The '
