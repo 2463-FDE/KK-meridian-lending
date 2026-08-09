@@ -283,7 +283,7 @@ _FIGURE_RE = re.compile(r"\d+(?:\.\d+)?")
 # The same figure, but only where it is written AS the signal's unit -- "4.2%"
 # or "4.2 percent". Used to tell a claim about the signal apart from an
 # unrelated number in the same sentence (an income, a loan amount).
-_UNIT_FIGURE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent|pct)", re.IGNORECASE)
+_UNIT_FIGURE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|pct\b)", re.IGNORECASE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 # Abbreviations whose full stop does not end a sentence. Without this the
 # splitter cut "The U.S. unemployment rate is 11.9%." into "The U.S." plus the

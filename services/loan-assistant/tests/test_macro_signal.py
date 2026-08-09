@@ -560,3 +560,45 @@ def test_an_application_too_large_on_its_own_still_fails_the_guard(monkeypatch):
 
     with pytest.raises(llm_client.LLMCostGuardError):
         llm_client.summarize_application(dict(_APP, applicant={"name": "Robin Fictional"}))
+
+
+def test_the_unit_pattern_matches_a_spelled_out_percent(monkeypatch):
+    """The unit pattern must recognise the words, not only the symbol.
+
+    Its `\b` word boundaries were written as literal U+0008 backspace
+    characters, so "4.2 percent" never matched and the check fell back to
+    treating EVERY number in the sentence as a rate claim -- discarding an
+    accurate sentence because an income sat next to the figure. Only the "%"
+    alternative worked, which is why the earlier tests missed it. Reviewed on
+    PR #13.
+
+    Asserted on the pattern directly as well as through the service, so a
+    regression names the cause rather than a symptom three layers away.
+    """
+    assert llm_client._UNIT_FIGURE_RE.findall("unemployment is 4.2 percent") == ["4.2"]
+    assert llm_client._UNIT_FIGURE_RE.findall("unemployment is 11.9 pct") == ["11.9"]
+    assert llm_client._UNIT_FIGURE_RE.findall("income of 82000") == []
+    # A word that merely starts with "percent" is not the unit.
+    assert llm_client._UNIT_FIGURE_RE.findall("rose 4.2 percentage points") == []
+
+
+def test_a_spelled_out_rate_beside_an_income_survives(monkeypatch):
+    """The user-visible half of the same defect."""
+    result = _summarize_with(
+        monkeypatch,
+        "Unemployment is 4.2 percent while income is 82000, so repayment looks sound.",
+    )
+
+    assert "82000" in result.summary
+    assert "4.2 percent" in result.summary
+
+
+def test_a_spelled_out_contradiction_is_still_removed(monkeypatch):
+    """...and the pattern working must not weaken the guard itself."""
+    result = _summarize_with(
+        monkeypatch,
+        "Income is adequate. Unemployment is 11.9 percent, which is alarming.",
+    )
+
+    assert "11.9" not in result.summary
+    assert "Income is adequate" in result.summary
