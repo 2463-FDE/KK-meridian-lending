@@ -73,8 +73,9 @@ def setup_conn():
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER NOT NULL REFERENCES applications(id),
                 apr NUMERIC(7,3) NOT NULL,
-                accepted_at TIMESTAMPTZ
-            );
+                accepted_at TIMESTAMPTZ,
+            principal NUMERIC(14,2)
+        );
             CREATE TABLE loans (
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER UNIQUE REFERENCES applications(id),

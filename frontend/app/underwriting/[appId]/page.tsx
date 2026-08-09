@@ -517,7 +517,7 @@ function UnderwritingDetailContent() {
             Generate a Truth-in-Lending offer using a {pct(OFFER_RATE_PCT)} note
             rate for {usd(app?.amount)} over {app?.term_months} months.
           </p>
-          {offer ? (
+          {offer && offerReady ? (
             // Not a control. "Offer already created" describes state and can
             // never be actioned -- rendering it as a disabled button invited
             // clicks on something that was never going to respond, and read to
@@ -526,6 +526,27 @@ function UnderwritingDetailContent() {
             <span className="status-note" role="status" data-testid="offer-exists">
               Offer already created
             </span>
+          ) : offer && !offerReady ? (
+            // A legacy offer: its five TILA amounts are there, but not the
+            // stored schedule boarding needs, so Accept below is disabled and
+            // its tooltip tells staff to regenerate. Until now there was
+            // nothing to click -- this branch showed the same static "Offer
+            // already created" label, so the audited repair path added for
+            // exactly these rows had no caller in any production UI. Review
+            // finding on PR #10.
+            <button
+              className="btn-ghost"
+              onClick={makeOffer}
+              disabled={actionBusy || currentDecision !== "approve"}
+              data-testid="regenerate-offer"
+              title={
+                "This offer predates the stored payment schedule, so it cannot "
+                + "be boarded. Regenerating writes a new disclosure at today's "
+                + "terms and records the change in the audit log."
+              }
+            >
+              {actionBusy ? "Regenerating…" : "Regenerate offer"}
+            </button>
           ) : (
             <button
               className="btn-ghost"

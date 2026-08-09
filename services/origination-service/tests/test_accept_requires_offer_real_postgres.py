@@ -106,8 +106,8 @@ def _approved_application(conn, *, with_offer: bool):
              # carry it -- an offer without one is a legacy row that cannot board.
              "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
              "finance_charge, monthly_payment, amount_financed, total_of_payments, "
-             "regular_payment_count, final_payment, term_months, schedule_version) "
-             "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1')",
+             "regular_payment_count, final_payment, term_months, schedule_version, principal) "
+             "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1', 9000.00)",
              tuple(_COMPLETE_TERMS[k] for k in
                    ("apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments")))
     return raw_token
@@ -157,8 +157,8 @@ def test_the_refusal_is_recoverable_once_the_offer_exists(real_db):
     _sql(real_db,
          "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
          "finance_charge, monthly_payment, amount_financed, total_of_payments, "
-         "regular_payment_count, final_payment, term_months, schedule_version) "
-         "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1')",
+         "regular_payment_count, final_payment, term_months, schedule_version, principal) "
+         "VALUES (1, 1, 0.030, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1', 9000.00)",
          tuple(_COMPLETE_TERMS[k] for k in
                ("apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments")))
 
@@ -245,7 +245,12 @@ def test_rv2_vector_boards_the_note_rate_and_bills_the_disclosed_payment(real_db
         "UPDATE offers SET note_rate_pct = %s, apr = %s, finance_charge = %s, "
         "monthly_payment = %s, amount_financed = %s, total_of_payments = %s, "
         "regular_payment_count = 35, final_payment = 469.87, term_months = 36, "
-        "schedule_version = 'B1' "
+        # RV2's own principal, not the fixture default. Boarding now opens the
+        # loan at the offer's stored principal, so a fixture that left the
+        # default here would bill RV2's 469.98 against a 9,000 loan -- which is
+        # precisely the mismatch this change exists to prevent, and which this
+        # test caught when the value was wrong.
+        "schedule_version = 'B1', principal = 15000.00 "
         "WHERE app_id = 1",
         tuple(rv2[k] for k in ("note_rate_pct", "apr", "finance_charge",
                                "monthly_payment", "amount_financed",
@@ -419,7 +424,7 @@ def test_a_legacy_offer_displays_but_cannot_board(real_db):
     #    the audited regeneration path, not an inference at accept time
     _sql(real_db,
          "UPDATE offers SET regular_payment_count = 23, final_payment = 407.12, "
-         "term_months = 24, schedule_version = 'B1' WHERE app_id = 1")
+         "term_months = 24, schedule_version = 'B1', principal = 9000.00 WHERE app_id = 1")
     assert app_router._complete_offer_exists(1) is True
     assert _accept(token).status_code == 200
 
@@ -460,7 +465,8 @@ def test_boarding_copies_the_contractual_schedule_onto_the_loan(real_db):
     numbers were written.
     """
     token = _approved_application(real_db, with_offer=True)
-    assert _accept(token).status_code == 200
+    resp = _accept(token)
+    assert resp.status_code == 200, resp.text
 
     offer = _sql(real_db,
                  "SELECT monthly_payment, regular_payment_count, final_payment, "
@@ -544,3 +550,36 @@ def test_a_boarding_failure_leaves_no_partly_recorded_loan(real_db, monkeypatch)
     # And the offer was NOT marked accepted, so the borrower can still complete.
     assert _sql(real_db, "SELECT accepted_at FROM offers WHERE app_id = 1")[0]["accepted_at"] is None
     assert _sql(real_db, "SELECT status FROM applications WHERE id = 1")[0]["status"] == "approved"
+
+
+def test_boarding_opens_the_loan_at_the_offers_principal_not_the_applications(real_db):
+    """The loan must amortize the schedule it is billing.
+
+    Boarding copies the offer's stored payments and term. It used to take the
+    principal from `applications.amount` instead of from the offer, so if the
+    requested amount were corrected after the offer was written -- or a future
+    counteroffer carried a different principal -- the loan would open at one
+    number while billing a schedule solved for another, leaving a residue that
+    never amortizes to zero. Review finding on PR #10.
+
+    The two are made deliberately different here, which is the only way to tell
+    which one was used: in normal operation they agree.
+    """
+    token = _approved_application(real_db, with_offer=True)
+    # The offer is the contract: 9,000 over 24 months, as seeded. The
+    # application's requested amount is then corrected to something else.
+    _sql(real_db, "UPDATE applications SET amount = 12345.00 WHERE id = 1")
+
+    resp = _accept(token)
+    assert resp.status_code == 200, resp.text
+
+    loan = _sql(real_db, "SELECT principal, regular_payment, term_months FROM loans WHERE app_id = 1")[0]
+    offer = _sql(real_db, "SELECT principal, monthly_payment FROM offers WHERE app_id = 1")[0]
+
+    assert float(loan["principal"]) == pytest.approx(float(offer["principal"]), abs=0.005), (
+        "the loan boarded the application's requested amount, so it is billing a "
+        "schedule that was solved for a different principal"
+    )
+    assert float(loan["principal"]) != pytest.approx(12345.00, abs=0.005)
+    # And the schedule it bills is still the offer's.
+    assert float(loan["regular_payment"]) == pytest.approx(float(offer["monthly_payment"]), abs=0.005)

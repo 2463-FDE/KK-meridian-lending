@@ -106,4 +106,8 @@ class Offer(Base):
     # applications.term_months, which is only what was requested.
     term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     schedule_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    # The principal the stored schedule was solved for. Boarding copies the
+    # stored payments, so it must open the loan at THIS principal rather than at
+    # the application's requested amount (db/migrations/0030).
+    principal: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

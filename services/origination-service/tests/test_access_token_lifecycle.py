@@ -84,6 +84,7 @@ def real_db(monkeypatch):
                 final_payment NUMERIC(14,2),
                 term_months INTEGER,
                 schedule_version TEXT,
+            principal NUMERIC(14,2),
                 accepted_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT now()
             );

@@ -121,6 +121,9 @@ def _full_schema_sql():
             final_payment NUMERIC(14,2),
             term_months INTEGER,
             schedule_version TEXT,
+            -- The principal the stored schedule was solved for; boarding opens
+            -- the loan at this value (db/migrations/0030).
+            principal NUMERIC(14,2),
             created_at TIMESTAMPTZ DEFAULT now(),
             accepted_at TIMESTAMPTZ
         );
@@ -884,8 +887,8 @@ def test_incomplete_offer_terms_never_board_a_loan(real_db, monkeypatch, missing
             # is a legacy row that cannot board.
             "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
             "finance_charge, monthly_payment, amount_financed, total_of_payments, "
-            "regular_payment_count, final_payment, term_months, schedule_version) "
-            "VALUES (%s, %s, 0.03, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1')",
+            "regular_payment_count, final_payment, term_months, schedule_version, principal) "
+            "VALUES (%s, %s, 0.03, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1', 9000.00)",
             (app_id, app_id, terms["apr"], terms["finance_charge"], terms["monthly_payment"],
              terms["amount_financed"], terms["total_of_payments"]),
         )
@@ -928,9 +931,9 @@ def test_a_complete_offer_still_boards_exactly_one_loan_and_balance(real_db, mon
         cur.execute(
             "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
             "finance_charge, monthly_payment, amount_financed, total_of_payments, "
-            "regular_payment_count, final_payment, term_months, schedule_version) "
+            "regular_payment_count, final_payment, term_months, schedule_version, principal) "
             "VALUES (%s, %s, 0.03, 7.990, 5.946, 768.11, 407.0, 8730.0, 9768.11, "
-            "23, 407.12, 24, 'B1')",
+            "23, 407.12, 24, 'B1', 9000.00)",
             (app_id, app_id),
         )
         cur.execute(

@@ -103,6 +103,10 @@ TILA_MONETARY_FIELDS = (
 BOARDING_REQUIRED_FIELDS = TILA_MONETARY_FIELDS + (
     "note_rate_pct", "regular_payment_count", "final_payment", "term_months",
     "schedule_version",
+    # The principal the schedule was solved for. Boarding copies the stored
+    # payments; opening the loan at a different principal would bill a schedule
+    # that cannot amortize it to zero.
+    "principal",
 )
 
 # Boarding readiness is what offer_ready reports and what accept enforces, so
@@ -938,6 +942,10 @@ def accept_offer(
         f"SELECT a.amount, a.term_months, a.status, {_ACCEPT_TOKEN_FIELDS}, ap.name, "
         "o.id AS offer_id, o.note_rate_pct, o.apr, o.finance_charge, o.monthly_payment, "
         "o.regular_payment_count, o.final_payment, o.term_months, o.schedule_version, "
+        # `o.principal` aliased: `a.amount` is the requested amount and this is
+        # the principal the stored schedule was solved for. Both are read here,
+        # and confusing them is exactly the defect this alias prevents.
+        "o.principal AS offer_principal, "
         "o.amount_financed, o.total_of_payments, o.accepted_at, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "
@@ -996,7 +1004,13 @@ def accept_offer(
     # answer -- the borrower needs a regenerated offer, not a first one. The
     # authoritative check is the locked re-read below; this fast path just
     # avoids opening a transaction for a row already known to be unusable.
-    incomplete_precheck = [f for f in _CANONICAL_OFFER_FIELDS if r.get(f) is None]
+    # `principal` arrives under an alias in this projection (see the SELECT
+    # above), so the readiness check has to look for it by that name or it would
+    # report every offer as missing a column the row actually has.
+    incomplete_precheck = [
+        f for f in _CANONICAL_OFFER_FIELDS
+        if r.get("offer_principal" if f == "principal" else f) is None
+    ]
     if incomplete_precheck:
         raise HTTPException(
             status_code=409,
@@ -1074,7 +1088,7 @@ def accept_offer(
         cur.execute(
             "SELECT note_rate_pct, regular_payment_count, final_payment, term_months, "
             "schedule_version, apr, finance_charge, monthly_payment, amount_financed, "
-            "total_of_payments "
+            "total_of_payments, principal "
             "FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
             (app_id,),
         )
@@ -1141,7 +1155,23 @@ def accept_offer(
         offer = offer_rows[0]
         try:
             loan_id = intake.board_to_servicing_tx(
-                cur, app_id, name, r["amount"], rate,
+                cur, app_id, name,
+                # The OFFER's principal, for the same reason as its term below:
+                # it is the amount the stored schedule was actually solved for.
+                # This used to board `applications.amount`. The two agree today
+                # -- the offer is built from the application's own record -- but
+                # if the requested amount were corrected after the offer was
+                # written, or a counteroffer ever carried a different principal,
+                # the loan would open at one principal while billing a schedule
+                # calculated for another, and the balance would never amortize
+                # to zero. Review finding on PR #10.
+                #
+                # Legacy rows have no stored principal; they cannot board at all
+                # (BOARDING_REQUIRED_FIELDS), so the fallback here is only ever
+                # reached if that gate is loosened, and it keeps today's
+                # behaviour rather than a NULL.
+                offer["principal"] if offer["principal"] is not None else r["amount"],
+                rate,
                 # The OFFER's contractual term, not the application's requested
                 # one. They agree today -- the offer is built from the
                 # application's term and the stored value is server-derived --

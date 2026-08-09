@@ -476,6 +476,12 @@ def _accept_row(status="approved", outcome="approve", apr=9.99,
         "final_payment": 400.12 if apr is not None else None,
         "term_months": 24 if apr is not None else None,
         "schedule_version": "B1" if apr is not None else None,
+        # The principal the stored schedule was solved for -- boarding opens the
+        # loan at this value, so a complete offer fixture must carry it. Named
+        # `offer_principal` because the precheck projection aliases it: the same
+        # row also carries the application's requested `amount`, and the two are
+        # different numbers.
+        "offer_principal": 9000.0 if apr is not None else None,
         "accept_token_hash": token_hash, "accept_token_consumed_at": token_consumed_at,
         "token_live": token_live,
     }
@@ -549,7 +555,7 @@ class _FakeAcceptTxCursor:
                 # The locked re-read now covers every BOARDING_REQUIRED_FIELD,
                 # including the stored schedule.
                 "regular_payment_count": 23, "final_payment": 400.12,
-                "term_months": 24, "schedule_version": "B1",
+                "term_months": 24, "schedule_version": "B1", "principal": 9000.0,
             }] if self.offer_apr is not None else []
         elif stmt.startswith("UPDATE applications SET status = 'funded'"):
             self._last = None

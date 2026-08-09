@@ -224,6 +224,76 @@ test("an existing offer is reported as state, not as a dead button", async ({ pa
   await expect(page.getByRole("button", { name: "Make offer" })).toHaveCount(0);
 });
 
+test("a legacy offer that cannot board offers a way to regenerate it", async ({ page }) => {
+  /* An unaccepted pre-0030 offer has its five TILA amounts and no stored
+   * schedule, so Accept is disabled and its tooltip tells staff to regenerate.
+   * There was nothing to click: this branch rendered the same static "Offer
+   * already created" label as a complete offer, so the audited repair path
+   * added for exactly these rows had no caller in any production UI. Review
+   * finding on PR #10.
+   *
+   * The legacy shape is produced by clearing the schedule columns directly --
+   * the wizard cannot create one, because every offer written since 0030 has
+   * them.
+   */
+  await signInAsStaff(page);
+  const applicant = fictionalApplicant("Marlowe", /* even ssn */ true, 100_000);
+  await submitApplication(page, applicant);
+  const appId = await currentAppId(page);
+  await getDecision(page);
+
+  const client = dbClient();
+  await client.connect();
+  try {
+    await client.query(
+      "UPDATE offers SET regular_payment_count = NULL, final_payment = NULL, " +
+      "term_months = NULL, schedule_version = NULL, note_rate_pct = NULL, " +
+      "principal = NULL WHERE app_id = $1",
+      [appId],
+    );
+  } finally {
+    await client.end();
+  }
+
+  await page.goto(`/underwriting/${appId}`);
+
+  // The static label is gone, and a real control is in its place.
+  await expect(page.getByTestId("offer-exists")).toHaveCount(0);
+  const regenerate = page.getByTestId("regenerate-offer");
+  await expect(regenerate).toBeVisible({ timeout: 15_000 });
+  await expect(regenerate).toBeEnabled();
+
+  await regenerate.click();
+
+  // Regeneration writes the stored schedule, so the offer becomes boardable --
+  // which is the whole point of having the control.
+  await expect(page.getByTestId("offer-exists")).toBeVisible({ timeout: 20_000 });
+
+  const check = dbClient();
+  await check.connect();
+  try {
+    const row = await check.query(
+      "SELECT final_payment, term_months, schedule_version, note_rate_pct, principal " +
+      "FROM offers WHERE app_id = $1",
+      [appId],
+    );
+    expect(row.rowCount).toBe(1);
+    for (const [column, value] of Object.entries(row.rows[0])) {
+      expect(value, `${column} is still null after regenerating`).not.toBeNull();
+    }
+    // And it is audited: a regenerated disclosure is a new disclosure.
+    const audit = await check.query(
+      "SELECT 1 FROM audit_logs WHERE action = 'offer.incomplete_terms_repaired' " +
+      "AND detail LIKE $1",
+      [`%app_id=${appId}%`],
+    );
+    expect(audit.rowCount).toBe(1);
+  } finally {
+    await check.end();
+  }
+});
+
+
 test("the Make offer control has correct disabled semantics when it is unavailable", async ({ page }) => {
   await signInAsStaff(page);
   const applicant = fictionalApplicant("Kit", /* odd ssn -> denied */ false, 20_000);
