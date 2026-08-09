@@ -3,8 +3,14 @@
 Output goes to logs/payment-service.log: this service's legacy duplicate of
 payment-service's charge path writes to the filename handed over in the repo.
 Gitignored since PR #9; the file itself remains in git history (DEBT.md D18).
-`payments.charge()` receives only processor_token/last4/brand (ADR 0008), so no
-card data reaches this logger. Why this docstring used to say otherwise: D5c.
+`payments.charge()` logs `loan_id`, `amount` and `method` only. Card data cannot
+reach this logger through any of them, and the reason is VALUE validation rather
+than the absence of a `pan` field: `extra="forbid"` rejects unknown field names
+and says nothing about what a permitted field contains, so `method` accepted any
+string and was logged verbatim until `method` became `Literal["card","ach"]`
+(and `last4`/`brand` gained shape patterns) in main.py's PaymentIn. Reviewed on
+PR #16 -- before that, `method="4111111111111111"` wrote a raw PAN here.
+Why this docstring used to claim a charge-request-body log: D5c.
 """
 import logging
 import os
