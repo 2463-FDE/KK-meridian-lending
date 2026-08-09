@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
 import { apiGet, apiPost, ApiError } from "../../lib/api";
@@ -148,6 +148,37 @@ function formatPhoneInput(raw: string): string {
 
 export default function ApplyPage() {
   const [step, setStep] = useState(1);
+  // Review-step edit affordance. The trainer could not correct anything from
+  // the review screen: Back existed and preserved answers, but reaching a
+  // Step 1 field meant three Back clicks and then three Next clicks to get
+  // home again, so in practice nobody used it. Each summary group now has its
+  // own Edit control; this flag is what lets the edited step offer a direct
+  // way back instead of making the user walk the wizard forward again.
+  const [returningToReview, setReturningToReview] = useState(false);
+  // Focus target for the edit round-trip. Activating Edit unmounts the button
+  // that had focus, which drops focus to <body> -- a keyboard or screen-reader
+  // user is then given no indication that the page changed under them. The
+  // heading of the step we jumped to is the announcement point, so focus moves
+  // there and the step's name is read out.
+  const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const [focusStepHeading, setFocusStepHeading] = useState(false);
+  // Which summary group's Edit control to hand focus back to once the review is
+  // reached again. Leaving focus on <body> after the return trip is the same
+  // defect as leaving it there on the way out.
+  const [returnFocusStep, setReturnFocusStep] = useState<number | null>(null);
+  const [editOriginStep, setEditOriginStep] = useState<number | null>(null);
+  useEffect(() => {
+    if (focusStepHeading && stepHeadingRef.current) {
+      stepHeadingRef.current.focus();
+      setFocusStepHeading(false);
+    }
+  }, [focusStepHeading, step]);
+  useEffect(() => {
+    if (step === 4 && returnFocusStep !== null) {
+      document.getElementById(`edit-step-${returnFocusStep}`)?.focus();
+      setReturnFocusStep(null);
+    }
+  }, [step, returnFocusStep]);
   const [form, setForm] = useState<FormState>({
     name: "",
     dob: "",
@@ -171,6 +202,16 @@ export default function ApplyPage() {
 
   // submission / decision / offer state
   const [busy, setBusy] = useState(false);
+  // The exact form values that were POSTed, frozen at submit time.
+  //
+  // Defence in depth behind the disabled Edit controls. Those stop the race
+  // being *reachable*; this stops it *mattering*. Everything after submission
+  // -- the Step 5 offer panel, and the fallback offer creation -- reads this
+  // snapshot rather than `form`, so even if some future control mutated the
+  // form mid-flight, the terms shown and the terms requested would still be
+  // the ones the backend actually accepted. `form` stays live only for the
+  // pre-submit wizard.
+  const [submitted, setSubmitted] = useState<FormState | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [app, setApp] = useState<AppResult | null>(null);
   const [decision, setDecision] = useState<DecisionResult | null>(null);
@@ -224,37 +265,105 @@ export default function ApplyPage() {
   function next() {
     if (validateStep(step)) {
       setErrors({});
+      // Reaching the review the normal way ends the edit round-trip.
+      if (step + 1 >= 4) setReturningToReview(false);
       setStep((s) => Math.min(5, s + 1));
     }
   }
   function back() {
+    // Back walks one step backwards, and during an edit round-trip it keeps
+    // `returningToReview` set on purpose: someone who jumped to step 3 and then
+    // realises step 1 also needs a correction can Back to it and still get home
+    // in one click. It is not a cancel -- edits are already in form state (see
+    // the "Return to review" button) -- and it cannot smuggle an invalid value
+    // into the review, because returnToReview() re-validates steps 1-3.
     setErrors({});
     setStep((s) => Math.max(1, s - 1));
   }
 
+  // What the Edit controls disable on. It has to be the SAME condition
+  // editStep() refuses on, or the buttons lie: they read as available while
+  // every click is dropped on the floor. `busy` alone was that lie.
+  const editLocked = busy || submitted !== null;
+
+  /** Jump straight from the review to the step that owns a field. */
+  function editStep(target: number) {
+    // Guarded in the function, not only on the button. The disabled attribute
+    // is an affordance; this is the rule. It also closes the gap where a
+    // control is activated in the same tick that `busy` flips, before React
+    // has re-rendered it as disabled.
+    if (busy || submitted) return;
+    setErrors({});
+    setReturningToReview(true);
+    setStep(target);
+    setFocusStepHeading(true);
+    setEditOriginStep(target);
+  }
+
+  /** Return to the review, but only if what was just edited is still valid --
+   * otherwise an edit could put the application back into review carrying a
+   * value the wizard would never have accepted going forward. */
+  function returnToReview() {
+    if (busy || submitted) return;
+    // Validate every step that feeds the review, not just the one on screen.
+    // Validating only the current step left a hole: edit step 3, type something
+    // invalid, press Back to step 2, then return -- step 2 validates clean and
+    // the invalid step-3 value reaches the review. Jump to the first offending
+    // step instead, with its errors showing.
+    for (const s of [1, 2, 3]) {
+      if (!validateStep(s)) {
+        if (s !== step) {
+          setStep(s);
+          setFocusStepHeading(true);
+        }
+        return;
+      }
+    }
+    setErrors({});
+    setReturningToReview(false);
+    setStep(4);
+    // Hand focus back to the Edit control this round-trip started from.
+    setReturnFocusStep(editOriginStep);
+  }
+
   async function submitApplication() {
+    // Snapshot FIRST, synchronously, and build the request body from the
+    // snapshot rather than from `form`. Reading `form` field by field across
+    // the call meant the body and the record of what was sent could in
+    // principle disagree; now there is exactly one object and it cannot change.
+    const sent: FormState = { ...form };
+    setSubmitted(sent);
     setBusy(true);
     setApiError(null);
     try {
       const res = (await apiPost("/los/applications", {
-        name: form.name,
-        dob: form.dob,
-        ssn: form.ssn,
-        address: `${form.street}, ${form.city}, ${form.state}`,
-        zip_code: form.zip_code,
-        email: form.email,
-        phone: form.phone,
-        employer: form.employer,
-        job_title: form.job_title,
-        income: parseFloat(form.annual_income || "0"),
-        employment_years: parseInt(form.employment_years || "0", 10),
-        amount: form.amount,
-        term_months: parseInt(form.term_months, 10),
-        purpose: form.purpose,
+        name: sent.name,
+        dob: sent.dob,
+        ssn: sent.ssn,
+        address: `${sent.street}, ${sent.city}, ${sent.state}`,
+        zip_code: sent.zip_code,
+        email: sent.email,
+        phone: sent.phone,
+        employer: sent.employer,
+        job_title: sent.job_title,
+        income: parseFloat(sent.annual_income || "0"),
+        employment_years: parseInt(sent.employment_years || "0", 10),
+        amount: sent.amount,
+        term_months: parseInt(sent.term_months, 10),
+        purpose: sent.purpose,
       })) as AppResult;
       setApp(res);
       setStep(5);
     } catch (err) {
+      // Release the snapshot. It exists to freeze the values the backend
+      // ACCEPTED; if the POST never got that far, there is nothing to freeze,
+      // and leaving it set locked the borrower out permanently -- editStep()
+      // and returnToReview() both refuse while `submitted` is non-null, so
+      // after a validation error or a dropped connection every Edit control on
+      // the review silently did nothing. Clearing it here is what makes the
+      // retry path work; the success path never reaches this branch, so the
+      // in-flight race the snapshot closes stays closed.
+      setSubmitted(null);
       setApiError(errMsg(err, "Could not submit your application."));
     } finally {
       setBusy(false);
@@ -320,9 +429,14 @@ export default function ApplyPage() {
         "/los/offer",
         {
           app_id: app.app_id,
-          principal: form.amount,
+          // The SUBMITTED terms, not the current form. This is the call the
+          // review flagged: it used to send whatever `form` held at the moment
+          // the borrower pressed "View your offer", which after an in-flight
+          // edit was not what the backend had accepted -- so an offer could be
+          // created on terms the application record never carried.
+          principal: (submitted ?? form).amount,
           annual_rate_pct: OFFER_RATE_PCT,
-          term_months: parseInt(form.term_months, 10),
+          term_months: parseInt((submitted ?? form).term_months, 10),
         },
         { "X-Offer-Accept-Token": token },
       )) as { app_id: string | number; disclosure: Disclosure };
@@ -386,6 +500,7 @@ export default function ApplyPage() {
         {step === 1 && (
           <>
             <StepHeader
+              headingRef={stepHeadingRef}
               eyebrow="Step 1 of 5"
               title="Personal information"
               desc="This is used to verify your identity and won't affect your credit."
@@ -511,6 +626,7 @@ export default function ApplyPage() {
         {step === 2 && (
           <>
             <StepHeader
+              headingRef={stepHeadingRef}
               eyebrow="Step 2 of 5"
               title="Employment & income"
               desc="Helps us confirm you can comfortably afford this loan."
@@ -560,6 +676,7 @@ export default function ApplyPage() {
         {step === 3 && (
           <>
             <StepHeader
+              headingRef={stepHeadingRef}
               eyebrow="Step 3 of 5"
               title="Loan details"
               desc="Choose the amount and term that fits your budget."
@@ -621,7 +738,7 @@ export default function ApplyPage() {
               title="Review your application"
               desc="Double check everything below before you submit."
             />
-            <SummaryGroup title="Personal">
+            <SummaryGroup title="Personal" editId="edit-step-1" onEdit={() => editStep(1)} editDisabled={editLocked}>
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
               <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
@@ -632,7 +749,7 @@ export default function ApplyPage() {
               <SummaryRow label="State" value={form.state} />
               <SummaryRow label="ZIP code" value={form.zip_code} />
             </SummaryGroup>
-            <SummaryGroup title="Employment & income">
+            <SummaryGroup title="Employment & income" editId="edit-step-2" onEdit={() => editStep(2)} editDisabled={editLocked}>
               <SummaryRow label="Employer" value={form.employer} />
               <SummaryRow label="Job title" value={form.job_title} />
               <SummaryRow
@@ -644,7 +761,7 @@ export default function ApplyPage() {
                 value={form.employment_years}
               />
             </SummaryGroup>
-            <SummaryGroup title="Loan details">
+            <SummaryGroup title="Loan details" editId="edit-step-3" onEdit={() => editStep(3)} editDisabled={editLocked}>
               <SummaryRow label="Amount" value={usd(form.amount)} />
               <SummaryRow
                 label="Term"
@@ -744,8 +861,11 @@ export default function ApplyPage() {
                 {disclosure ? (
                   <OfferPanel
                     disclosure={disclosure}
-                    amount={form.amount}
-                    termMonths={form.term_months}
+                    // Displayed from the submitted snapshot for the same
+                    // reason: the panel states what this application is for,
+                    // and that is a fact about the record, not about the form.
+                    amount={(submitted ?? form).amount}
+                    termMonths={(submitted ?? form).term_months}
                     showSchedule={showSchedule}
                     onToggleSchedule={() => setShowSchedule((v) => !v)}
                     onAccept={acceptOffer}
@@ -772,7 +892,17 @@ export default function ApplyPage() {
             >
               Back
             </button>
-            <button onClick={next}>Next</button>
+            {returningToReview ? (
+              // Came here from the review: offer the one-click way home rather
+              // than making the user press Next through the remaining steps.
+              // Deliberately NOT "Save and return" -- there is no save boundary
+              // here. Every field is a controlled input writing straight to
+              // `form`, so an edit has already taken effect the moment it is
+              // typed; this button only navigates (after re-validating).
+              <button onClick={returnToReview}>Return to review</button>
+            ) : (
+              <button onClick={next}>Next</button>
+            )}
           </div>
         )}
         {step === 4 && (
@@ -842,15 +972,20 @@ function StepHeader({
   eyebrow,
   title,
   desc,
+  headingRef,
 }: {
   eyebrow: string;
   title: string;
   desc: string;
+  headingRef?: React.Ref<HTMLHeadingElement>;
 }) {
   return (
     <div>
       <div className="step-eyebrow">{eyebrow}</div>
-      <h2 className="step-heading">{title}</h2>
+      {/* tabIndex={-1} makes the heading programmatically focusable without
+          adding it to the tab order -- the standard pattern for announcing a
+          view change to assistive tech. */}
+      <h2 className="step-heading" ref={headingRef} tabIndex={-1}>{title}</h2>
       <p className="step-desc">{desc}</p>
     </div>
   );
@@ -932,14 +1067,54 @@ function Field({
 function SummaryGroup({
   title,
   children,
+  onEdit,
+  editId,
+  editDisabled,
 }: {
   title: string;
   children: React.ReactNode;
+  onEdit?: () => void;
+  editId?: string;
+  // Disabled while a submission is in flight. Reviewed as high severity: the
+  // Submit button and the review's Back button both honoured `busy`, but these
+  // Edit controls were added later and bypassed that guard entirely, so they
+  // were the one way left to mutate `form` after the POST body had been
+  // snapshotted from it.
+  editDisabled?: boolean;
 }) {
   return (
     <div style={{ marginBottom: 18 }}>
-      <div className="card-title" style={{ marginBottom: 6 }}>
-        {title}
+      <div
+        className="card-title"
+        style={{
+          marginBottom: 6,
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 12,
+        }}
+      >
+        <span>{title}</span>
+        {onEdit && (
+          // Named for a screen reader too: three identical "Edit" buttons on one
+          // screen are indistinguishable without the section name.
+          <button
+            type="button"
+            id={editId}
+            className="btn-ghost"
+            onClick={onEdit}
+            disabled={editDisabled}
+            aria-label={`Edit ${title}`}
+            title={
+              editDisabled
+                ? "Your application is being submitted and can no longer be changed."
+                : undefined
+            }
+            style={{ fontSize: "0.85rem", padding: "2px 10px" }}
+          >
+            Edit
+          </button>
+        )}
       </div>
       <div className="dl">{children}</div>
     </div>
