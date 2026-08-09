@@ -312,3 +312,58 @@ def test_past_the_combined_window_the_citation_is_dropped(monkeypatch):
     """Still bounded. Stale-serving is a grace period, not an indefinite cache."""
     provider = _cached_provider(monkeypatch, age_seconds=200, ttl=10, stale=100)
     assert provider._servable_stale() is None
+
+
+# --- a series is only cited as what it actually is ---------------------------
+
+def test_an_unconfigured_series_yields_no_signal_rather_than_a_borrowed_label(monkeypatch):
+    """Overriding MACRO_SERIES_ID must not relabel another series' number.
+
+    The label and unit were hardcoded, so pointing the provider at, say, a CPI
+    series returned that value captioned "US unemployment rate (seasonally
+    adjusted)" in percent -- a wrong figure shown to an officer, and given to
+    the model, as GROUNDED context. Since grounding is the whole point, a
+    caption we cannot justify is worse than no signal. Reviewed on PR #13.
+    """
+    monkeypatch.setattr(macro, "MACRO_SERIES_ID", "CUUR0000SA0", raising=False)
+    called = {"n": 0}
+
+    def _transport(*a, **k):
+        called["n"] += 1
+        return _FakeResponse(_LIVE_SHAPE)
+
+    monkeypatch.setattr(httpx, "get", _transport)
+
+    assert BlsMacroProvider().fetch() is None
+    # And it refuses BEFORE spending one of the 25 daily requests to learn
+    # something the configuration already determined.
+    assert called["n"] == 0
+
+
+def test_a_response_for_an_unexpected_series_is_not_captioned(monkeypatch):
+    """Metadata is keyed on what BLS returned, not on what we asked for.
+
+    A redirect, a proxy, or an upstream change that answers with a different
+    series must not inherit the configured series' caption.
+    """
+    other = {
+        "status": "REQUEST_SUCCEEDED",
+        "Results": {"series": [{
+            "seriesID": "CUUR0000SA0",
+            "data": [{"year": "2026", "period": "M06", "periodName": "June",
+                      "latest": "true", "value": "317.6"}],
+        }]},
+    }
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(other))
+    assert BlsMacroProvider().fetch() is None
+
+
+def test_the_supported_series_is_still_captioned_from_its_metadata(monkeypatch):
+    """The other half: the configured default keeps working, from the table."""
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(_LIVE_SHAPE))
+    signal = BlsMacroProvider().fetch()
+
+    assert signal is not None
+    label, unit = macro._SERIES_METADATA["LNS14000000"]
+    assert signal.label == label
+    assert signal.unit == unit

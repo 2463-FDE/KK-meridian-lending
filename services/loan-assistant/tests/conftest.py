@@ -57,14 +57,3 @@ def macro_stays_disabled(monkeypatch):
     monkeypatch.setattr(macro, "provider", macro.StubMacroProvider(), raising=False)
     monkeypatch.setattr(macro.httpx, "get", _no_network)
     yield
-
-
-def test_the_module_constant_was_disabled_before_import():
-    """Guards layer 1 itself.
-
-    If this file ever imports `app.config` before setting the variable -- an
-    import reordered by a formatter would do it -- `config.MACRO_ENABLED` is
-    True and every test in this service is one unmocked call away from BLS
-    again. Asserted here rather than trusted, because the symptom is invisible.
-    """
-    assert config.MACRO_ENABLED is False

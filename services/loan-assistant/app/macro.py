@@ -68,6 +68,20 @@ log = logging.getLogger(__name__)
 
 _BLS_V1_URL = "https://api.bls.gov/publicAPI/v1/timeseries/data"
 
+# What each supported BLS series IS. A series id alone carries no caption, and a
+# caption invented for the wrong series is exactly the failure this whole
+# feature exists to avoid: a number an officer can check, described as something
+# it is not. So the caption lives here, keyed by series, and an unrecognised
+# series yields NO signal rather than a borrowed one.
+#
+# To support another series, add its id with a label and unit taken from the BLS
+# series description -- not guessed from the id. `unit` is what follows the
+# value in the citation, so it must match how BLS publishes that series
+# (percent, index points, thousands of persons, dollars).
+_SERIES_METADATA: dict[str, tuple[str, str]] = {
+    "LNS14000000": ("US unemployment rate (seasonally adjusted)", "percent"),
+}
+
 
 @dataclass(frozen=True)
 class MacroSignal:
@@ -307,6 +321,18 @@ class BlsMacroProvider:
         return signal
 
     def _fetch_uncached(self) -> MacroSignal | None:
+        if MACRO_SERIES_ID not in _SERIES_METADATA:
+            # Refused before the call, not after: there is nothing this response
+            # could contain that we would be able to caption, so spending one of
+            # the 25 daily requests to find that out is pure waste. Logged at
+            # warning because it is a misconfiguration an operator must fix, not
+            # a transient outage.
+            log.warning(
+                "MACRO_SERIES_ID=%s has no label/unit metadata -- omitting the "
+                "external signal rather than captioning it as another series",
+                MACRO_SERIES_ID,
+            )
+            return None
         self.fetch_count += 1
         url = f"{_BLS_V1_URL}/{MACRO_SERIES_ID}"
         try:
@@ -324,13 +350,31 @@ class BlsMacroProvider:
             if payload.get("status") != "REQUEST_SUCCEEDED":
                 raise ValueError(f"BLS status {payload.get('status')!r}")
             series = payload["Results"]["series"][0]
+            returned_id = series["seriesID"]
+            # The label and unit used to be hardcoded, so a deployment that
+            # overrode MACRO_SERIES_ID with any other valid BLS series got that
+            # series' number captioned "US unemployment rate (seasonally
+            # adjusted)" and forced to percent -- a wrong figure presented to an
+            # officer, and fed to the model, as GROUNDED context. Grounding is
+            # the entire value of this feature, so mislabelling is worse than
+            # having no signal. Metadata is keyed on what BLS actually returned,
+            # not on what was configured, so a redirect or a shape change fails
+            # closed too. Reviewed on PR #13.
+            meta = _SERIES_METADATA.get(returned_id)
+            if meta is None:
+                raise ValueError(
+                    f"no label/unit metadata for BLS series {returned_id!r}; add "
+                    f"it to _SERIES_METADATA rather than captioning it as another "
+                    f"series"
+                )
+            label, unit = meta
             latest = series["data"][0]
             return MacroSignal(
                 source="U.S. Bureau of Labor Statistics",
-                series_id=series["seriesID"],
-                label="US unemployment rate (seasonally adjusted)",
+                series_id=returned_id,
+                label=label,
                 value=float(latest["value"]),
-                unit="percent",
+                unit=unit,
                 period=f"{latest['periodName']} {latest['year']}",
                 url=url,
             )
