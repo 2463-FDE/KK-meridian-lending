@@ -15,21 +15,22 @@ relational joins are good at. The traversal that would justify a graph store --
 attribute, to unbounded depth" (fraud rings, beneficial ownership) -- cannot be
 written here at all, because there is no depth to hard-code. PostgreSQL can
 express it with a recursive CTE, and on the single benchmark run ADR 0009 is
-transcribed from (db/bench/results.json, 2026-08-07T21:20Z, 10k applicants,
-PostgreSQL 16.14) a root-scoped version answers depth 3 in **0.51 s**, costs
-**16.9-38.7 s at depth 4**, and does not return at depth 5 inside two minutes.
+transcribed from (db/bench/results.json, 2026-08-09T00:28Z, 10k applicants,
+PostgreSQL 16.14) a root-scoped version answers depth 3 in **0.026 s**, depth 4
+in **0.071 s** and depth 5 in **0.115 s**, reaching 2,944 applicants.
 
-Those numbers replace a "44 seconds at depth 4" that appeared only here and
-matched neither the ADR's table nor its prose. They also correct the depth-3
-figure downward by roughly 6x: the earlier benchmark rebuilt the entire
-adjacency relation on every query, so it was measuring the worst relational
-implementation rather than the best one. Materialising an indexed edge table
-does NOT rescue depth 4 either, which is why the wall is structural and not an
-indexing problem.
+Those numbers replace "16.9-38.7 s at depth 4, no return at depth 5", which
+replaced a "44 seconds at depth 4" before that. Both earlier figures were
+benchmark defects rather than PostgreSQL's cost: the first rebuilt the entire
+adjacency relation on every query, and the second enumerated every simple path
+through a cyclic graph instead of counting the applicants actually reached
+(9.4M rows to yield 1,621). Deduplicating nodes removed the wall entirely.
 
-Nothing in production needs depth > 3 today, so this stays relational. ADR
-0009 records the trigger to revisit (Week 9's beneficial-ownership work is the
-likely one).
+So the reason this stays relational is NOT that Postgres cannot keep up -- it
+comfortably can, at every depth measured. It is that no production traversal
+here needs the query at all. ADR 0009 records the trigger to revisit (Week 9's
+beneficial-ownership work is the likely one, and it is a weighted-path problem
+rather than a latency one).
 
 This module is the traversal layer -- it reads the same rows the rest of
 origination-service already reads, framed as graph nodes/edges instead of ad hoc

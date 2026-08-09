@@ -19,7 +19,12 @@ schema with foreign keys "is a graph shape", so the argument refuses a graph
 store in all cases, including the ones where it is the correct tool.
 
 This ADR replaces it with two specific things: a traversal `kg.py` cannot
-express, and a measured point at which the answer flips.
+express, and a measurement of what that traversal actually costs in PostgreSQL.
+
+**Scope of the measurement.** The benchmark times depth-bounded *reachability* —
+which applicants are within d hops — and not path reconstruction. The question
+as stated below also asks for the connecting path; that is a strictly larger
+answer, and no number here is evidence about its cost.
 
 ## The traversal kg.py cannot express
 
@@ -73,20 +78,29 @@ formed:
 -- identity_attr(applicant_id, kind, value), indexed on (kind, value) and
 -- (applicant_id), built once from applicants.{address,phone,email,ssn,ein}
 -- and applications.employer.
-WITH RECURSIVE walk AS (
-    SELECT :root AS id, 0 AS depth, ARRAY[:root] AS path
-    UNION ALL
-    SELECT x2.applicant_id, w.depth + 1, w.path || x2.applicant_id
+WITH RECURSIVE walk(id, depth) AS (
+    SELECT :root, 0
+    UNION                                      -- deduplicates NODES, not paths
+    SELECT DISTINCT x2.applicant_id, w.depth + 1
       FROM walk w
       JOIN identity_attr x1 ON x1.applicant_id = w.id
       JOIN identity_attr x2 ON x2.kind  = x1.kind
                            AND x2.value = x1.value
                            AND x2.applicant_id <> w.id
      WHERE w.depth < :maxdepth
-       AND NOT x2.applicant_id = ANY(w.path)   -- cycle guard, mandatory
 )
 SELECT count(DISTINCT id) FROM walk;
 ```
+
+Two details carry the cost, and getting either wrong is what produced the wrong
+answer twice. `UNION` rather than `UNION ALL` is the cycle handling: it
+deduplicates rows, so a node is expanded once per depth level rather than once
+per simple path reaching it. The earlier version instead carried the path in an
+`ARRAY[]` and excluded `ANY(w.path)`, which prunes a row only *after* producing
+it — correct output, catastrophic cost in a cyclic graph. The inner `DISTINCT`
+collapses parallel transitions: two applicants sharing both an address and a
+phone are one edge, and the posting-table join would otherwise emit them twice
+while the materialised `edges` relation (built with `UNION`) emits one.
 
 A posting table rather than five OR'd column predicates because the edge set
 spans two tables — the employer edge lives on `applications` — and PostgreSQL
@@ -101,9 +115,9 @@ That version still runs, and is retained in the harness as a labelled
 pessimistic baseline, but it is not what a competent implementation would ship
 and its timings should never be quoted as PostgreSQL's cost.
 
-So the question is not expressiveness. It is where this stops working.
+So the question is not expressiveness. It is what it costs.
 
-## The measured flip point
+## What it actually costs
 
 Reproduce with the committed harness. That is the point of the exercise, and
 the first version of this ADR failed it -- it quoted an ad-hoc shell session and
@@ -129,7 +143,8 @@ means worse, so these are a lower bound on the problem.
 All timings on this page come from a single run, recorded as
 `db/bench/results.json` with the plans in `db/bench/run-output.txt`:
 
-- **2026-08-07T21:20Z**, N = 10,000 applicants, root = 1, 120 s statement timeout
+- **2026-08-09T00:28Z** (`run_started_utc` in the artifact), N = 10,000
+  applicants, root = 1, 240 s statement timeout
 - PostgreSQL **16.14** — `shared_buffers` 128MB, `work_mem` 4MB,
   `effective_cache_size` 4GB, `max_parallel_workers_per_gather` 2, `jit` on
 - Windows 11 (10.0.26200), Intel64 Family 6 Model 140
@@ -137,8 +152,9 @@ All timings on this page come from a single run, recorded as
 An earlier revision of this ADR quoted three mutually contradictory sets of
 figures — a table reading 3.3 s / 3.0 s / 72.3 s, prose calling the cliff
 "1.8 s to 43.8 s", a decision rule promising "under two seconds", and a fourth
-number (44 s) in `kg.py`. Since the revisit trigger is latency-based, none of
-them governed. Everything below is transcribed from the run above and nothing
+number (44 s) in `kg.py`. None of them governed anything, and a fourth and
+fifth set have since replaced them for a different reason -- the harness was
+measuring the wrong quantity (see below). Everything below is transcribed from the run above and nothing
 else.
 
 ### Three implementations, because "PostgreSQL is slow" was measuring one bad one
@@ -151,74 +167,99 @@ reporting it as "PostgreSQL" nearly rejected a Postgres design nobody had tried.
 
 The harness now measures three implementations of the **same** traversal over
 the **same** edge set. It asserts identical reachability at every depth and
-aborts the run if they diverge; on this run all three returned 55 / 466 / 850 /
-1,621, so the comparison is sound.
+aborts if they diverge, and it asserts that the posting table and the edge table
+are the same relation as sets before any timing is taken. On this run that
+symmetric difference was **0 in both directions** (553,928 transitions each way)
+and all three candidates returned 55 / 466 / 850 / 1,621 / 2,944, so the
+comparison is sound.
 
 **Per-query traversal time (seconds), N = 10,000:**
 
 | Depth | Reached | frontier-attr | materialized | global-edge *(pessimistic)* |
 |---|---|---|---|---|
-| 1 | 55 | **0.005** | 0.002 | 1.325 |
-| 2 | 466 | **0.028** | 0.011 | 1.478 |
-| 3 | 850 | **0.514** | 0.288 | 2.485 |
-| 4 | 1,621 | **38.72** | 16.87 | 19.85 |
-| 5 | — | **abort >120 s** | abort >120 s | abort >120 s |
+| 1 | 55 | **0.002** | 0.001 | 0.86 |
+| 2 | 466 | **0.009** | 0.004 | 1.32 |
+| 3 | 850 | **0.026** | 0.009 | 1.49 |
+| 4 | 1,621 | **0.071** | 0.038 | 1.75 |
+| 5 | 2,944 | **0.115** | 0.036 | 1.95 |
 
 One-off build costs, kept out of the per-query numbers on purpose — a derived
-structure that takes seconds to build and answers in milliseconds is a different
-engineering proposition from one that is free:
+structure that takes a second to build and answers in milliseconds is a
+different engineering proposition from one that is free:
 
 | Structure | Build | Rows |
 |---|---|---|
-| `identity_attr` (postings) | 0.238 s | 40,140 |
-| `edges` (materialised pairs) | 1.690 s | 553,928 |
+| `identity_attr` (postings) | 0.149 s | 40,140 |
+| `edges` (materialised pairs) | 0.873 s | 553,928 |
+
+The `global-edge` column is now flat at roughly 1–2 s: with the walk fixed, the
+only thing it still pays for is rebuilding the whole 553,928-row adjacency
+relation on every query, which is a constant. That is the variable it was
+supposed to isolate all along.
 
 ### What that changes, and what it does not
 
-**It changes the depth ≤3 story completely.** A properly root-scoped traversal
-answers depth 3 in **0.29–0.51 s**, not the ~3 s previously published. The old
-figure was the cost of rebuilding the whole graph per query. At depth ≤3 there
-is not merely "nothing to buy" — there is a comfortable margin, and the earlier
-decision rule was nearly violated by its own evidence table.
+**There is no cliff. The cliff was the benchmark.** A previous revision of this
+page reported depth 4 at 17–39 s and depth 5 as not returning inside two
+minutes, and built the decision rule on that wall. It was an artifact of how the
+harness walked the graph, not a property of PostgreSQL — review finding on
+PR #12, confirmed by re-measurement.
 
-**It does not change the cliff.** Depth 4 costs 17–39 s on every implementation,
-and depth 5 does not return inside two minutes on any of them. Notably the
-materialised edge table — a genuine read model, 553,928 rows prebuilt and
-indexed — is *not* rescued by that work: 16.87 s at depth 4. The wall is not an
-indexing problem.
+Every candidate carried the current path in an `ARRAY[]` and excluded only nodes
+already on *that* path, so an applicant reachable by k distinct simple paths was
+expanded k times. The identity graph is dense and cyclic — households of three,
+a shared phone every seventh row, 200 employers — so k explodes with depth: the
+old depth-4 run emitted **9,419,712 recursive rows to yield 1,621 distinct
+applicants**. That is the cost of enumerating paths through cycles. It is not
+the cost of answering "who is reachable within four hops", which is the only
+question the ADR ever asked.
 
-The `EXPLAIN (ANALYZE, BUFFERS)` says why, and it is structural. At depth 4 the
-frontier-attr recursive union emits **9,419,712 rows to yield 1,621 distinct
-applicants**, and the materialised variant emits 8,486,438. The index is working
-exactly as intended — the plan shows a Bitmap Index Scan returning 4 rows per
-probe — so the per-lookup cost is already near optimal. What explodes is the
-number of lookups: the walk re-expands every *path* rather than every *node*,
-and the cycle guard can only prune a row after it has been produced. A graph
-store's index-free adjacency makes a hop a pointer dereference, so its cost
-tracks nodes actually visited rather than paths enumerated. Indexing cannot
-close that gap, because the index lookup is the thing being repeated.
+The walk now deduplicates nodes (`UNION` over `(id, depth)`, no path array), so
+each node is expanded at most once per depth level. **Same reachability counts,
+three orders of magnitude less work:** depth 4 goes from 38.72 s to **0.071 s**,
+and depth 5 — which never returned before — answers in **0.115 s**, reaching
+2,944 applicants. The identical 55 / 466 / 850 / 1,621 counts at depths 1–4 are
+what establishes this is the same question answered a cheaper way.
 
-Ten thousand applicants is a *small* lending book, and the wall is at **depth 4
-on a book this size**.
+Even the pessimistic baseline is rescued: rebuilding the entire adjacency
+relation per query costs a flat ~1–2 s at every depth, because that build is a
+constant and the walk on top of it is now cheap. Its old 15–22 s at depth 4 was
+the same path-enumeration defect, not the cost of the rebuild.
 
-### So the answer flips when all three hold
+**What the numbers now say:** on a 10,000-applicant book, PostgreSQL answers
+this traversal to depth 5 in about a tenth of a second, with no graph store and
+no exotic indexing. This ADR has now had its central measurement wrong twice, in
+two unrelated ways, and both times the prose reasoned impeccably from it. That
+is the argument for keeping the harness — and for the assertions now guarding
+it, which is what caught the third candidate still walking the old way after the
+first two were fixed (`db/tests/test_graph_traversal_benchmark_counts_nodes.py`).
+
+Ten thousand applicants is a *small* lending book, and the depth at which this
+becomes expensive is **not established by this run** — depth 5 was the deepest
+measured and it was cheap. A limit would need a run that finds one.
+
+### So the answer changes when all three hold
 
 1. **Traversal is the query, not a step in it.** Reading one loan's history is a
    tree walk; Postgres wins, and no graph store is warranted.
-2. **Depth is unbounded and above three.** At depth ≤3 a root-scoped traversal
-   answers in **under 0.6 s** on 10k rows (0.514 s worst of the two sound
-   implementations), so there is nothing to buy. This threshold is stated
-   against the measured frontier-attr column above, not against the pessimistic
-   baseline.
-3. **It runs interactively.** A nightly batch can absorb the depth-4 cost
-   (16.87–38.72 s). An underwriter waiting on a screen cannot, and neither can a
-   decision-time check.
+2. **The query is one PostgreSQL cannot express**, rather than one it merely
+   runs slowly. Depth-bounded reachability it expresses fine, and answers in
+   milliseconds. Weighted-path computations — FinCEN's 25%-plus-control-person
+   rule is one — are where a recursive CTE stops being the natural shape.
+3. **The measured latency actually fails a stated requirement.** This is now an
+   empirical bar with a number attached, not an assumption: on 10k applicants
+   the traversal costs 0.071 s at depth 4 and 0.115 s at depth 5, so a
+   requirement would have to be far tighter than any interactive budget, or the
+   book far larger, before this argument carries.
 
-If any one of those is false, foreign keys remain the right answer. **For
-Meridian today, (1) is false** — there is no fraud-ring product, no
-`beneficial_owners` table (Week 9, unbuilt), and the only traversal in
-production is `get_loan_history`, which is a depth-4 tree walk from a single
-root. The refusal stands.
+The second and third conditions replace a "depth > 3 is a wall" rule that the
+corrected benchmark disproved. If any one of these is false, foreign keys remain
+the right answer. **For Meridian today, (1) is false** — there is no fraud-ring
+product, no `beneficial_owners` table (Week 9, unbuilt), and the only traversal
+in production is `get_loan_history`, which is a depth-4 tree walk from a single
+root. The refusal stands, and it now stands on stronger evidence than before:
+the previous version refused a graph store while its own table showed Postgres
+failing at depth 4.
 
 What changes it: the Week 9 BSA/AML work. Beneficial ownership is inherently
 recursive — an entity owned by an entity owned by a person — and FinCEN's
@@ -237,7 +278,10 @@ a permanent refusal:
 - an identity-resolution or fraud-ring feature is actually specified; **or**
 - beneficial-ownership traversal lands (Week 9) and needs recursive
   weighted-path queries; **or**
-- any traversal in production needs depth > 3 at interactive latency.
+- a production traversal is measured missing its interactive budget on a real
+  book size. Stated as "re-measure", not as a depth: the depth-based version of
+  this trigger ("depth > 3 at interactive latency") was derived from a benchmark
+  that measured path enumeration, and depth 5 now costs 0.115 s.
 
 If it is revisited, the likely shape is a **derived read model, not a second
 source of truth** — the graph projected from Postgres and rebuilt from it, so
@@ -250,10 +294,16 @@ five tables) is answered by construction rather than by refusing the tool.
   Anyone can re-run the benchmark and disagree with evidence.
 - **Good:** the trigger is written down, so Week 9 does not silently inherit a
   decision made before the requirement existed.
-- **Bad, accepted:** if a fraud-ring question arrives before Week 9, the honest
-  answer is a batch job at depth ≤3, which will under-report rings. That is a
-  known limitation and is preferable to a 44-second interactive query.
-- **Unverified:** the flip point was measured on synthetic data in a local
-  container, single-user, no concurrency. Real production numbers would be
-  worse, not better — contention and a denser graph both push the same way.
-  Treat depth 4 as an upper bound on what works, not a target.
+- **Good, and learned the hard way twice:** both times this decision was nearly
+  made on bad evidence, the fault was in the harness rather than in the
+  reasoning — first a global adjacency build charged to a root-scoped question,
+  then path enumeration reported as reachability. Both were caught by review, not
+  by re-reading the prose. The harness is the artifact worth keeping.
+- **Bad, accepted:** if a fraud-ring question arrives before Week 9, there is no
+  identity-resolution product to answer it with. That is a missing feature, not
+  a performance limit — the traversal underneath it is cheap.
+- **Unverified:** measured on synthetic data in a local container, single-user,
+  no concurrency, at N = 10,000. Real production numbers would be worse, not
+  better — contention and a denser graph both push the same way. Depth 5 is the
+  deepest measured; nothing here establishes where the cost becomes prohibitive,
+  and no number in this ADR should be read as saying it has been found.

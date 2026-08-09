@@ -36,7 +36,30 @@ WHAT THIS VERSION MEASURES
     Every candidate's reachability count is compared at every depth. If they
     disagree, the run ABORTS: three implementations of different graphs produce
     three meaningless timings, and a silently divergent edge set is exactly the
-    defect that made the earlier ssn/ein omission matter.
+    defect that made the earlier ssn/ein omission matter. The posting table and
+    the edge table are also asserted to be the same relation as SETS before any
+    timing is taken (EDGE_PARITY_SQL).
+
+WHAT THE THIRD VERSION GOT WRONG
+    It measured PATH ENUMERATION and reported it as reachability. Every
+    candidate carried an ARRAY[] of the current path and excluded only nodes
+    already on THAT path, so an applicant reachable by k distinct simple paths
+    was expanded k times. The identity graph is dense and cyclic -- households,
+    shared phones, 200 employers -- so k explodes with depth: the depth-4 run
+    emitted 9.4 MILLION recursive rows to arrive at 1,621 distinct applicants,
+    and the "depth-4 cliff" that ADR 0009 rested on was the cost of enumerating
+    those paths, not the cost of answering the question.
+
+    The question the ADR actually asks is which applicants are reachable within
+    d hops. So the walk now deduplicates NODES: `UNION` (not `UNION ALL`) over
+    (id, depth), no path array, each node expanded at most once per depth level
+    instead of once per path reaching it. Reachability counts are unchanged --
+    the same 55/466/850/1,621 at depths 1-4 -- which is the check that this is
+    the same question answered a cheaper way, not a different question.
+
+    Note what this does NOT claim: a node found at depth 2 is expanded again at
+    depth 3, because a single recursive CTE cannot consult a global visited set.
+    Work is bounded by depth x |E| rather than by the number of simple paths.
 
 USAGE
     DATABASE_URL=postgresql://meridian:postgres@localhost:5432/meridian \
@@ -116,47 +139,50 @@ EDGE_SQL = """
 # single index-driven join and keeps this candidate's edge set identical to the
 # other two, which is the property that makes the comparison mean anything.
 FRONTIER_ATTR_SQL = """
-WITH RECURSIVE walk AS (
-    SELECT %(root)s::int AS id, 0 AS depth, ARRAY[%(root)s::int] AS path
-    UNION ALL
-    SELECT x2.applicant_id, w.depth + 1, w.path || x2.applicant_id
+WITH RECURSIVE walk(id, depth) AS (
+    SELECT %(root)s::int, 0
+    UNION
+    SELECT DISTINCT x2.applicant_id, w.depth + 1
       FROM walk w
       JOIN identity_attr x1 ON x1.applicant_id = w.id
       JOIN identity_attr x2 ON x2.kind = x1.kind
                            AND x2.value = x1.value
                            AND x2.applicant_id <> w.id
      WHERE w.depth < %(max_depth)s
-       AND NOT x2.applicant_id = ANY(w.path)   -- cycle guard, mandatory
 )
 SELECT count(DISTINCT id) AS reached FROM walk
 """
 
 # --- candidate 2: a derived edge table, built once and indexed ---------------
 MATERIALIZED_SQL = """
-WITH RECURSIVE walk AS (
-    SELECT %(root)s::int AS id, 0 AS depth, ARRAY[%(root)s::int] AS path
-    UNION ALL
-    SELECT e.dst, w.depth + 1, w.path || e.dst
+WITH RECURSIVE walk(id, depth) AS (
+    SELECT %(root)s::int, 0
+    UNION
+    SELECT e.dst, w.depth + 1
       FROM walk w JOIN edges e ON e.src = w.id
      WHERE w.depth < %(max_depth)s
-       AND NOT e.dst = ANY(w.path)
 )
 SELECT count(DISTINCT id) AS reached FROM walk
 """
 
 # --- candidate 3: the global-edge CTE, PESSIMISTIC BASELINE ONLY -------------
-# Retained so the earlier published numbers remain reproducible and so the cost
-# of the naive formulation is visible. Never quote this as the relational
-# option's cost.
+# Retained so the cost of the naive formulation is visible. Never quote this as
+# the relational option's cost.
+#
+# It isolates ONE variable: building the whole adjacency relation per query
+# instead of expanding a frontier. It therefore walks the same node-deduplicated
+# way as the other two -- when it did not, it was pessimistic for two unrelated
+# reasons at once and the comparison said nothing about either. Caught by
+# db/tests/test_graph_traversal_benchmark_counts_nodes.py after the first two
+# candidates were fixed and this one was left behind.
 GLOBAL_EDGE_SQL = f"""
-WITH RECURSIVE edges AS ({EDGE_SQL}),
-walk AS (
-    SELECT %(root)s::int AS id, 0 AS depth, ARRAY[%(root)s::int] AS path
-    UNION ALL
-    SELECT e.dst, w.depth + 1, w.path || e.dst
-      FROM walk w JOIN edges e ON e.src = w.id
+WITH RECURSIVE edge_rel AS ({EDGE_SQL}),
+walk(id, depth) AS (
+    SELECT %(root)s::int, 0
+    UNION
+    SELECT e.dst, w.depth + 1
+      FROM walk w JOIN edge_rel e ON e.src = w.id
      WHERE w.depth < %(max_depth)s
-       AND NOT e.dst = ANY(w.path)
 )
 SELECT count(DISTINCT id) AS reached FROM walk
 """
@@ -234,6 +260,35 @@ CREATE INDEX ON edges (src);
 ANALYZE edges;
 """
 
+# The posting table reaches neighbours by joining identity_attr to itself, which
+# emits one row per SHARED ATTRIBUTE: two applicants at the same address who also
+# share a phone produce that transition twice, while `edges` collapses it with
+# UNION. Left alone, the frontier candidate does strictly more work than the
+# other two and the three timings are not measuring the same edge relation --
+# review finding, visible in the committed plans as 9,419,712 recursive rows
+# against 8,486,438.
+#
+# `SELECT DISTINCT` in the recursive term now collapses parallel transitions
+# before they enter the union. This asserts the two relations are identical as
+# SETS, in both directions, rather than inferring it from row counts: an equal
+# count with different membership would pass a count check and still be two
+# different graphs.
+EDGE_PARITY_SQL = """
+WITH attr_edges AS (
+    SELECT DISTINCT x1.applicant_id AS src, x2.applicant_id AS dst
+      FROM identity_attr x1
+      JOIN identity_attr x2 ON x2.kind = x1.kind
+                           AND x2.value = x1.value
+                           AND x2.applicant_id <> x1.applicant_id
+)
+SELECT (SELECT count(*) FROM attr_edges),
+       (SELECT count(*) FROM edges),
+       (SELECT count(*) FROM (SELECT src, dst FROM attr_edges
+                              EXCEPT SELECT src, dst FROM edges) a),
+       (SELECT count(*) FROM (SELECT src, dst FROM edges
+                              EXCEPT SELECT src, dst FROM attr_edges) b)
+"""
+
 
 def _server_settings(cur) -> dict:
     """The knobs that actually move these timings. Recorded so the ADR's
@@ -291,6 +346,14 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(SETUP_SQL, {"rows": args.rows})
             artifact["server"] = _server_settings(cur)
+            # Provenance. Every document transcribing these timings names a run;
+            # without a timestamp IN the artifact, "the run of 2026-08-07T21:20Z"
+            # was a claim about the file rather than something the file said.
+            # Read from the server so it cannot disagree with the database the
+            # numbers came from.
+            cur.execute("SELECT to_char(now() AT TIME ZONE 'UTC', "
+                        "'YYYY-MM-DD\"T\"HH24:MI\"Z\"')")
+            artifact["run_started_utc"] = cur.fetchone()[0]
 
             # Build costs, reported on their own. A derived structure that takes
             # a minute to build and answers in milliseconds is a different
@@ -303,6 +366,22 @@ def main() -> int:
             artifact["build"]["identity_attr_rows"] = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM edges")
             artifact["build"]["edge_rows"] = cur.fetchone()[0]
+
+            cur.execute(EDGE_PARITY_SQL)
+            attr_edges, edge_rows, attr_only, edges_only = cur.fetchone()
+            artifact["edge_parity"] = {
+                "attr_edges": attr_edges, "edge_rows": edge_rows,
+                "in_attr_not_in_edges": attr_only, "in_edges_not_in_attr": edges_only,
+            }
+            if attr_only or edges_only:
+                print("\n" + "!" * 70)
+                print(f"ABORT: the posting table and the edge table are different "
+                      f"relations -- {attr_only} transitions only in identity_attr, "
+                      f"{edges_only} only in edges.")
+                print("Three timings over three graphs are three meaningless "
+                      "numbers. Fix the edge sets before publishing anything.")
+                print("!" * 70)
+                return 4
 
         print()
         print("one-off build costs (NOT part of any per-query timing below)")
