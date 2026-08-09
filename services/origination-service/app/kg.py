@@ -15,12 +15,14 @@ relational joins are good at. The traversal that would justify a graph store --
 attribute, to unbounded depth" (fraud rings, beneficial ownership) -- cannot be
 written here at all, because there is no depth to hard-code. PostgreSQL can
 express it with a recursive CTE, and on the single benchmark run ADR 0009 is
-transcribed from (db/bench/results.json, 2026-08-09T01:02Z, 10k applicants,
-PostgreSQL 16.14) a root-scoped version answers depth 3 in **0.033 s**, depth 4
-in **0.064 s** and depth 5 in **0.152 s**. The genuinely unbounded form -- a
+transcribed from (db/bench/results.json, 2026-08-09T20:59Z, 10k applicants,
+PostgreSQL 16.14) a root-scoped version answers depth 3 in **0.019 s**, depth 4
+in **0.050 s** and depth 5 in **0.108 s**. The genuinely unbounded form -- a
 recursive union keyed on the applicant alone, which terminates when the
 connected component is exhausted -- returns the whole 10,000-applicant
-component in **0.41 s**.
+component in **0.32 s**, and a frontier/visited walk returns that component
+WITH every connecting path, which is what adr/0009 actually asks for, in
+**0.31 s**.
 
 Those numbers replace "16.9-38.7 s at depth 4, no return at depth 5", which
 replaced a "44 seconds at depth 4" before that. Both earlier figures were

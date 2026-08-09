@@ -237,6 +237,66 @@ UNBOUNDED = [
     ("materialized", UNBOUNDED_EDGE_SQL),
 ]
 
+# --- the traversal AS THE ADR STATES IT: reachable applicants AND the path ---
+#
+# Everything above answers "who is reachable" and throws the route away. The
+# question at the top of adr/0009 is "find every other applicant reachable
+# through any shared identity attribute, to unbounded depth, AND RETURN THE
+# CONNECTING PATH" -- and for the investigator the path is the answer: knowing
+# that applicant 8,412 is in the ring is useless without "shares a phone with B,
+# who shares an address with C, who shares an employer with the root".
+#
+# A recursive union cannot carry the path and deduplicate globally at once: the
+# path makes every row distinct, so `UNION` stops collapsing anything and the
+# walk is back to enumerating simple paths -- the defect this benchmark was
+# corrected for twice. So this is the frontier/visited traversal the first
+# review actually asked for: expand one level at a time, insert each applicant
+# ONCE with the predecessor that found it, and reconstruct routes from those
+# predecessors afterwards. Each node is expanded exactly once for the whole
+# walk, not once per depth level and certainly not once per path.
+#
+# Reviewed on PR #12: the published unbounded figure measured `count(*)`, so it
+# could not support the ADR's claim.
+BFS_TABLE_SQL = """
+DROP TABLE IF EXISTS bfs_visited;
+CREATE TABLE bfs_visited (
+    applicant_id INT PRIMARY KEY,
+    depth        INT NOT NULL,
+    parent       INT
+);
+CREATE INDEX ON bfs_visited (depth);
+"""
+
+BFS_SEED_SQL = "INSERT INTO bfs_visited (applicant_id, depth, parent) VALUES (%(root)s, 0, NULL)"
+
+# One level. DISTINCT ON keeps exactly one predecessor per newly-found
+# applicant; the NOT EXISTS is the visited set, so an applicant already reached
+# at a shallower depth is never re-expanded.
+BFS_STEP_SQL = """
+INSERT INTO bfs_visited (applicant_id, depth, parent)
+SELECT DISTINCT ON (e.dst) e.dst, %(depth)s + 1, e.src
+  FROM edges e
+  JOIN bfs_visited v ON v.applicant_id = e.src AND v.depth = %(depth)s
+ WHERE NOT EXISTS (SELECT 1 FROM bfs_visited w WHERE w.applicant_id = e.dst)
+ ORDER BY e.dst, e.src
+"""
+
+# Every applicant's route back to the root, walked through the predecessor
+# column. Bounded by the sum of path lengths rather than by the number of
+# paths, which is the whole point of storing one predecessor.
+BFS_PATHS_SQL = """
+WITH RECURSIVE route(target, node, parent, path) AS (
+    SELECT applicant_id, applicant_id, parent, ARRAY[applicant_id]
+      FROM bfs_visited
+     WHERE parent IS NOT NULL
+    UNION ALL
+    SELECT r.target, v.applicant_id, v.parent, v.applicant_id || r.path
+      FROM route r
+      JOIN bfs_visited v ON v.applicant_id = r.parent
+)
+SELECT target, path FROM route WHERE parent IS NULL
+"""
+
 CANDIDATES = [
     ("frontier-attr", FRONTIER_ATTR_SQL,
      "expands only the current frontier against an indexed posting table"),
@@ -516,6 +576,84 @@ def main() -> int:
                       f"number means anything.")
                 print("!" * 70)
                 return 5
+
+        # --- the traversal WITH its connecting path ---------------------------
+        print()
+        print("unbounded WITH the connecting path (frontier/visited, one "
+              "predecessor per applicant)")
+        with conn.cursor() as cur:
+            cur.execute(f"SET search_path TO {SCHEMA}")
+            cur.execute(f"SET statement_timeout = {args.timeout * 1000}")
+            t0 = time.monotonic()
+            cur.execute(BFS_TABLE_SQL)
+            cur.execute(BFS_SEED_SQL, {"root": args.root})
+            depth, levels = 0, 0
+            while True:
+                cur.execute(BFS_STEP_SQL, {"depth": depth})
+                if cur.rowcount == 0:
+                    break
+                depth += 1
+                levels += 1
+            walk_seconds = time.monotonic() - t0
+
+            t1 = time.monotonic()
+            cur.execute(BFS_PATHS_SQL)
+            routes = cur.fetchall()
+            path_seconds = time.monotonic() - t1
+
+            cur.execute("SELECT count(*), max(depth) FROM bfs_visited")
+            visited_rows, max_depth_reached = cur.fetchone()
+
+            # The paths have to be REAL, or this is a fast way to produce
+            # fiction. Every consecutive pair on a sample of routes must be an
+            # actual edge, the route must start at the root, and it must end at
+            # the applicant it claims to reach.
+            sample = routes[:: max(1, len(routes) // 200)] if routes else []
+            bad = 0
+            for target, path in sample:
+                if not path or path[0] != args.root or path[-1] != target:
+                    bad += 1
+                    continue
+                pairs = list(zip(path, path[1:]))
+                cur.execute(
+                    "SELECT count(*) FROM edges e JOIN unnest(%s::int[], %s::int[]) "
+                    "AS p(src, dst) ON e.src = p.src AND e.dst = p.dst",
+                    ([a for a, _ in pairs], [b for _, b in pairs]),
+                )
+                if cur.fetchone()[0] != len(pairs):
+                    bad += 1
+
+        artifact["unbounded_with_path"] = {
+            "walk_seconds": round(walk_seconds, 3),
+            "path_reconstruction_seconds": round(path_seconds, 3),
+            "total_seconds": round(walk_seconds + path_seconds, 3),
+            "reached": visited_rows,
+            "levels": levels,
+            "max_depth": max_depth_reached,
+            "routes_returned": len(routes),
+            "routes_sampled": len(sample),
+            "routes_invalid": bad,
+        }
+        print(f"  walk (one predecessor each) : {walk_seconds:>8.3f} s  "
+              f"({visited_rows} applicants, {levels} levels, max depth {max_depth_reached})")
+        print(f"  path reconstruction        : {path_seconds:>8.3f} s  "
+              f"({len(routes)} routes)")
+        print(f"  validated                  : {len(sample)} sampled, {bad} invalid")
+
+        if bad:
+            print("\n" + "!" * 70)
+            print(f"ABORT: {bad} reconstructed route(s) are not real paths through "
+                  f"the edge relation. A path benchmark that returns fiction is "
+                  f"worse than one that returns nothing.")
+            print("!" * 70)
+            return 6
+        if unbounded_reached is not None and visited_rows != unbounded_reached:
+            print("\n" + "!" * 70)
+            print(f"ABORT: the path-preserving walk reached {visited_rows} "
+                  f"applicants against the count-only walk's {unbounded_reached}. "
+                  f"They must traverse the same graph.")
+            print("!" * 70)
+            return 7
 
         if args.explain:
             for name, sql, _ in CANDIDATES:

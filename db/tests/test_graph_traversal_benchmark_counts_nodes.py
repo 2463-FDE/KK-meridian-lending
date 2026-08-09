@@ -264,3 +264,86 @@ def test_the_unbounded_and_bounded_walks_agree_where_they_overlap(cur):
     unbounded = cur.fetchone()[0]
     bounded = _reached(cur, bench.MATERIALIZED_SQL, depth=10)
     assert unbounded == bounded == 4
+
+
+def _bfs_with_paths(cur, root=1):
+    """Run the benchmark's frontier/visited walk and return {target: path}."""
+    cur.execute(bench.BFS_TABLE_SQL)
+    cur.execute(bench.BFS_SEED_SQL, {"root": root})
+    depth = 0
+    while True:
+        cur.execute(bench.BFS_STEP_SQL, {"depth": depth})
+        if cur.rowcount == 0:
+            break
+        depth += 1
+    cur.execute(bench.BFS_PATHS_SQL)
+    return {target: path for target, path in cur.fetchall()}
+
+
+def test_the_path_walk_returns_a_real_route_to_every_applicant(cur):
+    """The ADR asks for the connecting path, not just who is reachable.
+
+    The published unbounded figure timed `count(*)` and threw the route away,
+    so it could not support the claim the ADR makes -- for an investigator the
+    route IS the answer. Review finding on PR #12.
+
+    Every route is checked against the edge relation here rather than trusted:
+    it must start at the root, end at the applicant it claims, and every
+    consecutive pair must be a real edge.
+    """
+    _build_graph(cur)
+    routes = _bfs_with_paths(cur, root=1)
+
+    # Everything except the root itself.
+    assert set(routes) == {2, 3, 4}
+
+    cur.execute("SELECT src, dst FROM edges")
+    edges = {(s, d) for s, d in cur.fetchall()}
+    for target, path in routes.items():
+        assert path[0] == 1, f"route to {target} does not start at the root"
+        assert path[-1] == target, f"route to {target} ends at {path[-1]}"
+        assert len(set(path)) == len(path), f"route to {target} revisits a node"
+        for a, b in zip(path, path[1:]):
+            assert (a, b) in edges, f"route to {target} uses a non-edge {a}->{b}"
+
+
+def test_each_applicant_is_expanded_once_with_exactly_one_predecessor(cur):
+    """That is what makes the path affordable.
+
+    Carrying the path inside a recursive union would make every row distinct,
+    so the union would stop collapsing and the walk would enumerate simple
+    paths again -- the defect this benchmark was corrected for twice. One
+    predecessor per applicant is the alternative, and it has to be exactly one.
+    """
+    _build_graph(cur)
+    _bfs_with_paths(cur, root=1)
+
+    cur.execute("SELECT applicant_id, count(*) FROM bfs_visited GROUP BY applicant_id "
+                "HAVING count(*) > 1")
+    assert cur.fetchall() == [], "an applicant was recorded more than once"
+
+    cur.execute("SELECT count(*) FROM bfs_visited WHERE parent IS NULL")
+    assert cur.fetchone()[0] == 1, "exactly one node -- the root -- has no predecessor"
+
+
+def test_the_path_walk_and_the_count_walk_reach_the_same_applicants(cur):
+    """Two shapes of the same question must not disagree.
+
+    If they ever do, one of them is traversing a different graph and neither
+    number means anything -- the same property the depth-wise comparison
+    enforces for the bounded walks.
+    """
+    _build_graph(cur)
+    routes = _bfs_with_paths(cur, root=1)
+
+    cur.execute(bench.UNBOUNDED[1][1], {"root": 1})
+    count_only = cur.fetchone()[0]
+    assert len(routes) + 1 == count_only  # +1: the root has no route to itself
+
+
+def test_the_path_walk_terminates_on_a_cycle(cur):
+    """The fixture graph is cyclic; the visited set is what ends the loop."""
+    _build_graph(cur)
+    routes = _bfs_with_paths(cur, root=1)
+    # A hop count bounded by the node count, not by the number of paths.
+    assert max(len(p) for p in routes.values()) <= 4
