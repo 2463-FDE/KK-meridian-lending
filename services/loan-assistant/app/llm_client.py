@@ -280,7 +280,35 @@ _LABEL_STOPWORDS = frozenset({
 })
 # A percentage or bare decimal, e.g. "11.9%", "11.9 percent", "4.2".
 _FIGURE_RE = re.compile(r"\d+(?:\.\d+)?")
+# The same figure, but only where it is written AS the signal's unit -- "4.2%"
+# or "4.2 percent". Used to tell a claim about the signal apart from an
+# unrelated number in the same sentence (an income, a loan amount).
+_UNIT_FIGURE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent|pct)", re.IGNORECASE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Abbreviations whose full stop does not end a sentence. Without this the
+# splitter cut "The U.S. unemployment rate is 11.9%." into "The U.S." plus the
+# rest -- removing the false claim left the orphan "The U.S." in the summary,
+# which passed the nonempty check and put malformed prose in front of an
+# officer. Reviewed on PR #13.
+_ABBREVIATIONS = (
+    "U.S.", "U.K.", "E.U.", "e.g.", "i.e.", "etc.", "approx.", "vs.", "No.",
+    "Inc.", "Ltd.", "Co.", "Mr.", "Mrs.", "Ms.", "Dr.", "Jr.", "Sr.", "St.",
+)
+_ABBREV_SENTINEL = "<<ABBREV>>"
+
+
+def _split_sentences(text: str) -> list:
+    """Sentence split that does not treat an abbreviation's dot as a full stop."""
+    masked = text
+    for i, abbrev in enumerate(_ABBREVIATIONS):
+        masked = masked.replace(abbrev, abbrev.replace(".", f"{_ABBREV_SENTINEL}{i}{_ABBREV_SENTINEL}"))
+    parts = _SENTENCE_SPLIT_RE.split(masked)
+    restored = []
+    for part in parts:
+        for i, abbrev in enumerate(_ABBREVIATIONS):
+            part = part.replace(f"{_ABBREV_SENTINEL}{i}{_ABBREV_SENTINEL}", ".")
+        restored.append(part)
+    return restored
 
 
 def _signal_topic_words(signal) -> set[str]:
@@ -303,10 +331,23 @@ def _drops_a_contradicting_claim(text: str, signal) -> bool:
     lowered = text.lower()
     if not any(word in lowered for word in topic):
         return False
-    figures = [float(m) for m in _FIGURE_RE.findall(text)]
-    if not figures:
+
+    # Figures written AS the signal's unit are the claims about it. Preferring
+    # them keeps an unrelated number in the same sentence -- an income, a loan
+    # amount -- from being read as a rate. If the sentence carries none, every
+    # figure in it is a candidate, which is the conservative reading.
+    published = float(signal.value)
+    unit_figures = [float(m) for m in _UNIT_FIGURE_RE.findall(text)]
+    claims = unit_figures or [float(m) for m in _FIGURE_RE.findall(text)]
+    if not claims:
         return False
-    return not any(abs(f - float(signal.value)) < 0.05 for f in figures)
+
+    # EVERY claim must be the published one. The previous version accepted the
+    # whole sentence as soon as ONE number matched, so "Unemployment is 11.9%,
+    # while the cited series value is 4.2%" survived intact and was rendered
+    # beside the 4.2% citation -- the reviewed defect, in a sentence that
+    # contradicts itself as well as the source. Reviewed on PR #13.
+    return any(abs(f - published) >= 0.05 for f in claims)
 
 
 def _strip_contradicting_macro_claims(summary: str, flags: list, signal):
@@ -328,7 +369,7 @@ def _strip_contradicting_macro_claims(summary: str, flags: list, signal):
 
     dropped = 0
     kept_sentences = []
-    for sentence in _SENTENCE_SPLIT_RE.split(summary):
+    for sentence in _split_sentences(summary):
         if sentence and _drops_a_contradicting_claim(sentence, signal):
             dropped += 1
             continue
@@ -384,21 +425,40 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     # that will actually be sent. Fails open -- None simply means no context.
     signal = macro.current_signal()
 
-    prompt = _build_prompt(app_data, signal)
-
-    estimated = _estimate_tokens(_SYSTEM + prompt)
-    if estimated > MAX_INPUT_TOKENS:
+    # The BASE prompt is measured first, and it is the one the guard judges. The
+    # signal is optional context that fails open everywhere else; letting its
+    # tokens push an otherwise-valid application over the ceiling would make an
+    # optional extra the reason a summary 400s -- and it is reachable, because
+    # `purpose`, `employer` and `job_title` carry no maximum length in
+    # origination's ApplicationIn. Reviewed on PR #13.
+    base_prompt = _build_prompt(app_data, None)
+    base_estimated = _estimate_tokens(_SYSTEM + base_prompt)
+    if base_estimated > MAX_INPUT_TOKENS:
         raise LLMCostGuardError(
-            f"Estimated input tokens ({estimated}) exceeds guard ({MAX_INPUT_TOKENS}). "
+            f"Estimated input tokens ({base_estimated}) exceeds guard ({MAX_INPUT_TOKENS}). "
             "Trim the application payload before calling summarize_application()."
         )
 
-    # The review asked for the signal's cost to be measured, not assumed. This
-    # logs the delta on every call, so the real figure is observable in
-    # production rather than a number someone quoted once in a PR.
-    signal_tokens = 0
-    if signal is not None:
-        signal_tokens = estimated - _estimate_tokens(_SYSTEM + _build_prompt(app_data, None))
+    prompt = _build_prompt(app_data, signal)
+    estimated = _estimate_tokens(_SYSTEM + prompt)
+    # The review asked for the signal's cost to be measured, not assumed, so the
+    # delta is computed here and logged on every call.
+    signal_tokens = estimated - base_estimated if signal is not None else 0
+
+    if signal is not None and estimated > MAX_INPUT_TOKENS:
+        # Only the citation crosses the line. Drop it and answer without the
+        # external context, which is exactly what happens when the provider is
+        # disabled or unreachable -- the summary is still valid, it simply has
+        # nothing external to show.
+        log.warning(
+            "omitting the external signal to stay inside the cost guard "
+            "app_id=%s base_tokens=%d with_signal=%d guard=%d",
+            app_data.get("id", "unknown"), base_estimated, estimated, MAX_INPUT_TOKENS,
+        )
+        signal = None
+        prompt = base_prompt
+        estimated = base_estimated
+        signal_tokens = 0
 
     log.info(
         "llm_client summarize app_id=%s estimated_tokens=%d signal=%s signal_tokens=%d",

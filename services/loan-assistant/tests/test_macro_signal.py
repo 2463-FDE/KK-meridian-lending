@@ -444,3 +444,119 @@ def test_the_supported_series_is_still_captioned_from_its_metadata(monkeypatch):
     label, unit = macro._SERIES_METADATA["LNS14000000"]
     assert signal.label == label
     assert signal.unit == unit
+
+
+# --- claims the earlier guard let through ------------------------------------
+
+def test_a_sentence_carrying_both_the_true_and_a_false_figure_is_removed(monkeypatch):
+    """One matching number used to exempt the whole sentence.
+
+    "Unemployment is 11.9%, while the cited series value is 4.2%" contradicts
+    both the source and itself, and it survived intact next to the 4.2%
+    citation because the check accepted a sentence as soon as ANY figure in it
+    matched. Reviewed on PR #13.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "Income is adequate. Unemployment is 11.9%, while the cited series value is 4.2%.",
+    )
+
+    assert "11.9" not in result.summary
+    assert "Income is adequate" in result.summary
+
+
+def test_an_unrelated_number_in_a_signal_sentence_is_not_read_as_a_rate(monkeypatch):
+    """The other direction: requiring every figure to match would be too blunt.
+
+    An income or a loan amount beside an accurate rate is not a competing claim
+    about the rate, so figures written as the signal's unit are what count.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "With unemployment at 4.2% and income of 82000, repayment looks comfortable.",
+    )
+
+    assert "82000" in result.summary
+    assert "4.2%" in result.summary
+
+
+def test_an_abbreviation_does_not_leave_an_orphan_fragment(monkeypatch):
+    """`U.S.` is not the end of a sentence.
+
+    The splitter cut "The U.S. unemployment rate is 11.9%." after the
+    abbreviation, so removing the false claim left "The U.S." behind -- nonempty,
+    so the fail-closed check passed, and malformed prose reached the officer.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "The U.S. unemployment rate is 11.9%. Income is adequate.",
+    )
+
+    assert "11.9" not in result.summary
+    assert "The U.S." not in result.summary, "an orphaned abbreviation was left behind"
+    assert result.summary.strip() == "Income is adequate."
+
+
+def test_an_abbreviation_inside_a_kept_sentence_survives_intact(monkeypatch):
+    """Masking the dot must not damage prose that is fine as it stands."""
+    result = _summarize_with(
+        monkeypatch,
+        "The U.S. labour market is soft, which raises repayment risk slightly.",
+    )
+
+    assert "The U.S. labour market is soft" in result.summary
+
+
+# --- the cost guard judges the application, not the optional citation --------
+
+def test_the_signal_is_dropped_rather_than_failing_an_otherwise_valid_prompt(monkeypatch):
+    """An optional extra must not be the reason a summary 400s.
+
+    `purpose`, `employer` and `job_title` have no maximum length in
+    origination's ApplicationIn, so a base prompt can sit just under the ceiling
+    and the citation can push it over. The signal fails open everywhere else --
+    disabled, unreachable, rate-limited -- and it fails open here too.
+    Reviewed on PR #13.
+    """
+    signal = _signal()
+    monkeypatch.setattr(macro, "current_signal", lambda: signal)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
+    seen = {}
+
+    def _capture(client, prompt):
+        seen["prompt"] = prompt
+        return (
+            '{"loan_amount": 18000, "term_months": 48, "purpose": "debt consolidation",'
+            ' "risk_tier": "medium", "summary": "Adequate income.", "flags": []}'
+        )
+
+    monkeypatch.setattr(llm_client, "call_api", _capture)
+
+    app = dict(_APP, applicant={"name": "Robin Fictional"})
+    base_tokens = llm_client._estimate_tokens(
+        llm_client._SYSTEM + llm_client._build_prompt(app, None)
+    )
+    with_signal = llm_client._estimate_tokens(
+        llm_client._SYSTEM + llm_client._build_prompt(app, signal)
+    )
+    # A ceiling the application clears on its own and the citation does not.
+    monkeypatch.setattr(llm_client, "MAX_INPUT_TOKENS", (base_tokens + with_signal) // 2)
+
+    result = llm_client.summarize_application(app)
+
+    assert result.summary  # it answered rather than raising
+    assert signal.cite() not in seen["prompt"], "the citation was sent anyway"
+    assert result.external_signals == [], (
+        "a citation was attached that the model was never shown"
+    )
+
+
+def test_an_application_too_large_on_its_own_still_fails_the_guard(monkeypatch):
+    """Dropping the signal must not become a way to smuggle a huge payload past."""
+    signal = _signal()
+    monkeypatch.setattr(macro, "current_signal", lambda: signal)
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "MAX_INPUT_TOKENS", 1)
+
+    with pytest.raises(llm_client.LLMCostGuardError):
+        llm_client.summarize_application(dict(_APP, applicant={"name": "Robin Fictional"}))
