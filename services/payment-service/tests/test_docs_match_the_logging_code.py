@@ -30,6 +30,7 @@ those appear legitimately throughout the docs when describing history, the
 handover state, or what is still stored. A test that failed on every mention
 would be noise, and noise is how the next stale claim gets waved through.
 """
+import os
 import pathlib
 import re
 
@@ -548,32 +549,210 @@ def test_a_rejected_payload_carrying_a_pan_never_becomes_a_log_line():
     assert "pan" in message and "cvv" in message
 
 
-def test_the_seed_files_do_not_write_card_values():
-    """The evidence behind README's corrected claim, checked rather than trusted.
+# --- what the seeds actually WRITE -------------------------------------------
+#
+# Reviewed on PR #16. The first version of this guard read the `payments` INSERT
+# column list and checked that `pan` and `cvv` were absent. That is not the claim
+# README makes. A 16-digit literal in `last4` or `brand`, or a PAN inside an
+# `audit_logs` message -- which is the exact historical exposure this branch
+# documents, `charge req pan=4111111111111111` -- passes a column-name check and
+# still puts card data in every fresh database. So the values are scanned, in
+# every INSERT, into every table.
 
-    README now says the seed scripts insert `last4`/`brand` only, so a fresh
-    database holds no card data. That is a statement about two SQL files, and the
-    guard above only stops the OLD wording coming back -- it cannot notice if the
-    seeds start writing card numbers again and make the NEW wording false. This
-    reads the files.
+_SEED_FILES = ("002_seed.sql", "003_seed_bulk.sql")
 
-    Asserted on the INSERT column list rather than by grepping for "pan", because
-    both files legitimately discuss PAN in comments; the question is what they
-    write. Reviewed on PR #16.
-    """
-    inserts = 0
-    for name in ("002_seed.sql", "003_seed_bulk.sql"):
+# Any 13-19 digit run, Luhn-valid, however it is punctuated. The redactor's own
+# definition, reused deliberately: a second private notion of "looks like a PAN"
+# in a test would drift from the one the service enforces.
+_INSERT_RE = re.compile(
+    r"INSERT\s+INTO\s+(\w+)\s*\(([^)]*)\)\s*(?:VALUES|SELECT)(.*?)(?=;\s*(?:--|$|\n))",
+    re.IGNORECASE | re.DOTALL,
+)
+_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'")
+
+
+def _seed_statements():
+    """Every INSERT in the seed files, as (file, table, columns, literal values)."""
+    found = []
+    for name in _SEED_FILES:
         sql = (REPO_ROOT / "db" / "init" / name).read_text(encoding="utf-8")
-        for match in re.finditer(
-            r"INSERT\s+INTO\s+payments\s*\(([^)]*)\)", sql, re.IGNORECASE
-        ):
-            inserts += 1
-            columns = {c.strip().lower() for c in match.group(1).split(",")}
-            assert "pan" not in columns and "cvv" not in columns, (
-                f"{name} writes card data into payments{sorted(columns)} -- README "
-                f"claims a fresh database contains none"
-            )
-    assert inserts >= 2, (
-        f"found only {inserts} payments INSERT(s) in the seed files; the walk is "
-        f"broken and this test is vacuous"
+        # Strip line comments first: they discuss PAN legitimately, and the
+        # question is what the statement WRITES.
+        stripped = re.sub(r"--[^\n]*", "", sql)
+        for match in _INSERT_RE.finditer(stripped):
+            table = match.group(1).lower()
+            columns = [c.strip().lower() for c in match.group(2).split(",")]
+            literals = _LITERAL_RE.findall(match.group(3))
+            found.append((name, table, columns, literals))
+    return found
+
+
+def test_no_seed_statement_writes_a_card_number_into_any_table():
+    """README's claim, checked against the values rather than the column names.
+
+    Covers `last4`/`brand` and every other seed target including `audit_logs`,
+    because a PAN in a log message is card data in a fresh database no matter
+    which column it sits in.
+    """
+    from app import redactor
+
+    offenders = []
+    for name, table, columns, literals in _seed_statements():
+        for value in literals:
+            if redactor.looks_like_pan(value):
+                offenders.append(f"{name} -> {table}: {value!r}")
+    assert not offenders, (
+        "seed statements write card or personal data:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nREADME and docs/DEBT.md D5b state that a freshly initialised "
+          "database contains no card data. Either the seed is wrong or those "
+          "documents are; do not silence this test."
     )
+
+
+def test_no_seed_statement_names_a_card_column():
+    """The column-name check, kept as well -- the two catch different mistakes.
+
+    A value scan misses `pan = <a parameter>` or a non-Luhn placeholder; a column
+    check misses a real PAN in `brand`. Neither subsumes the other.
+    """
+    offenders = [
+        f"{name} -> {table}({', '.join(columns)})"
+        for name, table, columns, _ in _seed_statements()
+        if {"pan", "cvv"} & set(columns)
+    ]
+    assert not offenders, "seed statements write to a card column:\n  " + "\n  ".join(offenders)
+
+
+def test_the_seed_scan_sees_every_table_the_seeds_write():
+    """Guard against the scan reading nothing and reporting clean.
+
+    Names the tables that must appear, so a broken regex or a renamed file cannot
+    make the two tests above vacuous. `audit_logs` is listed explicitly because it
+    is the table the original exposure was in and the one a column-name check
+    could never have covered.
+    """
+    tables = {table for _, table, _, _ in _seed_statements()}
+    for required in ("payments", "audit_logs", "offers", "loans", "applications"):
+        assert required in tables, (
+            f"the seed scan never saw an INSERT into {required!r}; it found "
+            f"{sorted(tables)} -- the parser is broken and the guards above prove nothing"
+        )
+
+
+def test_the_only_seeded_personal_data_is_the_ssn_debt_this_register_already_names():
+    """The scan above asks about CARD data. This states what else it finds, so the
+    scope is visible rather than implied.
+
+    `applicants.ssn` holds fictional SSNs on purpose -- plaintext SSN storage is
+    its own entry in docs/DEBT.md and is not what README's card-data claim is
+    about. Pinning it here means an SSN appearing in some OTHER column, where
+    nobody has accounted for it, fails a test instead of passing quietly.
+    """
+    from app import redactor
+
+    unexpected = []
+    for name, table, columns, literals in _seed_statements():
+        for value in literals:
+            if not redactor.looks_sensitive(value) or redactor.looks_like_pan(value):
+                continue
+            if table == "applicants" and "ssn" in columns:
+                continue          # the documented, separately tracked debt
+            unexpected.append(f"{name} -> {table}({', '.join(columns)}): {value!r}")
+    assert not unexpected, (
+        "seed statements write personal data outside the one place this "
+        "repository accounts for it:\n  " + "\n  ".join(unexpected)
+    )
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("4111111111111111", True),                 # Luhn-valid PAN, bare
+    ("charge req pan=4111111111111111 amount=250.00", True),   # the historical audit row
+    ("4111-1111-1111-1111", True),              # punctuated
+    ("412-55-9981", False),                     # an SSN is not a card number
+    ("1111", False),                            # last4, which is permitted
+    ("visa", False),                            # brand
+    ("charge req last4=1111 amount=250.00", False),            # the current audit row
+    ("1234567890123456", False),                # 16 digits, Luhn-INVALID -- not a card
+])
+def test_the_seed_scanner_recognises_card_data_and_leaves_the_rest_alone(value, expected):
+    """Positive and negative fixtures for the detector itself.
+
+    Without these, "no offenders" is indistinguishable from "detects nothing".
+    The last case is the interesting negative: length alone does not make a card
+    number, and a scanner that flagged it would fail on ordinary seed integers.
+    """
+    from app import redactor
+
+    assert redactor.looks_like_pan(value) is expected, value
+
+
+def test_a_real_initialised_database_holds_no_card_data():
+    """The claim checked against a database, not against the SQL that builds one.
+
+    Review of PR #16 asked for this if practical, and it is: `db/init` is applied
+    into a throwaway schema and every text-ish column of every table it created is
+    scanned for a Luhn-valid card number. Parsing SQL can be fooled -- by a
+    generated value, an `INSERT ... SELECT`, or a statement shape the regex does
+    not match -- and this cannot, because it reads what actually landed.
+
+    Skipped when DATABASE_URL is unset, so the SQL-level guards above remain the
+    always-on floor.
+    """
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        pytest.skip("DATABASE_URL not set -- no Postgres to initialise")
+
+    import psycopg2
+
+    from app import redactor
+
+    schema = "seed_content_scan"
+    init_dir = REPO_ROOT / "db" / "init"
+    files = sorted(p for p in init_dir.glob("*.sql"))
+    assert files, "no db/init SQL found -- this test would prove nothing"
+
+    conn = psycopg2.connect(database_url)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+            cur.execute(f"CREATE SCHEMA {schema}")
+            cur.execute(f"SET search_path TO {schema}")
+            for path in files:
+                cur.execute(path.read_text(encoding="utf-8"))
+
+            cur.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND data_type IN "
+                "('text','character varying','character','json','jsonb')",
+                (schema,),
+            )
+            columns = cur.fetchall()
+            assert columns, "the initialised schema has no text columns -- scan is vacuous"
+
+            offenders = []
+            scanned_rows = 0
+            for table, column in columns:
+                cur.execute(
+                    f'SELECT "{column}"::text FROM "{table}" '
+                    f'WHERE "{column}" IS NOT NULL'
+                )
+                for (value,) in cur.fetchall():
+                    scanned_rows += 1
+                    if redactor.looks_like_pan(value):
+                        offenders.append(f"{table}.{column}: {value!r}")
+
+        assert scanned_rows > 0, (
+            "no seeded text values were scanned; db/init produced an empty "
+            "database and this test proves nothing"
+        )
+        assert not offenders, (
+            "a freshly initialised database contains card data:\n  "
+            + "\n  ".join(offenders)
+            + "\n\nREADME and docs/DEBT.md D5b both state it does not."
+        )
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.close()

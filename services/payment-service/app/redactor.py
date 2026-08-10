@@ -74,6 +74,18 @@ def redact_str(text: str) -> str:
     return text
 
 
+def looks_like_pan(text: str) -> bool:
+    """True if `text` contains a Luhn-valid card number.
+
+    Narrower than `looks_sensitive` on purpose. Some callers need to ask about
+    CARD data specifically -- the seed-content guard does, because this repository
+    deliberately seeds fictional SSNs into `applicants.ssn` (its own, separately
+    tracked debt) while claiming, and enforcing, that no card data is present.
+    Sharing the PAN definition keeps the two questions from drifting apart.
+    """
+    return _PAN_CANDIDATE_RE.sub(_redact_pan, text) != text
+
+
 def looks_sensitive(text: str) -> bool:
     """True if `text` carries one of the shapes this module knows how to redact.
 

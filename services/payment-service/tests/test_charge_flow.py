@@ -27,6 +27,7 @@ to a processor for real authorization. test_post_payment_with_a_made_up_
 token_never_captures_or_touches_the_balance is the exact attack: an arbitrary
 token gets declined, no balance-affecting call ever reaches servicing.
 """
+import json
 import logging
 from decimal import Decimal
 
@@ -736,3 +737,69 @@ def test_brand_cannot_carry_a_card_number_into_the_payments_row():
                            last4="1111", brand="visa", amount=10.0,
                            idempotency_key="k")
     assert ok.brand == "visa"
+
+
+# --- the 422 contract ---------------------------------------------------------
+#
+# Reviewed on PR #16. Every Pydantic error carries `loc` as a tuple, and
+# JSONResponse renders a tuple as a JSON array. A blanket str() fallback in
+# `_sanitize_non_finite` -- added to stop an exception object in `ctx` crashing
+# the response -- caught those tuples too and turned `("body",
+# "idempotency_key")` into the string "('body', 'idempotency_key')" on EVERY 422.
+# The status code was unchanged, so nothing failed loudly; a client reading `loc`
+# as an array to attach an error to a form field simply stopped working.
+
+def test_a_422_reports_loc_as_an_array_not_a_stringified_tuple():
+    """The response SHAPE, asserted on a plain missing-field error.
+
+    Deliberately not the interesting validator: this is the shape every client
+    depends on, so it is asserted on the most ordinary rejection there is.
+    """
+    body = _payload()
+    del body["idempotency_key"]
+
+    resp = client.post("/payments", json=body)
+
+    assert resp.status_code == 422, resp.text
+    errors = resp.json()["detail"]
+    assert isinstance(errors, list) and errors, resp.text
+    locs = [e["loc"] for e in errors]
+    assert ["body", "idempotency_key"] in locs, (
+        f"loc is not the standard array: {locs!r}"
+    )
+    for loc in locs:
+        assert isinstance(loc, list), f"loc must be a JSON array, got {type(loc).__name__}: {loc!r}"
+        assert all(isinstance(part, (str, int)) for part in loc), loc
+
+
+def test_a_custom_validator_error_keeps_the_array_and_still_returns_422():
+    """Both halves at once, because fixing either alone regressed the other.
+
+    `idempotency_key` raises ValueError, so Pydantic puts the exception object in
+    `ctx` -- unserializable, and a 500 before it was handled. Handling it with a
+    blanket str() then flattened `loc`. This asserts the status, the array, and
+    that the exception was rendered as text rather than crashing the response.
+    """
+    resp = client.post("/payments", json=_payload(idempotency_key="4111111111111111"))
+
+    assert resp.status_code == 422, resp.text
+    errors = resp.json()["detail"]
+    assert ["body", "idempotency_key"] in [e["loc"] for e in errors]
+    ctxs = [e.get("ctx", {}).get("error") for e in errors if e.get("ctx")]
+    for value in ctxs:
+        assert isinstance(value, str), f"ctx.error must be rendered as text, got {value!r}"
+
+
+def test_a_nonfinite_amount_is_still_reported_rather_than_crashing_the_response():
+    """The case the sanitizer was written for, kept under test.
+
+    Starlette renders JSON with allow_nan=False, so an Infinity echoed back in
+    `input` would raise inside the error response itself.
+    """
+    resp = client.post("/payments", data=json.dumps(_payload(amount=float("inf"))),
+                       headers={"Content-Type": "application/json"})
+
+    assert resp.status_code == 422, resp.text
+    assert "amount" in resp.text
+    for e in resp.json()["detail"]:
+        assert isinstance(e["loc"], list)
