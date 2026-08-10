@@ -126,9 +126,20 @@ def test_a_caller_supplied_idempotency_key_that_looks_like_a_card_is_masked():
     assert VISA not in str(out)
 
 
-def test_a_name_carrying_an_ssn_is_masked():
-    """`charge()` passes the borrower name straight through. Whatever ends up in
-    that field must not reach the log unredacted."""
+def test_a_name_field_is_redacted_whole():
+    """Strengthened from an earlier version, deliberately.
+
+    This used to assert that an SSN inside the name was masked while the name
+    itself survived -- `assert "Robin Fictional" in out["name"]`. That second
+    assertion encoded the assumption D5d disproved: that a cardholder name is
+    safe to log. Logged beside a loan id, an amount and a last4, it identifies a
+    person and what they paid.
+
+    `name` is now a sensitive key, so the whole value is replaced. The SSN case
+    still cannot leak -- it is inside a value that no longer reaches the log at
+    all, which is a stronger guarantee than masking part of it.
+    """
     out = redact_dict({"name": "Robin Fictional 123-45-6789"})
+    assert out["name"] == "[REDACTED]"
     assert "123-45-6789" not in out["name"]
-    assert "Robin Fictional" in out["name"]
+    assert "Robin Fictional" not in out["name"]

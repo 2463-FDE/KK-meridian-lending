@@ -174,7 +174,9 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
-    # creates applicant+application rows, logs full PII (D5 — KEEP)
+    # creates applicant+application rows; intake logs app_id/applicant_id only
+    # (tests/test_intake_pii_not_logged.py). This comment used to claim full-PII
+    # logging here — it was stale, see DEBT.md D5c.
     app_id, access_token = intake.create_application(payload)
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None

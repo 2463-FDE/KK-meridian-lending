@@ -1,7 +1,8 @@
-"""Logging setup.
+"""Logging setup -- wires a stream handler and a file handler. Logs nothing itself.
 
-Logs the full request body on every POST — including PII. No redaction.
-Halcyon said "we need the body to debug." (D5)
+`decision.py` and `graph.py` log `app_id`, scores and reason codes; `decision_events`
+stores no SSN or PAN. No request-body middleware in this service.
+Why this docstring used to say otherwise: DEBT.md D5c.
 """
 import logging
 import os

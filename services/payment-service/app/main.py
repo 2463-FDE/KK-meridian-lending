@@ -80,8 +80,30 @@ def _sanitize_non_finite(obj):
         return str(obj)
     if isinstance(obj, dict):
         return {k: _sanitize_non_finite(v) for k, v in obj.items()}
-    if isinstance(obj, list):
+    # Tuples are CONTAINERS here, not unserializable values. Every Pydantic error
+    # carries `loc` as a tuple, and JSONResponse already renders a tuple as a JSON
+    # array -- so an earlier version of this function, which fell through to
+    # str(), turned `("body", "idempotency_key")` into the string
+    # "('body', 'idempotency_key')" on EVERY 422. That silently changed the shape
+    # of every validation response and would break any client that reads `loc` as
+    # an array to attach an error to a field. Recursed as a list, which is what it
+    # serializes to anyway. Reviewed on PR #16.
+    if isinstance(obj, (list, tuple)):
         return [_sanitize_non_finite(v) for v in obj]
+    # Only genuinely unserializable values are stringified, and they are named
+    # rather than caught by a blanket fallback -- a fallback is what swallowed the
+    # tuples above. A field validator that raises ValueError
+    # (`PaymentIn.idempotency_key` does, to refuse card data in a stored field)
+    # makes Pydantic put the EXCEPTION OBJECT in the error's `ctx`, which
+    # JSONResponse cannot render: that turned a 422 into a 500 reading
+    # "Object of type ValueError is not JSON serializable", so a boundary check
+    # told the caller the server had broken.
+    #
+    # Anything else is returned untouched. If some future value is neither JSON
+    # nor listed here, the response fails loudly instead of quietly reshaping a
+    # contract, which is the better failure of the two.
+    if isinstance(obj, BaseException):
+        return str(obj)
     return obj
 
 

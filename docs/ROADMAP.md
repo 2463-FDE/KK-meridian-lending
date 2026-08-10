@@ -136,7 +136,7 @@ PAN/CVV/SSN. Float-based money math. A README claiming PCI-DSS compliance.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | 🟡 **Partial — three halves, one closed.** ✅ `payment-service.charge()` redacts via a ported copy of `loan-assistant/redactor.py` before logging. ⬜ `servicing-service/app/payments.py` still formats PAN/CVV/SSN into a log line on the legacy `POST /payments`, and origination's request middleware still logs full POST bodies unredacted (D5a). ⬜ Storage: the DB row still keeps the full PAN/CVV on `main` (D5b/D13). **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
+| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | 🟡 **Partial — three halves, one closed.** ✅ `payment-service.charge()` redacts via a ported copy of `loan-assistant/redactor.py` before logging. ✅ `servicing-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. 🟨 Storage: the `pan`/`cvv` columns still exist, nullable and **unwritten** — the seed writers went in PR #11, so both seed files insert `last4`/`brand` only and a fresh database contains no card data (a seed-content test enforces that, failing on a PAN-shaped literal in any inserted column or seed target). PR #15 drops the columns, which closes D5b/D13. *This line previously said the seeds "still write real values into them, so every fresh database contains card data" — true when written, false since PR #11.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
 | 2 | Origination / Decisioning | Bureau + core-banking + processor keys hardcoded in `config.py`, also committed in root `.env` | ✅ Effectively closed — `.env` untracked, hardcoded fallbacks removed from all 7 services. **Confirmed with the project owner: these were training placeholders (`EXAMPLE-LEAKED-KEY-rotate-me`), never real provider accounts** — so there's no live credential to rotate, and the old values still in git history aren't a real security exposure, just cosmetic (a reviewer seeing placeholder-labeled strings in `git log`). A history rewrite remains available on request but isn't fixing an actual vulnerability here | For a *real* deployment this would be a genuine breach risk (a leaked bureau key pulling real credit data under Meridian's name) — confirmed not the case for this training instance specifically |
 | 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
 | 4 | Payments | README claims "PCI-DSS compliant," schema has plaintext `pan`/`cvv` columns | ✅ Fixed:<br>• Removed the false "PCI-DSS compliant" claim<br>• README now states plainly it's **not** compliant and names the specific gaps (raw PAN/CVV storage, plaintext logging half still open) | a false claim is worse than an honest gap |
@@ -419,12 +419,17 @@ the processor token is never persisted. `payments.pan`/`.cvv` stay nullable and
 dead-going-forward for historical rows (ADR 0008, supersedes ADR 0003) — not
 dropped, since retroactively tokenizing old rows needs the processor per row.
 
-**On `main` today, none of that is true yet:** both `payment-service` and
-`servicing-service` still INSERT `pan`/`cvv`, and servicing's legacy
-`POST /payments` still logs PAN/CVV/SSN in the clear. The client review asked
-for the columns to be dropped without waiting for this PR; that is blocked on
-deciding whether to land PR #8 first or duplicate its code changes on `main`
-(see `DEBT.md` D5b/D13).
+**Status on `main` now that PR #8 has merged:** neither `payment-service` nor
+`servicing-service` inserts `pan`/`cvv` any more, and neither logs PAN/CVV/SSN --
+both receive a processor token instead. This paragraph previously said the
+opposite; it described the state while PR #8 was still open and was not updated
+when it merged.
+
+What remains: the `pan`/`cvv` COLUMNS still exist, and `db/init/002_seed.sql`
+and `003_seed_bulk.sql` still write real values into them, so a freshly created
+database contains card data regardless of what the application does. PR #11
+(the `last4` back-fill) is merged; PR #15 drops the columns, and the seed
+writers must go with them (see `DEBT.md` D5b/D13).
 
 **Also on PR #8, beyond this week's original scope** — added during review, not
 from the brief: a captured payment could be authorized on the card and never

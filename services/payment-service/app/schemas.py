@@ -1,7 +1,9 @@
 """Pydantic models for the Payment Service API."""
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from . import redactor
 
 # Review fix: amount was an unconstrained float -- a negative value credited
 # the borrower's balance instead of charging them (servicing computes
@@ -26,18 +28,58 @@ class PaymentIn(BaseModel):
     # contract is provably enforced, not just conventionally followed.
     model_config = {"extra": "forbid"}
 
-    loan_id: int
+    # Bounded to int4, the column's own width. An unbounded int let a caller put
+    # a PAN-shaped number here -- `loan_id=4111111111111111` -- and it reached
+    # the log line before PostgreSQL ever saw it, so the database rejecting the
+    # value afterwards did not help. servicing's `PaymentIn` was bounded in this
+    # PR; this is the same bound on the service that actually takes the charge.
+    # Reviewed on PR #16.
+    loan_id: int = Field(gt=0, le=2_147_483_647)
     processor_token: str = Field(min_length=1, max_length=255)
     last4: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
-    brand: Optional[str] = None
+    # Shape-constrained like `last4` above, and for the same reason: the field
+    # named `pan` is forbidden, but an unconstrained string is a channel for the
+    # same data. charge() INSERTs this verbatim into the payments row before
+    # authorization, so `brand="4111111111111111"` stored a raw card number in
+    # the `brand` column -- while the README claimed the INSERT never writes
+    # one. Card brands are words. Reviewed on PR #16.
+    brand: Optional[str] = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ]{0,19}$")
     amount: float = Field(gt=0, le=_MAX_AMOUNT)
     name: Optional[str] = None
-    method: str = "card"
+    # An enum, not free text. `method` is persisted verbatim in the same INSERT
+    # as `last4`/`brand`, so an unconstrained string was another channel for the
+    # data the field named `pan` is rejected for -- `method="4111111111111111"`
+    # stored a card number in a column nobody would think to look in. There are
+    # exactly two payment methods here. Reviewed on PR #16.
+    method: Literal["card", "ach"] = "card"
     # Review fix: required so a retry/double-click can be recognized as the
     # SAME request instead of charging twice -- see payments.py::charge() and
     # db/migrations/0007's partial unique index. Caller-generated (e.g. a
     # UUID minted once per submit attempt, reused on retry).
+    #
+    # Shape-checked as well as length-checked, for the same reason as `brand` and
+    # `method`: it is caller-controlled, it is persisted, and it is formatted into
+    # log lines and the 409 body. Redaction covers the log; it does not stop the
+    # value being STORED. A key is an opaque correlator, so the charset is the
+    # constraint -- a PAN or an SSN cannot be spelled with it, because neither
+    # survives without its digits being contiguous.
     idempotency_key: str = Field(min_length=1, max_length=255)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _key_is_not_sensitive_content(cls, value: str) -> str:
+        """Reject a key that carries the card/SSN shapes the redactor knows.
+
+        Deliberately reuses `redactor`'s own patterns rather than inventing a
+        second definition of "looks like a PAN": two definitions drift, and the
+        one in the redactor is the one already tested.
+        """
+        if redactor.looks_sensitive(value):
+            raise ValueError(
+                "idempotency_key must be an opaque correlator (a UUID, say), not "
+                "card or personal data -- it is stored on the payments row"
+            )
+        return value
 
 
 class PaymentOut(BaseModel):

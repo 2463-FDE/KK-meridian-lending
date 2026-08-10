@@ -103,12 +103,31 @@ and a borrower login `maria`.
 
 ## Compliance
 
-**Not PCI-DSS compliant** — `payment-service` persists the full PAN and CVV unencrypted
-(`db/init/001_schema.sql`, `payments` table) and logs them at INFO
-(`services/payment-service/app/logging_config.py`). Storing CVV/SAD post-authorization is
-a flat PCI-DSS violation independent of encryption; this predates the current engagement
-(vendor debt, see `adr/0003`) and has not been remediated. Treat any prior claim of PCI-DSS
-compliance for this codebase as false.
+**Not PCI-DSS compliant** — the `payments` table still carries plaintext `pan` and `cvv`
+columns (`db/init/001_schema.sql`). Storing CVV/SAD post-authorization is a flat PCI-DSS
+violation independent of encryption; it predates the current engagement (vendor debt, see
+`adr/0003`) and the columns are still there — tracked as `docs/DEBT.md` D5b/D13.
+
+What is *no longer* true, and was corrected here rather than left to be re-reported: the
+seed scripts do **not** write card values any more (`002_seed.sql`, `003_seed_bulk.sql`
+insert `last4`/`brand` only), so a freshly initialised database does not contain card data.
+The columns are empty and unwritten, waiting to be dropped by the contract migration
+(`db/migrations/0031`). "The columns exist" and "there is card data in them" are different
+claims, and only the first one holds.
+
+This section previously said that `payment-service` logs them at INFO and persists the PAN
+and CVV itself. Both claims are false against the current code, and were verified against
+it: `PaymentIn` sets `extra="forbid"` and accepts only a processor token plus
+`last4`/`brand` (ADR 0008), so a field *named* `pan`, `cvv` or `ssn` is rejected with a 422
+rather than dropped silently; its INSERT writes `last4`/`brand` and never the card number;
+and `charge()` builds its log line through `redact_dict`, which masks sensitive keys and
+runs the PAN/SSN/CVV patterns over every other string value — so card data pushed through
+an *allowed* field (a PAN in `processor_token`, say) is redacted before it is logged, which
+the schema alone would not prevent.
+The remaining exposure is the schema and the seed data, not the application's write or log
+path — see `docs/DEBT.md` D5a for the per-call-site logging verification.
+
+Treat any prior claim of PCI-DSS compliance for this codebase as false.
 
 Credit decisions ARE audited: every `/decisions` call persists an append-only
 `decision_events` row (inputs, model score/version, reason codes — Week 3) alongside the

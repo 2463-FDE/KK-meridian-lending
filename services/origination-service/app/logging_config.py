@@ -1,7 +1,8 @@
-"""Logging setup.
+"""Logging setup -- wires a stream handler and a file handler. Logs nothing itself.
 
-Logs the full request body on every POST — including PII. No redaction.
-Halcyon said "we need the body to debug." (D5)
+Intake logs `app_id`/`applicant_id` only, never the request payload; enforced by
+tests/test_intake_pii_not_logged.py. There is no request-body middleware in this
+service. Why this docstring used to say otherwise: DEBT.md D5c.
 """
 import logging
 import os

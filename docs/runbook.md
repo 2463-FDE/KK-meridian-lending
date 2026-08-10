@@ -87,9 +87,33 @@ orchestrates the LOS flow and calls them over HTTP.
   intake requests pile up. (No circuit breaker / fallback.)
 - **Month-end close.** `reconciliation.peek` totals do not tie out and nothing runs on a
   schedule. Finance reconciles by hand in a spreadsheet.
-- **Logs contain card + SSN data.** `payment-service` logs full PAN/CVV/SSN at INFO to
-  `logs/payment-service.log` (and origination still logs full PII at intake). Do not ship
-  these logs to a third-party aggregator until redaction is added.
+- **No log line writes a card-number-shaped value — and that is narrower than "no SSN".**
+  This entry previously said `payment-service` logs full PAN/CVV/SSN at INFO and that
+  origination logs full PII at intake. Both are false against the current code and were
+  verified line by line. The guarantee is stated as card-number-shaped data rather than
+  "no SSN" because one gap is unclosable by validation: servicing's legacy charge logs
+  `loan_id` before the insert that would reject a nonexistent loan, and a nine-digit
+  integer is both a plausible loan id and an SSN — `412559981` is accepted by any bound
+  that does not also refuse real ids (see `servicing-service/app/logging_config.py`).
+  Treat an SSN-shaped identifier in that log as possible; everything below is what was
+  actually verified:
+  `payment-service`'s `PaymentIn` sets `extra="forbid"` and accepts only a processor
+  token plus `last4`/`brand`, so a field *named* `pan`/`cvv`/`ssn` is rejected with a
+  422 (ADR 0008) — that is a check on field names, not on content, so it is the
+  redactor and not the schema that covers card data pushed through an allowed field
+  (a PAN in `processor_token`). `charge()` logs `redact_dict` output, which masks
+  sensitive keys and runs the PAN/SSN/CVV patterns over every other string value, with
+  the cardholder name omitted entirely;
+  `servicing-service`'s legacy charge logs `loan_id`/`amount`/`method` only; and
+  `origination-service`'s intake logs `app_id`/`applicant_id` (PR #6 review, Gap C).
+  **What logs still carry:** identifiers and financial decision data — applicant,
+  application and loan ids, model scores, decisions, reason codes, balances, amounts,
+  and `last4`/`brand`. Those are the correlation fields operations needs; they are not
+  claimed to be free of privacy consequence, and `last4` and processor tokens remain
+  security-relevant. **Scope:** verified at application level only. Reverse-proxy,
+  container-runtime and deployment-platform logging were not available in this
+  repository and were not tested, so confirm those before shipping logs to a
+  third-party aggregator. See `docs/DEBT.md` D5a.
 - **Secrets are in the repo.** `.env` is committed and the services' `config.py` hardcode
   fallbacks — including Experian/core-banking keys in `decision-service` and the processor
   key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)

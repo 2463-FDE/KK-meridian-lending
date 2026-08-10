@@ -34,7 +34,17 @@ _CVV_RE = re.compile(
 
 _SENSITIVE_KEYS = frozenset(
     {"pan", "cvv", "ssn", "card_number", "card_no", "social_security_number",
-     "processor_token"}
+     "processor_token",
+     # Cardholder name. Reviewed finding (D5d): charge() logged it in clear at
+     # INFO alongside payment context, because this set did not treat it as
+     # sensitive. A name beside a loan id, an amount and a last4 identifies a
+     # person and what they paid -- which is the thing log redaction exists to
+     # prevent, whether or not it is card data under PCI.
+     #
+     # The call site no longer passes it at all; this entry is the backstop, so
+     # that a future one cannot reintroduce the leak merely by including the
+     # field. Both spellings, since either is plausible for the same value.
+     "name", "cardholder_name"}
 )
 
 
@@ -62,6 +72,35 @@ def redact_str(text: str) -> str:
     text = _SSN_RE.sub("[SSN-REDACTED]", text)
     text = _CVV_RE.sub(lambda m: m.group(0).replace(m.group(1), "[CVV-REDACTED]"), text)
     return text
+
+
+def looks_like_pan(text: str) -> bool:
+    """True if `text` contains a Luhn-valid card number.
+
+    Narrower than `looks_sensitive` on purpose. Some callers need to ask about
+    CARD data specifically -- the seed-content guard does, because this repository
+    deliberately seeds fictional SSNs into `applicants.ssn` (its own, separately
+    tracked debt) while claiming, and enforcing, that no card data is present.
+    Sharing the PAN definition keeps the two questions from drifting apart.
+    """
+    return _PAN_CANDIDATE_RE.sub(_redact_pan, text) != text
+
+
+def looks_sensitive(text: str) -> bool:
+    """True if `text` carries one of the shapes this module knows how to redact.
+
+    For deciding whether to REJECT a value rather than mask it. Redaction covers
+    the log; it does nothing about a value that gets stored, so a caller-supplied
+    field that lands on a database row needs to be refused at the boundary
+    instead (`schemas.PaymentIn.idempotency_key`, reviewed on PR #16).
+
+    Defined here, next to the patterns, on purpose: a second private copy of
+    "looks like a PAN" in the schema module would drift from this one, and this
+    is the copy with tests and Luhn validation behind it. Equivalent to "does
+    redaction change this string", which is the property actually wanted -- so it
+    cannot silently disagree with `redact_str`.
+    """
+    return redact_str(text) != text
 
 
 def redact_dict(data: dict) -> dict:

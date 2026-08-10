@@ -27,6 +27,8 @@ to a processor for real authorization. test_post_payment_with_a_made_up_
 token_never_captures_or_touches_the_balance is the exact attack: an arbitrary
 token gets declined, no balance-affecting call ever reaches servicing.
 """
+import json
+import logging
 from decimal import Decimal
 
 import httpx as httpx_module
@@ -611,3 +613,193 @@ def test_authorize_charge_fails_closed_when_no_processor_is_configured(monkeypat
 
     with pytest.raises(processor_module.ProcessorUnavailableError):
         processor_module.authorize_charge(_VALID_MOCK_TOKEN, 250.0)
+
+
+# --- caller-controlled values in the RETRY logs ------------------------------
+#
+# Reviewed on PR #16. The first charge log goes through redact_dict, but the
+# duplicate-retry branches interpolated `idempotency_key` directly -- so a
+# caller using a PAN or an SSN as their key had it masked on the initial
+# request and written in the clear on the retry, which is the one request that
+# is guaranteed to happen twice.
+
+@pytest.mark.parametrize("secret", ["4111111111111111", "412-55-9981"])
+def test_the_api_refuses_a_key_carrying_card_or_personal_data(fake_db, caplog, secret):
+    """The boundary, which is the fix that actually removes the exposure.
+
+    Redaction protects the log; it does nothing about the copy PostgreSQL keeps,
+    and `idempotency_key` is persisted on the payments row. So a key carrying a
+    PAN or an SSN is refused outright -- 422, nothing inserted, and the value
+    never reaches a log line either.
+
+    422 and not 500 is part of the assertion. Pydantic puts the raised
+    ValueError object into the error's `ctx`, which this service's own 422
+    handler could not serialise, so the first version of this validator turned a
+    rejected request into "internal error" -- a boundary check that reports the
+    server is broken is not a boundary check.
+    """
+    with caplog.at_level(logging.INFO, logger=payments.log.name):
+        resp = client.post("/payments", json=_payload(idempotency_key=secret))
+
+    assert resp.status_code == 422, resp.text
+    assert "idempotency_key" in resp.text
+    inserts = [c for c in fake_db.calls if c[0].strip().startswith("INSERT")]
+    assert not inserts, "a rejected request still wrote a payments row"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert secret not in logged, f"the rejected value was logged: {logged!r}"
+
+
+@pytest.mark.parametrize("secret,marker", [
+    ("4111111111111111", "[PAN-REDACTED]"),
+    ("412-55-9981", "[SSN-REDACTED]"),
+])
+def test_the_duplicate_branch_still_redacts_a_key_that_bypassed_the_api(
+    fake_db, monkeypatch, caplog, secret, marker
+):
+    """Defence in depth, exercised through the REAL duplicate branch.
+
+    The validator above stops such a key arriving over HTTP, so this calls
+    `charge()` directly -- which is not a contrivance: `app/reconcile.py` drives
+    the same function from stored rows, and a key predating the validator is
+    exactly what it would replay.
+
+    The previous version of this test called `log.info` itself with an
+    already-redacted string, which asserted that logging a redacted value logs a
+    redacted value -- true of any implementation, including one that formats the
+    raw key three lines further down. Review of PR #16 asked for the actual
+    duplicate flow, and that is the right ask: the redaction has to happen inside
+    `charge()`, on the retry path, where the defect was. So this charges twice and
+    reads `caplog`; the second call takes the duplicate branch.
+    """
+    monkeypatch.setattr(
+        payments.httpx, "post", lambda *a, **k: _FakeServicingResponse()
+    )
+    kwargs = dict(loan_id=42, processor_token=_VALID_MOCK_TOKEN, last4="1111",
+                  brand="visa", amount=125.0, method="card", idempotency_key=secret)
+
+    with caplog.at_level(logging.INFO, logger=payments.log.name):
+        first = payments.charge(**kwargs)
+        second = payments.charge(**kwargs)
+
+    # The precondition that makes this meaningful: the second call really did
+    # take the duplicate path rather than charging again.
+    assert first["payment_id"] == second["payment_id"]
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "duplicate POST /payments" in logged, (
+        "the duplicate branch never logged, so this test proves nothing about it"
+    )
+    assert secret not in logged, (
+        f"the retry log wrote the caller's key verbatim: {logged!r}"
+    )
+    assert marker in logged
+
+
+def test_the_conflict_message_does_not_echo_a_raw_key(fake_db, monkeypatch):
+    """The 409 body is caller-visible, and it was formatting the key verbatim.
+
+    Asserted on the RAISED ERROR, not on `inspect.getsource`. Matching source
+    text passes whenever the string happens to be spelled that way and fails on a
+    refactor that is still correct -- it tests the file, not the behaviour. The
+    key here is one the API would now reject, so `charge()` is called directly for
+    the same reason as the test above.
+    """
+    monkeypatch.setattr(
+        payments.httpx, "post", lambda *a, **k: _FakeServicingResponse()
+    )
+    secret = "4111111111111111"
+    base = dict(processor_token=_VALID_MOCK_TOKEN, last4="1111", brand="visa",
+                amount=250.0, method="card", idempotency_key=secret)
+
+    payments.charge(loan_id=42, **base)
+    # Same key, different loan: the conflict the 409 exists for. `charge()` raises
+    # the domain error; the router is what turns it into a 409, so this asserts on
+    # the message that becomes the response body.
+    with pytest.raises(payments.IdempotencyKeyConflict) as exc:
+        payments.charge(loan_id=43, **base)
+
+    message = str(exc.value)
+    assert secret not in message, f"the conflict echoed the caller's key: {message!r}"
+    assert "[PAN-REDACTED]" in message
+
+
+def test_brand_cannot_carry_a_card_number_into_the_payments_row():
+    """`last4` was constrained and `brand` was not, though both are persisted."""
+    from app import schemas
+
+    with pytest.raises(Exception) as exc:
+        schemas.PaymentIn(loan_id=1, processor_token="tok_test_placeholder",
+                          last4="1111", brand="4111111111111111", amount=10.0,
+                          idempotency_key="k")
+    assert "brand" in str(exc.value)
+
+    ok = schemas.PaymentIn(loan_id=1, processor_token="tok_test_placeholder",
+                           last4="1111", brand="visa", amount=10.0,
+                           idempotency_key="k")
+    assert ok.brand == "visa"
+
+
+# --- the 422 contract ---------------------------------------------------------
+#
+# Reviewed on PR #16. Every Pydantic error carries `loc` as a tuple, and
+# JSONResponse renders a tuple as a JSON array. A blanket str() fallback in
+# `_sanitize_non_finite` -- added to stop an exception object in `ctx` crashing
+# the response -- caught those tuples too and turned `("body",
+# "idempotency_key")` into the string "('body', 'idempotency_key')" on EVERY 422.
+# The status code was unchanged, so nothing failed loudly; a client reading `loc`
+# as an array to attach an error to a form field simply stopped working.
+
+def test_a_422_reports_loc_as_an_array_not_a_stringified_tuple():
+    """The response SHAPE, asserted on a plain missing-field error.
+
+    Deliberately not the interesting validator: this is the shape every client
+    depends on, so it is asserted on the most ordinary rejection there is.
+    """
+    body = _payload()
+    del body["idempotency_key"]
+
+    resp = client.post("/payments", json=body)
+
+    assert resp.status_code == 422, resp.text
+    errors = resp.json()["detail"]
+    assert isinstance(errors, list) and errors, resp.text
+    locs = [e["loc"] for e in errors]
+    assert ["body", "idempotency_key"] in locs, (
+        f"loc is not the standard array: {locs!r}"
+    )
+    for loc in locs:
+        assert isinstance(loc, list), f"loc must be a JSON array, got {type(loc).__name__}: {loc!r}"
+        assert all(isinstance(part, (str, int)) for part in loc), loc
+
+
+def test_a_custom_validator_error_keeps_the_array_and_still_returns_422():
+    """Both halves at once, because fixing either alone regressed the other.
+
+    `idempotency_key` raises ValueError, so Pydantic puts the exception object in
+    `ctx` -- unserializable, and a 500 before it was handled. Handling it with a
+    blanket str() then flattened `loc`. This asserts the status, the array, and
+    that the exception was rendered as text rather than crashing the response.
+    """
+    resp = client.post("/payments", json=_payload(idempotency_key="4111111111111111"))
+
+    assert resp.status_code == 422, resp.text
+    errors = resp.json()["detail"]
+    assert ["body", "idempotency_key"] in [e["loc"] for e in errors]
+    ctxs = [e.get("ctx", {}).get("error") for e in errors if e.get("ctx")]
+    for value in ctxs:
+        assert isinstance(value, str), f"ctx.error must be rendered as text, got {value!r}"
+
+
+def test_a_nonfinite_amount_is_still_reported_rather_than_crashing_the_response():
+    """The case the sanitizer was written for, kept under test.
+
+    Starlette renders JSON with allow_nan=False, so an Infinity echoed back in
+    `input` would raise inside the error response itself.
+    """
+    resp = client.post("/payments", data=json.dumps(_payload(amount=float("inf"))),
+                       headers={"Content-Type": "application/json"})
+
+    assert resp.status_code == 422, resp.text
+    assert "amount" in resp.text
+    for e in resp.json()["detail"]:
+        assert isinstance(e["loc"], list)
