@@ -272,19 +272,14 @@ CREATE TABLE IF NOT EXISTS balances (
 -- PAN or a CVV any more (ADR 0008, supersedes ADR 0003) -- new rows carry only
 -- last4/brand from the processor's token response.
 --
--- pan/cvv still exist here on purpose, for one release. Removing them from a
--- fresh install while db/migrations has only reached the EXPAND step (0029,
--- back-fill last4) would make a fresh database and a migrated one disagree,
--- and db/tests/test_migration_paths_converge.py compares exactly that. They go
--- in the CONTRACT step, db/migrations/0031, and come out of this file in the
--- same release.
+-- No PAN and no CVV: db/migrations/0031 dropped them from existing databases
+-- (after 0029 back-filled last4 so payment history still displays), and a fresh
+-- volume has never created them since. This file and that migration changed in
+-- the same release on purpose -- the parity suite compares a fresh install
+-- against a migrated one.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
-    -- Legacy, write-path-dead, dropped by db/migrations/0031. No application
-    -- code reads or writes either column as of this release.
-    pan         TEXT,
-    cvv         TEXT,
     last4       TEXT,                 -- display only; never enough to reconstruct a PAN
     brand       TEXT,                 -- e.g. "visa", "mastercard" -- display only
     amount      NUMERIC(14,2) NOT NULL,  -- D12: was DOUBLE PRECISION

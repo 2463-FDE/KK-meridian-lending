@@ -67,14 +67,12 @@ class Payment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     loan_id: Mapped[int | None] = mapped_column(ForeignKey("loans.id"), nullable=True)
-    # EXPAND-PHASE ONLY, read-only. Declared so _display_last4() can fall back to
-    # the last four digits of a legacy PAN during the window where this service
-    # version is live but db/migrations/0029 has not yet back-filled `last4`.
-    # Deploys are not atomic and this change does not enforce migration ordering,
-    # so without it every historical payment's card column blanks silently.
-    # Nothing writes this column. REMOVE together with the fallback in PR #15,
-    # the contract step, once 0029 is deployed and verified.
-    pan: Mapped[str | None] = mapped_column(String, nullable=True)
+    # `pan` is deliberately NOT mapped. It was declared during the expand phase so
+    # _display_last4() could fall back to a legacy PAN before 0029 back-filled
+    # `last4`; that annotation said to remove it here, in the contract step, and
+    # this is that removal. Mapping it would defeat the point of dropping it:
+    # SQLAlchemy names every mapped column in its SELECT, so leaving this line in
+    # would make every payment query fail the moment 0031 commits.
     last4: Mapped[str | None] = mapped_column(String, nullable=True)
     brand: Mapped[str | None] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
