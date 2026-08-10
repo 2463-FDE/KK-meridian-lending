@@ -328,7 +328,22 @@ def _signal_topic_words(signal) -> set[str]:
     return {w for w in words if len(w) > 2 and w not in _LABEL_STOPWORDS}
 
 
-def _macro_claims(text: str, topic: set) -> list:
+# Words that may sit BETWEEN a topic word and its figure without breaking the
+# link: the signal's own label parts, the generic label words, and ordinary
+# connectors. A fixed token window was not enough -- the model is handed the full
+# label in the prompt, so "The US unemployment rate (seasonally adjusted) is
+# 11.9%" is the phrasing to expect, and its four preceding tokens are
+# "rate seasonally adjusted is", which excludes the topic word itself. Reviewed
+# on PR #13.
+_CONNECTOR_WORDS = frozenset({
+    "is", "was", "are", "were", "at", "of", "the", "a", "an", "to", "and",
+    "currently", "now", "stands", "sits", "remains", "held", "about",
+    "approximately", "around", "roughly", "near", "nearly", "just", "still",
+    "reported", "measured", "recorded", "published",
+})
+
+
+def _macro_claims(text: str, topic: set, signal) -> list:
     """Unit-shaped figures in `text` that are ABOUT the signal, with their values.
 
     A sentence can mention the signal and also carry a percentage that has
@@ -337,26 +352,38 @@ def _macro_claims(text: str, topic: set) -> list:
     relevant, while the requested loan is 22% of annual income" was dropped
     because 22 != 4.2, and if it was the only sentence the endpoint answered 502.
     Worse, it also dropped sentences whose macro figure was CORRECT: "the loan is
-    22% of income and unemployment is 4.2%" failed on the 22. Reviewed on PR #13.
+    22% of income and unemployment is 4.2%" failed on the 22.
 
-    So each figure is bound to its own local context instead of to the sentence:
-    a topic word must sit within the few words immediately BEFORE it ("the
-    unemployment rate is 11.9%") or immediately AFTER it ("11.9% unemployment").
-    That is how the claim is actually phrased in English, and it is what
-    separates it from a loan-to-income ratio in the same breath.
+    So each figure is bound to its own context rather than to the sentence. The
+    binding walks backwards from the figure and keeps going THROUGH label words,
+    generic label words and connectors, stopping at the first word that is none of
+    those -- so it reaches `unemployment` across "rate (seasonally adjusted) is",
+    and stops dead at `loan` in "the requested loan is". A fixed four-token window
+    could not do both, and the label phrasing is the one the prompt itself
+    supplies. Two tokens after the figure are also checked, for "11.9%
+    unemployment". Reviewed on PR #13.
 
-    Bounded rather than clever on purpose: this is a backstop for a model that
-    was asked not to restate the figure at all, so it should refuse to guess
-    rather than reach for a parser. A figure with no topic word near it is not
-    treated as a macro claim -- stated as a limitation in the caller.
+    Bounded rather than clever on purpose: this is a backstop for a model asked
+    not to restate the figure at all, so it refuses to guess rather than reaching
+    for a parser. A figure with no topic word reachable from it is not treated as
+    a macro claim -- stated as a limitation in the caller.
     """
-    words_before, words_after = 4, 2
+    label_words = {w.strip("(),.").lower() for w in signal.label.split()}
+    passable = label_words | _LABEL_STOPWORDS | _CONNECTOR_WORDS | topic
     claims = []
     for match in _UNIT_FIGURE_RE.finditer(text):
-        before = _WORD_RE.findall(text[:match.start()])[-words_before:]
-        after = _WORD_RE.findall(text[match.end():])[:words_after]
-        context = {w.strip("(),.").lower() for w in before + after}
-        if context & topic:
+        before = _WORD_RE.findall(text[:match.start()])
+        after = _WORD_RE.findall(text[match.end():])[:2]
+        found = any(w.strip("(),.").lower() in topic for w in after)
+        # Backwards through everything the label may legitimately put in the way.
+        for raw in reversed(before):
+            word = raw.strip("(),.").lower()
+            if word in topic:
+                found = True
+                break
+            if word not in passable:
+                break
+        if found:
             claims.append(float(match.group(1)))
     return claims
 
@@ -394,7 +421,7 @@ def _drops_a_contradicting_claim(text: str, signal) -> bool:
     published = float(signal.value)
     # Only figures bound to the signal's own topic -- see _macro_claims. A
     # percentage elsewhere in the sentence is somebody else's number.
-    claims = _macro_claims(text, topic)
+    claims = _macro_claims(text, topic, signal)
     if not claims:
         return False
 

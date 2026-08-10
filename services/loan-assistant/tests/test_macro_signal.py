@@ -717,3 +717,43 @@ def test_a_ratio_sentence_with_no_topic_word_is_untouched(monkeypatch):
     result = _summarize_with(monkeypatch, "The payment is 31% of monthly income.")
 
     assert result.summary == "The payment is 31% of monthly income."
+
+
+# --- the label phrasing the prompt itself supplies ----------------------------
+#
+# Reviewed on PR #13, after the topic-binding fix. A fixed four-token window
+# looked back over "rate seasonally adjusted is" and never reached
+# `unemployment`, so the model's own full-label phrasing -- the one most likely
+# to appear, because that exact parenthetical label is in the prompt -- slipped
+# a false 11.9% past the guard and onto the officer's screen beside the cited
+# 4.2%. The binding now walks through label words, generic label words and
+# connectors, and stops at the first word that is none of those.
+
+@pytest.mark.parametrize("sentence", [
+    "The US unemployment rate (seasonally adjusted) is 11.9%.",
+    "The US unemployment rate (seasonally adjusted) is reported at 11.9%.",
+    "The U.S. unemployment rate is currently about 11.9%.",
+])
+def test_a_contradiction_stated_with_the_full_label_is_removed(monkeypatch, sentence):
+    """The reviewed phrasing, and two variants that put more words in the way."""
+    result = _summarize_with(monkeypatch, sentence + " Income is adequate.")
+
+    assert "11.9" not in result.summary, (
+        "a false figure stated with the signal's own label survived"
+    )
+    assert "Income is adequate" in result.summary
+
+
+def test_walking_through_label_words_still_stops_at_an_unrelated_subject(monkeypatch):
+    """The other half: the walk must not reach across a different noun.
+
+    `loan` is not a label word, a stopword or a connector, so the backward walk
+    stops there and the 22% is left alone. Without this the widened binding would
+    simply delete more prose than the fixed window did.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "Unemployment remains relevant, while the requested loan is 22% of annual income.",
+    )
+
+    assert "22%" in result.summary
