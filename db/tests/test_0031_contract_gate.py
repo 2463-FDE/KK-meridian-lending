@@ -949,3 +949,74 @@ def test_a_nested_function_does_not_rely_on_a_later_rebinding(tmp_path):
         "    return inner\n"
     ))
     assert hits, "a closure was cleared by the binding at its definition point"
+
+
+# --- annotated assignments bind like unannotated ones -------------------------
+#
+# Reviewed on PR #15. `sql: str = ...` is the same statement as `sql = ...` with a
+# type annotation on it, and the checker handled only `ast.Assign` at three of its
+# four binding sites. So an annotated assignment bound nothing: the name stayed
+# unknown, no unresolved state was recorded for it, and `db.query(sql)` carried no
+# table literal of its own -- the run reported clean over a live dynamic read.
+# Annotating a line is not a semantic change and must not be a way through.
+
+_DYNAMIC_ANNOTATED = '''
+import os
+
+_COLUMN = os.environ["COL"]
+
+
+def read():
+    sql: str = "SELECT " + _COLUMN + " FROM payments"
+    return db.query(sql)
+'''
+
+_DYNAMIC_PLAIN = _DYNAMIC_ANNOTATED.replace("sql: str =", "sql =")
+
+
+def test_an_annotated_dynamic_sql_assignment_fails_closed(tmp_path):
+    """The reported case. Refused, not reported clean."""
+    hits = _run_checker_over(tmp_path, _DYNAMIC_ANNOTATED)
+    assert hits, (
+        "an annotated assignment of dynamically composed payments SQL was "
+        "reported clean; it could authorize the destructive migration"
+    )
+
+
+def test_annotation_does_not_change_the_verdict(tmp_path):
+    """The two forms are the same statement, so they must agree.
+
+    Asserted as a PAIR rather than only on the annotated form: a checker that
+    refused everything would pass the test above while being useless, and this
+    pins the equivalence rather than one arbitrary outcome.
+    """
+    annotated = _run_checker_over(tmp_path, _DYNAMIC_ANNOTATED)
+    plain = _run_checker_over(tmp_path, _DYNAMIC_PLAIN)
+    assert bool(annotated) == bool(plain), (
+        f"annotation changed the verdict: annotated={annotated!r} plain={plain!r}"
+    )
+
+
+def test_an_annotated_static_statement_is_still_clean(tmp_path):
+    """The other direction: annotations must not manufacture findings either."""
+    hits = _run_checker_over(tmp_path, '''
+def read():
+    sql: str = "SELECT last4, brand FROM payments WHERE id = %s"
+    return db.query(sql, (1,))
+''')
+    assert not hits, f"a static annotated statement was reported as a reader: {hits!r}"
+
+
+def test_an_annotation_without_a_value_binds_nothing(tmp_path):
+    """`sql: str` declares a name and assigns nothing.
+
+    Treating it as a binding would either crash on the missing value or wipe a
+    real one, so it is skipped -- and the real assignment above it still governs.
+    """
+    hits = _run_checker_over(tmp_path, '''
+def read():
+    sql: str
+    sql = "SELECT pan FROM payments"
+    return db.query(sql)
+''')
+    assert hits, "the declaration swallowed the assignment that followed it"

@@ -149,7 +149,14 @@ def _composed_payments_sql(pattern):
             # And SQL assigned to a name first, the `sql = ...; db.query(sql)`
             # shape -- caught at the assignment, because that is where the
             # composition happens and where the fix belongs.
-            elif (isinstance(node, ast.Assign)
+            #
+            # `ast.AnnAssign` as well as `ast.Assign`: `sql: str = f"..."` is the
+            # same statement with a type annotation on it, and handling only the
+            # unannotated form left the annotated one invisible to this test AND
+            # to the checker -- `db.query(sql)` carries no table literal of its
+            # own, so nothing downstream noticed either. Reviewed on PR #15.
+            elif (isinstance(node, (ast.Assign, ast.AnnAssign))
+                  and node.value is not None
                   and _is_string_expression(node.value)
                   and _names_payments(node.value, pattern)
                   and not isinstance(node.value, ast.Constant)):
@@ -201,3 +208,48 @@ def test_the_walk_actually_reaches_the_payments_readers(table_pattern):
         "code; the walk or the pattern is broken, which would make the "
         "invariant test above vacuous" % literals
     )
+
+
+def test_the_walk_treats_an_annotated_assignment_like_a_plain_one(table_pattern):
+    """Reviewed on PR #15: `sql: str = f"..."` was invisible to this walk.
+
+    It handled `ast.Assign` only, so an annotated assignment of composed payments
+    SQL passed -- and the `db.query(sql)` that followed carries no table literal
+    of its own, so nothing else caught it either. Annotating a line is not a
+    semantic change and must not be a way through.
+
+    Exercised on synthetic sources rather than by planting code in a service, so
+    the assertion is about the walk itself and cannot be satisfied by the tree
+    happening to be clean.
+    """
+    annotated = ast.parse(
+        'def read(column):\n'
+        '    sql: str = f"SELECT {column} FROM payments"\n'
+        '    return db.query(sql)\n'
+    )
+    plain = ast.parse(
+        'def read(column):\n'
+        '    sql = f"SELECT {column} FROM payments"\n'
+        '    return db.query(sql)\n'
+    )
+
+    def composed(tree):
+        found = []
+        for node in ast.walk(tree):
+            if (isinstance(node, (ast.Assign, ast.AnnAssign))
+                    and node.value is not None
+                    and _is_string_expression(node.value)
+                    and _names_payments(node.value, table_pattern)
+                    and not isinstance(node.value, ast.Constant)):
+                found.append(_describe(node.value))
+        return found
+
+    assert composed(annotated), "an annotated composed assignment was not seen"
+    assert composed(annotated) == composed(plain), (
+        "the annotated and plain forms are the same statement and must be "
+        "reported identically"
+    )
+
+    # And a declaration with no value binds nothing, rather than crashing on
+    # `node.value` being None.
+    assert composed(ast.parse("def read():\n    sql: str\n")) == []

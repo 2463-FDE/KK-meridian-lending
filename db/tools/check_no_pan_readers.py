@@ -187,18 +187,42 @@ def _docstring_lines(source: str) -> set[int]:
 _SEQUENCES: dict[str, list] = {}
 
 
+def _single_binding(node):
+    """(name, value) for a statement that binds ONE name, else (None, None).
+
+    Normalizes `x = ...` and `x: str = ...` into one shape. They are the same
+    statement with an annotation on it, and handling only the first left the
+    annotated form invisible: `sql: str = f"SELECT {column} FROM payments"`
+    followed by `db.query(sql)` resolved to nothing, and since the execute
+    argument carries no table literal of its own, nothing downstream noticed
+    either -- the checker reported clean on a live dynamic read. `AnnAssign`
+    without a value (`x: str`) binds nothing and is skipped. Reviewed on PR #15.
+    """
+    if isinstance(node, ast.Assign):
+        if len(node.targets) != 1:
+            return None, None
+        target = node.targets[0]
+    elif isinstance(node, ast.AnnAssign):
+        if node.value is None:
+            return None, None
+        target = node.target
+    else:
+        return None, None
+    if not isinstance(target, ast.Name):
+        return None, None
+    return target.id, node.value
+
+
 def _collect_sequences(tree: ast.AST) -> dict:
     found = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            value = node.value
-            if isinstance(target, ast.Name) and isinstance(value, (ast.Tuple, ast.List)):
-                if value.elts and all(
-                    isinstance(e, ast.Constant) and isinstance(e.value, str)
-                    for e in value.elts
-                ):
-                    found[target.id] = list(value.elts)
+        name, value = _single_binding(node)
+        if name is not None and isinstance(value, (ast.Tuple, ast.List)):
+            if value.elts and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in value.elts
+            ):
+                found[name] = list(value.elts)
     return found
 
 
@@ -376,16 +400,15 @@ def _bindings_for_scope(scope: ast.AST, inherited: dict[str, str]) -> dict[str, 
     """
     names = dict(inherited)
     for node in _nodes_in_scope(scope):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            if isinstance(target, ast.Name):
-                text = _fold(node.value, names)
-                if text is not None:
-                    names[target.id] = text
-                else:
-                    # Rebound to something we cannot resolve: the old value is
-                    # no longer what this name means here.
-                    names.pop(target.id, None)
+        name, value = _single_binding(node)
+        if name is not None:
+            text = _fold(value, names)
+            if text is not None:
+                names[name] = text
+            else:
+                # Rebound to something we cannot resolve: the old value is
+                # no longer what this name means here.
+                names.pop(name, None)
     return names
 
 
@@ -637,28 +660,27 @@ def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), u
                     unresolved.add(name)
 
         # ...then this statement's own effect on the bindings.
-        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-            target = stmt.targets[0]
-            if isinstance(target, ast.Name):
-                text = _fold(stmt.value, names)
-                if text is not None:
-                    names[target.id] = text
-                    unresolved.discard(target.id)
-                else:
-                    names.pop(target.id, None)
-                    # Assigned from STRING construction this checker could not
-                    # finish resolving -- an f-string or concatenation with an
-                    # unknown piece. If that reaches execute(), it is dynamic
-                    # SQL and the run fails closed.
-                    #
-                    # A plain call (`stmt = select(...)`, `sql = build()`) is
-                    # deliberately NOT marked: telling a SQLAlchemy construct
-                    # apart from a function returning a SQL string means
-                    # following calls across the application, which this tool
-                    # does not do. Stated in the module docstring as a limit
-                    # rather than guessed at.
-                    if _looks_like_built_sql(stmt.value):
-                        unresolved.add(target.id)
+        bound_name, bound_value = _single_binding(stmt)
+        if bound_name is not None:
+            text = _fold(bound_value, names)
+            if text is not None:
+                names[bound_name] = text
+                unresolved.discard(bound_name)
+            else:
+                names.pop(bound_name, None)
+                # Assigned from STRING construction this checker could not
+                # finish resolving -- an f-string or concatenation with an
+                # unknown piece. If that reaches execute(), it is dynamic
+                # SQL and the run fails closed.
+                #
+                # A plain call (`stmt = select(...)`, `sql = build()`) is
+                # deliberately NOT marked: telling a SQLAlchemy construct
+                # apart from a function returning a SQL string means
+                # following calls across the application, which this tool
+                # does not do. Stated in the module docstring as a limit
+                # rather than guessed at.
+                if _looks_like_built_sql(bound_value):
+                    unresolved.add(bound_name)
 
 
 def _scan_scope(scope, inherited, doc_nodes, hits) -> None:
