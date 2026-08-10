@@ -690,3 +690,74 @@ def test_a_normal_amount_still_creates_an_offer(pg):
     resp = _post(app_id)
     assert resp.status_code == 200, resp.text
     assert resp.json()["disclosure"]["final_payment"] > 0
+
+
+# --- legacy offer whose decision_id was never set -----------------------------
+#
+# Reviewed on PR #10. `offers.decision_id` and `offers.app_id` are two separate
+# UNIQUE constraints, and the INSERT sets both -- but rows written before
+# migration 0011 have `app_id` populated and `decision_id` NULL. For those the
+# INSERT collides on `offers_app_id_key`, which the ON CONFLICT clause does not
+# target, so it raises UniqueViolation; the fallback then read the offer back
+# `WHERE decision_id = %s`, found nothing, and reported "no approved decision on
+# record" for an application that has both a decision and an offer.
+
+def _seed_offer_without_decision_id(conn, app_id, *, accepted=False, schedule=False):
+    """The pre-0011 shape: app_id set, decision_id NULL."""
+    _rows(
+        conn,
+        "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
+        "monthly_payment, amount_financed, total_of_payments, accepted_at) "
+        "VALUES (%s, NULL, 0.030, 5.946, 768.11, 407.0, 8730.0, 9768.11, %s)",
+        (app_id, "2026-01-01T00:00:00+00:00" if accepted else None),
+    )
+    return _rows(conn, "SELECT * FROM offers WHERE app_id = %s", (app_id,))[0]
+
+
+def test_a_legacy_offer_with_a_null_decision_id_converges_to_one_boardable_offer(pg):
+    """The reported blocker, end to end.
+
+    Approved decision + existing unaccepted offer + matching app_id +
+    decision_id NULL. A regenerate must find that offer by app_id, adopt it,
+    stamp its decision_id from the decision it belongs to, and return ONE
+    complete boardable offer -- not a 422 claiming no decision exists, and not a
+    second offer row.
+    """
+    app_id = _seed_approved_application(pg)
+    before = _seed_offer_without_decision_id(pg, app_id)
+    assert before["decision_id"] is None
+    assert before["schedule_version"] is None
+
+    resp = _post(app_id)
+
+    assert resp.status_code == 200, resp.text
+    rows = _rows(pg, "SELECT * FROM offers WHERE app_id = %s", (app_id,))
+    assert len(rows) == 1, "a second offer row was created for the same application"
+    row = rows[0]
+    assert row["id"] == before["id"], "the existing offer was replaced instead of repaired"
+    assert row["decision_id"] == app_id, "decision_id was left NULL"
+    # Boardable: every contractual fact present.
+    for field in ("principal", "note_rate_pct", "monthly_payment",
+                  "regular_payment_count", "final_payment", "term_months",
+                  "schedule_version"):
+        assert row[field] is not None, f"{field} still missing -- offer cannot board"
+
+
+def test_an_accepted_legacy_offer_with_a_null_decision_id_is_not_rewritten(pg):
+    """Adopting the row must not become a licence to change agreed terms.
+
+    Stamping `decision_id` is bookkeeping -- it records which decision the offer
+    already belonged to. Regenerating the money is not, and an accepted offer's
+    terms are immutable. So this asserts the monetary columns are byte-identical
+    afterwards, whatever the endpoint decides to do with the request.
+    """
+    app_id = _seed_approved_application(pg)
+    before = _seed_offer_without_decision_id(pg, app_id, accepted=True)
+
+    _post(app_id)
+
+    after = _rows(pg, "SELECT * FROM offers WHERE app_id = %s", (app_id,))[0]
+    assert len(_rows(pg, "SELECT * FROM offers WHERE app_id = %s", (app_id,))) == 1
+    for field in ("apr", "finance_charge", "monthly_payment", "amount_financed",
+                  "total_of_payments", "fee_pct_used", "accepted_at"):
+        assert after[field] == before[field], f"{field} changed on an accepted offer"

@@ -274,12 +274,82 @@ END $$;
 -- compares both provisioning paths inside one database and so reproduces the
 -- cross-schema collision exactly.
 
+-- Partial contracts, demoted before the constraint that forbids them.
+--
+-- The all-or-nothing CHECK below covers SIX columns, not four: `principal` and
+-- `note_rate_pct` belong to the set, because expanding a stored schedule needs
+-- the principal the payments run on and the rate they were priced at. A row
+-- holding the other four without those two satisfied every single-column NULL
+-- check in the codebase, so the read path called it "contract" and filled the
+-- gaps with an inverted principal and a rate recovered from an already-rounded
+-- payment: inferred numbers, displayed as agreed terms, with the estimate caveat
+-- suppressed precisely because the row looked stored.
+--
+-- Widening the constraint makes those rows illegal, so they are dealt with
+-- first, and only in the one direction that invents nothing: an UNACCEPTED
+-- partial row is demoted to legacy (all six cleared), which is what it already
+-- was in substance. The old values are written into audit_logs first, so the
+-- demotion is recoverable and nothing disappears quietly. Completing them
+-- instead would mean solving terms today and filing them as the terms that were
+-- agreed, which is the whole failure this migration exists to end.
+--
+-- ACCEPTED partial rows are left exactly as they are -- an accepted disclosure
+-- is immutable, and this migration does not get to edit one. See the VALIDATE
+-- step after the constraint for what happens if any exist.
+INSERT INTO audit_logs (actor, action, detail)
+SELECT 'db/migrations/0030', 'offer.partial_contract_demoted',
+       'offer_id=' || o.id || ' app_id=' || coalesce(o.app_id::text, 'null')
+       || ' cleared: principal=' || coalesce(o.principal::text, 'null')
+       || ' note_rate_pct=' || coalesce(o.note_rate_pct::text, 'null')
+       || ' regular_payment_count=' || coalesce(o.regular_payment_count::text, 'null')
+       || ' final_payment=' || coalesce(o.final_payment::text, 'null')
+       || ' term_months=' || coalesce(o.term_months::text, 'null')
+       || ' schedule_version=' || coalesce(o.schedule_version, 'null')
+  FROM offers o
+ WHERE o.accepted_at IS NULL
+   AND num_nonnulls(o.regular_payment_count, o.final_payment, o.term_months,
+                    o.schedule_version, o.principal, o.note_rate_pct)
+       NOT IN (0, 6);
+
+UPDATE offers o
+   SET regular_payment_count = NULL,
+       final_payment         = NULL,
+       term_months           = NULL,
+       schedule_version      = NULL,
+       principal             = NULL,
+       note_rate_pct         = NULL
+ WHERE o.accepted_at IS NULL
+   AND num_nonnulls(o.regular_payment_count, o.final_payment, o.term_months,
+                    o.schedule_version, o.principal, o.note_rate_pct)
+       NOT IN (0, 6);
+
 DO $$
 BEGIN
-    -- All-or-nothing. The four columns describe one schedule; any proper subset
+    -- All-or-nothing. The six columns describe one schedule; any proper subset
     -- of them describes nothing. This is the constraint that makes every NULL
     -- check elsewhere in the codebase sound: code may test one column and
     -- conclude about the group.
+    --
+    -- Dropped and re-added rather than skipped when present, because an earlier
+    -- release of this migration created the same constraint NAME over only four
+    -- of the columns. A plain IF NOT EXISTS would find that name, decide the
+    -- table was protected, and leave the two-column hole open on every database
+    -- that had already run it -- the exact silent-skip failure the guards in
+    -- this file were written to avoid. Reviewed on PR #10.
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'offers'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND c.conname = 'offers_schedule_all_or_nothing'
+          AND pg_get_constraintdef(c.oid) NOT LIKE '%principal%'
+    ) THEN
+        ALTER TABLE offers DROP CONSTRAINT offers_schedule_all_or_nothing;
+        RAISE NOTICE '0030: replacing the 4-column offers schedule CHECK with the 6-column one';
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint c
         JOIN pg_class t ON t.oid = c.conrelid
@@ -289,18 +359,44 @@ BEGIN
           AND c.contype = 'c'
           AND c.conname = 'offers_schedule_all_or_nothing'
     ) THEN
+        -- NOT VALID, then validated separately below. An accepted partial row
+        -- cannot be demoted and cannot be completed, so a plain ADD CONSTRAINT
+        -- would abort the whole migration on a database that has one -- leaving
+        -- it with no constraint at all, which is strictly worse than one that
+        -- governs every future write.
         ALTER TABLE offers ADD CONSTRAINT offers_schedule_all_or_nothing CHECK (
             (regular_payment_count IS NULL
              AND final_payment      IS NULL
              AND term_months        IS NULL
-             AND schedule_version   IS NULL)
+             AND schedule_version   IS NULL
+             AND principal          IS NULL
+             AND note_rate_pct      IS NULL)
             OR
             (regular_payment_count IS NOT NULL
              AND final_payment      IS NOT NULL
              AND term_months        IS NOT NULL
-             AND schedule_version   IS NOT NULL)
-        );
+             AND schedule_version   IS NOT NULL
+             AND principal          IS NOT NULL
+             AND note_rate_pct      IS NOT NULL)
+        ) NOT VALID;
     END IF;
+
+    -- Now try to make it cover the existing rows too. It succeeds whenever the
+    -- demotion above cleared everything, which is every database without an
+    -- accepted partial offer.
+    BEGIN
+        ALTER TABLE offers VALIDATE CONSTRAINT offers_schedule_all_or_nothing;
+    EXCEPTION WHEN check_violation THEN
+        RAISE WARNING '0030: % accepted offer(s) hold a partial contract and cannot be '
+                      'demoted (an accepted disclosure is immutable). The constraint is '
+                      'enforced for all new and updated rows but left NOT VALID for the '
+                      'existing ones; those offers report schedule_source=reconstructed '
+                      'and cannot board.',
+            (SELECT count(*) FROM offers
+              WHERE num_nonnulls(regular_payment_count, final_payment, term_months,
+                                 schedule_version, principal, note_rate_pct)
+                    NOT IN (0, 6));
+    END;
 
     -- The count and the term must describe the same schedule. Under Model B
     -- there are exactly term_months - 1 regular payments and one adjusted

@@ -60,6 +60,17 @@ def _legacy_database(conn):
     with conn.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("""
+            -- Present in every real database since 001_schema.sql. Added to this
+            -- legacy simulator because 0030 records its partial-contract
+            -- demotions here before clearing them, and a migration that audits
+            -- what it changed must not be made silent to keep a fixture small.
+            CREATE TABLE audit_logs (
+                id SERIAL PRIMARY KEY,
+                actor TEXT,
+                action TEXT,
+                detail TEXT,
+                at TIMESTAMPTZ DEFAULT now()
+            );
             CREATE TABLE offers (
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER UNIQUE,

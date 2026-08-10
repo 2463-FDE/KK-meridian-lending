@@ -705,3 +705,54 @@ def test_a_stored_schedule_is_labelled_as_the_contract():
 
     assert body["schedule_source"] == "contract"
     assert body["schedule_note"] is None
+
+
+# --- a partial contract is never presented as the agreed terms ----------------
+#
+# Reviewed on PR #10. `schedule_is_stored` tested `final_payment` and
+# `term_months` only, so a row missing `principal` or `note_rate_pct` was
+# labelled schedule_source="contract" while the expansion substituted a principal
+# inverted from the cent-rounded amount_financed and a rate recovered from an
+# already-rounded payment. Inferred numbers, presented as the agreed terms, with
+# the estimate caveat suppressed precisely because the row looked stored.
+#
+# The database's all-or-nothing CHECK now forbids that shape, so these rows are
+# only reachable as leftovers: an ACCEPTED offer holding a partial contract
+# cannot be demoted (an accepted disclosure is immutable), which is why 0030
+# leaves the constraint NOT VALID in that case. The read path is the only thing
+# between such a row and a borrower, so it is tested directly.
+
+@pytest.mark.parametrize("absent", ["principal", "note_rate_pct"])
+def test_a_partial_contract_is_reported_as_reconstructed_not_contract(absent):
+    fields = dict(
+        id=91, app_id=91, decision_id=91, fee_pct_used=0.03,
+        note_rate_pct=7.99, apr=13.51, finance_charge=202.03,
+        monthly_payment=24.47, amount_financed=972.43, total_of_payments=1174.46,
+        regular_payment_count=47, final_payment=24.37, term_months=48,
+        schedule_version="B1", principal=1002.50,
+    )
+    fields[absent] = None
+    body = _offer_response_for(_FakeOffer(**fields), 91)
+
+    assert body["schedule_source"] == "reconstructed", (
+        f"an offer missing {absent} was presented as the contract"
+    )
+    assert body["schedule_note"], "a reconstructed schedule must carry its caveat"
+    assert "estimate" in body["schedule_note"].lower()
+
+
+def test_a_complete_contract_is_still_reported_as_contract():
+    """The other half. A rule that called everything reconstructed would pass the
+    test above while destroying the distinction it exists to draw."""
+    body = _offer_response_for(
+        _FakeOffer(
+            id=92, app_id=92, decision_id=92, fee_pct_used=0.03,
+            note_rate_pct=7.99, apr=13.51, finance_charge=202.03,
+            monthly_payment=24.47, amount_financed=972.43, total_of_payments=1174.46,
+            regular_payment_count=47, final_payment=24.37, term_months=48,
+            schedule_version="B1", principal=1002.50,
+        ),
+        92,
+    )
+    assert body["schedule_source"] == "contract"
+    assert not body["schedule_note"]

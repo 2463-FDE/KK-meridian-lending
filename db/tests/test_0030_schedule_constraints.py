@@ -55,6 +55,13 @@ _VALID_OFFER = {
     "final_payment": 407.12,
     "term_months": 24,
     "schedule_version": "B1",
+    # `principal` joined the all-or-nothing set on PR #10: expanding a stored
+    # schedule needs the principal the payments run on, so a row with the other
+    # five and no principal is a schedule that cannot be reproduced. Without it
+    # here every test below would be rejected by the all-or-nothing rule before
+    # reaching the rule it means to exercise -- which is the fixture-already-
+    # invalid trap this block's own comment warns about.
+    "principal": 9000.00,
 }
 
 _VALID_LOAN = {
@@ -139,14 +146,22 @@ def test_a_legacy_offer_with_no_schedule_at_all_is_accepted(conn):
     """0030 does not back-fill, so all-NULL is the normal state of every row
     that predates it. A constraint that rejected these would make the
     migration undeployable."""
+    # All SIX, since principal and note_rate_pct joined the set on PR #10. A
+    # pre-0030 row has none of them: the columns did not exist yet.
     row = {k: v for k, v in _VALID_OFFER.items()
            if k not in ("regular_payment_count", "final_payment",
-                        "term_months", "schedule_version")}
+                        "term_months", "schedule_version", "principal",
+                        "note_rate_pct")}
     _insert(conn, "offers", row)
 
 
 @pytest.mark.parametrize("omitted", [
     "regular_payment_count", "final_payment", "term_months", "schedule_version",
+    # Both added on PR #10. `principal` was the reachable gap in production:
+    # the repair path could not fill it and the read path inverted
+    # amount_financed through the fee instead, landing on a neighbouring
+    # principal and displaying the result as the agreed schedule.
+    "principal", "note_rate_pct",
 ])
 def test_a_partly_recorded_offer_schedule_is_rejected(conn, omitted):
     """One case per column: no single field can quietly become optional.

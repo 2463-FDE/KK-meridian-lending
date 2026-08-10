@@ -54,6 +54,19 @@ _OFFER_FIELDS_Q = ", ".join(f"o.{c}" for c in _OFFER_COLUMNS)
 # displayable. Separate from CANONICAL_TERMS because the two answer different
 # questions -- see origination's TILA_MONETARY_FIELDS / BOARDING_REQUIRED_FIELDS
 # split, which this mirrors on the write side.
+# Everything that must be present before a schedule may be called the contract.
+# One list, used by the write side (what repair must fill in), the read side
+# (whether GET may label the rows "contract") and the database's own all-or-none
+# CHECK, so the three cannot disagree about what "complete" means -- they did,
+# and the row in the gap displayed inferred numbers as agreed terms.
+# `monthly_payment` is included because it is the regular payment the schedule
+# expands from; it is NOT NULL in practice on every path, and asserting it here
+# costs nothing and removes a hole. Reviewed on PR #10.
+CONTRACT_FACTS = (
+    "principal", "note_rate_pct", "monthly_payment", "regular_payment_count",
+    "final_payment", "term_months", "schedule_version",
+)
+
 SCHEDULE_TERMS = (
     "note_rate_pct", "regular_payment_count", "final_payment", "term_months",
     "schedule_version",
@@ -348,9 +361,21 @@ def create_offer(
         # offer already exists for it (ON CONFLICT DO NOTHING -- see above).
         # decisions.app_id is this offer's decision_id, so it's also
         # body.application_id here.
+        #
+        # Matched on EITHER key, because the two are not interchangeable on old
+        # rows. `offers.app_id` and `offers.decision_id` carry separate UNIQUE
+        # constraints (0009/0011) and this INSERT sets both -- but a row written
+        # before 0011 has `app_id` populated and `decision_id` NULL. That row
+        # collides on `offers_app_id_key`, which the ON CONFLICT clause does not
+        # target, so the INSERT raises UniqueViolation and lands here; a lookup
+        # keyed only on `decision_id` then found nothing and this endpoint
+        # reported "no approved decision on record" for an application that has
+        # both a decision AND an offer. The offer was unreachable and
+        # unrepairable. Reviewed on PR #10.
         existing = db.query(
-            f"SELECT {_OFFER_FIELDS} FROM offers WHERE decision_id = %s",
-            (body.application_id,),
+            f"SELECT {_OFFER_FIELDS} FROM offers "
+            "WHERE decision_id = %s OR app_id = %s",
+            (body.application_id, body.application_id),
         )
         if not existing:
             raise HTTPException(
@@ -358,6 +383,32 @@ def create_offer(
                 detail=f"no approved decision on record for application_id={body.application_id}",
             )
         row = existing[0]
+
+        # Adopt the row into the current schema before deciding what else it
+        # needs. `decision_id` is not a term -- it records which decision this
+        # offer already came from, recovered by joining the offer's own app_id to
+        # `decisions.app_id`, so nothing is inferred and nothing is chosen. It is
+        # stamped only when an APPROVED decision exists, which the INSERT above
+        # has already established by getting far enough to conflict.
+        #
+        # Safe on an accepted offer for the same reason: it changes no agreed
+        # figure. The monetary and schedule columns stay under the repair path
+        # below, which refuses accepted offers outright.
+        if row.get("decision_id") is None:
+            stamped = db.query(
+                f"UPDATE offers o SET decision_id = d.app_id "
+                "FROM decisions d "
+                "WHERE d.app_id = o.app_id AND d.outcome = 'approve' "
+                "  AND o.id = %s AND o.decision_id IS NULL "
+                f"RETURNING {_OFFER_FIELDS_Q}",
+                (row["id"],),
+            )
+            if stamped:
+                row = stamped[0]
+                log.info(
+                    "adopted a pre-0011 offer offer_id=%s app_id=%s: decision_id set "
+                    "from its own approved decision", row["id"], row["app_id"],
+                )
 
         # Review fix: DO NOTHING + read-back returns the row that is ALREADY
         # there -- so for a pre-0026 incomplete row this endpoint handed the
@@ -492,7 +543,22 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     # The legacy fallbacks below are reached ONLY for pre-0030 rows that never
     # stored these facts. They are never used for boarding: accept_offer requires
     # the stored terms and refuses otherwise.
-    schedule_is_stored = offer.final_payment is not None and offer.term_months is not None
+    # ALL of the contractual facts, not two of them. Calling a schedule the
+    # "contract" is a claim that what follows is what was agreed, and expanding
+    # it needs the principal the payments run on and the rate they were priced
+    # at. This tested `final_payment` and `term_months` only, so a row missing
+    # `principal` or `note_rate_pct` was labelled `schedule_source="contract"`
+    # while the expansion below silently substituted an inverted principal and a
+    # rate recovered from an already-rounded payment -- inferred numbers,
+    # presented as authoritative terms, with the `schedule_note` caveat
+    # suppressed precisely because the row looked stored.
+    #
+    # A partial row is legacy. It reports "reconstructed" with the estimate note,
+    # and boarding still refuses it (`accept_offer` requires the stored terms),
+    # so it cannot become a loan on inferred figures either. Reviewed on PR #10.
+    schedule_is_stored = all(
+        getattr(offer, name) is not None for name in CONTRACT_FACTS
+    )
     if offer.term_months is not None:
         term_months = int(offer.term_months)
     else:

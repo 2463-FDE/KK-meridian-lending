@@ -241,6 +241,13 @@ export default function ApplyPage() {
   // ready when `principal` or `note_rate_pct` was missing, and acceptance then
   // 409'd with no way to regenerate. Reviewed on PR #10.
   const [offerReady, setOfferReady] = useState(false);
+  // Regeneration reprices the offer, so the disclosure on screen afterwards is a
+  // DIFFERENT one from the one the borrower opened. Acceptance is gated on an
+  // explicit acknowledgement that they have read it -- a repriced offer accepted
+  // by a click aimed at the previous set of numbers is not an informed
+  // acceptance. Reviewed on PR #10.
+  const [repriced, setRepriced] = useState(false);
+  const [reviewedNewTerms, setReviewedNewTerms] = useState(false);
 
   function set<K extends keyof FormState>(k: K, v: FormState[K]) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -434,6 +441,8 @@ export default function ApplyPage() {
       )) as { disclosure: Disclosure; offer_ready?: boolean };
       setDisclosure(created.disclosure);
       setOfferReady(created.offer_ready ?? false);
+      setRepriced(true);
+      setReviewedNewTerms(false);
     } catch (err) {
       setApiError(errMsg(err, "Could not regenerate your offer."));
     } finally {
@@ -929,6 +938,9 @@ export default function ApplyPage() {
                     onAccept={acceptOffer}
                     onRegenerate={regenerateOffer}
                     offerReady={offerReady}
+                    repriced={repriced}
+                    reviewedNewTerms={reviewedNewTerms}
+                    onReviewNewTerms={setReviewedNewTerms}
                     busy={busy}
                     acceptedLoanId={acceptedLoanId}
                   />
@@ -1214,6 +1226,9 @@ function OfferPanel({
   onAccept,
   onRegenerate,
   offerReady,
+  repriced,
+  reviewedNewTerms,
+  onReviewNewTerms,
   busy,
   acceptedLoanId,
 }: {
@@ -1225,6 +1240,9 @@ function OfferPanel({
   onAccept: () => void;
   onRegenerate: () => void;
   offerReady: boolean;
+  repriced: boolean;
+  reviewedNewTerms: boolean;
+  onReviewNewTerms: (v: boolean) => void;
   busy: boolean;
   acceptedLoanId: string | number | null;
 }) {
@@ -1370,20 +1388,58 @@ function OfferPanel({
           </Link>
         </div>
       ) : offerReady ? (
-        <button style={{ marginTop: 16 }} onClick={onAccept} disabled={busy}>
-          {busy ? "Accepting…" : "Accept offer"}
-        </button>
+        <div style={{ marginTop: 16 }}>
+          {/* A repriced offer needs a fresh, explicit acceptance. After
+              regeneration the numbers above are not the ones the borrower opened
+              the page on, so an Accept click aimed at the previous figures must
+              not carry over. Reviewed on PR #10. */}
+          {repriced ? (
+            <div className="alert alert-warn" data-testid="repriced-disclosure">
+              <strong>These are new terms.</strong> This offer was recalculated
+              under our current pricing just now, so the interest rate, the
+              origination fee, the APR, the monthly payment and the schedule above
+              may differ from what you saw before. Please read the disclosure
+              above before accepting.
+              <label style={{ display: "block", marginTop: 8 }}>
+                <input
+                  type="checkbox"
+                  data-testid="ack-new-terms"
+                  checked={reviewedNewTerms}
+                  onChange={(e) => onReviewNewTerms(e.target.checked)}
+                />{" "}
+                I have reviewed the updated disclosure above.
+              </label>
+            </div>
+          ) : null}
+          <button
+            onClick={onAccept}
+            disabled={busy || (repriced && !reviewedNewTerms)}
+          >
+            {busy ? "Accepting…" : "Accept offer"}
+          </button>
+        </div>
       ) : (
         /* Not boardable. Showing Accept here would fail with a 409 the borrower
            can do nothing about, so the action offered is the one that helps:
            regenerating records the contractual terms and makes acceptance
            possible. Reviewed on PR #10. */
         <div style={{ marginTop: 16 }}>
+          {/* No preservation promise. This used to say "your amount, rate and
+              term do not change", which was not true: regeneration prices the
+              offer again under the CURRENT policy, so the rate, the origination
+              fee, the APR, the payment and the whole schedule can all come back
+              different. Telling a borrower their terms are unchanged and then
+              changing them is the one thing a disclosure exists to prevent.
+              Reviewed on PR #10. */}
           <div className="alert alert-warn" data-testid="offer-not-boardable">
-            This offer was prepared before we started recording the exact
-            payment schedule, so it cannot be accepted as it stands.
-            Regenerating it records the exact terms — your amount, rate and term
-            do not change.
+            This offer was prepared before we started recording the exact payment
+            schedule, so it cannot be accepted as it stands. Regenerating it
+            produces a <strong>new offer priced today</strong>: the interest rate,
+            the origination fee, the APR, the monthly payment and the payment
+            schedule are all recalculated under our current pricing, and any of
+            them may differ from what you see now. Your requested amount and term
+            stay as you entered them. You will be shown the new disclosure to
+            review before you can accept it.
           </div>
           <button onClick={onRegenerate} disabled={busy} data-testid="regenerate-offer">
             {busy ? "Regenerating…" : "Regenerate offer"}

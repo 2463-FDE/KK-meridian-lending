@@ -168,16 +168,28 @@ CREATE TABLE IF NOT EXISTS offers (
     -- repair path and any operator with psql all write this table, and a
     -- half-written schedule is worse than an absent one: it reads as "recorded"
     -- to a single-column NULL check while describing nothing billable.
+    -- `principal` and `note_rate_pct` are part of the set, not adjacent to it.
+    -- Expanding a stored schedule needs the principal the payments run on and
+    -- the rate they were priced at, so a row holding the four columns below
+    -- without those two is a schedule that cannot be reproduced -- and it
+    -- satisfied every single-column NULL check, so the read path labelled it
+    -- "contract" and filled the gaps with an inverted principal and a rate
+    -- recovered from a rounded payment. Inferred numbers presented as agreed
+    -- terms. Mirrors disclosure-service's CONTRACT_FACTS. Reviewed on PR #10.
     CONSTRAINT offers_schedule_all_or_nothing CHECK (
         (regular_payment_count IS NULL
          AND final_payment      IS NULL
          AND term_months        IS NULL
-         AND schedule_version   IS NULL)
+         AND schedule_version   IS NULL
+         AND principal          IS NULL
+         AND note_rate_pct      IS NULL)
         OR
         (regular_payment_count IS NOT NULL
          AND final_payment      IS NOT NULL
          AND term_months        IS NOT NULL
-         AND schedule_version   IS NOT NULL)
+         AND schedule_version   IS NOT NULL
+         AND principal          IS NOT NULL
+         AND note_rate_pct      IS NOT NULL)
     ),
     -- An identity of Model B, not a policy: term_months - 1 regular payments
     -- plus one adjusted final payment. Also the exact corruption a mismatched
