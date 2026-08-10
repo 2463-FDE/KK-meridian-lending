@@ -208,3 +208,29 @@ def test_a_disclosed_apr_in_loans_apr_is_not_taken_as_the_note_rate(conn):
     # And the rows whose stored rate DOES reproduce their payment still recover.
     assert float(rows[1]["note_rate_pct"]) == pytest.approx(11.250, abs=1e-3)
     assert float(rows[2]["note_rate_pct"]) == pytest.approx(22.990, abs=1e-3)
+
+
+def test_a_small_dollar_loan_does_not_falsely_certify_its_apr(conn):
+    """A fixed $0.02 window admits a false positive on a small-dollar loan.
+
+    A $100 12-month loan priced at 7.99% stores an $8.70 payment. Amortizing at
+    its OLD disclosed APR of 7.609% gives $8.681 -- inside $0.02, so the APR
+    would have been certified as the contractual note rate and shown to the
+    borrower as one. A genuine note rate reproduces its own stored payment to
+    the cent, so half a cent admits every true case and excludes this one.
+    Reviewed on PR #10.
+    """
+    _legacy_database(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, "
+                    "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+                    "VALUES (5, 5, 0.03, 7.609, 4.40, 8.70, 97.00, 104.40)")
+        cur.execute("INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+                    "VALUES (5, 'Small Dollar', 100.00, 7.609, 12)")
+    _apply_0030(conn)
+
+    assert _offers(conn)[5]["note_rate_pct"] is None, (
+        "a disclosed APR was certified as the contractual note rate on a "
+        "small-dollar loan"
+    )

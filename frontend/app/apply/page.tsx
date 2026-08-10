@@ -236,6 +236,11 @@ export default function ApplyPage() {
     null
   );
   const [showSchedule, setShowSchedule] = useState(false);
+  // Boardability, from the server's own check rather than inferred from a
+  // subset of the disclosure fields. Deriving it client-side marked an offer
+  // ready when `principal` or `note_rate_pct` was missing, and acceptance then
+  // 409'd with no way to regenerate. Reviewed on PR #10.
+  const [offerReady, setOfferReady] = useState(false);
 
   function set<K extends keyof FormState>(k: K, v: FormState[K]) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -426,8 +431,9 @@ export default function ApplyPage() {
           term_months: parseInt(form.term_months, 10),
         },
         { "X-Offer-Accept-Token": token },
-      )) as { disclosure: Disclosure };
+      )) as { disclosure: Disclosure; offer_ready?: boolean };
       setDisclosure(created.disclosure);
+      setOfferReady(created.offer_ready ?? false);
     } catch (err) {
       setApiError(errMsg(err, "Could not regenerate your offer."));
     } finally {
@@ -456,18 +462,19 @@ export default function ApplyPage() {
       // gateway/origination-service access logs, browser history, and a
       // Referer header; a header does not.
       const token = decision?.accept_token || "";
-      let existing: { disclosure: Disclosure } | null = null;
+      let existing: { disclosure: Disclosure; offer_ready?: boolean } | null = null;
       try {
         existing = (await apiGet(
           `/los/applications/${app.app_id}/offer`,
           { "X-Offer-Accept-Token": token },
-        )) as { disclosure: Disclosure };
+        )) as { disclosure: Disclosure; offer_ready?: boolean };
       } catch (getErr) {
         if (!(getErr instanceof ApiError) || getErr.status !== 404) throw getErr;
         // 404 -- genuinely no offer yet; fall through to create one below.
       }
       if (existing) {
         setDisclosure(existing.disclosure);
+        setOfferReady(existing.offer_ready ?? false);
         return;
       }
       // Security fix (PR #6 review): POST /offer now requires the same
@@ -488,8 +495,9 @@ export default function ApplyPage() {
           term_months: parseInt((submitted ?? form).term_months, 10),
         },
         { "X-Offer-Accept-Token": token },
-      )) as { app_id: string | number; disclosure: Disclosure };
+      )) as { app_id: string | number; disclosure: Disclosure; offer_ready?: boolean };
       setDisclosure(created.disclosure);
+      setOfferReady(created.offer_ready ?? false);
     } catch (err) {
       setApiError(errMsg(err, "Could not generate your offer."));
     } finally {
@@ -920,6 +928,7 @@ export default function ApplyPage() {
                     onToggleSchedule={() => setShowSchedule((v) => !v)}
                     onAccept={acceptOffer}
                     onRegenerate={regenerateOffer}
+                    offerReady={offerReady}
                     busy={busy}
                     acceptedLoanId={acceptedLoanId}
                   />
@@ -1204,6 +1213,7 @@ function OfferPanel({
   onToggleSchedule,
   onAccept,
   onRegenerate,
+  offerReady,
   busy,
   acceptedLoanId,
 }: {
@@ -1214,18 +1224,18 @@ function OfferPanel({
   onToggleSchedule: () => void;
   onAccept: () => void;
   onRegenerate: () => void;
+  offerReady: boolean;
   busy: boolean;
   acceptedLoanId: string | number | null;
 }) {
   const hasSchedule = !!disclosure.schedule && disclosure.schedule.length > 0;
-  // Boardable only if the contractual terms were STORED. A pre-0030 offer
-  // reports these as null and origination refuses to board it -- so offering
-  // Accept here produced a guaranteed 409 with nothing the borrower could do.
+  // Boardability comes from the SERVER (`offer_ready`, the same
+  // _complete_offer_exists check accept_offer enforces over
+  // BOARDING_REQUIRED_FIELDS). Deriving it here from the three schedule columns
+  // marked an offer ready when `principal` or `note_rate_pct` was missing, and
+  // acceptance then 409'd with no way to reach the regeneration path. The
+  // client must not hold its own opinion about what boarding requires.
   // Reviewed on PR #10.
-  const offerReady =
-    disclosure.final_payment != null &&
-    disclosure.term_months != null &&
-    disclosure.regular_payment_count != null;
   const scheduleIsEstimate = disclosure.schedule_source === "reconstructed";
   return (
     <div style={{ marginTop: 22 }}>

@@ -338,3 +338,39 @@ SELECT l.id,
   TIMESTAMPTZ '2026-05-01 09:00:00' + ((l.id % 20) || ' days')::interval + (s || ' days')::interval
 FROM loans l CROSS JOIN LATERAL generate_series(1, 1 + (l.id % 5)) AS s
 WHERE l.id BETWEEN 7000 AND 7299;
+
+-- ---------------------------------------------------------------------------
+-- Copy each seeded loan's contractual schedule from its own offer.
+-- ---------------------------------------------------------------------------
+-- The loan inserts above (and in 002_seed.sql) predate the Model B schedule
+-- columns, so on a FRESH database every seeded loan looked like a pre-0030
+-- legacy row: servicing hides its note rate because nothing proves the `apr`
+-- column holds a contractual rate, and its schedule renders as a
+-- reconstruction. The offers are generated with an exact B1 contract, so the
+-- proof exists -- it just was not carried across. Migrations are not replayed
+-- over fresh init, which is why this belongs here rather than in 0030.
+--
+-- One statement covering the curated loans (002) and the bulk ones above,
+-- keyed on app_id, so a loan can only ever take the schedule of its own offer.
+-- Reviewed on PR #10.
+UPDATE loans l
+   SET regular_payment       = o.monthly_payment,
+       regular_payment_count = o.regular_payment_count,
+       final_payment         = o.final_payment,
+       schedule_version      = o.schedule_version
+  FROM offers o
+ WHERE o.app_id = l.app_id
+   AND o.schedule_version IS NOT NULL
+   AND o.regular_payment_count + 1 = l.term_months;
+
+DO $$
+DECLARE
+    unproven INTEGER;
+BEGIN
+    SELECT count(*) INTO unproven FROM loans WHERE schedule_version IS NULL;
+    IF unproven = 0 THEN
+        RAISE NOTICE 'seed: every seeded loan carries its contractual schedule.';
+    ELSE
+        RAISE NOTICE 'seed: % seeded loan(s) have no stored schedule -- servicing will show their rate as not recorded.', unproven;
+    END IF;
+END $$;

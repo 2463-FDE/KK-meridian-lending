@@ -29,18 +29,26 @@ import {
  */
 
 test("a legacy loan's schedule is labelled as reconstructed, not contractual", async ({ page }) => {
-  // Seeded loans predate the Model B columns: db/init inserts them without
-  // regular_payment/final_payment/schedule_version, which is exactly the
-  // legacy shape. Picked from the database rather than hard-coded so this does
-  // not break when seed ids change.
+  // The legacy shape is CREATED here rather than found in the seed.
+  //
+  // This used to pick whichever seeded loan had no stored schedule, which was
+  // all of them -- db/init's loan inserts predate the Model B columns. That is
+  // no longer true: the seed now copies each loan's contractual schedule from
+  // its own offer, because leaving them null made every demo loan look legacy
+  // and hid its note rate. So the test makes its own subject by clearing the
+  // columns on one high-id bulk loan, which is filler data no other spec
+  // asserts on. Depending on a seed's shape for a fixture was the coupling
+  // that broke here.
   const client = dbClient();
   await client.connect();
   let legacyLoanId: number;
   try {
     const row = await client.query(
-      "SELECT id FROM loans WHERE schedule_version IS NULL ORDER BY id LIMIT 1",
+      "UPDATE loans SET regular_payment = NULL, regular_payment_count = NULL, " +
+      "final_payment = NULL, schedule_version = NULL " +
+      "WHERE id = (SELECT max(id) FROM loans) RETURNING id",
     );
-    expect(row.rowCount, "the seed should contain at least one pre-0030 loan").toBe(1);
+    expect(row.rowCount, "the seed should contain at least one loan").toBe(1);
     legacyLoanId = row.rows[0].id;
   } finally {
     await client.end();

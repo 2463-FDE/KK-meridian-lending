@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from .. import clients, config, db, decision_state
 from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferOut, ScheduleRow
-from .applications import _is_staff
+from .applications import _complete_offer_exists, _is_staff
 
 log = get_logger("offers")
 router = APIRouter(tags=["offers"])
@@ -83,7 +83,12 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
         term_months=d.get("term_months"),
         schedule=[ScheduleRow(**row) for row in rows],
     )
-    return OfferOut(app_id=app_id, disclosure=disclosure, created=resp.get("created", True))
+    # Readiness from the SAME server-side check accept_offer enforces, not from
+    # whichever subset of fields a client happens to look at.
+    return OfferOut(
+        app_id=app_id, disclosure=disclosure, created=resp.get("created", True),
+        offer_ready=_complete_offer_exists(app_id),
+    )
 
 
 @router.post("/offer", response_model=OfferOut)

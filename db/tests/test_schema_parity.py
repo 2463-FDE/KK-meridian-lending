@@ -408,3 +408,39 @@ def test_fresh_init_and_migrated_schemas_agree_on_decision_attempts(conn):
     migrated_indexes = _indexes(conn, MIGRATED_SCHEMA, "decision_attempts")
     assert "idx_decision_attempts_one_active" in fresh_indexes
     assert "idx_decision_attempts_one_active" in migrated_indexes
+
+
+def test_every_seeded_loan_carries_its_contractual_schedule():
+    """A fresh database must not look like a pile of legacy loans.
+
+    The loan inserts in db/init predate the Model B schedule columns, so on a
+    fresh `docker compose up` every seeded loan had NULL
+    regular_payment/count/final_payment/schedule_version. Servicing then hid
+    each loan's note rate -- nothing proved `loans.apr` held a contractual rate
+    -- and rendered its schedule as a reconstruction, on a database whose offers
+    contain an exact B1 contract. Migrations are not replayed over fresh init,
+    so 003_seed_bulk.sql copies each loan's schedule from its own offer.
+    Reviewed on PR #10.
+    """
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set")
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET search_path TO public")
+            cur.execute("SELECT count(*) FROM loans")
+            total = cur.fetchone()[0]
+            if total == 0:
+                pytest.skip("no seeded loans in this database")
+            cur.execute(
+                "SELECT count(*) FROM loans l JOIN offers o ON o.app_id = l.app_id "
+                "WHERE o.schedule_version IS NOT NULL AND l.schedule_version IS NULL"
+            )
+            unproven = cur.fetchone()[0]
+        assert unproven == 0, (
+            f"{unproven} seeded loan(s) have an offer with a stored contract but no "
+            f"schedule of their own -- servicing will hide their note rate and "
+            f"label their schedule an estimate"
+        )
+    finally:
+        conn.close()

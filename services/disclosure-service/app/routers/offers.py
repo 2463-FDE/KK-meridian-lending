@@ -249,6 +249,34 @@ def create_offer(
     annual_rate = float(fees.NOTE_RATE_PCT)
 
     o = offer_mod.build_offer(principal, annual_rate, term_months)
+
+    # A principal too small for its term cannot produce a schedule. Cent-rounded
+    # regular payments can exhaust the balance before the last period, leaving a
+    # nonpositive final payment: $0.10 over 12 months gives eleven $0.01
+    # payments and a final of -$0.01. The INSERT then violates
+    # offers_final_payment_positive and the caller sees a 500, with an approved
+    # application that can never obtain an offer. ApplicationIn permits amounts
+    # below the UI's $1,000 slider minimum, so this is reachable.
+    #
+    # Refused here with a 422 that says why, rather than surfacing a constraint
+    # violation. Reviewed on PR #10.
+    if o["final_payment"] <= 0 or o["monthly_payment"] <= 0:
+        log.error(
+            "refusing to create an offer with a nonpositive payment "
+            "application_id=%s principal=%s term_months=%s regular=%s final=%s",
+            body.application_id, principal, term_months,
+            o["monthly_payment"], o["final_payment"],
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"An amount of {principal:.2f} over {term_months} months cannot "
+                f"produce a payment schedule: the cent-rounded payments would "
+                f"leave a final payment of {o['final_payment']:.2f}. Increase the "
+                f"amount or shorten the term."
+            ),
+        )
+
     rows = schedule.amortization(principal, annual_rate, term_months)
     # W4: snapshot the fee rule version in effect right now, on this row, so a later
     # change to ORIGINATION_FEE_PCT can never retroactively change what this offer

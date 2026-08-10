@@ -179,6 +179,14 @@ class OfferOut(BaseModel):
     # back approve) now returns that SAME offer instead of a 409 -- this
     # tells the caller which happened without parsing anything.
     created: bool = True
+    # Whether this offer carries every field boarding requires, from the SAME
+    # server-side check accept_offer enforces (_complete_offer_exists over
+    # BOARDING_REQUIRED_FIELDS). Reported so a client cannot derive readiness
+    # from a subset of the fields and offer an Accept that is guaranteed to 409
+    # -- which is exactly what the borrower page did when it checked only the
+    # three schedule columns and not `principal`/`note_rate_pct`. Reviewed on
+    # PR #10.
+    offer_ready: bool = False
 
 
 class ApplicationDetail(BaseModel):

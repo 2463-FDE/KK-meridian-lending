@@ -58,6 +58,14 @@ ALTER TABLE offers
 -- monthly payment. A note rate does; an APR does not, because the APR is solved
 -- against the amount financed rather than against the principal the payments
 -- actually run on. Review finding on PR #10.
+--
+-- HALF A CENT, not two cents. An absolute $0.02 window is wide enough to admit
+-- a false positive on a small-dollar loan: a $100 12-month loan priced at 7.99%
+-- stores an $8.70 payment, and amortizing at its old disclosed APR of 7.609%
+-- gives $8.681 -- inside $0.02, so the APR would have been certified as the
+-- note rate. A genuine note rate reproduces its own stored payment to the cent
+-- (the payment was computed from it and then rounded), so half a cent admits
+-- every true case and excludes that one. Reviewed on PR #10.
 UPDATE offers o
    SET note_rate_pct = l.apr
   FROM loans l
@@ -75,7 +83,7 @@ UPDATE offers o
                 / (1 - power(1 + (l.apr / 100 / 12), -l.term_months))
          END
          - o.monthly_payment
-       ) <= 0.02;
+       ) <= 0.005;   -- half a cent: see the note above
 
 -- Everything else stays NULL on purpose. An unboarded legacy offer has no
 -- second record of what it was priced at, and there is no way to recover it

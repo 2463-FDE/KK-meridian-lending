@@ -662,3 +662,31 @@ def test_an_idempotent_post_returns_the_stored_schedule_not_a_regenerated_one(pg
     ), "the returned rows were generated from the corrected application, not the stored offer"
     # And the summary fields agree with the rows they are printed beside.
     assert body["disclosure"]["final_payment"] == pytest.approx(rows[-1]["payment"], abs=0.005)
+
+
+def test_an_amount_too_small_for_its_term_is_refused_not_a_500(pg):
+    """A principal that cannot produce a schedule must fail cleanly.
+
+    Cent-rounded regular payments can exhaust the balance before the last
+    period: $0.10 over 12 months gives eleven $0.01 payments and a final of
+    -$0.01. The INSERT then violated offers_final_payment_positive and the
+    caller saw an internal error, with an approved application that could never
+    obtain an offer. `ApplicationIn` permits amounts below the UI's $1,000
+    slider minimum, so this is reachable. Reviewed on PR #10.
+    """
+    app_id = _seed_approved_application(pg, app_id=61, amount=0.10, term=12)
+
+    resp = _post(app_id)
+
+    assert resp.status_code == 422, resp.text
+    assert "payment schedule" in resp.json()["detail"]
+    # And nothing was written: a refused offer must not leave a partial row.
+    assert _rows(pg, "SELECT * FROM offers WHERE app_id = %s", (app_id,)) == []
+
+
+def test_a_normal_amount_still_creates_an_offer(pg):
+    """The guard must not refuse an ordinary application."""
+    app_id = _seed_approved_application(pg, app_id=62, amount=9000, term=24)
+    resp = _post(app_id)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["disclosure"]["final_payment"] > 0
