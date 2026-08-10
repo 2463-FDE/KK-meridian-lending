@@ -114,6 +114,27 @@ CREATE TABLE IF NOT EXISTS offers (
     app_id      INTEGER REFERENCES applications(id) UNIQUE,
     decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,  -- W4: which decision this offer came from; UNIQUE makes offer creation idempotent per decision
     fee_pct_used NUMERIC(5,4),          -- W4: snapshot of ORIGINATION_FEE_PCT used at creation time
+    -- Contractual payment schedule, persisted as fact (db/migrations/0030).
+    -- Model B: regular periods bill `monthly_payment`; the final period bills
+    -- `final_payment`, which absorbs the cent residue and cannot be recovered
+    -- from any other stored figure. The read path used to regenerate the
+    -- schedule with whatever generator was deployed, so an accepted disclosure
+    -- was not a stored fact. NULL on legacy rows = "not recorded"; boarding
+    -- refuses those rather than inventing terms.
+    regular_payment_count INTEGER,
+    final_payment    NUMERIC(14,2),
+    term_months      INTEGER,
+    schedule_version TEXT,              -- 'B1' = cent-rounded level + final adjustment
+    -- The principal the schedule was calculated on. Stored because it cannot be
+    -- recovered: amount_financed is cent-rounded, so inverting it through the
+    -- fee lands on a DIFFERENT principal and regenerates a schedule whose final
+    -- row contradicts the disclosure above it (db/migrations/0030).
+    principal        NUMERIC(14,2),
+    -- The contractual rate the payment schedule was calculated on. Distinct
+    -- from `apr` below, which is the disclosed all-in rate and is higher
+    -- whenever a prepaid fee exists. Boarding reads THIS one; servicing
+    -- amortizes what boarding gives it (db/migrations/0030).
+    note_rate_pct NUMERIC(7,3),
     apr         NUMERIC(7,3),           -- D12: was DOUBLE PRECISION
     finance_charge NUMERIC(14,2),       -- D12: was DOUBLE PRECISION
     monthly_payment NUMERIC(14,2),      -- D12: was DOUBLE PRECISION
@@ -137,6 +158,58 @@ CREATE TABLE IF NOT EXISTS offers (
         AND monthly_payment IS NOT NULL
         AND amount_financed IS NOT NULL
         AND total_of_payments IS NOT NULL
+    ),
+    -- Model B schedule integrity (db/migrations/0030). Mirrored here so both
+    -- provisioning paths enforce the same rules -- test_migration_paths_converge
+    -- compares CHECK constraints by name and normalized expression, so a rule
+    -- present on one path and absent on the other fails the build.
+    --
+    -- The application checks these too; that is not a substitute. Seed SQL, the
+    -- repair path and any operator with psql all write this table, and a
+    -- half-written schedule is worse than an absent one: it reads as "recorded"
+    -- to a single-column NULL check while describing nothing billable.
+    -- `principal` and `note_rate_pct` are part of the set, not adjacent to it.
+    -- Expanding a stored schedule needs the principal the payments run on and
+    -- the rate they were priced at, so a row holding the four columns below
+    -- without those two is a schedule that cannot be reproduced -- and it
+    -- satisfied every single-column NULL check, so the read path labelled it
+    -- "contract" and filled the gaps with an inverted principal and a rate
+    -- recovered from a rounded payment. Inferred numbers presented as agreed
+    -- terms. Mirrors disclosure-service's CONTRACT_FACTS. Reviewed on PR #10.
+    CONSTRAINT offers_schedule_all_or_nothing CHECK (
+        (regular_payment_count IS NULL
+         AND final_payment      IS NULL
+         AND term_months        IS NULL
+         AND schedule_version   IS NULL
+         AND principal          IS NULL
+         AND note_rate_pct      IS NULL)
+        OR
+        (regular_payment_count IS NOT NULL
+         AND final_payment      IS NOT NULL
+         AND term_months        IS NOT NULL
+         AND schedule_version   IS NOT NULL
+         AND principal          IS NOT NULL
+         AND note_rate_pct      IS NOT NULL)
+    ),
+    -- An identity of Model B, not a policy: term_months - 1 regular payments
+    -- plus one adjusted final payment. Also the exact corruption a mismatched
+    -- request body used to produce -- a 36-month schedule filed as 60 months.
+    CONSTRAINT offers_schedule_term_agrees CHECK (
+        term_months IS NULL OR regular_payment_count + 1 = term_months
+    ),
+    -- Zero regular payments is correct and reachable: a single-payment loan is
+    -- all final payment.
+    CONSTRAINT offers_schedule_shape_sane CHECK (
+        (term_months IS NULL OR term_months >= 1)
+        AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+    ),
+    CONSTRAINT offers_final_payment_positive CHECK (
+        final_payment IS NULL OR final_payment > 0
+    ),
+    -- An unknown version is not forward compatibility; it is a row whose
+    -- amounts were produced by rounding rules the reader does not have.
+    CONSTRAINT offers_schedule_version_supported CHECK (
+        schedule_version IS NULL OR schedule_version IN ('B1')
     )
 );
 
@@ -151,9 +224,40 @@ CREATE TABLE IF NOT EXISTS loans (
     applicant_name  TEXT,
     principal       NUMERIC(14,2) NOT NULL,   -- D12: was DOUBLE PRECISION
     apr             NUMERIC(7,3) NOT NULL,     -- D12: was DOUBLE PRECISION
+    -- The contract as boarded (db/migrations/0030). Servicing bills THESE
+    -- amounts; recomputing them from principal/rate/term is what drifts.
+    regular_payment       NUMERIC(14,2),
+    regular_payment_count INTEGER,
+    final_payment         NUMERIC(14,2),
+    schedule_version      TEXT,
     term_months     INTEGER NOT NULL,
     status          TEXT DEFAULT 'current',
-    opened_at       TIMESTAMPTZ DEFAULT now()
+    opened_at       TIMESTAMPTZ DEFAULT now(),
+    -- Model B schedule integrity on the boarded contract (db/migrations/0030).
+    -- No term_months in the group: loans.term_months already exists and is NOT
+    -- NULL, so the count is reconciled against the loan's own term instead.
+    CONSTRAINT loans_schedule_all_or_nothing CHECK (
+        (regular_payment       IS NULL
+         AND regular_payment_count IS NULL
+         AND final_payment     IS NULL
+         AND schedule_version  IS NULL)
+        OR
+        (regular_payment       IS NOT NULL
+         AND regular_payment_count IS NOT NULL
+         AND final_payment     IS NOT NULL
+         AND schedule_version  IS NOT NULL)
+    ),
+    CONSTRAINT loans_schedule_term_agrees CHECK (
+        regular_payment_count IS NULL OR regular_payment_count + 1 = term_months
+    ),
+    CONSTRAINT loans_schedule_amounts_positive CHECK (
+        (regular_payment IS NULL OR regular_payment > 0)
+        AND (final_payment IS NULL OR final_payment > 0)
+        AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+    ),
+    CONSTRAINT loans_schedule_version_supported CHECK (
+        schedule_version IS NULL OR schedule_version IN ('B1')
+    )
 );
 
 -- Mutable balance: one column, overwritten in place. No ledger, no transaction history.

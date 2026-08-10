@@ -8,6 +8,24 @@ published 3.0% (D6). Published source: policies/fee_schedule.md.
 from decimal import Decimal
 
 ORIGINATION_FEE_PCT = Decimal("0.030")   # policy: 3.0%
+
+# Identifies the rounding policy that produced a stored payment schedule, so a
+# future policy change is distinguishable per row rather than retroactive.
+# 'B1' = cent-rounded level regular payments, final period bills the remaining
+# principal plus that period's interest. Bump this if that changes; never
+# reinterpret existing rows under a new policy.
+SCHEDULE_VERSION = "B1"
+
+# The contractual note rate every offer is written at. It was a bare `7.99`
+# inline in routers/offers.py -- the same shape as the fee constant before D6
+# drifted three copies apart. It lives here so there is one place to change it,
+# and so the value that gets persisted on the offer is provably the value the
+# payment was calculated from.
+#
+# The note rate is NOT the APR. The APR is solved against the amount financed
+# and is higher whenever a prepaid fee exists; the note rate is what the payment
+# schedule actually runs on. Conflating them is what PR #10's review caught.
+NOTE_RATE_PCT = Decimal("7.99")
 LATE_FEE_FLAT = Decimal("35.0")
 NSF_FEE = Decimal("25.0")
 

@@ -7,8 +7,28 @@ import { Client } from "pg";
  * even else 612) while the rest of the number is derived from the current
  * timestamp so repeated runs never collide or depend on a prior run's
  * application id. */
+let _seq = 0;
 export function uniqueDigits(len: number): string {
-  return Date.now().toString().slice(-len).padStart(len, "0");
+  // A per-process counter FIRST, then the timestamp.
+  //
+  // This used to be the last `len` digits of Date.now() alone, and
+  // fictionalApplicant() builds its SSN from characters 0-4 of the result --
+  // which, for a millisecond timestamp, are the digits that change only every
+  // ~10 seconds. Two applications created inside the same window therefore got
+  // the SAME SSN, and the second one's submission failed: the wizard never
+  // reached Step 5 and the failure surfaced in submitApplication(), far from
+  // its cause.
+  //
+  // Latent until the suite grew. It began failing when this branch added
+  // specs, and which spec failed varied from run to run depending on where the
+  // 10-second boundary happened to fall -- flakiness that looked like
+  // parallelism but is not (playwright.config.ts sets workers: 1).
+  //
+  // Putting the counter in the leading digits guarantees every call differs in
+  // exactly the characters the SSN is cut from.
+  const counter = (_seq++ % 1000).toString().padStart(3, "0");
+  const stamp = Date.now().toString().slice(-6);
+  return (counter + stamp).slice(-len).padStart(len, "0");
 }
 
 export interface FictionalApplicant {

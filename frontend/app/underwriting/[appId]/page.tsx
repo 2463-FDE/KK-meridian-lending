@@ -7,7 +7,7 @@ import LoanSummaryCard from "../../../components/LoanSummaryCard";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
-import { usd, pct, shortDate } from "../../../lib/format";
+import { usd, pct, shortDate, paymentPlanText } from "../../../lib/format";
 
 interface Kyc {
   name_verified?: boolean;
@@ -17,11 +17,22 @@ interface Kyc {
 }
 
 interface Offer {
+  // The CONTRACTUAL interest rate the payments are priced at -- NOT the APR.
+  // Optional: a pre-0030 offer has no stored note rate, and the summary shows
+  // an em dash rather than presenting the APR as if it were the note rate.
+  note_rate_pct?: number | null;
+  // The federal APR: the note rate plus the prepaid origination fee, so always
+  // the larger of the two once a fee exists.
   apr: number;
   finance_charge: number;
+  // The REGULAR payment. Model B bills final_payment in the last period.
   monthly_payment: number;
   amount_financed: number;
   total_of_payments: number;
+  // Null on a legacy offer that never recorded a schedule.
+  regular_payment_count?: number | null;
+  final_payment?: number | null;
+  term_months?: number | null;
 }
 
 interface Applicant {
@@ -48,6 +59,9 @@ interface Application {
   created_at?: string;
   kyc?: Kyc;
   decision?: string;
+  // Whether this application's offer carries the full contractual schedule
+  // boarding needs -- a different question from whether `offer` is present.
+  offer_ready?: boolean;
   // Review fix: once staff decides, that decision is final -- this tells
   // the frontend to disable Approve/Deny up front instead of only finding
   // out via a 409 on submit.
@@ -103,6 +117,7 @@ function UnderwritingDetailContent() {
   // action state (mirrors the servicing detail action pattern)
   const [decision, setDecision] = useState<DecisionResult | null>(null);
   const [offer, setOffer] = useState<Offer | null>(null);
+  const [offerReady, setOfferReady] = useState(false);
   const [boardedLoanId, setBoardedLoanId] = useState<string | number | null>(
     null
   );
@@ -125,6 +140,10 @@ function UnderwritingDetailContent() {
       const a = (await apiGet(`/los/applications/${appId}`)) as Application;
       setApp(a);
       if (a.offer) setOffer(a.offer);
+      // Boardability is reported separately from the disclosure: an offer
+      // predating the stored Model B schedule still displays its disclosed
+      // amounts but cannot be funded from them.
+      setOfferReady(Boolean(a.offer_ready));
     } catch (err) {
       setError(errMsg(err, "Could not load this application."));
       setApp(null);
@@ -197,6 +216,12 @@ function UnderwritingDetailContent() {
       const disc = res.disclosure ?? res.offer ?? null;
       setOffer(disc);
       setActionMsg("Offer generated.");
+      // Re-read rather than assuming the new offer is boardable. Whether the
+      // full contractual schedule was persisted is a server-side fact, and
+      // /los/offer's response body does not report it -- inferring boardability
+      // from "an offer came back" is exactly the conflation offer_ready exists
+      // to remove.
+      await load();
     } catch (err) {
       setActionErr(errMsg(err, "Could not generate an offer."));
     } finally {
@@ -488,36 +513,90 @@ function UnderwritingDetailContent() {
       <h2>Offer</h2>
       <div className="card">
         <div className="spread" style={{ marginBottom: offer ? 16 : 0 }}>
-          <p className="hint" style={{ margin: 0 }}>
-            Generate a Truth-in-Lending offer at {pct(OFFER_RATE_PCT)} APR for{" "}
-            {usd(app?.amount)} over {app?.term_months} months.
+          <p className="hint hint-strong" style={{ margin: 0 }}>
+            Generate a Truth-in-Lending offer using a {pct(OFFER_RATE_PCT)} note
+            rate for {usd(app?.amount)} over {app?.term_months} months.
           </p>
-          <button
-            className="btn-ghost"
-            onClick={makeOffer}
-            disabled={actionBusy || Boolean(offer) || currentDecision !== "approve"}
-            title={
-              offer
-                ? "An offer has already been created for this application."
-                : currentDecision === "deny"
+          {offer && offerReady ? (
+            // Not a control. "Offer already created" describes state and can
+            // never be actioned -- rendering it as a disabled button invited
+            // clicks on something that was never going to respond, and read to
+            // a screen reader as an unavailable action rather than a fact.
+            // A status message says the same thing honestly.
+            <span className="status-note" role="status" data-testid="offer-exists">
+              Offer already created
+            </span>
+          ) : offer && !offerReady ? (
+            // A legacy offer: its five TILA amounts are there, but not the
+            // stored schedule boarding needs, so Accept below is disabled and
+            // its tooltip tells staff to regenerate. Until now there was
+            // nothing to click -- this branch showed the same static "Offer
+            // already created" label, so the audited repair path added for
+            // exactly these rows had no caller in any production UI. Review
+            // finding on PR #10.
+            <button
+              className="btn-ghost"
+              onClick={makeOffer}
+              disabled={actionBusy || currentDecision !== "approve"}
+              data-testid="regenerate-offer"
+              title={
+                "This offer predates the stored payment schedule, so it cannot "
+                + "be boarded. Regenerating writes a new disclosure at today's "
+                + "terms and records the change in the audit log."
+              }
+            >
+              {actionBusy ? "Regenerating…" : "Regenerate offer"}
+            </button>
+          ) : (
+            <button
+              className="btn-ghost"
+              onClick={makeOffer}
+              disabled={actionBusy || currentDecision !== "approve"}
+              // aria-disabled alongside `disabled` so assistive technology is
+              // told why the control is unavailable rather than skipping it
+              // silently; the title carries the reason for pointer users.
+              aria-disabled={actionBusy || currentDecision !== "approve"}
+              title={
+                currentDecision === "deny"
                   ? `An offer cannot be created because this application was denied.${decision?.adverse_action_reason ? ` Decision reason: ${decision.adverse_action_reason}` : ""}`
                   : currentDecision !== "approve"
                     ? "An offer cannot be created until the application receives a final approval."
                     : undefined
-            }
-          >
-            {actionBusy ? "Working…" : offer ? "Offer already created" : "Make offer"}
-          </button>
+              }
+            >
+              {actionBusy ? "Working…" : "Make offer"}
+            </button>
+          )}
         </div>
 
         {offer ? (
+          <>
+          {/* Both rates, before the federal box. They are different numbers --
+              the note rate prices the payments, the APR adds the prepaid
+              origination fee -- and showing one alone is what let a 5.43%
+              "APR" sit under a 7.99% loan without looking wrong. */}
+          <div className="rate-summary" data-testid="rate-summary">
+            <div className="rate-summary-item">
+              <span className="rate-summary-label">Interest rate (note rate)</span>
+              <span className="rate-summary-value" data-testid="note-rate">
+                {offer.note_rate_pct != null ? pct(offer.note_rate_pct) : "—"}
+              </span>
+            </div>
+            <div className="rate-summary-item">
+              <span className="rate-summary-label">Federal APR</span>
+              <span className="rate-summary-value" data-testid="federal-apr">
+                {pct(offer.apr)}
+              </span>
+            </div>
+          </div>
           <div className="tila">
             <div className="tila-title">Federal Truth-in-Lending Disclosure</div>
             <div className="tila-grid">
               <div className="tila-cell tila-cell-apr">
                 <div className="tila-cell-label">Annual Percentage Rate</div>
                 <div className="tila-cell-desc">
-                  The cost of your credit as a yearly rate.
+                  The total cost of your credit as a yearly rate, including the
+                  origination fee.
                 </div>
                 <div className="tila-cell-value">{pct(offer.apr)}</div>
               </div>
@@ -549,7 +628,36 @@ function UnderwritingDetailContent() {
                 </div>
               </div>
             </div>
+            {/* Payment schedule: a full-width row INSIDE the box, beneath the
+                four federal cells. The four boxes are the federal disclosure
+                and do not carry the schedule, so staff had no way to see that
+                the final payment differs from the regular one -- which under
+                Model B it almost always does.
+
+                Previously a bare <p> appended here, which .tila's
+                overflow:hidden and zero padding pushed against the border. Now
+                a real row with real padding, so nothing can sit on the border
+                at any viewport width. */}
+            <div className="tila-schedule" data-testid="payment-schedule">
+              <div className="tila-schedule-label">Payment schedule</div>
+              <div className="tila-schedule-value">
+                {offer.regular_payment_count != null && offer.final_payment != null ? (
+                  paymentPlanText(
+                    offer.monthly_payment,
+                    offer.regular_payment_count,
+                    offer.final_payment,
+                  )
+                ) : (
+                  <>
+                    Monthly payment {usd(offer.monthly_payment)}. No contractual
+                    payment schedule was recorded for this offer, so the final
+                    payment is not known and it cannot be boarded.
+                  </>
+                )}
+              </div>
+            </div>
           </div>
+          </>
         ) : null}
       </div>
 
@@ -578,7 +686,7 @@ function UnderwritingDetailContent() {
             </p>
             <button
               onClick={acceptAndBoard}
-              disabled={actionBusy || currentDecision !== "approve" || !offer}
+              disabled={actionBusy || currentDecision !== "approve" || !offerReady}
               title={
                 currentDecision === "deny"
                   ? `This application cannot be boarded because it was denied.${decision?.adverse_action_reason ? ` Reason: ${decision.adverse_action_reason}` : ""}`
@@ -586,7 +694,9 @@ function UnderwritingDetailContent() {
                     ? "This application must receive final approval before it can be boarded."
                     : !offer
                       ? "Create an offer before boarding this application."
-                      : undefined
+                      : !offerReady
+                        ? "This offer predates the stored payment schedule, so it cannot be boarded. Regenerate the offer to record the schedule."
+                        : undefined
               }
             >
               {actionBusy ? "Working…" : "Accept & board"}

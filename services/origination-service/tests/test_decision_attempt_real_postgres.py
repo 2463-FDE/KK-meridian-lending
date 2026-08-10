@@ -109,11 +109,21 @@ def _full_schema_sql():
             app_id INTEGER REFERENCES applications(id) UNIQUE,
             decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,
             fee_pct_used NUMERIC(5,4),
+            note_rate_pct NUMERIC(7,3),
             apr NUMERIC(7,3),
             finance_charge NUMERIC(14,2),
             monthly_payment NUMERIC(14,2),
             amount_financed NUMERIC(14,2),
             total_of_payments NUMERIC(14,2),
+            -- Model B schedule facts (db/migrations/0030). Boarding requires
+            -- these, so a fixture omitting them cannot board.
+            regular_payment_count INTEGER,
+            final_payment NUMERIC(14,2),
+            term_months INTEGER,
+            schedule_version TEXT,
+            -- The principal the stored schedule was solved for; boarding opens
+            -- the loan at this value (db/migrations/0030).
+            principal NUMERIC(14,2),
             created_at TIMESTAMPTZ DEFAULT now(),
             accepted_at TIMESTAMPTZ
         );
@@ -127,8 +137,35 @@ def _full_schema_sql():
             principal NUMERIC(14,2) NOT NULL,
             apr NUMERIC(7,3) NOT NULL,
             term_months INTEGER NOT NULL,
+            -- The Model B contract as boarded (db/migrations/0030), WITH its
+            -- constraints. Copying only the columns would let these tests pass
+            -- on a boarding write that real Postgres rejects -- and the whole
+            -- point of a real-Postgres fixture is that it does not diverge
+            -- from the deployed schema in ways the tests cannot see.
+            regular_payment NUMERIC(14,2),
+            regular_payment_count INTEGER,
+            final_payment NUMERIC(14,2),
+            schedule_version TEXT,
             status TEXT DEFAULT 'current',
-            opened_at TIMESTAMPTZ DEFAULT now()
+            opened_at TIMESTAMPTZ DEFAULT now(),
+            CONSTRAINT loans_schedule_all_or_nothing CHECK (
+                (regular_payment IS NULL AND regular_payment_count IS NULL
+                 AND final_payment IS NULL AND schedule_version IS NULL)
+                OR
+                (regular_payment IS NOT NULL AND regular_payment_count IS NOT NULL
+                 AND final_payment IS NOT NULL AND schedule_version IS NOT NULL)
+            ),
+            CONSTRAINT loans_schedule_term_agrees CHECK (
+                regular_payment_count IS NULL OR regular_payment_count + 1 = term_months
+            ),
+            CONSTRAINT loans_schedule_amounts_positive CHECK (
+                (regular_payment IS NULL OR regular_payment > 0)
+                AND (final_payment IS NULL OR final_payment > 0)
+                AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
+            ),
+            CONSTRAINT loans_schedule_version_supported CHECK (
+                schedule_version IS NULL OR schedule_version IN ('B1')
+            )
         );
         CREATE TABLE balances (
             loan_id INTEGER PRIMARY KEY REFERENCES loans(id),
@@ -846,9 +883,12 @@ def test_incomplete_offer_terms_never_board_a_loan(real_db, monkeypatch, missing
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (%s, 'approve')", (app_id,))
         cur.execute(
-            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-            "monthly_payment, amount_financed, total_of_payments) "
-            "VALUES (%s, %s, 0.03, %s, %s, %s, %s, %s)",
+            # Boarding requires the stored Model B schedule; an offer without it
+            # is a legacy row that cannot board.
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+            "finance_charge, monthly_payment, amount_financed, total_of_payments, "
+            "regular_payment_count, final_payment, term_months, schedule_version, principal) "
+            "VALUES (%s, %s, 0.03, 7.990, %s, %s, %s, %s, %s, 23, 407.12, 24, 'B1', 9000.00)",
             (app_id, app_id, terms["apr"], terms["finance_charge"], terms["monthly_payment"],
              terms["amount_financed"], terms["total_of_payments"]),
         )
@@ -889,9 +929,11 @@ def test_a_complete_offer_still_boards_exactly_one_loan_and_balance(real_db, mon
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (%s, 'approve')", (app_id,))
         cur.execute(
-            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-            "monthly_payment, amount_financed, total_of_payments) "
-            "VALUES (%s, %s, 0.03, 5.946, 768.11, 407.0, 8730.0, 9768.11)",
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+            "finance_charge, monthly_payment, amount_financed, total_of_payments, "
+            "regular_payment_count, final_payment, term_months, schedule_version, principal) "
+            "VALUES (%s, %s, 0.03, 7.990, 5.946, 768.11, 407.0, 8730.0, 9768.11, "
+            "23, 407.12, 24, 'B1', 9000.00)",
             (app_id, app_id),
         )
         cur.execute(

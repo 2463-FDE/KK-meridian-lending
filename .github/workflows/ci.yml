@@ -156,7 +156,10 @@ jobs:
         with:
           node-version: "20"
       - name: Start the full stack (fresh Postgres via db/init)
-        run: docker compose up -d --build
+        # The e2e overlay raises ONLY the gateway rate limit, which a dozen
+        # browser journeys from one source IP would otherwise trip. The default
+        # stack ships the real 120/60s control -- see docker-compose.e2e.yml.
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
       - name: Wait for gateway + frontend health
         run: |
           for i in $(seq 1 60); do

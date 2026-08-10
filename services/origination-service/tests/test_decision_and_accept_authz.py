@@ -462,10 +462,26 @@ def _accept_row(status="approved", outcome="approve", apr=9.99,
         "name": "Jane Borrower", "outcome": outcome,
         "offer_id": offer_id if apr is not None else None,
         "apr": apr,
+        # PR #10 review: boarding reads the CONTRACTUAL note rate, not the
+        # disclosed APR -- the two diverge once a prepaid fee exists, and
+        # boarding the APR billed the borrower above their own disclosure.
+        "note_rate_pct": 7.99 if apr is not None else None,
         "finance_charge": 500.0 if apr is not None else None,
         "monthly_payment": 400.0 if apr is not None else None,
         "amount_financed": 8700.0 if apr is not None else None,
         "total_of_payments": 9600.0 if apr is not None else None,
+        # Stored Model B schedule -- boarding refuses an offer without it, so a
+        # complete fixture offer must carry the whole set.
+        "regular_payment_count": 23 if apr is not None else None,
+        "final_payment": 400.12 if apr is not None else None,
+        "term_months": 24 if apr is not None else None,
+        "schedule_version": "B1" if apr is not None else None,
+        # The principal the stored schedule was solved for -- boarding opens the
+        # loan at this value, so a complete offer fixture must carry it. Named
+        # `offer_principal` because the precheck projection aliases it: the same
+        # row also carries the application's requested `amount`, and the two are
+        # different numbers.
+        "offer_principal": 9000.0 if apr is not None else None,
         "accept_token_hash": token_hash, "accept_token_consumed_at": token_consumed_at,
         "token_live": token_live,
     }
@@ -526,12 +542,20 @@ class _FakeAcceptTxCursor:
             }]
         elif stmt.startswith("SELECT outcome FROM decisions"):
             self._last = [{"outcome": self.locked_outcome}] if self.locked_outcome else []
-        elif stmt.startswith("SELECT apr, finance_charge, monthly_payment"):
+        elif stmt.startswith("SELECT note_rate_pct, regular_payment_count, final_payment"):
             # Gap F: all five canonical terms are re-read under the lock now.
             self._last = [{
+                # PR #10 review: boarding reads the contractual note rate, and
+                # it is deliberately different from the disclosed apr here so a
+                # test cannot pass by confusing the two.
+                "note_rate_pct": 7.99,
                 "apr": self.offer_apr, "finance_charge": 500.0,
                 "monthly_payment": 400.0, "amount_financed": 8700.0,
                 "total_of_payments": 9600.0,
+                # The locked re-read now covers every BOARDING_REQUIRED_FIELD,
+                # including the stored schedule.
+                "regular_payment_count": 23, "final_payment": 400.12,
+                "term_months": 24, "schedule_version": "B1", "principal": 9000.0,
             }] if self.offer_apr is not None else []
         elif stmt.startswith("UPDATE applications SET status = 'funded'"):
             self._last = None

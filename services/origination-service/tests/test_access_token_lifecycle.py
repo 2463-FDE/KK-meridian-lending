@@ -72,9 +72,19 @@ def real_db(monkeypatch):
                 app_id INTEGER REFERENCES applications(id) UNIQUE,
                 decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,
                 fee_pct_used NUMERIC(5,4),
+                -- note_rate_pct is canonical: _complete_offer_exists() queries it,
+                -- so a fixture omitting it fails with UndefinedColumn.
+                note_rate_pct NUMERIC(7,3),
                 apr NUMERIC(7,3), finance_charge NUMERIC(14,2),
                 monthly_payment NUMERIC(14,2), amount_financed NUMERIC(14,2),
                 total_of_payments NUMERIC(14,2),
+                -- Model B schedule facts (db/migrations/0030). Boarding requires
+                -- these, so a fixture omitting them cannot board.
+                regular_payment_count INTEGER,
+                final_payment NUMERIC(14,2),
+                term_months INTEGER,
+                schedule_version TEXT,
+            principal NUMERIC(14,2),
                 accepted_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT now()
             );

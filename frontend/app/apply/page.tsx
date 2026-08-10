@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
 import { apiGet, apiPost, ApiError } from "../../lib/api";
-import { usd, pct } from "../../lib/format";
+import { usd, pct, paymentPlanText } from "../../lib/format";
 
 const STEPS: Step[] = [
   { n: 1, label: "Personal" },
@@ -100,11 +100,27 @@ interface DecisionResult {
 }
 
 interface Disclosure {
+  // The contractual interest rate the payment stream is priced at. Distinct
+  // from `apr`, which additionally carries the prepaid origination fee -- and
+  // always the smaller of the two once a fee exists. Showing only one of them
+  // is what let a 5.43% "APR" sit under a 7.99% loan without looking wrong.
+  note_rate_pct?: number;
   apr: number;
   finance_charge: number;
   monthly_payment: number;
   amount_financed: number;
   total_of_payments: number;
+  // Model B: monthly_payment is the REGULAR payment and the final period bills
+  // final_payment instead. Optional -- a pre-0030 offer has no stored schedule
+  // and reports null rather than a reconstructed figure.
+  regular_payment_count?: number | null;
+  final_payment?: number | null;
+  term_months?: number | null;
+  // Provenance of the rows below: "contract" when they were expanded from the
+  // stored payment terms, "reconstructed" when this offer predates them and the
+  // rows are an estimate.
+  schedule_source?: string | null;
+  schedule_note?: string | null;
   schedule?: {
     n: number;
     due_date: string;
@@ -220,6 +236,18 @@ export default function ApplyPage() {
     null
   );
   const [showSchedule, setShowSchedule] = useState(false);
+  // Boardability, from the server's own check rather than inferred from a
+  // subset of the disclosure fields. Deriving it client-side marked an offer
+  // ready when `principal` or `note_rate_pct` was missing, and acceptance then
+  // 409'd with no way to regenerate. Reviewed on PR #10.
+  const [offerReady, setOfferReady] = useState(false);
+  // Regeneration reprices the offer, so the disclosure on screen afterwards is a
+  // DIFFERENT one from the one the borrower opened. Acceptance is gated on an
+  // explicit acknowledgement that they have read it -- a repriced offer accepted
+  // by a click aimed at the previous set of numbers is not an informed
+  // acceptance. Reviewed on PR #10.
+  const [repriced, setRepriced] = useState(false);
+  const [reviewedNewTerms, setReviewedNewTerms] = useState(false);
 
   function set<K extends keyof FormState>(k: K, v: FormState[K]) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -386,6 +414,42 @@ export default function ApplyPage() {
     }
   }
 
+  /** Regenerate a legacy offer so it carries stored contractual terms.
+   *
+   * A pre-0030 offer displays fine and CANNOT be accepted: origination requires
+   * the stored schedule and returns 409 without it. The staff screen got a
+   * "Regenerate offer" control for exactly this state; the borrower flow had
+   * none, so a borrower could sit in front of an offer whose Accept button was
+   * guaranteed to fail. POST /los/offer is idempotent and repairs an unaccepted
+   * legacy row (audited), which is the same path staff use. Reviewed on PR #10.
+   */
+  async function regenerateOffer() {
+    if (!app) return;
+    setBusy(true);
+    setApiError(null);
+    try {
+      const token = decision?.accept_token || "";
+      const created = (await apiPost(
+        "/los/offer",
+        {
+          app_id: app.app_id,
+          principal: form.amount,
+          annual_rate_pct: OFFER_RATE_PCT,
+          term_months: parseInt(form.term_months, 10),
+        },
+        { "X-Offer-Accept-Token": token },
+      )) as { disclosure: Disclosure; offer_ready?: boolean };
+      setDisclosure(created.disclosure);
+      setOfferReady(created.offer_ready ?? false);
+      setRepriced(true);
+      setReviewedNewTerms(false);
+    } catch (err) {
+      setApiError(errMsg(err, "Could not regenerate your offer."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function viewOffer() {
     if (!app) return;
     setBusy(true);
@@ -407,18 +471,19 @@ export default function ApplyPage() {
       // gateway/origination-service access logs, browser history, and a
       // Referer header; a header does not.
       const token = decision?.accept_token || "";
-      let existing: { disclosure: Disclosure } | null = null;
+      let existing: { disclosure: Disclosure; offer_ready?: boolean } | null = null;
       try {
         existing = (await apiGet(
           `/los/applications/${app.app_id}/offer`,
           { "X-Offer-Accept-Token": token },
-        )) as { disclosure: Disclosure };
+        )) as { disclosure: Disclosure; offer_ready?: boolean };
       } catch (getErr) {
         if (!(getErr instanceof ApiError) || getErr.status !== 404) throw getErr;
         // 404 -- genuinely no offer yet; fall through to create one below.
       }
       if (existing) {
         setDisclosure(existing.disclosure);
+        setOfferReady(existing.offer_ready ?? false);
         return;
       }
       // Security fix (PR #6 review): POST /offer now requires the same
@@ -439,8 +504,9 @@ export default function ApplyPage() {
           term_months: parseInt((submitted ?? form).term_months, 10),
         },
         { "X-Offer-Accept-Token": token },
-      )) as { app_id: string | number; disclosure: Disclosure };
+      )) as { app_id: string | number; disclosure: Disclosure; offer_ready?: boolean };
       setDisclosure(created.disclosure);
+      setOfferReady(created.offer_ready ?? false);
     } catch (err) {
       setApiError(errMsg(err, "Could not generate your offer."));
     } finally {
@@ -723,9 +789,10 @@ export default function ApplyPage() {
                 </select>
               </Field>
             </div>
-            <p className="hint" style={{ marginTop: 12 }}>
-              Estimated rate {pct(OFFER_RATE_PCT)} APR (illustrative — your final
-              rate is set at offer).
+            <p className="hint hint-strong" style={{ marginTop: 12 }}>
+              Estimated interest rate (note rate) {pct(OFFER_RATE_PCT)} —
+              illustrative; your final rate is set at offer. Your APR will be
+              higher, because it also includes the origination fee.
             </p>
           </>
         )}
@@ -869,6 +936,11 @@ export default function ApplyPage() {
                     showSchedule={showSchedule}
                     onToggleSchedule={() => setShowSchedule((v) => !v)}
                     onAccept={acceptOffer}
+                    onRegenerate={regenerateOffer}
+                    offerReady={offerReady}
+                    repriced={repriced}
+                    reviewedNewTerms={reviewedNewTerms}
+                    onReviewNewTerms={setReviewedNewTerms}
                     busy={busy}
                     acceptedLoanId={acceptedLoanId}
                   />
@@ -1152,6 +1224,11 @@ function OfferPanel({
   showSchedule,
   onToggleSchedule,
   onAccept,
+  onRegenerate,
+  offerReady,
+  repriced,
+  reviewedNewTerms,
+  onReviewNewTerms,
   busy,
   acceptedLoanId,
 }: {
@@ -1161,17 +1238,47 @@ function OfferPanel({
   showSchedule: boolean;
   onToggleSchedule: () => void;
   onAccept: () => void;
+  onRegenerate: () => void;
+  offerReady: boolean;
+  repriced: boolean;
+  reviewedNewTerms: boolean;
+  onReviewNewTerms: (v: boolean) => void;
   busy: boolean;
   acceptedLoanId: string | number | null;
 }) {
   const hasSchedule = !!disclosure.schedule && disclosure.schedule.length > 0;
+  // Boardability comes from the SERVER (`offer_ready`, the same
+  // _complete_offer_exists check accept_offer enforces over
+  // BOARDING_REQUIRED_FIELDS). Deriving it here from the three schedule columns
+  // marked an offer ready when `principal` or `note_rate_pct` was missing, and
+  // acceptance then 409'd with no way to reach the regeneration path. The
+  // client must not hold its own opinion about what boarding requires.
+  // Reviewed on PR #10.
+  const scheduleIsEstimate = disclosure.schedule_source === "reconstructed";
   return (
     <div style={{ marginTop: 22 }}>
       <h3>Your offer</h3>
-      <p className="hint" style={{ marginBottom: 12 }}>
-        {usd(amount)} over {termMonths} months · monthly payment{" "}
-        <strong>{usd(disclosure.monthly_payment)}</strong>
+      <p className="hint hint-strong" style={{ marginBottom: 12 }}>
+        {usd(amount)} over {termMonths} months. The rates and the payment
+        schedule are set out below.
       </p>
+
+      {/* Both rates, before the federal box. They are different numbers and
+          neither substitutes for the other. */}
+      <div className="rate-summary" data-testid="rate-summary">
+        <div className="rate-summary-item">
+          <span className="rate-summary-label">Interest rate (note rate)</span>
+          <span className="rate-summary-value" data-testid="note-rate">
+            {disclosure.note_rate_pct != null ? pct(disclosure.note_rate_pct) : "—"}
+          </span>
+        </div>
+        <div className="rate-summary-item">
+          <span className="rate-summary-label">Federal APR</span>
+          <span className="rate-summary-value" data-testid="federal-apr">
+            {pct(disclosure.apr)}
+          </span>
+        </div>
+      </div>
 
       {/* Classic 4-box Federal Truth-in-Lending disclosure layout. */}
       <div className="tila">
@@ -1180,7 +1287,8 @@ function OfferPanel({
           <div className="tila-cell tila-cell-apr">
             <div className="tila-cell-label">Annual Percentage Rate</div>
             <div className="tila-cell-desc">
-              The cost of your credit as a yearly rate.
+              The total cost of your credit as a yearly rate, including the
+              origination fee.
             </div>
             <div className="tila-cell-value">{pct(disclosure.apr)}</div>
           </div>
@@ -1212,10 +1320,30 @@ function OfferPanel({
             </div>
           </div>
         </div>
+        {/* Payment schedule: a full-width row inside the box, beneath the four
+            federal cells. The four boxes are the federal disclosure and carry
+            no schedule, so without this the borrower is told a single monthly
+            figure for a contract whose final payment differs. */}
+        <div className="tila-schedule" data-testid="payment-schedule">
+          <div className="tila-schedule-label">Payment schedule</div>
+          <div className="tila-schedule-value">
+            {paymentPlanText(
+              disclosure.monthly_payment,
+              disclosure.regular_payment_count,
+              disclosure.final_payment,
+            )}
+          </div>
+        </div>
       </div>
 
       {hasSchedule ? (
         <div style={{ marginTop: 16 }}>
+          {scheduleIsEstimate ? (
+            <div className="alert alert-warn" data-testid="schedule-estimate">
+              {disclosure.schedule_note ||
+                "This payment schedule is an estimate, rebuilt from the disclosed amounts."}
+            </div>
+          ) : null}
           <button className="collapse-toggle" onClick={onToggleSchedule}>
             {showSchedule ? "Hide" : "Show"} payment schedule (
             {disclosure.schedule!.length})
@@ -1259,10 +1387,64 @@ function OfferPanel({
             Go to your loan account →
           </Link>
         </div>
+      ) : offerReady ? (
+        <div style={{ marginTop: 16 }}>
+          {/* A repriced offer needs a fresh, explicit acceptance. After
+              regeneration the numbers above are not the ones the borrower opened
+              the page on, so an Accept click aimed at the previous figures must
+              not carry over. Reviewed on PR #10. */}
+          {repriced ? (
+            <div className="alert alert-warn" data-testid="repriced-disclosure">
+              <strong>These are new terms.</strong> This offer was recalculated
+              under our current pricing just now, so the interest rate, the
+              origination fee, the APR, the monthly payment and the schedule above
+              may differ from what you saw before. Please read the disclosure
+              above before accepting.
+              <label style={{ display: "block", marginTop: 8 }}>
+                <input
+                  type="checkbox"
+                  data-testid="ack-new-terms"
+                  checked={reviewedNewTerms}
+                  onChange={(e) => onReviewNewTerms(e.target.checked)}
+                />{" "}
+                I have reviewed the updated disclosure above.
+              </label>
+            </div>
+          ) : null}
+          <button
+            onClick={onAccept}
+            disabled={busy || (repriced && !reviewedNewTerms)}
+          >
+            {busy ? "Accepting…" : "Accept offer"}
+          </button>
+        </div>
       ) : (
-        <button style={{ marginTop: 16 }} onClick={onAccept} disabled={busy}>
-          {busy ? "Accepting…" : "Accept offer"}
-        </button>
+        /* Not boardable. Showing Accept here would fail with a 409 the borrower
+           can do nothing about, so the action offered is the one that helps:
+           regenerating records the contractual terms and makes acceptance
+           possible. Reviewed on PR #10. */
+        <div style={{ marginTop: 16 }}>
+          {/* No preservation promise. This used to say "your amount, rate and
+              term do not change", which was not true: regeneration prices the
+              offer again under the CURRENT policy, so the rate, the origination
+              fee, the APR, the payment and the whole schedule can all come back
+              different. Telling a borrower their terms are unchanged and then
+              changing them is the one thing a disclosure exists to prevent.
+              Reviewed on PR #10. */}
+          <div className="alert alert-warn" data-testid="offer-not-boardable">
+            This offer was prepared before we started recording the exact payment
+            schedule, so it cannot be accepted as it stands. Regenerating it
+            produces a <strong>new offer priced today</strong>: the interest rate,
+            the origination fee, the APR, the monthly payment and the payment
+            schedule are all recalculated under our current pricing, and any of
+            them may differ from what you see now. Your requested amount and term
+            stay as you entered them. You will be shown the new disclosure to
+            review before you can accept it.
+          </div>
+          <button onClick={onRegenerate} disabled={busy} data-testid="regenerate-offer">
+            {busy ? "Regenerating…" : "Regenerate offer"}
+          </button>
+        </div>
       )}
     </div>
   );

@@ -57,12 +57,29 @@ def create_application(payload: dict) -> tuple[int, str]:
 
 
 def board_to_servicing(app_id: int, applicant_name: str, principal: float,
-                       annual_rate_pct: float, term_months: int) -> int:
-    """Direct cross-schema insert into the LSS tables. The 'seam'."""
+                       annual_rate_pct: float, term_months: int,
+                       *, regular_payment: float, regular_payment_count: int,
+                       final_payment: float, schedule_version: str) -> int:
+    """Direct cross-schema insert into the LSS tables. The 'seam'.
+
+    The Model B schedule is copied from the offer, not recomputed here
+    (db/migrations/0030). Recomputing is what drifts: servicing used to
+    regenerate the schedule from principal/rate/term with whatever generator
+    was deployed at read time, so a later rounding change silently altered the
+    contractual terms of a loan somebody had already signed.
+
+    Keyword-only and mandatory. Defaulting them to None would let a caller
+    board a loan with no schedule by simply not knowing about the parameters --
+    which is the state legacy loans are in, and which nothing new should be
+    able to enter. loans_schedule_all_or_nothing would catch a partial write,
+    but a silently complete-looking all-NULL write is exactly what it permits.
+    """
     loan = db.query(
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (app_id, applicant_name, principal, annual_rate_pct, term_months),
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months, "
+        "regular_payment, regular_payment_count, final_payment, schedule_version) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct, term_months,
+         regular_payment, regular_payment_count, final_payment, schedule_version),
     )
     loan_id = loan[0]["id"]
     # reach across into the servicing balances table directly
@@ -76,17 +93,27 @@ def board_to_servicing(app_id: int, applicant_name: str, principal: float,
 
 
 def board_to_servicing_tx(cur, app_id: int, applicant_name: str, principal: float,
-                          annual_rate_pct: float, term_months: int) -> int:
+                          annual_rate_pct: float, term_months: int,
+                          *, regular_payment: float, regular_payment_count: int,
+                          final_payment: float, schedule_version: str) -> int:
     """Same insert as board_to_servicing, but runs on a caller-supplied cursor
     so it lands in the SAME transaction as the caller's own statements (see
     routers/applications.py accept_offer + db.transaction()) -- a boarding
     failure then rolls back everything in that transaction together, instead
     of leaving a status flip committed with no loan behind it.
+
+    The schedule copy is inside that same transaction for the same reason. A
+    loan row committed without the terms it is to be billed on would be a
+    funded contract whose payment amounts exist nowhere -- and the accept path
+    has no second chance to write them, since it also marks the offer accepted
+    and the offer is thereafter immutable.
     """
     cur.execute(
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (app_id, applicant_name, principal, annual_rate_pct, term_months),
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months, "
+        "regular_payment, regular_payment_count, final_payment, schedule_version) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct, term_months,
+         regular_payment, regular_payment_count, final_payment, schedule_version),
     )
     loan_id = cur.fetchone()["id"]
     cur.execute(

@@ -44,16 +44,45 @@ INSERT INTO decisions (app_id, outcome) VALUES
   (6013, 'deny'),
   (6014, 'approve');
 
-INSERT INTO offers (app_id, apr, finance_charge, monthly_payment, amount_financed, total_of_payments) VALUES
-  (4471, 7.142, 3021.44, 437.94, 18000, 21021.44),  -- disclosed APR is the float value
-  (5582, 9.990, 1934.10, 386.00, 12000, 13896.00),
-  (6011, 7.142, 1772.55, 466.46, 15000, 16793.16),
-  (6014, 11.250, 16480.00, 1093.00, 50000, 65580.00);
+-- Offers. Every field recomputed from principal / note rate / term through the
+-- same formulas production uses -- these were hand-written literals that
+-- satisfied no TILA relationship: amount_financed equalled the principal (no fee
+-- deducted at all), the stored `apr` was a stale float value, note_rate_pct and
+-- fee_pct_used were absent, and 3 of 4 failed
+-- amount_financed + finance_charge = total_of_payments.
+--
+-- Rounding: payment kept unrounded for the total, monetary fields at 2dp,
+-- APR at 3dp, finance charge derived as total - amount_financed so the box
+-- cannot fail to foot. Verified by db/tests/test_seed_offer_consistency.py.
+--
+--   app   note   apr     finance_charge  payment  amount_financed  total
+-- BEGIN GENERATED OFFER ROWS (db/tools/regenerate_seed_offers.py)
+-- The four curated anchors. Do not hand-edit: regenerate with
+-- `python db/tools/regenerate_seed_offers.py --write`.
+--
+-- These previously carried pre-Model-B values -- 4471's total was 21088.71
+-- against an actual 21088.70, and 6011's 16919.15 against 16919.17. A cent
+-- or two, on the figures a demo points at to show the disclosure footing.
+INSERT INTO offers (app_id, note_rate_pct, fee_pct_used, apr,
+                    finance_charge, monthly_payment, amount_financed,
+                    total_of_payments, regular_payment_count, final_payment,
+                    term_months, schedule_version, principal) VALUES
+  (4471, 7.99, 0.0300, 9.584, 3628.70, 439.35, 17460.00, 21088.70, 47, 439.25, 48, 'B1', 18000),
+  (5582, 9.99, 0.0300, 12.096, 2297.39, 387.15, 11640.00, 13937.39, 35, 387.14, 36, 'B1', 12000),
+  (6011, 7.99, 0.0300, 10.072, 2369.17, 469.98, 14550.00, 16919.17, 35, 469.87, 36, 'B1', 15000),
+  (6014, 11.25, 0.0300, 12.590, 17101.83, 1093.37, 48500.00, 65601.83, 59, 1093.00, 60, 'B1', 50000);
+-- END GENERATED OFFER ROWS
 
+-- `loans.apr` holds the CONTRACTUAL note rate despite the column name (D19) --
+-- it is what servicing/schedule.py::amortization() bills from. 4471 and 6011
+-- previously carried 7.142, a stale disclosed-APR value, so amortizing them
+-- reproduced neither the disclosed payment nor anything else. They now match
+-- their offer's note_rate_pct, which is the invariant
+-- db/tests/test_seed_offer_consistency.py enforces for every row.
 INSERT INTO loans (id, app_id, applicant_name, principal, apr, term_months, status) VALUES
-  (4471, 4471, 'Maria Gonzalez', 18000, 7.142, 48, 'current'),
-  (5582, 5582, 'Darnell Webb',   12000, 9.990, 36, 'current'),
-  (6011, 6011, 'Priya Raman',    15000, 7.142, 36, 'current'),
+  (4471, 4471, 'Maria Gonzalez', 18000,  7.990, 48, 'current'),
+  (5582, 5582, 'Darnell Webb',   12000,  9.990, 36, 'current'),
+  (6011, 6011, 'Priya Raman',    15000,  7.990, 36, 'current'),
   (6014, 6014, 'Northgate Holdings LLC', 50000, 11.250, 60, 'current');
 SELECT setval('loans_id_seq', 6014);
 

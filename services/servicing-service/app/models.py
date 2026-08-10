@@ -37,6 +37,18 @@ class Loan(Base):
     principal: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     apr: Mapped[float] = mapped_column(Numeric(7, 3, asdecimal=False))
     term_months: Mapped[int] = mapped_column(Integer)
+    # The Model B contractual schedule copied from the offer at boarding
+    # (db/migrations/0030). Nothing in this service reads them yet -- billing
+    # from the stored amounts instead of regenerating the schedule is the
+    # remaining half of that work. They are declared now anyway: an undeclared
+    # column reads as None through the ORM regardless of what SQL holds, and
+    # this repository has now been bitten by that twice (servicing `pan` in
+    # PR #11, origination's offer schedule columns in this one). Declaring the
+    # column when the migration lands is what stops a third.
+    regular_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    regular_payment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_payment: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
+    schedule_version: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str | None] = mapped_column(String, default="current")
     opened_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

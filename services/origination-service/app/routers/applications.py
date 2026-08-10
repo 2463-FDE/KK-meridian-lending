@@ -80,9 +80,38 @@ def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> Non
 
 # The five canonical TILA amounts. An offers row missing any of them is not a
 # disclosure -- see _offer_disclosure_or_none and Gap F.
-_CANONICAL_OFFER_FIELDS = (
+# Two different questions, deliberately not one list.
+#
+# TILA_MONETARY_FIELDS -- the historical four-box amounts. An accepted legacy
+# offer that has these can still be DISPLAYED: those figures are what was
+# disclosed, and hiding them because newer columns are absent would withhold a
+# real disclosure over a bookkeeping gap.
+TILA_MONETARY_FIELDS = (
     "apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments",
 )
+
+# BOARDING_REQUIRED_FIELDS -- everything needed to board a contract that
+# servicing can bill without inventing anything. The monetary amounts plus the
+# contractual note rate and the persisted Model B schedule.
+#
+# Why the schedule fields belong here: under Model B the final payment differs
+# from the regular one and cannot be recovered from any stored figure. Boarding
+# an offer without it would leave servicing to regenerate the schedule with
+# whatever generator is deployed -- which is the drift this PR exists to remove.
+# NULL means "never recorded", so such an offer cannot board; an unaccepted one
+# can be regenerated through the audited repair path instead.
+BOARDING_REQUIRED_FIELDS = TILA_MONETARY_FIELDS + (
+    "note_rate_pct", "regular_payment_count", "final_payment", "term_months",
+    "schedule_version",
+    # The principal the schedule was solved for. Boarding copies the stored
+    # payments; opening the loan at a different principal would bill a schedule
+    # that cannot amortize it to zero.
+    "principal",
+)
+
+# Boarding readiness is what offer_ready reports and what accept enforces, so
+# they cannot disagree: a caller told "ready" must not then hit a 409.
+_CANONICAL_OFFER_FIELDS = BOARDING_REQUIRED_FIELDS
 
 
 def _complete_offer_exists(app_id: int) -> bool:
@@ -107,10 +136,20 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
     Gap F (PR #6 review): this read used to be `offer.apr or 0` per field, so a
     row with a NULL amount was presented as a real disclosure quoting 0.00 --
     invented terms indistinguishable from genuine ones. Missing terms now
-    render as "no offer", never as a number nobody calculated."""
+    render as "no offer", never as a number nobody calculated.
+
+    Gated on TILA_MONETARY_FIELDS, not BOARDING_REQUIRED_FIELDS: this function
+    answers "what was disclosed", and the four-box amounts are the whole of
+    that answer. It briefly used the boarding list, which made a legacy offer
+    render as no disclosure at all -- withholding figures that were genuinely
+    disclosed because newer bookkeeping columns were absent. Whether those
+    terms are complete enough to FUND is a different question, answered by
+    _complete_offer_exists and reported separately as offer_ready; the UI
+    disables Accept & board on that, so loosening this gate cannot let an
+    unboardable offer through to a 409."""
     if offer is None:
         return None
-    missing = [f for f in _CANONICAL_OFFER_FIELDS if getattr(offer, f, None) is None]
+    missing = [f for f in TILA_MONETARY_FIELDS if getattr(offer, f, None) is None]
     if missing:
         log.error(
             "incomplete offer row app_id=%s offer_id=%s missing=%s",
@@ -118,9 +157,17 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
         )
         return None
     return Disclosure(
+        note_rate_pct=getattr(offer, "note_rate_pct", None),
         apr=offer.apr, finance_charge=offer.finance_charge,
         monthly_payment=offer.monthly_payment, amount_financed=offer.amount_financed,
         total_of_payments=offer.total_of_payments,
+        # Passed through as stored, including None. A legacy offer reports no
+        # final payment rather than a recomputed one: shown beside four genuinely
+        # disclosed amounts, a reconstructed figure is indistinguishable from a
+        # disclosed one.
+        regular_payment_count=getattr(offer, "regular_payment_count", None),
+        final_payment=getattr(offer, "final_payment", None),
+        term_months=getattr(offer, "term_months", None),
     )
 
 
@@ -282,6 +329,11 @@ def get_application(
         # a staff detail view, so it degrades to "no offer yet" instead of
         # failing the whole application page.)
         offer=_offer_disclosure_or_none(offer, a.id),
+        # Read from SQL rather than from the ORM row above on purpose: this must
+        # agree with what accept_offer enforces, and accept re-reads the row
+        # under a lock. Deriving it from `offer` here would be a second
+        # implementation of the same rule -- the kind that drifts.
+        offer_ready=_complete_offer_exists(a.id),
     )
 
 
@@ -888,7 +940,12 @@ def accept_offer(
     # between this read and that lock.
     rows = db.query(
         f"SELECT a.amount, a.term_months, a.status, {_ACCEPT_TOKEN_FIELDS}, ap.name, "
-        "o.id AS offer_id, o.apr, o.finance_charge, o.monthly_payment, "
+        "o.id AS offer_id, o.note_rate_pct, o.apr, o.finance_charge, o.monthly_payment, "
+        "o.regular_payment_count, o.final_payment, o.term_months, o.schedule_version, "
+        # `o.principal` aliased: `a.amount` is the requested amount and this is
+        # the principal the stored schedule was solved for. Both are read here,
+        # and confusing them is exactly the defect this alias prevents.
+        "o.principal AS offer_principal, "
         "o.amount_financed, o.total_of_payments, o.accepted_at, d.outcome "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN offers o ON o.app_id = a.id "
@@ -947,7 +1004,13 @@ def accept_offer(
     # answer -- the borrower needs a regenerated offer, not a first one. The
     # authoritative check is the locked re-read below; this fast path just
     # avoids opening a transaction for a row already known to be unusable.
-    incomplete_precheck = [f for f in _CANONICAL_OFFER_FIELDS if r.get(f) is None]
+    # `principal` arrives under an alias in this projection (see the SELECT
+    # above), so the readiness check has to look for it by that name or it would
+    # report every offer as missing a column the row actually has.
+    incomplete_precheck = [
+        f for f in _CANONICAL_OFFER_FIELDS
+        if r.get("offer_principal" if f == "principal" else f) is None
+    ]
     if incomplete_precheck:
         raise HTTPException(
             status_code=409,
@@ -1023,7 +1086,9 @@ def accept_offer(
         # condition matters: a second racing request must not board against
         # an offer this same transaction is about to mark accepted.
         cur.execute(
-            "SELECT apr, finance_charge, monthly_payment, amount_financed, total_of_payments "
+            "SELECT note_rate_pct, regular_payment_count, final_payment, term_months, "
+            "schedule_version, apr, finance_charge, monthly_payment, amount_financed, "
+            "total_of_payments, principal "
             "FROM offers WHERE app_id = %s AND accepted_at IS NULL ORDER BY id DESC LIMIT 1",
             (app_id,),
         )
@@ -1051,7 +1116,31 @@ def accept_offer(
                     f"disclosure terms: {', '.join(incomplete)}. Generate a new offer."
                 ),
             )
-        rate = offer_rows[0]["apr"]
+        # Review fix (PR #10): this used to board `offers.apr`. Once apr became
+        # the true actuarial rate that meant servicing amortized the loan at the
+        # DISCLOSED rate instead of the contractual one, billing 452.94 a month
+        # against a disclosure that said 439.35 -- 652 more over a 48-month term,
+        # against the borrower. It was wrong before that change too (it boarded
+        # the old add-on ratio and billed under), so this is not a regression the
+        # APR fix introduced so much as one it made harmful.
+        #
+        # Board the note rate: the contractual rate the payment schedule was
+        # actually calculated on (db/migrations/0030). servicing amortizes
+        # whatever it is given, so this is the number that decides what the
+        # borrower is billed.
+        rate = offer_rows[0]["note_rate_pct"]
+        if rate is None:
+            # Refuse rather than fall back to apr. A pre-0030 row that escaped
+            # the back-fill has no recorded contractual rate, and guessing one
+            # is how the borrower ends up on terms nobody disclosed.
+            log.error("refusing to board an offer with no note_rate_pct app_id=%s", app_id)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This offer does not record the contractual rate it was written at "
+                    "and cannot be boarded. Generate a new offer."
+                ),
+            )
 
         cur.execute(
             "UPDATE applications SET status = 'funded', accept_token_hash = NULL, "
@@ -1063,8 +1152,45 @@ def accept_offer(
             "UPDATE offers SET accepted_at = now() WHERE app_id = %s AND accepted_at IS NULL",
             (app_id,),
         )
+        offer = offer_rows[0]
         try:
-            loan_id = intake.board_to_servicing_tx(cur, app_id, name, r["amount"], rate, r["term_months"])
+            loan_id = intake.board_to_servicing_tx(
+                cur, app_id, name,
+                # The OFFER's principal, for the same reason as its term below:
+                # it is the amount the stored schedule was actually solved for.
+                # This used to board `applications.amount`. The two agree today
+                # -- the offer is built from the application's own record -- but
+                # if the requested amount were corrected after the offer was
+                # written, or a counteroffer ever carried a different principal,
+                # the loan would open at one principal while billing a schedule
+                # calculated for another, and the balance would never amortize
+                # to zero. Review finding on PR #10.
+                #
+                # Legacy rows have no stored principal; they cannot board at all
+                # (BOARDING_REQUIRED_FIELDS), so the fallback here is only ever
+                # reached if that gate is loosened, and it keeps today's
+                # behaviour rather than a NULL.
+                offer["principal"] if offer["principal"] is not None else r["amount"],
+                rate,
+                # The OFFER's contractual term, not the application's requested
+                # one. They agree today -- the offer is built from the
+                # application's term and the stored value is server-derived --
+                # but only one of them is the term the schedule below was
+                # actually solved for, and loans_schedule_term_agrees checks the
+                # count against whatever is boarded here. Reading the requested
+                # term would make a future counteroffer board a schedule filed
+                # under the wrong term.
+                offer["term_months"],
+                # Copied, never recomputed. Under Model B the final payment
+                # absorbs the cent residue and cannot be recovered from any
+                # other stored figure, so a servicing-side recomputation would
+                # not merely risk drift -- it could not reproduce these amounts
+                # at all.
+                regular_payment=offer["monthly_payment"],
+                regular_payment_count=offer["regular_payment_count"],
+                final_payment=offer["final_payment"],
+                schedule_version=offer["schedule_version"],
+            )
         except psycopg2.errors.UniqueViolation:
             # loans_app_id_key (db/migrations/0015) -- a loan already exists
             # for this application; surface that instead of a raw 500.

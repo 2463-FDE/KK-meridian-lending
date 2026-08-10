@@ -90,3 +90,57 @@ def test_last4_wins_over_the_legacy_pan_once_the_backfill_has_run():
         pan = "4111111111111111"
 
     assert _display_last4(_PostBackfillRow()) == "•••• 4242"
+# --- a legacy loan's APR is not a note rate ----------------------------------
+
+def test_a_loan_without_a_stored_schedule_reports_no_note_rate():
+    """`loans.apr` means different things depending on how the loan was boarded.
+
+    The pre-change acceptance path copied `offers.apr` -- the DISCLOSED APR --
+    into that column: 5.196% for a contract priced at 7.99%. An unconditional
+    alias therefore printed 5.196% to those borrowers as "Interest rate (note
+    rate)", a contractual term they were never quoted, while migration 0030
+    refuses to trust the same column. Reviewed on PR #10.
+
+    `schedule_version` is written only by the current boarding path, which also
+    copies the contractual rate, so it is the evidence the value means what the
+    API calls it.
+    """
+    from app.routers.loans import _proven_note_rate
+
+    class _Loan:
+        apr = 5.196
+        schedule_version = None
+
+    rate, proven = _proven_note_rate(_Loan())
+    assert rate is None, "an unproven APR was reported as the contractual rate"
+    assert proven is False
+
+
+def test_a_loan_boarded_with_its_contract_reports_the_note_rate():
+    """The other half: a proven rate must still be shown."""
+    from app.routers.loans import _proven_note_rate
+
+    class _Loan:
+        apr = 7.99
+        schedule_version = "B1"
+
+    rate, proven = _proven_note_rate(_Loan())
+    assert rate == 7.99
+    assert proven is True
+
+
+def test_the_list_item_no_longer_aliases_apr_unconditionally():
+    """The schema itself must not relabel the column.
+
+    Asserted on the model rather than only through a route, because the alias
+    was the defect: any caller building a LoanListItem would inherit it.
+    """
+    from app.schemas import LoanListItem
+
+    field = LoanListItem.model_fields["note_rate_pct"]
+    assert field.validation_alias is None, (
+        "note_rate_pct still aliases the raw apr column, so an unproven rate "
+        "would be relabelled as contractual"
+    )
+    item = LoanListItem(id=1, principal=1000.0, term_months=12)
+    assert item.note_rate_pct is None and item.note_rate_proven is False

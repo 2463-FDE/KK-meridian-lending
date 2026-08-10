@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from .. import clients, config, db, decision_state
 from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferOut, ScheduleRow
-from .applications import _is_staff
+from .applications import _complete_offer_exists, _is_staff
 
 log = get_logger("offers")
 router = APIRouter(tags=["offers"])
@@ -54,18 +54,42 @@ def _conflict(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
 
-def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
+def _to_offer_out(app_id: int, resp: dict, offer_ready: bool = False) -> OfferOut:
     """Map a disclosure-service OfferResponse into the LOS OfferOut/Disclosure shape."""
     d = resp.get("disclosure") or {}
     rows = resp.get("schedule") or d.get("schedule") or []
     disclosure = Disclosure(
+        # Forwarded, not defaulted: a missing note rate is meaningfully
+        # different from a note rate of zero, and a 0.0% rate printed beside a
+        # 9.584% APR would read as a promotional offer nobody made.
+        note_rate_pct=d.get("note_rate_pct"),
+        # Provenance of the rows, from the response envelope rather than the
+        # disclosure block. Dropping it here is what let a reconstruction reach
+        # the borrower looking like a contract. Reviewed on PR #10.
+        schedule_source=resp.get("schedule_source"),
+        schedule_note=resp.get("schedule_note"),
         apr=d.get("apr", 0), finance_charge=d.get("finance_charge", 0),
         monthly_payment=d.get("monthly_payment", 0),
         amount_financed=d.get("amount_financed", 0),
         total_of_payments=d.get("total_of_payments", 0),
+        # Forwarded, not defaulted. `.get(x, 0)` is right for the four amounts
+        # -- an offer that reached this point has them, and Gap F refuses the row
+        # otherwise -- but a MISSING final payment is meaningfully different from
+        # a zero one, so these carry None through. The borrower screen shows a
+        # single monthly figure when they are absent rather than describing a
+        # final payment of $0.00.
+        regular_payment_count=d.get("regular_payment_count"),
+        final_payment=d.get("final_payment"),
+        term_months=d.get("term_months"),
         schedule=[ScheduleRow(**row) for row in rows],
     )
-    return OfferOut(app_id=app_id, disclosure=disclosure, created=resp.get("created", True))
+    # Readiness is passed IN, not looked up here. This function is a pure
+    # mapper -- giving it a database query made it untestable without a schema
+    # and coupled response shaping to storage. The callers already have both.
+    return OfferOut(
+        app_id=app_id, disclosure=disclosure, created=resp.get("created", True),
+        offer_ready=offer_ready,
+    )
 
 
 @router.post("/offer", response_model=OfferOut)
@@ -168,7 +192,7 @@ def make_offer(
             "Could not create the offer -- please try again.",
         ) from exc
 
-    return _to_offer_out(body.app_id, resp)
+    return _to_offer_out(body.app_id, resp, _complete_offer_exists(body.app_id))
 
 
 @router.get("/applications/{app_id}/offer", response_model=OfferOut)
@@ -220,4 +244,4 @@ def get_offer(
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="no offer for this application")
     resp.raise_for_status()
-    return _to_offer_out(app_id, resp.json())
+    return _to_offer_out(app_id, resp.json(), _complete_offer_exists(app_id))

@@ -139,11 +139,35 @@ class ScheduleRow(BaseModel):
 
 
 class Disclosure(BaseModel):
+    # The CONTRACTUAL interest rate the payment stream is priced at, distinct
+    # from `apr` below, which additionally carries the prepaid origination fee
+    # and is therefore always the larger of the two once a fee exists.
+    #
+    # Reviewed finding: disclosure-service returned this and the LOS dropped it,
+    # so the borrower's own /apply page -- which already renders it when
+    # present -- never received it. Showing only one rate is what let a 5.43%
+    # "APR" sit under a 7.99% loan without looking wrong.
+    #
+    # Optional because a pre-0030 offer has no stored note rate; null omits the
+    # line rather than printing a guessed rate beside genuine disclosed amounts.
+    note_rate_pct: Optional[float] = None
+    # Provenance of the payment rows, forwarded from disclosure-service. A
+    # reconstruction must not reach the borrower looking like a contract.
+    schedule_source: Optional[str] = None
+    schedule_note: Optional[str] = None
     apr: float
     finance_charge: float
+    # The REGULAR payment: billed in every period but the last. See
+    # disclosure-service's Disclosure for why the name is kept.
     monthly_payment: float
     amount_financed: float
     total_of_payments: float
+    # Null on a legacy offer with no stored schedule. The staff console shows a
+    # single monthly figure when these are absent, rather than inventing a final
+    # payment to fill the sentence out.
+    regular_payment_count: Optional[int] = None
+    final_payment: Optional[float] = None
+    term_months: Optional[int] = None
     schedule: list[ScheduleRow] = []
 
 
@@ -155,6 +179,14 @@ class OfferOut(BaseModel):
     # back approve) now returns that SAME offer instead of a 409 -- this
     # tells the caller which happened without parsing anything.
     created: bool = True
+    # Whether this offer carries every field boarding requires, from the SAME
+    # server-side check accept_offer enforces (_complete_offer_exists over
+    # BOARDING_REQUIRED_FIELDS). Reported so a client cannot derive readiness
+    # from a subset of the fields and offer an Accept that is guaranteed to 409
+    # -- which is exactly what the borrower page did when it checked only the
+    # three schedule columns and not `principal`/`note_rate_pct`. Reviewed on
+    # PR #10.
+    offer_ready: bool = False
 
 
 class ApplicationDetail(BaseModel):
@@ -169,6 +201,16 @@ class ApplicationDetail(BaseModel):
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
     offer: Optional[Disclosure] = None
+    # Whether the offer above carries the full contractual schedule boarding
+    # needs (BOARDING_REQUIRED_FIELDS), which is NOT the same question as
+    # whether there is a disclosure to display. The staff screen used to infer
+    # boardability from `offer` being present; that conflated the two, so the
+    # only way to keep Accept & board correctly disabled for an offer with no
+    # stored schedule was to withhold its disclosure entirely. Reported
+    # explicitly so the amounts can be shown and the button still refuse.
+    # Mirrors DecisionOut.offer_ready and comes from the same function, so the
+    # two responses cannot disagree.
+    offer_ready: bool = False
     # Review fix: once staff decides (review_application), that decision is
     # final -- the frontend needs to know this to disable the Approve/Deny
     # controls, not just rely on the backend's own 409 after a doomed retry.

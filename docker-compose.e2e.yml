@@ -1,0 +1,19 @@
+# Overlay for the browser test suite ONLY.
+#
+# The default stack ships the real rate limit (120 requests / 60s per client
+# IP). The Playwright suite is a dozen browser journeys arriving from one source
+# IP in a couple of minutes, which trips that limit and surfaces as unrelated
+# specs failing to sign in -- a test-harness artefact, not a finding.
+#
+# Kept as a separate file so the raise is explicit and cannot leak into the
+# demo stack by default:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+#
+# Nothing else about the stack changes. If a test needs the real limit exercised
+# (gateway/tests/test_rate_limit.py does, in-process), it must not rely on this
+# overlay being absent -- assert the configured value instead.
+services:
+  gateway:
+    environment:
+      RATE_LIMIT_MAX_REQUESTS: ${GATEWAY_RATE_LIMIT_MAX:-2000}

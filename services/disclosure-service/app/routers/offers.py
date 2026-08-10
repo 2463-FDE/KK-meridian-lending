@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import config, db, fees, models, offer as offer_mod, schedule
+from .. import apr, config, db, fees, models, offer as offer_mod, schedule
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferIn, OfferResponse, ScheduleRow
@@ -24,8 +24,25 @@ CANONICAL_TERMS = (
 )
 
 _OFFER_COLUMNS = (
-    "id", "app_id", "decision_id", "fee_pct_used", "apr", "finance_charge",
-    "monthly_payment", "amount_financed", "total_of_payments", "accepted_at",
+    "id", "app_id", "decision_id", "fee_pct_used", "note_rate_pct", "apr", "finance_charge",
+    "monthly_payment", "amount_financed", "total_of_payments",
+    # The Model B contractual schedule (db/migrations/0030). Reviewed finding:
+    # these were persisted by the INSERT but absent from this projection, so
+    # every path that reads an offer through it -- immediate creation's
+    # RETURNING, the idempotent read-back, the repair statement, and the later
+    # GET -- handed back a row with no schedule. The Disclosure builder then
+    # reported regular_payment_count/final_payment as null, and the borrower saw
+    # "monthly payment $X" with no final payment: the exact presentation defect
+    # this work exists to remove, reintroduced one layer further out.
+    #
+    # One tuple feeds all four statements, so adding a column here is the only
+    # place it needs adding -- which is also why omitting it broke all four at
+    # once.
+    "regular_payment_count", "final_payment", "term_months", "schedule_version",
+    # The principal the schedule was calculated on. Cannot be recovered from
+    # amount_financed (cent-rounded), which is what the GET path used to do.
+    "principal",
+    "accepted_at",
 )
 _OFFER_FIELDS = ", ".join(_OFFER_COLUMNS)
 # Qualified form, for the repair statement's UPDATE ... FROM decisions: `app_id`
@@ -33,12 +50,71 @@ _OFFER_FIELDS = ", ".join(_OFFER_COLUMNS)
 _OFFER_FIELDS_Q = ", ".join(f"o.{c}" for c in _OFFER_COLUMNS)
 
 
+# The contractual terms a row needs to be BOARDABLE, as opposed to merely
+# displayable. Separate from CANONICAL_TERMS because the two answer different
+# questions -- see origination's TILA_MONETARY_FIELDS / BOARDING_REQUIRED_FIELDS
+# split, which this mirrors on the write side.
+# Everything that must be present before a schedule may be called the contract.
+# One list, used by the write side (what repair must fill in), the read side
+# (whether GET may label the rows "contract") and the database's own all-or-none
+# CHECK, so the three cannot disagree about what "complete" means -- they did,
+# and the row in the gap displayed inferred numbers as agreed terms.
+# `monthly_payment` is included because it is the regular payment the schedule
+# expands from; it is NOT NULL in practice on every path, and asserting it here
+# costs nothing and removes a hole. Reviewed on PR #10.
+CONTRACT_FACTS = (
+    "principal", "note_rate_pct", "monthly_payment", "regular_payment_count",
+    "final_payment", "term_months", "schedule_version",
+)
+
+SCHEDULE_TERMS = (
+    "note_rate_pct", "regular_payment_count", "final_payment", "term_months",
+    "schedule_version",
+    # Boarding requires it (origination's BOARDING_REQUIRED_FIELDS), so leaving
+    # it out here created a row that repair called complete and accept refused
+    # forever: POST returned it unchanged, and nothing else could fill it in.
+    # The database's schedule all-or-nothing CHECK does not cover principal
+    # either, so that state is reachable. Reviewed on PR #10.
+    "principal",
+)
+
+
 def missing_terms(row) -> list[str]:
-    """Which canonical terms this offer row is missing, in disclosure order."""
+    """Which canonical DISCLOSURE terms this offer row is missing.
+
+    The five monetary amounts only. This is the "is it a disclosure at all"
+    question, and it stays narrow because that is what callers use it for.
+    """
     return [name for name in CANONICAL_TERMS if row[name] is None]
 
 
-def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
+def missing_schedule_terms(row) -> list[str]:
+    """Which Model B contractual terms this offer row is missing.
+
+    A row can have all five monetary amounts and still be unboardable: the
+    schedule columns arrived with db/migrations/0030 and are deliberately not
+    back-filled, so every offer written before it is in exactly that state.
+    """
+    return [name for name in SCHEDULE_TERMS if row.get(name) is None]
+
+
+def terms_needing_regeneration(row) -> list[str]:
+    """Everything missing, monetary and contractual.
+
+    Reviewed finding: the repair path tested `missing_terms(row)` alone, so an
+    unaccepted legacy offer holding all five monetary amounts but no stored
+    schedule was judged complete and left alone. It then displayed perfectly and
+    refused to board, with no path to fix it -- the half-repaired state the
+    boarding gate exists to make visible, reached by never repairing at all.
+
+    Both sets go through the SAME audited regeneration, which is what makes the
+    fix honest: a schedule-only gap is not quietly patched in place, it produces
+    a new disclosure and an audit_logs row saying so.
+    """
+    return missing_terms(row) + missing_schedule_terms(row)
+
+
+def _repair_incomplete_offer(row, missing, terms, fee_pct_used, principal, application_id):
     """Regenerate the canonical terms of an existing INCOMPLETE offer, in place.
 
     Only reachable for a row that is already missing at least one canonical
@@ -76,13 +152,36 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
     repaired = db.query(
         "WITH repaired AS ("
         "  UPDATE offers o"
-        "     SET fee_pct_used = %s, apr = %s, finance_charge = %s,"
-        "         monthly_payment = %s, amount_financed = %s, total_of_payments = %s"
+        "     SET fee_pct_used = %s, note_rate_pct = %s, apr = %s, finance_charge = %s,"
+        "         monthly_payment = %s, amount_financed = %s, total_of_payments = %s,"
+        # A repair writes the COMPLETE Model B schedule, not just the four-box
+        # amounts. Repairing the monetary fields while leaving the schedule NULL
+        # would produce a row that displays fine and still cannot board -- the
+        # exact half-fixed state BOARDING_REQUIRED_FIELDS exists to prevent.
+        "         regular_payment_count = %s, final_payment = %s, term_months = %s,"
+        "         schedule_version = %s, principal = %s"
         "    FROM decisions d"
         "   WHERE o.decision_id = d.app_id AND d.app_id = %s AND d.outcome = 'approve'"
         "     AND o.accepted_at IS NULL"
+        # accepted_at alone is not enough on an UPGRADED database. Migration
+        # 0021 added the column without back-filling, so an offer boarded
+        # before it has a loan and a NULL accepted_at -- and 0030 leaves its
+        # schedule columns NULL by design, which is exactly the shape that now
+        # qualifies for schedule-only repair. Without this clause an authorised
+        # POST /offers retry could rewrite every monetary and contractual term
+        # of an offer somebody has already been funded against. 0030 back-fills
+        # accepted_at from the loan as well; this guard does not depend on that
+        # migration having run. Review finding on PR #10.
+        "     AND NOT EXISTS (SELECT 1 FROM loans l WHERE l.app_id = o.app_id)"
         "     AND (o.apr IS NULL OR o.finance_charge IS NULL OR o.monthly_payment IS NULL"
-        "          OR o.amount_financed IS NULL OR o.total_of_payments IS NULL)"
+        "          OR o.amount_financed IS NULL OR o.total_of_payments IS NULL"
+        "          OR o.note_rate_pct IS NULL OR o.final_payment IS NULL"
+        # `principal` belongs in this list for the same reason it belongs in
+        # SCHEDULE_TERMS: without it the caller detects the gap, calls repair,
+        # and the UPDATE matches nothing -- so the row comes back unchanged,
+        # still unboardable, with no path to fix it. Reviewed on PR #10.
+        "          OR o.regular_payment_count IS NULL OR o.term_months IS NULL"
+        "          OR o.principal IS NULL)"
         f"  RETURNING {_OFFER_FIELDS_Q}"
         "), audited AS ("
         "  INSERT INTO audit_logs (actor, action, detail)"
@@ -92,9 +191,11 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
         "    FROM repaired r"
         ")"
         "SELECT * FROM repaired",
-        (fee_pct_used, terms["apr"], terms["finance_charge"], terms["monthly_payment"],
-         terms["amount_financed"], terms["total_of_payments"], application_id,
-         ",".join(missing)),
+        (fee_pct_used, float(fees.NOTE_RATE_PCT), terms["apr"], terms["finance_charge"],
+         terms["monthly_payment"], terms["amount_financed"], terms["total_of_payments"],
+         terms["regular_payment_count"], terms["final_payment"],
+         terms["regular_payment_count"] + 1, fees.SCHEDULE_VERSION, principal,
+         application_id, ",".join(missing)),
     )
     if repaired:
         log.warning(
@@ -109,7 +210,7 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, application_id):
     now = db.query(
         f"SELECT {_OFFER_FIELDS} FROM offers WHERE decision_id = %s", (application_id,),
     )
-    if now and not missing_terms(now[0]):
+    if now and not terms_needing_regeneration(now[0]):
         return now[0]
     log.error(
         "could not repair incomplete offer application_id=%s missing=%s", application_id, ",".join(missing),
@@ -155,9 +256,40 @@ def create_offer(
         )
     principal = float(app_rows[0]["amount"])
     term_months = app_rows[0]["term_months"]
-    annual_rate = 7.99
+    # One source of truth (fees.py). This is the CONTRACTUAL rate the payment
+    # is calculated on, and it is persisted on the offer so boarding does not
+    # have to infer it from the disclosed APR -- which is a different number.
+    annual_rate = float(fees.NOTE_RATE_PCT)
 
     o = offer_mod.build_offer(principal, annual_rate, term_months)
+
+    # A principal too small for its term cannot produce a schedule. Cent-rounded
+    # regular payments can exhaust the balance before the last period, leaving a
+    # nonpositive final payment: $0.10 over 12 months gives eleven $0.01
+    # payments and a final of -$0.01. The INSERT then violates
+    # offers_final_payment_positive and the caller sees a 500, with an approved
+    # application that can never obtain an offer. ApplicationIn permits amounts
+    # below the UI's $1,000 slider minimum, so this is reachable.
+    #
+    # Refused here with a 422 that says why, rather than surfacing a constraint
+    # violation. Reviewed on PR #10.
+    if o["final_payment"] <= 0 or o["monthly_payment"] <= 0:
+        log.error(
+            "refusing to create an offer with a nonpositive payment "
+            "application_id=%s principal=%s term_months=%s regular=%s final=%s",
+            body.application_id, principal, term_months,
+            o["monthly_payment"], o["final_payment"],
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"An amount of {principal:.2f} over {term_months} months cannot "
+                f"produce a payment schedule: the cent-rounded payments would "
+                f"leave a final payment of {o['final_payment']:.2f}. Increase the "
+                f"amount or shorten the term."
+            ),
+        )
+
     rows = schedule.amortization(principal, annual_rate, term_months)
     # W4: snapshot the fee rule version in effect right now, on this row, so a later
     # change to ORIGINATION_FEE_PCT can never retroactively change what this offer
@@ -199,14 +331,24 @@ def create_offer(
     # handled gracefully, not just one.
     try:
         inserted = db.query(
-            "INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge, "
-            "monthly_payment, amount_financed, total_of_payments) "
-            "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s "
+            "INSERT INTO offers (app_id, decision_id, fee_pct_used, note_rate_pct, apr, "
+            "finance_charge, monthly_payment, amount_financed, total_of_payments, "
+            "regular_payment_count, final_payment, term_months, schedule_version, principal) "
+            "SELECT d.app_id, d.app_id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
             "FROM decisions d WHERE d.app_id = %s AND d.outcome = 'approve' "
             "ON CONFLICT (decision_id) DO NOTHING "
             f"RETURNING {_OFFER_FIELDS}",
-            (fee_pct_used, o["apr"], o["finance_charge"], o["monthly_payment"],
-             o["amount_financed"], o["total_of_payments"], body.application_id),
+            (fee_pct_used, annual_rate, o["apr"], o["finance_charge"], o["monthly_payment"],
+             o["amount_financed"], o["total_of_payments"],
+             # term_months comes from the APPLICATION row (read above), never from
+             # body.term_months. The schedule and every derived amount were built
+             # from the server-side term; persisting the caller's value would
+             # store a term inconsistent with the schedule it describes, which is
+             # the exact conflation this PR exists to remove. Client-supplied
+             # principal/term/rate have been ignored since the PR #6 security
+             # review -- the stored schedule term must follow the same rule.
+             o["regular_payment_count"], o["final_payment"], term_months,
+             fees.SCHEDULE_VERSION, principal, body.application_id),
         )
     except psycopg2.errors.UniqueViolation:
         inserted = []
@@ -219,9 +361,21 @@ def create_offer(
         # offer already exists for it (ON CONFLICT DO NOTHING -- see above).
         # decisions.app_id is this offer's decision_id, so it's also
         # body.application_id here.
+        #
+        # Matched on EITHER key, because the two are not interchangeable on old
+        # rows. `offers.app_id` and `offers.decision_id` carry separate UNIQUE
+        # constraints (0009/0011) and this INSERT sets both -- but a row written
+        # before 0011 has `app_id` populated and `decision_id` NULL. That row
+        # collides on `offers_app_id_key`, which the ON CONFLICT clause does not
+        # target, so the INSERT raises UniqueViolation and lands here; a lookup
+        # keyed only on `decision_id` then found nothing and this endpoint
+        # reported "no approved decision on record" for an application that has
+        # both a decision AND an offer. The offer was unreachable and
+        # unrepairable. Reviewed on PR #10.
         existing = db.query(
-            f"SELECT {_OFFER_FIELDS} FROM offers WHERE decision_id = %s",
-            (body.application_id,),
+            f"SELECT {_OFFER_FIELDS} FROM offers "
+            "WHERE decision_id = %s OR app_id = %s",
+            (body.application_id, body.application_id),
         )
         if not existing:
             raise HTTPException(
@@ -230,21 +384,104 @@ def create_offer(
             )
         row = existing[0]
 
+        # Adopt the row into the current schema before deciding what else it
+        # needs. `decision_id` is not a term -- it records which decision this
+        # offer already came from, recovered by joining the offer's own app_id to
+        # `decisions.app_id`, so nothing is inferred and nothing is chosen. It is
+        # stamped only when an APPROVED decision exists, which the INSERT above
+        # has already established by getting far enough to conflict.
+        #
+        # Safe on an accepted offer for the same reason: it changes no agreed
+        # figure. The monetary and schedule columns stay under the repair path
+        # below, which refuses accepted offers outright.
+        if row.get("decision_id") is None:
+            # Not attempted on an accepted PARTIAL contract, because it cannot
+            # succeed. 0030 installs the all-or-nothing CHECK as NOT VALID when
+            # such a row exists (it can be neither demoted nor completed), and
+            # PostgreSQL enforces a NOT VALID check on every subsequent UPDATE --
+            # including one that touches only `decision_id`. Attempting the stamp
+            # would raise a check violation and turn a readable legacy offer into
+            # a 500. 0030 stamps these rows itself, before the constraint exists,
+            # so reaching this branch with one means the migration has not run
+            # here yet. Reviewed on PR #10.
+            facts_present = sum(
+                1 for name in CONTRACT_FACTS
+                if name != "monthly_payment" and row.get(name) is not None
+            )
+            if 0 < facts_present < len(CONTRACT_FACTS) - 1:
+                log.warning(
+                    "offer_id=%s has a partial contract and no decision_id; leaving "
+                    "it as-is (an accepted partial row cannot be updated while the "
+                    "all-or-nothing CHECK is NOT VALID -- see db/migrations/0030)",
+                    row["id"],
+                )
+            else:
+                stamped = db.query(
+                    f"UPDATE offers o SET decision_id = d.app_id "
+                    "FROM decisions d "
+                    "WHERE d.app_id = o.app_id AND d.outcome = 'approve' "
+                    "  AND o.id = %s AND o.decision_id IS NULL "
+                    f"RETURNING {_OFFER_FIELDS_Q}",
+                    (row["id"],),
+                )
+                if stamped:
+                    row = stamped[0]
+                    log.info(
+                        "adopted a pre-0011 offer offer_id=%s app_id=%s: decision_id "
+                        "set from its own approved decision", row["id"], row["app_id"],
+                    )
+
         # Review fix: DO NOTHING + read-back returns the row that is ALREADY
         # there -- so for a pre-0026 incomplete row this endpoint handed the
         # same NULL terms straight back, and the float() coercions below turned
         # that into a 500. Migration 0026 told the operator to "regenerate the
         # offer from its decision", which this endpoint could not actually do.
         # It can now, for unaccepted offers only.
-        missing = missing_terms(row)
+        missing = terms_needing_regeneration(row)
         if missing:
-            row = _repair_incomplete_offer(row, missing, o, fee_pct_used, body.application_id)
+            row = _repair_incomplete_offer(
+                row, missing, o, fee_pct_used, principal, body.application_id
+            )
             repaired = True
 
+    # The rows must describe the row being RETURNED, not the request that came
+    # in. `rows` above was generated from the application's current inputs with
+    # the currently deployed generator; when this call found an existing offer
+    # (the idempotent path), the response would then advertise the stored
+    # regular/final payments beside a schedule whose payments and totals came
+    # from somewhere else -- after a generator change, or after the
+    # application's amount or term was corrected. Reviewed on PR #10.
+    post_source, post_note = "contract", None
+    if all(row.get(f) is not None for f in ("principal", "term_months",
+                                            "monthly_payment", "final_payment",
+                                            "note_rate_pct")):
+        rows = schedule.amortization_from_contract(
+            float(row["principal"]), float(row["note_rate_pct"]), int(row["term_months"]),
+            regular_payment=float(row["monthly_payment"]),
+            final_payment=float(row["final_payment"]),
+        )
+    else:
+        # An offer returned without stored terms -- a legacy row this call did
+        # not regenerate. Its rows come from the generator, not the contract.
+        post_source = "reconstructed"
+        post_note = (
+            "This payment schedule is an estimate: this offer predates the "
+            "stored payment schedule. Regenerate the offer to record exact terms."
+        )
+
     disclosure = Disclosure(
+        note_rate_pct=(float(row["note_rate_pct"]) if row.get("note_rate_pct") is not None else None),
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
         monthly_payment=float(row["monthly_payment"]), amount_financed=float(row["amount_financed"]),
         total_of_payments=float(row["total_of_payments"]),
+        # Straight from the stored row. Never derived here: the final payment is
+        # not a function of the other amounts, so a value computed at read time
+        # would be this generator's opinion presented as a disclosed term.
+        regular_payment_count=(int(row["regular_payment_count"])
+                               if row.get("regular_payment_count") is not None else None),
+        final_payment=(float(row["final_payment"])
+                       if row.get("final_payment") is not None else None),
+        term_months=(int(row["term_months"]) if row.get("term_months") is not None else None),
     )
     return OfferResponse(
         offer_id=row["id"], application_id=row["app_id"],
@@ -252,6 +489,7 @@ def create_offer(
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
         monthly_payment=float(row["monthly_payment"]), total_of_payments=float(row["total_of_payments"]),
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],
+        schedule_source=post_source, schedule_note=post_note,
         created=created, repaired=repaired,
     )
 
@@ -315,15 +553,129 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
             "pre-snapshot rate offer_id=%s application_id=%s (db/migrations/0011 back-fill)",
             offer.id, application_id,
         )
-    principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
-    term_months = round(total_of_payments / monthly_payment) if monthly_payment else 0
-    # No `or 7.99` fallback: apr is guaranteed non-NULL by the integrity check
-    # above, so the schedule is always built from the rate actually disclosed.
-    rows = schedule.amortization(principal, float(offer.apr), term_months) if term_months else []
+    # Stored contractual facts first. These used to be INFERRED -- principal as
+    # amount_financed / (1 - fee_pct), term as total_of_payments / monthly_payment
+    # -- and the schedule regenerated by whatever generator was deployed at read
+    # time, so an accepted disclosure could silently change meaning after a
+    # rounding or fee change. Under Model B the final payment cannot be recovered
+    # from any stored figure at all, which makes inference impossible rather than
+    # merely unsafe.
+    #
+    # The legacy fallbacks below are reached ONLY for pre-0030 rows that never
+    # stored these facts. They are never used for boarding: accept_offer requires
+    # the stored terms and refuses otherwise.
+    # ALL of the contractual facts, not two of them. Calling a schedule the
+    # "contract" is a claim that what follows is what was agreed, and expanding
+    # it needs the principal the payments run on and the rate they were priced
+    # at. This tested `final_payment` and `term_months` only, so a row missing
+    # `principal` or `note_rate_pct` was labelled `schedule_source="contract"`
+    # while the expansion below silently substituted an inverted principal and a
+    # rate recovered from an already-rounded payment -- inferred numbers,
+    # presented as authoritative terms, with the `schedule_note` caveat
+    # suppressed precisely because the row looked stored.
+    #
+    # A partial row is legacy. It reports "reconstructed" with the estimate note,
+    # and boarding still refuses it (`accept_offer` requires the stored terms),
+    # so it cannot become a loan on inferred figures either. Reviewed on PR #10.
+    schedule_is_stored = all(
+        getattr(offer, name) is not None for name in CONTRACT_FACTS
+    )
+    if offer.term_months is not None:
+        term_months = int(offer.term_months)
+    else:
+        term_months = round(total_of_payments / monthly_payment) if monthly_payment else 0
+    # The stored principal is the one the payments were calculated on. Inverting
+    # amount_financed through the fee is a LEGACY fallback and nothing more:
+    # amount_financed is cent-rounded, so the inversion lands on a neighbouring
+    # principal -- a $1,002.50 loan stores $972.43, which inverts to $1,002.51 --
+    # and the schedule regenerated from it disagreed with the disclosure printed
+    # directly above it ($24.39 final and $1,174.48 total against a stored $24.37
+    # and $1,174.46). `schedule_is_stored` was computed here and never consulted,
+    # so every borrower viewing an auto-generated offer got the inferred one.
+    # Review finding on PR #10.
+    if offer.principal is not None:
+        principal = float(offer.principal)
+    else:
+        principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
+    # Review fix: this used to build the schedule at `offer.apr`. The APR and
+    # the note rate are not interchangeable once a prepaid fee exists -- the APR
+    # is solved against the amount financed, the payments run on the full
+    # principal -- so the redisplayed schedule showed a monthly payment that did
+    # not match the disclosed one. Recover the rate the payments were actually
+    # calculated at from the stored payment itself.
+    # Prefer the STORED contractual rate. note_rate_from_payment() is legacy
+    # compatibility ONLY -- for offers created before db/migrations/0030, which
+    # have no stored value. A recovered rate is an inference from an already
+    # rounded payment, so it must never be preferred over a persisted one, and
+    # accept refuses to board a recovered rate at all (applications.py::
+    # accept_offer). Asserted both ways:
+    # test_stored_note_rate_is_preferred_over_recovery (normal rows never reach
+    # the recovery) and test_a_legacy_offer_without_a_stored_note_rate_recovers.
+    if offer.note_rate_pct is not None:
+        note_rate = float(offer.note_rate_pct)
+    elif term_months and monthly_payment:
+        note_rate = apr.note_rate_from_payment(principal, monthly_payment, term_months)
+    else:
+        note_rate = 0.0
+    if schedule_is_stored and term_months:
+        # Expanded from the STORED contract, not re-solved. Regenerating and
+        # then patching the final row back left every regular row -- and the
+        # patched row's own principal/interest split -- computed by whatever
+        # generator is deployed now, which is the drift schedule_version exists
+        # to make impossible. Review finding on PR #10.
+        rows = schedule.amortization_from_contract(
+            principal, note_rate, term_months,
+            regular_payment=monthly_payment, final_payment=float(offer.final_payment),
+        )
+        residue = rows[-1]["balance"] if rows else 0.0
+        if abs(residue) >= 0.005:
+            # The stored amounts do not amortize the stored principal. That is a
+            # real inconsistency in a signed disclosure, so it is logged rather
+            # than smoothed away; the rows still show what was actually agreed.
+            log.error(
+                "stored contract does not amortize to zero offer_id=%s "
+                "application_id=%s residue=%.2f schedule_version=%s",
+                offer.id, application_id, residue, offer.schedule_version,
+            )
+        schedule_source, schedule_note = "contract", None
+    else:
+        # Legacy rows only: nothing was stored, so these rows are a
+        # reconstruction. The null contractual fields below say so to a reader
+        # who knows to look; `schedule_source` says it to one who does not, and
+        # is what stops the borrower page rendering an estimate as a contract.
+        rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
+        schedule_source = "reconstructed"
+        schedule_note = (
+            "This payment schedule is an estimate. It was rebuilt from the "
+            "disclosed amounts because this offer predates the stored payment "
+            "schedule, so the amounts shown may differ by a few cents from the "
+            "contract. Regenerate the offer to record exact terms."
+        )
+
     disclosure = Disclosure(
+        # STORED only. `note_rate` above may be a value recovered from an
+        # already-rounded payment, and recovery is not exact -- a genuine 7.99%
+        # $1,000/12-month offer with an $86.98 stored payment comes back as
+        # 7.98177%, which the borrower UI would print as "7.98%" under the
+        # label "Interest rate (note rate)". That is a contractual term the
+        # borrower was never quoted, and it contradicts migration 0030's
+        # deliberate policy of leaving an unprovable legacy rate NULL rather
+        # than guessing it. The recovered value still draws the reconstructed
+        # SCHEDULE below, which is labelled as a reconstruction; it must not be
+        # reported as the rate. Reviewed on PR #10.
+        note_rate_pct=(float(offer.note_rate_pct)
+                       if offer.note_rate_pct is not None else None),
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, amount_financed=amount_financed,
         total_of_payments=total_of_payments,
+        # Stored values only. This endpoint reconstructs a SCHEDULE for display
+        # when none was recorded, but it must not manufacture the contractual
+        # terms themselves -- a legacy row reports null and the caller can tell.
+        regular_payment_count=(int(offer.regular_payment_count)
+                               if offer.regular_payment_count is not None else None),
+        final_payment=(float(offer.final_payment)
+                       if offer.final_payment is not None else None),
+        term_months=(int(offer.term_months) if offer.term_months is not None else None),
     )
     return OfferResponse(
         offer_id=offer.id, application_id=application_id,
@@ -331,4 +683,5 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, total_of_payments=total_of_payments,
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],
+        schedule_source=schedule_source, schedule_note=schedule_note,
     )

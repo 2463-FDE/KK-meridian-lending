@@ -283,6 +283,58 @@ def test_lss_loans_list_borrower_decimal_rows_serialize(monkeypatch):
     assert item["balance"] == 9000.0
 
 
+def _borrower_row(**overrides):
+    row = {
+        "id": 5, "applicant_name": "Maria Gonzalez",
+        "principal": Decimal("10000.00"), "apr": Decimal("12.500"),
+        "schedule_version": "B1", "term_months": 36, "status": "current",
+        "balance": Decimal("9000.00"), "past_due": Decimal("0.00"),
+        "opened_at": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _borrower_list(monkeypatch, row):
+    class _FakeDb:
+        def query(self, sql, params=None):
+            return [row]
+
+    monkeypatch.setattr(main, "db", _FakeDb())
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    resp = client.get("/lss/loans", headers={"Authorization": "Bearer faketoken123"})
+    assert resp.status_code == 200
+    return resp.json()["items"][0]
+
+
+def test_lss_loans_list_borrower_reports_a_proven_note_rate(monkeypatch):
+    """A loan boarded with its contractual schedule has a rate worth naming.
+
+    `schedule_version` is written only by the current boarding path, which also
+    copies the contractual note rate into `loans.apr` -- so it is the evidence
+    that the column means what the API calls it.
+    """
+    item = _borrower_list(monkeypatch, _borrower_row())
+    assert item["note_rate_pct"] == 12.5
+    assert item["note_rate_proven"] is True
+
+
+def test_lss_loans_list_borrower_withholds_an_unproven_note_rate(monkeypatch):
+    """A pre-change loan's `apr` is the DISCLOSED APR, not the note rate.
+
+    That path copied `offers.apr` into this column -- 5.196% for a contract
+    priced at 7.99% -- so relabelling it printed a contractual rate the borrower
+    was never quoted. Unknown stays unknown. Reviewed on PR #10.
+    """
+    item = _borrower_list(
+        monkeypatch, _borrower_row(apr=Decimal("5.196"), schedule_version=None)
+    )
+    assert item["note_rate_pct"] is None, "an unproven rate was reported as contractual"
+    assert item["note_rate_proven"] is False
+    # And the misleading value is not smuggled out under the old name either.
+    assert item.get("apr") in (None, 5.196) or "apr" not in item
+
+
 def test_lss_loans_list_borrower_without_applicant_id_is_forbidden(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER_NO_APPLICANT)
 

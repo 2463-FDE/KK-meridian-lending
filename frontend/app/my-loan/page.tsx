@@ -12,7 +12,13 @@ interface LoanRow {
   applicant_name: string;
   borrower?: string;
   principal: number;
-  apr: number;
+  // Servicing exposes the CONTRACTUAL note rate under its accurate name.
+  // The database column behind it is still `loans.apr` (legacy, tracked as
+  // D19); the API is where that name stops. This is NOT the disclosed
+  // federal APR -- that lives on the offer, and is the larger of the two
+  // once a prepaid fee exists.
+  note_rate_pct: number | null;
+  note_rate_proven?: boolean;
   term_months: number;
   status: string;
   balance: number;
@@ -131,8 +137,17 @@ function MyLoanContent() {
                     <dd>{usd(l.principal)}</dd>
                   </div>
                   <div className="dl-row">
-                    <dt>APR</dt>
-                    <dd>{pct(l.apr)}</dd>
+                    <dt>Interest rate</dt>
+                    {/* Null means the contractual rate was never recorded for
+                        this loan -- it was boarded before the schedule was
+                        stored, and `loans.apr` holds the disclosed APR for
+                        those rows. Saying so is honest; printing that number
+                        would state a rate the borrower was never quoted. */}
+                    <dd>
+                      {l.note_rate_pct != null
+                        ? pct(l.note_rate_pct)
+                        : "Not recorded for this loan"}
+                    </dd>
                   </div>
                   <div className="dl-row">
                     <dt>Term</dt>

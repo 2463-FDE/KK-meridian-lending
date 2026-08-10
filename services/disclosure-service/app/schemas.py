@@ -20,11 +20,35 @@ class ScheduleRow(BaseModel):
 
 
 class Disclosure(BaseModel):
+    # Two distinct rates, deliberately named so they cannot be confused at any
+    # boundary. `note_rate_pct` is the contractual interest rate the payment
+    # stream is priced at and the rate servicing amortizes; `apr` is the
+    # disclosed federal APR, which additionally carries the prepaid origination
+    # fee and is therefore always the larger of the two once a fee exists.
+    # Optional because pre-0030 offer rows have no stored note rate.
+    note_rate_pct: float | None = None
     apr: float
     finance_charge: float
+    # Under Model B `monthly_payment` is the REGULAR payment -- the amount billed
+    # in every period except the last. The final period bills `final_payment`,
+    # which absorbs the cent residue and is a different number. Presenting only
+    # `monthly_payment` and a term told the borrower they would make N identical
+    # payments, which is not what the contract says.
+    #
+    # The name is kept because it is the persisted column name and the field
+    # every existing caller reads; renaming it in the API while offers.
+    # monthly_payment stays put would put the confusion somewhere else.
     monthly_payment: float
     amount_financed: float
     total_of_payments: float
+    # How many periods bill `monthly_payment`, and what the last one bills.
+    # Optional because pre-0030 rows have no stored schedule -- and a legacy row
+    # must report null here rather than a plausible guess, since a reconstructed
+    # final payment presented beside genuine disclosed amounts is
+    # indistinguishable from a real one.
+    regular_payment_count: int | None = None
+    final_payment: float | None = None
+    term_months: int | None = None
     schedule: list[ScheduleRow] = []
 
 
@@ -44,6 +68,18 @@ class OfferResponse(BaseModel):
     total_of_payments: float
     disclosure: Disclosure
     schedule: list[ScheduleRow] = []
+    # Where these rows came from. "contract" means they were expanded from the
+    # stored payment terms; "reconstructed" means the offer predates
+    # db/migrations/0030 and the rows were synthesised from an inferred
+    # principal, term and rate.
+    #
+    # A reconstruction rendered identically to a contract is the defect: the
+    # contractual fields beside it are deliberately NULL because they are
+    # unproven, while the rows looked exactly as authoritative as stored ones.
+    # The servicing schedule endpoint already carries this distinction; offers
+    # did not. Reviewed on PR #10.
+    schedule_source: str = "contract"
+    schedule_note: str | None = None
     # Idempotency fix: create_offer() is safe to call again for an
     # application that already has one (ON CONFLICT DO NOTHING, then read
     # back the original row) -- callers need to tell "just created" from
