@@ -68,6 +68,18 @@ class OfferResponse(BaseModel):
     total_of_payments: float
     disclosure: Disclosure
     schedule: list[ScheduleRow] = []
+    # Where these rows came from. "contract" means they were expanded from the
+    # stored payment terms; "reconstructed" means the offer predates
+    # db/migrations/0030 and the rows were synthesised from an inferred
+    # principal, term and rate.
+    #
+    # A reconstruction rendered identically to a contract is the defect: the
+    # contractual fields beside it are deliberately NULL because they are
+    # unproven, while the rows looked exactly as authoritative as stored ones.
+    # The servicing schedule endpoint already carries this distinction; offers
+    # did not. Reviewed on PR #10.
+    schedule_source: str = "contract"
+    schedule_note: str | None = None
     # Idempotency fix: create_offer() is safe to call again for an
     # application that already has one (ON CONFLICT DO NOTHING, then read
     # back the original row) -- callers need to tell "just created" from

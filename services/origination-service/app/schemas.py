@@ -151,6 +151,10 @@ class Disclosure(BaseModel):
     # Optional because a pre-0030 offer has no stored note rate; null omits the
     # line rather than printing a guessed rate beside genuine disclosed amounts.
     note_rate_pct: Optional[float] = None
+    # Provenance of the payment rows, forwarded from disclosure-service. A
+    # reconstruction must not reach the borrower looking like a contract.
+    schedule_source: Optional[str] = None
+    schedule_note: Optional[str] = None
     apr: float
     finance_charge: float
     # The REGULAR payment: billed in every period but the last. See

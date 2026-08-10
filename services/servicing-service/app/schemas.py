@@ -12,13 +12,31 @@ class LoanListItem(BaseModel):
     id: int
     applicant_name: Optional[str] = None
     principal: float
-    # The database column is still `loans.apr`, but what it holds -- and what
-    # schedule.amortization() consumes -- is the CONTRACTUAL note rate, not the
-    # disclosed federal APR. Exposing it to clients as "apr" was a misleading
-    # label on a regulated figure, so the API name says what the value is. The
-    # column rename is tracked as D19; until it lands, this alias is the
-    # boundary where the legacy name stops.
-    note_rate_pct: float = Field(validation_alias="apr", serialization_alias="note_rate_pct")
+    # `loans.apr` is a legacy column name whose MEANING depends on how the loan
+    # was boarded, and that is why this is not a plain rename.
+    #
+    #   * boarded by the current path -- the value is the contractual note rate,
+    #     copied from the offer alongside the stored schedule. Provable, and the
+    #     stored schedule is the proof: `schedule_version` is set only when
+    #     boarding wrote the contract;
+    #   * boarded before the change -- the pre-change acceptance path copied
+    #     `offers.apr`, the DISCLOSED APR, into this column. For a contract
+    #     priced at 7.99% that is 5.196% (db/migrations/0030, which refuses to
+    #     trust the column for exactly this reason).
+    #
+    # An unconditional alias therefore printed 5.196% to those borrowers as
+    # "Interest rate (note rate)" -- a contractual term they were never quoted.
+    # Reviewed on PR #10.
+    #
+    # So the rate is reported only where it is proven, and is null otherwise.
+    # Unknown stays unknown: the caller can say "not recorded", which is true,
+    # instead of showing a number that is wrong. `note_rate_proven` says which
+    # case this is without the client having to infer it from a null.
+    note_rate_pct: Optional[float] = None
+    note_rate_proven: bool = False
+    # The raw column, unrelabelled, for callers that still need it (and so this
+    # model does not silently drop data it used to carry).
+    apr: Optional[float] = Field(default=None, exclude=True)
     term_months: int
     status: Optional[str] = None
     balance: float = 0.0

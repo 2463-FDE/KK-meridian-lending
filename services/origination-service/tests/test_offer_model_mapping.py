@@ -109,3 +109,49 @@ def test_every_mapped_schedule_column_is_nullable():
             f"offers.{name} is populated by migration 0030 without a "
             "back-fill, so pre-0030 rows hold NULL"
         )
+
+
+def test_the_los_forwards_schedule_provenance():
+    """The LOS must not drop the estimate label on the way to the borrower.
+
+    disclosure-service reports whether the rows came from the stored contract or
+    were reconstructed; dropping it here is what let an estimate reach the
+    borrower page looking exactly like a contract. Reviewed on PR #10.
+    """
+    from app.routers.offers import _to_offer_out
+
+    resp = {
+        "offer_id": 1, "application_id": 1, "decision_id": 1, "fee_pct_used": 0.03,
+        "apr": 10.072, "finance_charge": 2369.15, "monthly_payment": 469.98,
+        "total_of_payments": 16919.15,
+        "schedule": [],
+        "schedule_source": "reconstructed",
+        "schedule_note": "This payment schedule is an estimate.",
+        "disclosure": {
+            "note_rate_pct": None, "apr": 10.072, "finance_charge": 2369.15,
+            "monthly_payment": 469.98, "amount_financed": 14550.0,
+            "total_of_payments": 16919.15,
+        },
+    }
+    out = _to_offer_out(1, resp)
+    assert out.disclosure.schedule_source == "reconstructed"
+    assert out.disclosure.schedule_note == "This payment schedule is an estimate."
+
+
+def test_the_los_forwards_a_contract_label_unchanged():
+    from app.routers.offers import _to_offer_out
+
+    resp = {
+        "offer_id": 1, "application_id": 1, "decision_id": 1, "fee_pct_used": 0.03,
+        "apr": 13.51, "finance_charge": 202.03, "monthly_payment": 24.47,
+        "total_of_payments": 1174.46, "schedule": [],
+        "schedule_source": "contract", "schedule_note": None,
+        "disclosure": {
+            "note_rate_pct": 7.99, "apr": 13.51, "finance_charge": 202.03,
+            "monthly_payment": 24.47, "amount_financed": 972.43,
+            "total_of_payments": 1174.46,
+        },
+    }
+    out = _to_offer_out(1, resp)
+    assert out.disclosure.schedule_source == "contract"
+    assert out.disclosure.schedule_note is None

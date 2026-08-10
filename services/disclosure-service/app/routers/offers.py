@@ -351,6 +351,7 @@ def create_offer(
     # regular/final payments beside a schedule whose payments and totals came
     # from somewhere else -- after a generator change, or after the
     # application's amount or term was corrected. Reviewed on PR #10.
+    post_source, post_note = "contract", None
     if all(row.get(f) is not None for f in ("principal", "term_months",
                                             "monthly_payment", "final_payment",
                                             "note_rate_pct")):
@@ -358,6 +359,14 @@ def create_offer(
             float(row["principal"]), float(row["note_rate_pct"]), int(row["term_months"]),
             regular_payment=float(row["monthly_payment"]),
             final_payment=float(row["final_payment"]),
+        )
+    else:
+        # An offer returned without stored terms -- a legacy row this call did
+        # not regenerate. Its rows come from the generator, not the contract.
+        post_source = "reconstructed"
+        post_note = (
+            "This payment schedule is an estimate: this offer predates the "
+            "stored payment schedule. Regenerate the offer to record exact terms."
         )
 
     disclosure = Disclosure(
@@ -380,6 +389,7 @@ def create_offer(
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
         monthly_payment=float(row["monthly_payment"]), total_of_payments=float(row["total_of_payments"]),
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],
+        schedule_source=post_source, schedule_note=post_note,
         created=created, repaired=repaired,
     )
 
@@ -512,11 +522,20 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
                 "application_id=%s residue=%.2f schedule_version=%s",
                 offer.id, application_id, residue, offer.schedule_version,
             )
+        schedule_source, schedule_note = "contract", None
     else:
-        # Legacy rows only: nothing was stored, so the schedule is explicitly a
-        # reconstruction and the caller is told so by the null contractual
-        # fields below.
+        # Legacy rows only: nothing was stored, so these rows are a
+        # reconstruction. The null contractual fields below say so to a reader
+        # who knows to look; `schedule_source` says it to one who does not, and
+        # is what stops the borrower page rendering an estimate as a contract.
         rows = schedule.amortization(principal, note_rate, term_months) if term_months else []
+        schedule_source = "reconstructed"
+        schedule_note = (
+            "This payment schedule is an estimate. It was rebuilt from the "
+            "disclosed amounts because this offer predates the stored payment "
+            "schedule, so the amounts shown may differ by a few cents from the "
+            "contract. Regenerate the offer to record exact terms."
+        )
 
     disclosure = Disclosure(
         # STORED only. `note_rate` above may be a value recovered from an
@@ -549,4 +568,5 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, total_of_payments=total_of_payments,
         disclosure=disclosure, schedule=[ScheduleRow(**r) for r in rows],
+        schedule_source=schedule_source, schedule_note=schedule_note,
     )

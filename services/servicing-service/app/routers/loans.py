@@ -57,6 +57,22 @@ def _display_last4(payment) -> str | None:
     return None
 
 
+def _proven_note_rate(loan) -> tuple:
+    """(rate, proven) for a loan, from whether boarding recorded the contract.
+
+    `loans.apr` holds the contractual note rate when the loan was boarded by the
+    current path, and the DISCLOSED APR when it was boarded by the pre-change
+    one -- 5.196% for a contract priced at 7.99%. `schedule_version` is set only
+    by the current path, so it is the evidence that the rate means what the API
+    calls it. Where it is absent the rate is not reported at all: unknown stays
+    unknown, and the UI says "not recorded" rather than printing a number the
+    borrower was never quoted. Reviewed on PR #10.
+    """
+    if loan.schedule_version:
+        return float(loan.apr), True
+    return None, False
+
+
 @router.get("", response_model=Page[LoanListItem])
 def list_loans(
     session: Session = Depends(get_session),
@@ -76,7 +92,9 @@ def list_loans(
     items = [
         LoanListItem(
             id=loan.id, applicant_name=loan.applicant_name, principal=loan.principal,
-            apr=loan.apr, term_months=loan.term_months, status=loan.status,
+            note_rate_pct=_proven_note_rate(loan)[0],
+            note_rate_proven=_proven_note_rate(loan)[1],
+            term_months=loan.term_months, status=loan.status,
             balance=(bal.balance if bal else 0.0), past_due=(bal.past_due if bal else 0.0),
             opened_at=loan.opened_at.isoformat() if loan.opened_at else None,
         )
@@ -91,9 +109,11 @@ def get_loan(loan_id: int, session: Session = Depends(get_session)):
     if not loan:
         raise HTTPException(status_code=404, detail="loan not found")
     bal = session.get(models.Balance, loan_id)
+    rate, proven = _proven_note_rate(loan)
     return LoanDetail(
         id=loan.id, applicant_name=loan.applicant_name, principal=loan.principal,
-        apr=loan.apr, term_months=loan.term_months, status=loan.status,
+        note_rate_pct=rate, note_rate_proven=proven,
+        term_months=loan.term_months, status=loan.status,
         balance=(bal.balance if bal else 0.0), past_due=(bal.past_due if bal else 0.0),
         opened_at=loan.opened_at.isoformat() if loan.opened_at else None,
     )

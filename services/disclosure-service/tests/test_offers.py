@@ -666,3 +666,42 @@ def test_the_repair_statement_can_actually_fix_a_missing_principal():
     import inspect
     source = inspect.getsource(offers_router._repair_incomplete_offer)
     assert "o.principal IS NULL" in source
+
+
+def test_a_reconstructed_schedule_is_labelled_as_an_estimate():
+    """Estimated rows must not render like contractual ones.
+
+    A pre-0030 offer's rows are synthesised from an inferred principal, term and
+    rate, while the contractual fields beside them are deliberately null because
+    they are unproven. The response carried no provenance, so the borrower page
+    showed the estimate under the same heading as a stored schedule. Servicing
+    already made this distinction for loans; offers did not. Reviewed on PR #10.
+    """
+    offer = _FakeOffer(
+        id=94, app_id=94, decision_id=94, fee_pct_used=0.03,
+        note_rate_pct=None,                       # legacy shape
+        apr=10.072, finance_charge=2369.15,
+        monthly_payment=469.98, amount_financed=14550.0, total_of_payments=16919.15,
+    )
+    body = _offer_response_for(offer, 94)
+
+    assert body["schedule_source"] == "reconstructed"
+    assert body["schedule_note"], "a reconstruction must carry its caveat"
+    assert "estimate" in body["schedule_note"].lower()
+    # The rows are still returned -- a legacy offer would otherwise show nothing.
+    assert len(body["schedule"]) > 0
+
+
+def test_a_stored_schedule_is_labelled_as_the_contract():
+    """The other half: a real contract must not be captioned as an estimate."""
+    offer = _FakeOffer(
+        id=95, app_id=95, decision_id=95, fee_pct_used=0.03,
+        note_rate_pct=7.99, apr=13.51, finance_charge=202.03,
+        monthly_payment=24.47, amount_financed=972.43, total_of_payments=1174.46,
+        regular_payment_count=47, final_payment=24.37, term_months=48,
+        schedule_version="B1", principal=1002.50,
+    )
+    body = _offer_response_for(offer, 95)
+
+    assert body["schedule_source"] == "contract"
+    assert body["schedule_note"] is None

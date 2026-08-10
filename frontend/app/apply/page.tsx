@@ -116,6 +116,11 @@ interface Disclosure {
   regular_payment_count?: number | null;
   final_payment?: number | null;
   term_months?: number | null;
+  // Provenance of the rows below: "contract" when they were expanded from the
+  // stored payment terms, "reconstructed" when this offer predates them and the
+  // rows are an estimate.
+  schedule_source?: string | null;
+  schedule_note?: string | null;
   schedule?: {
     n: number;
     due_date: string;
@@ -392,6 +397,39 @@ export default function ApplyPage() {
       setDecision(res);
     } catch (err) {
       setApiError(errMsg(err, "Could not retrieve a decision."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Regenerate a legacy offer so it carries stored contractual terms.
+   *
+   * A pre-0030 offer displays fine and CANNOT be accepted: origination requires
+   * the stored schedule and returns 409 without it. The staff screen got a
+   * "Regenerate offer" control for exactly this state; the borrower flow had
+   * none, so a borrower could sit in front of an offer whose Accept button was
+   * guaranteed to fail. POST /los/offer is idempotent and repairs an unaccepted
+   * legacy row (audited), which is the same path staff use. Reviewed on PR #10.
+   */
+  async function regenerateOffer() {
+    if (!app) return;
+    setBusy(true);
+    setApiError(null);
+    try {
+      const token = decision?.accept_token || "";
+      const created = (await apiPost(
+        "/los/offer",
+        {
+          app_id: app.app_id,
+          principal: form.amount,
+          annual_rate_pct: OFFER_RATE_PCT,
+          term_months: parseInt(form.term_months, 10),
+        },
+        { "X-Offer-Accept-Token": token },
+      )) as { disclosure: Disclosure };
+      setDisclosure(created.disclosure);
+    } catch (err) {
+      setApiError(errMsg(err, "Could not regenerate your offer."));
     } finally {
       setBusy(false);
     }
@@ -881,6 +919,7 @@ export default function ApplyPage() {
                     showSchedule={showSchedule}
                     onToggleSchedule={() => setShowSchedule((v) => !v)}
                     onAccept={acceptOffer}
+                    onRegenerate={regenerateOffer}
                     busy={busy}
                     acceptedLoanId={acceptedLoanId}
                   />
@@ -1164,6 +1203,7 @@ function OfferPanel({
   showSchedule,
   onToggleSchedule,
   onAccept,
+  onRegenerate,
   busy,
   acceptedLoanId,
 }: {
@@ -1173,10 +1213,20 @@ function OfferPanel({
   showSchedule: boolean;
   onToggleSchedule: () => void;
   onAccept: () => void;
+  onRegenerate: () => void;
   busy: boolean;
   acceptedLoanId: string | number | null;
 }) {
   const hasSchedule = !!disclosure.schedule && disclosure.schedule.length > 0;
+  // Boardable only if the contractual terms were STORED. A pre-0030 offer
+  // reports these as null and origination refuses to board it -- so offering
+  // Accept here produced a guaranteed 409 with nothing the borrower could do.
+  // Reviewed on PR #10.
+  const offerReady =
+    disclosure.final_payment != null &&
+    disclosure.term_months != null &&
+    disclosure.regular_payment_count != null;
+  const scheduleIsEstimate = disclosure.schedule_source === "reconstructed";
   return (
     <div style={{ marginTop: 22 }}>
       <h3>Your offer</h3>
@@ -1260,6 +1310,12 @@ function OfferPanel({
 
       {hasSchedule ? (
         <div style={{ marginTop: 16 }}>
+          {scheduleIsEstimate ? (
+            <div className="alert alert-warn" data-testid="schedule-estimate">
+              {disclosure.schedule_note ||
+                "This payment schedule is an estimate, rebuilt from the disclosed amounts."}
+            </div>
+          ) : null}
           <button className="collapse-toggle" onClick={onToggleSchedule}>
             {showSchedule ? "Hide" : "Show"} payment schedule (
             {disclosure.schedule!.length})
@@ -1303,10 +1359,26 @@ function OfferPanel({
             Go to your loan account →
           </Link>
         </div>
-      ) : (
+      ) : offerReady ? (
         <button style={{ marginTop: 16 }} onClick={onAccept} disabled={busy}>
           {busy ? "Accepting…" : "Accept offer"}
         </button>
+      ) : (
+        /* Not boardable. Showing Accept here would fail with a 409 the borrower
+           can do nothing about, so the action offered is the one that helps:
+           regenerating records the contractual terms and makes acceptance
+           possible. Reviewed on PR #10. */
+        <div style={{ marginTop: 16 }}>
+          <div className="alert alert-warn" data-testid="offer-not-boardable">
+            This offer was prepared before we started recording the exact
+            payment schedule, so it cannot be accepted as it stands.
+            Regenerating it records the exact terms — your amount, rate and term
+            do not change.
+          </div>
+          <button onClick={onRegenerate} disabled={busy} data-testid="regenerate-offer">
+            {busy ? "Regenerating…" : "Regenerate offer"}
+          </button>
+        </div>
       )}
     </div>
   );

@@ -189,7 +189,8 @@ def _borrower_loans(applicant_id: int) -> dict:
     filter of its own). Same shape as servicing-service's Page[LoanListItem]
     so the frontend needs no special-casing for the borrower path."""
     rows = db.query(
-        "SELECT l.id, l.applicant_name, l.principal, l.apr, l.term_months, l.status, "
+        "SELECT l.id, l.applicant_name, l.principal, l.apr, l.schedule_version, "
+        "       l.term_months, l.status, "
         "       COALESCE(b.balance, 0) AS balance, COALESCE(b.past_due, 0) AS past_due, "
         "       l.opened_at "
         "FROM loans l "
@@ -209,18 +210,16 @@ def _borrower_loans(applicant_id: int) -> dict:
             # Decimal. Cast to float at this boundary, same fix as everywhere
             # else a raw-DB-read money value crosses a JSON response/request.
             "principal": float(r["principal"]),
-            # `loans.apr` is a legacy misnomer: the column holds the CONTRACTUAL
-            # note rate, written at boarding from the rate the schedule was
-            # calculated on. servicing-service's LoanListItem renames it on the
-            # way out (validation_alias="apr", serialization_alias=
-            # "note_rate_pct") -- but this borrower path is built here, not
-            # proxied, so it kept emitting `apr` and /my-loan rendered the
-            # borrower's own interest rate as an em dash. Emitted under both
-            # names: the accurate one the frontend reads, and the old one so a
-            # client that has not been updated does not break on this change.
-            # Review finding on PR #10.
-            "note_rate_pct": float(r["apr"]),
-            "apr": float(r["apr"]),
+            # `loans.apr` means different things depending on how the loan was
+            # boarded: the contractual note rate under the current path, the
+            # DISCLOSED APR under the pre-change one (5.196% for a contract
+            # priced at 7.99%). `schedule_version` is set only by the current
+            # path, so it is the evidence the value means what the API calls
+            # it -- the same rule servicing-service applies. Reported only where
+            # it is proven; unknown stays unknown rather than printing a rate
+            # the borrower was never quoted. Reviewed on PR #10.
+            "note_rate_pct": (float(r["apr"]) if r.get("schedule_version") else None),
+            "note_rate_proven": bool(r.get("schedule_version")),
             "term_months": r["term_months"],
             "status": r["status"],
             "balance": float(r["balance"]),

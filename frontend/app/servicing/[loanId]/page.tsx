@@ -18,7 +18,8 @@ interface Loan {
   // D19); the API is where that name stops. This is NOT the disclosed
   // federal APR -- that lives on the offer, and is the larger of the two
   // once a prepaid fee exists.
-  note_rate_pct: number;
+  note_rate_pct: number | null;
+  note_rate_proven?: boolean;
   term_months: number;
   status: string;
   balance: number;
@@ -322,7 +323,14 @@ function LoanDetailContent() {
           </div>
           <div className="dl-row">
             <dt>Interest rate (note rate)</dt>
-            <dd>{pct(loan?.note_rate_pct)}</dd>
+            {/* Reported only where boarding recorded the contract. For a
+                pre-0030 loan `loans.apr` is the DISCLOSED APR, so naming it
+                the note rate would be wrong -- see servicing schemas. */}
+            <dd>
+              {loan?.note_rate_pct != null
+                ? pct(loan.note_rate_pct)
+                : "Not recorded (legacy loan)"}
+            </dd>
           </div>
           <div className="dl-row">
             <dt>Term</dt>
