@@ -125,3 +125,43 @@ Three findings from review, all fixed before merge:
    migration convention), and `/health` now calls `_decision_events_ready()` to
    verify the table actually exists before reporting healthy, the same pattern
    already used for the `EXPERIAN_KEY`/`AI_MODEL_API_KEY` readiness checks above.
+
+## Addendum (2026-08-06): the authority cited in Context was withdrawn
+
+The Context section above cites **CFPB Circular 2023-03**. That circular was
+**withdrawn on 12 May 2025** — **fourteen months before this ADR was accepted on
+2026-07-14**. So this was never a case of being overtaken by events: the citation
+was already dead on the day it was written, and nobody checked. The decision it
+justified does not change, but a withdrawn circular is not something to cite in
+front of a regulator, so the live anchor is recorded here rather than edited into
+the accepted text above.
+
+**Cite instead: 12 CFR 1002.9** (Regulation B, adverse-action notification). It
+requires a statement of *specific* reasons for the action taken, and it contains
+no exemption for a model that cannot explain its own output. That is the same
+requirement the Circular restated; the obligation was always in the rule, not in
+the guidance about the rule.
+
+**Enforcement anchor, if one is needed:** Massachusetts Attorney General v.
+Earnest Operations — $2.5M, 10 July 2025 — an AI-underwriting fair-lending
+settlement postdating the withdrawal.
+
+**What this does not change.** Every design choice above stands as written: the
+reason codes are still computed from the model's real drivers rather than
+generated, the scorer is still wrapped as a fail-closed tool call, and
+`decision_events` is still append-only by trigger. The mapping still picks
+between only two categories and is still not fixture-tested against known cases —
+that gap is unchanged by this correction, and is tracked on the roadmap rather
+than closed here.
+
+**Why an addendum and not an edit.** An accepted ADR records what was decided on
+a date and what was believed at the time — including the mistakes. Editing the
+Context to cite 12 CFR 1002.9 would erase the actual finding, which is not "the
+rule changed" but "we cited a fourteen-month-dead circular without checking, and
+it took another month to notice." That is the part worth keeping on the record.
+ADR 0008 supersedes 0003 the same way — a new statement referencing the old, not
+a rewrite of it.
+
+**The generalisable lesson:** a regulatory citation needs a checked date, the
+same way a document citation needs to be committed. Neither is satisfied by
+having read it somewhere.

@@ -13,7 +13,9 @@ short of that is inventory, not delivery. So the status key distinguishes them:
 | | Means |
 |---|---|
 | ✅ **Landed** | Merged to `main`, reachable in the running app, with a test that fails without it |
-| 🔵 **Built, not landed** | Real working code with tests, on an open PR. Not delivered yet — this is inventory |
+| 🟠 **Built in an open PR** | Real working code with tests, on an open PR. Not delivered yet — this is inventory |
+| ⚠️ **Training-only / mock** | The contract is real; no vendor behind it |
+| ❌ **Stale or incorrect claim** | Corrected in place, with what it was |
 | 🟡 **Partial** | Some conditions met, named individually so the gap is visible |
 | ⬜ **Open** | Not built. Either not started, or deliberately deferred with a reason |
 
@@ -27,19 +29,81 @@ during Week 4); those are marked where they occur.
 
 ## Status at a glance
 
+**Suite as of this pass** (`main` with #10, #12, #13, #15 and #16 all merged;
+re-run, not transcribed from an earlier record): disclosure 166, origination 210,
+servicing 96, gateway 83, payment 138, loan-assistant 153, kyc 12, decision 40 --
+**898 service tests** -- plus **231** database/migration tests and **38**
+Playwright browser tests across 12 files. The browser suite needs the documented
+rate-limit overlay (`docker-compose.e2e.yml`); without it later specs trip the
+shipped 120-request control and fail on unrelated assertions.
+
+Counts quoted further down this file are deliberately point-in-time ("41 tests at
+the time", "102 tests passing") and are left as written -- they record what was
+true when a week closed, which is the only thing that makes them useful. This
+block is the current number; those are history.
+
+
 | Week | Feature | Status |
 |---|---|---|
 | 1 | Safe LLM engine (client, redactor, secrets cleanup) | ✅ Landed |
 | 2 | RAG retrieval + corpus hygiene | ✅ Landed |
 | 3 | AI scorer wrapper + append-only decision memory | ✅ Landed |
 | 4 | Auto-disclosure on approval + KG traversal | ✅ Landed |
-| 5 | Card tokenization + payment reconciliation | 🔵 Built, not landed (PR #8) |
+| 5 | Card tokenization + payment reconciliation | ✅ Landed (PR #8, 2026-08-05). Column drop ✅ landed (PR #15) |
 | 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC landed; ledger + maker-checker open |
 | 7 | Trace ID + scoped reconciliation control | ⬜ Open (Prometheus/Grafana landed early) |
 | 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
 | 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
 | — | **Not on any brief:** test + CI infrastructure, browser E2E, migration parity, the bureau/decision-attempt seams, this register | ✅ Landed |
+
+### Open pull requests
+
+Eight open. **None has a human review**, so none is ✅. CI status is stated per
+row rather than asserted for all — GitHub Actions has been in a major outage
+since 2026-08-06 15:22 UTC, so a red or pending check on these is not evidence
+about the branch.
+
+| PR | Concern | Head | Status |
+|---|---|---|---|
+| #10 | Actuarial APR + TILA box foots | `7875658d81` | ✅ **Merged** 2026-08-10, CI 22/22 |
+| #11 | `payments.pan`/`cvv` removal — expand half | `69b563448d` | ✅ **Merged** 2026-08-07, CI 22/22 |
+| #12 | Graph-store threshold answered by measurement (`adr/0009`) | `ab056ce0df` | ✅ **Merged** 2026-08-10, CI 22/22 |
+| #13 | One grounded external signal on the officer summary | `95b7586395` | ✅ **Merged** 2026-08-10, CI 22/22 |
+| #14 | Correct a wrong answer from the review screen | `d6afd88135` | ✅ **Merged** 2026-08-09, CI 22/22 |
+| #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | `50c4b3f2f2` | ✅ **Merged** 2026-08-10, CI 22/22. Rebased onto `main` before merge, so its base is `main` and not #11's branch |
+| #16 | Four docstrings claiming a PII leak the code does not have | `2b5fd291ad` | ✅ **Merged** 2026-08-10, CI 22/22 |
+| #17 | This status and citation pass | — | 🟠 **Open**, this PR |
+
+*What this table used to say, kept because the reason matters.* Every row above
+read "🟠 CI green" or worse, and two rows carried an explanation about GitHub
+Actions being in a major outage from 2026-08-06 — #16 "CI not green, 19 of 22
+checks still queued" and #17 "no CI run exists, the outage swallowed the
+`pull_request` trigger". That was accurate when written. The outage ended, the
+runs completed, and five of these PRs have since merged with 22/22 — so the
+table had become a snapshot of a bad afternoon presented as current status. The
+`Additions` column went too: those line counts were measured at heads that no
+longer exist, and a stale diffstat is worse than no diffstat because it reads as
+precise.
+
+**Merge order — what is left of it.** Rules 1, 2 and 4 are spent: #16 merged
+before this PR, so the `DEBT.md` D5c it cites is on `main`; #15 was rebased onto
+`main` and merged after #11, so its base is no longer another PR's branch; and
+#10 and #14 have both landed. What remains is rule 3, and it is the reason this
+row-by-row pass is worth reading twice:
+
+**#12 and #13 have merged, so rule 3 is spent too and the merge order is now
+history in full.** Both edited the same two rows of the "Owed to the client"
+table as this PR; the resolution was to take main's merged version of each row,
+because "answered on the branch" and "answered on `main`" are different claims
+and only one of them is now true.
+
+This PR held those two rows back deliberately while they were open, and it no
+longer needs to: the graph row reads **Answered** rather than "answered on PR
+#12", and `db/bench/graph_traversal_benchmark.py` is a path a reader can open
+here. Its forward-citation disclaimer is gone with it -- that sentence said the
+file "does not exist on `main`", which was true when written and false the moment
+#12 landed, which is exactly the class of staleness this pass exists to remove.
 
 ## Owed to the client
 
@@ -54,9 +118,10 @@ not lost between weeks:
 
 ## Verification baseline
 
-Counts below are as of **2026-08-05** on `main` plus the repo-hygiene commit.
-Reproduce with `python -m pytest -q` per service, `python -m pytest db/tests -q`,
-and `npm run test:e2e` in `frontend/`.
+Counts below were measured at **`ca1dbf9`** (the PR #6 merge, 2026-08-05).
+⚠️ **PRs #8 and #9 merged after that commit, so every figure here is
+understated — re-measurement pending.** Reproduce with `python -m pytest -q` per
+service, `python -m pytest db/tests -q`, and `npm run test:e2e` in `frontend/`.
 
 - **441** backend tests across all eight services
 - **76** db migration tests against real PostgreSQL
@@ -97,7 +162,8 @@ they are historical, not current, and are labelled as such.
 
 **Roles:** `borrower`, `csr` (Servicing Rep), `underwriter`, `admin`. Staff-only backend routes require a session role **and** a second shared secret (`X-Internal-Token`) — closes the case where a role header alone could be spoofed if a port were ever reopened. Frontend nav/route guards are UI convenience only; the backend is the real gate.
 
-**Demo logins** (password `password` for all): `admin`, `underwriter`, `csr`, `maria` (borrower, applicant_id 1).
+**Demo logins:** `admin`, `underwriter`, `csr`, `maria` (borrower, `applicant_id` 1). Credentials
+are in `db/init/002_seed.sql` and on the login page — not repeated here.
 
 ---
 
@@ -136,9 +202,9 @@ PAN/CVV/SSN. Float-based money math. A README claiming PCI-DSS compliance.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | 🟡 **Partial — three halves, one closed.** ✅ `payment-service.charge()` redacts via a ported copy of `loan-assistant/redactor.py` before logging. ✅ `servicing-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. 🟨 Storage: the `pan`/`cvv` columns still exist, nullable and **unwritten** — the seed writers went in PR #11, so both seed files insert `last4`/`brand` only and a fresh database contains no card data (a seed-content test enforces that, failing on a PAN-shaped literal in any inserted column or seed target). PR #15 drops the columns, which closes D5b/D13. *This line previously said the seeds "still write real values into them, so every fresh database contains card data" — true when written, false since PR #11.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
+| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | ✅ **Closed, all four halves — the last one by PR #15.** ✅ `payment-service.charge()` redacts via a ported copy of `services/loan-assistant/app/redactor.py` before logging. ✅ `servicing-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. ✅ Storage: the `pan`/`cvv` columns are **gone** — `db/migrations/0031` dropped them and `db/init/001_schema.sql` no longer creates them, so neither a migrated nor a fresh database has them (PR #15). The writers went first: the application in PR #8, the seeds in PR #11, with `0029` back-filling `last4` so payment history still displays and `0031` refusing to run until that was complete and an operator acknowledged the drop. Closes D5b/D13. *Two earlier versions of this line were wrong in opposite directions — it claimed the seeds "still write real values into them, so every fresh database contains card data" after PR #11 had stopped them, and before that it had understated the seeds entirely.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
 | 2 | Origination / Decisioning | Bureau + core-banking + processor keys hardcoded in `config.py`, also committed in root `.env` | ✅ Effectively closed — `.env` untracked, hardcoded fallbacks removed from all 7 services. **Confirmed with the project owner: these were training placeholders (`EXAMPLE-LEAKED-KEY-rotate-me`), never real provider accounts** — so there's no live credential to rotate, and the old values still in git history aren't a real security exposure, just cosmetic (a reviewer seeing placeholder-labeled strings in `git log`). A history rewrite remains available on request but isn't fixing an actual vulnerability here | For a *real* deployment this would be a genuine breach risk (a leaked bureau key pulling real credit data under Meridian's name) — confirmed not the case for this training instance specifically |
-| 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
+| 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers. **The separate defect this row used to point at -- exact arithmetic is not the same as the right formula -- is fixed too: `compute_apr` has used the actuarial present-value solve since PR #10 merged, checked against an independent FFIEC vector. The row previously warned that `main` still shipped the wrong formula, which was true until 2026-08-10.** Details:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
 | 4 | Payments | README claims "PCI-DSS compliant," schema has plaintext `pan`/`cvv` columns | ✅ Fixed:<br>• Removed the false "PCI-DSS compliant" claim<br>• README now states plainly it's **not** compliant and names the specific gaps (raw PAN/CVV storage, plaintext logging half still open) | a false claim is worse than an honest gap |
 
 **Built this week (the actual deliverable):**
@@ -220,7 +286,7 @@ persisted at all (no inputs, no model features, no timestamp).
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Decisioning | Every denial got the identical hardcoded reason ("purchasing history"), never actually connected to the model's real inputs (bureau score vs. income) | ✅ Fixed:<br>• Added `_reason_codes()` — maps the actual driving input (bureau score vs. income shortfall) to a specific reason<br>• Replaced the single hardcoded "purchasing history" string used for every denial | CFPB Circular 2023-03: an adverse-action notice must state the *specific, accurate* reason — no AI exemption. A canned string isn't legally defensible, accurate model or not |
+| 1 | Decisioning | Every denial got the identical hardcoded reason ("purchasing history"), never actually connected to the model's real inputs (bureau score vs. income) | ✅ Fixed:<br>• Added `_reason_codes()` — maps the actual driving input (bureau score vs. income shortfall) to a specific reason<br>• Replaced the single hardcoded "purchasing history" string used for every denial | **12 CFR 1002.9** (Reg B): an adverse-action notice must state the *specific, accurate* reason — no AI exemption. (Cited here rather than CFPB Circular 2023-03, which was **withdrawn 12 May 2025**; enforcement anchor: Massachusetts AG v. Earnest Operations, $2.5M, 10 July 2025.) A canned string isn't legally defensible, accurate model or not |
 | 2 | Decisioning | No record of a decision's inputs, model version, or timestamp — nothing to prove *why* Meridian denied someone if disputed later | ✅ Fixed:<br>• Added append-only `decision_events` table — persists inputs, model score/version, top features, reason codes per decision<br>• Enforced with a DB trigger so a record can't be edited or deleted after the fact, not just access-controlled | If a denied applicant disputes the reason, "we don't have that data anymore" is not a defensible answer to a regulator or a fair-lending challenge |
 | 3 | Decisioning / Finance | Credit pull + bureau call + model run all synchronous on one request thread; already timing out above ~20 concurrent applications | ✅ Fixed — `_pull_credit`/`_call_ai_scorer`/`_run_model`/`decide` are all `async def` now, using `httpx.AsyncClient` instead of blocking `httpx.get`/`.post`; the `POST /decisions` route is `async def` too. A request waiting on Experian or the AI scorer no longer holds a thread-pool worker for the call's full duration — the event loop's own async I/O handles far more concurrent in-flight vendor calls than FastAPI's default sync-route thread pool ever could. Verified live via `TestClient` (real 200 through the actual async route) plus 31 passing tests (`pytest-asyncio` added). **Scope note:** this fixes decision-service's own internal chain only — `origination-service`'s call *into* decision-service is still synchronous, a separate service's own thread-pool budget, out of scope here. The DB write in `decide()` also stays synchronous (fast local Postgres insert, not the external-vendor bottleneck this targeted) | The new AI-scorer call had added a *second* synchronous network hop on the same thread, making the existing bottleneck worse, not better — both hops are non-blocking now |
 | 4 | Decisioning | The pull-credit/score/persist chain was a plain async function body — no explicit graph, no per-step trace | ✅ Fixed:<br>• `app/graph.py` — the exact same three steps (`_pull_credit` → `_run_model` → persist) as a real LangGraph `StateGraph`, not inline code<br>• `decide()`'s signature, output shape, and every fail-closed exception are unchanged — the graph's nodes call the identical functions decide() always called, so all 31 existing tests pass untouched<br>• LangSmith tracing comes for free: `langgraph` pulls in `langchain-core`, which auto-instruments when `LANGSMITH_TRACING`/`LANGSMITH_API_KEY` are set (already true via the shared `.env`, project `2463-fde`) — no separate wiring needed<br>• Live-verified: a real decision (app 7307, approve/672) ran through the graph end to end | Each step (bureau pull, scoring, persistence) is now individually traceable and has an explicit boundary to extend later — a retry policy or a conditional branch on one step doesn't mean editing a function body |
@@ -262,7 +328,7 @@ origination-fee % copy-pasted into three files, drifted: `apr.py` 0.025,
 |---|---|---|---|---|
 | 1 | Disclosures | The fee constant is copy-pasted into 3 files and has drifted — `apr.py` (0.025) doesn't match `fees.py`/`offer.py` (0.030) or the published `policies/fee_schedule.md` | ✅ Fixed — `apr.py` and `offer.py` now import `ORIGINATION_FEE_PCT` from `fees.py` (one source of truth) instead of redeclaring it; `compute_apr(18000, 7.99, 48)` now correctly returns 5.196% (was 5.041% with the wrong 0.025 fee), confirmed against `test_apr.py`'s own Decimal reference | `apr.py`'s wrong value is the one that computes the number that ships on the real TILA disclosure — a real Reg Z tolerance breach, not a rounding nit |
 | 2 | Disclosures | No link from a disclosure back to the exact decision + fee-constant version that produced it (`offers` has no `decision_id`, no snapshot of which rule version ran) | ✅ Fixed:<br>• `offers.decision_id` — real FK to `decisions(app_id)` (`db/migrations/0008_offer_decision_link.sql` — renumbered after merging with Week 3's own `0006`/`0007`), not a loose reference; an offer can't be linked to a decision that doesn't exist<br>• `offers.fee_pct_used` — snapshots `ORIGINATION_FEE_PCT` at offer-creation time, so a later change to the constant can never retroactively change what an existing offer is proven to have used<br>• Both origination-service's manual `POST /los/offer` and the new auto-generated path (see #3) populate them | If `ORIGINATION_FEE_PCT` changes next quarter, there's now a real record of what fee was actually used for a loan originated today |
-| 3 | Disclosures | Auto-generating the offer + disclosure on approval is still fully manual | ✅ Fixed:<br>• `run_decision()` now calls disclosure-service's `/offers` automatically the moment `decision-service` returns `approve`, using the application's own requested amount/term<br>• Best-effort — a disclosure-service hiccup logs a warning and doesn't fail the decision that already happened; the loan officer can still build it manually via `POST /los/offer`<br>• Verified live end-to-end: application 7302 (approve, score 672) auto-produced offer id 186 with `decision_id=7302`, `fee_pct_used=0.0300`, correct APR/schedule<br>• All 182 backend tests still pass *(at the time)* | Directly answers the automation ask — the offer + TILA disclosure now exist the moment underwriting approves, with an auditable link back to that exact decision |
+| 3 | Disclosures | Auto-generating the offer + disclosure on approval is still fully manual | ✅ Fixed:<br>• `run_decision()` now calls disclosure-service's `/offers` automatically the moment `decision-service` returns `approve`, using the application's own requested amount/term<br>• Best-effort — a disclosure-service hiccup logs a warning and doesn't fail the decision that already happened; the loan officer can still build it manually via `POST /los/offer`<br>• Verified live end-to-end: application 7302 (approve, score 672) auto-produced offer id 186 with `decision_id=7302`, `fee_pct_used=0.0300`, and an APR/schedule that were correct *for the formula then in use* — ⚠️ that formula is itself wrong, see Owed to the client<br>• All 182 backend tests still pass *(at the time)* | Directly answers the automation ask — the offer + TILA disclosure now exist the moment underwriting approves, with an auditable link back to that exact decision |
 
 **A correction worth stating plainly — the client's own attached numbers don't
 match what the code actually computes:** re-running `apr.compute_apr(18000,
@@ -384,8 +450,8 @@ log showing a slow (2.4s) `POST /payments`, a client retry, and a second POST
 |---|---|---|---|---|
 | 1 | Payments | "Charged twice" is real, not confusion — `payments.py` has zero dedupe; a retried POST unconditionally inserts a second row and applies the amount a second time | ✅ Fixed, past the spec stage — `idempotency_key` is now required at the API boundary, enforced by a partial unique index + `INSERT ... ON CONFLICT`, with the original result replayed on a repeat request (`services/payment-service/app/payments.py::charge()`) | The client's own framing ("people are just confused") was wrong — this is a real, reproducible double-charge bug, not a support-ticket misunderstanding |
 | 2 | Payments | No idempotency-key contract exists — nothing tells the server a retried request is the same request | ✅ Fixed — atomic DB-level dedupe: `Idempotency-Key` required in `PaymentIn`, `UNIQUE` partial index (`db/migrations/0007`), `INSERT ... ON CONFLICT ... RETURNING` is the atomic check-and-write. A same-key retry with a *different* `loan_id`/`amount` gets a 409, not silently honored either way. A charge that captures but never confirms applying to the balance is tracked separately (`applied_at`, `db/migrations/0012`) and reconciled by the next retry — `servicing-service`'s own apply-payment is idempotent by `payment_id` too (`payment_applications`, `db/migrations/0013`), with the marker + balance update committed atomically | A safe retry needs to be dedup'd atomically at the database layer — check-then-insert in application code has its own race condition |
-| 3 | Payments | Full PAN/CVV stored in the `payments` table; an unrelated SSN field accepted on the payment endpoint at all | 🔵 **Built, not landed** (`kalab-week5-payment-tokenization`, PR #8 — open; ADR 0008 exists on that branch only) — `PaymentIn` no longer has `pan`/`cvv`/`ssn` fields at all; the payment form tokenizes the card client-side (`frontend/lib/tokenize.ts`, a mock standing in for a real processor SDK) before it ever reaches a Meridian server. `pan`/`cvv` columns stay nullable/dead-going-forward for historical rows (not dropped — retroactive tokenization is its own project, same shape as the Week 10 retention question) | CVV storage is an absolute PCI-DSS violation, no exceptions; SSN had no functional reason to be on a payment-capture endpoint at all — that was GLBA-covered data creeping into a PCI-scoped flow for nothing |
-| 4 | Payments | No design for shrinking PCI scope — the current design touches raw PAN/CVV directly, maximizing scope | 🔵 **Built, not landed** (PR #8) — `payment-service` accepts only `processor_token` + `last4` + `brand`; the token is used transiently and never persisted (only `last4`/`brand` reach the `payments` row, `db/migrations/0016`). No real processor is integrated in this training app, so the tokenization boundary itself is mocked — the contract (opaque token in, only display fields ever stored) is real and is what a real processor integration would slot behind | Moves the service toward the lightest PCI SAQ tier instead of the current design, which did the opposite |
+| 3 | Payments | Full PAN/CVV stored in the `payments` table; an unrelated SSN field accepted on the payment endpoint at all | ✅ **Landed** (PR #8, merged 2026-08-05; ADR 0008 is on `main`) — `PaymentIn` no longer has `pan`/`cvv`/`ssn` fields at all; the payment form tokenizes the card client-side (`frontend/lib/tokenize.ts`, a mock standing in for a real processor SDK) before it ever reaches a Meridian server. `pan`/`cvv` are **gone**: PR #15's `db/migrations/0031` dropped them and `db/init/001_schema.sql` no longer creates them, so neither a migrated nor a fresh database has them. *This clause used to say the columns stayed nullable and dead-going-forward for historical rows -- true until the contract step landed.* | CVV storage is an absolute PCI-DSS violation, no exceptions; SSN had no functional reason to be on a payment-capture endpoint at all — that was GLBA-covered data creeping into a PCI-scoped flow for nothing |
+| 4 | Payments | No design for shrinking PCI scope — the current design touches raw PAN/CVV directly, maximizing scope | ✅ **Landed** (PR #8) — `payment-service` accepts only `processor_token` + `last4` + `brand`; the token is used transiently and never persisted (only `last4`/`brand` reach the `payments` row, `db/migrations/0016`). No real processor is integrated in this training app, so the tokenization boundary itself is mocked — the contract (opaque token in, only display fields ever stored) is real and is what a real processor integration would slot behind | Moves the service toward the lightest PCI SAQ tier instead of the current design, which did the opposite |
 
 **Original deliverable, as originally described:** a spec package
 (`specs/0001-online-payments-idempotency-tokenization.md`) — idempotency-key
@@ -404,20 +470,12 @@ that spec, if it ever existed — landed via later security-review passes on
 (idempotency) retroactively as-built, and Part 2 (tokenization) as a design
 with acceptance criteria.
 
-**Status (2026-08-05): 🔵 Built, not landed.** Rows 1 and 2 landed on `main`
-via earlier merged PRs. Rows 3 and 4 are real, tested, CI-green code on
-**PR #8, which is still open** — so by this file's own definition of done they
-are inventory, not delivery. An earlier version of this paragraph said they
-"closed out all four rows for real"; that was the overstatement this review
-pass exists to remove.
-
-What is on that branch: `payment-service`'s `PaymentIn` dropped `pan`/`cvv`/`ssn`
-entirely; card capture tokenizes client-side (`frontend/lib/tokenize.ts`, mocked
+**Status (2026-08-06): ✅ Landed.** All four rows are on `main` — PR #8 merged
+2026-08-05 21:34. `payment-service`'s `PaymentIn` has no `pan`/`cvv`/`ssn`
+fields; card capture tokenizes client-side (`frontend/lib/tokenize.ts`, ⚠️ mocked
 — no real processor integrated in this training app) before anything reaches a
 Meridian server; new rows store only `last4`/`brand` (`db/migrations/0016`) and
-the processor token is never persisted. `payments.pan`/`.cvv` stay nullable and
-dead-going-forward for historical rows (ADR 0008, supersedes ADR 0003) — not
-dropped, since retroactively tokenizing old rows needs the processor per row.
+the processor token is never persisted.
 
 **Status on `main` now that PR #8 has merged:** neither `payment-service` nor
 `servicing-service` inserts `pan`/`cvv` any more, and neither logs PAN/CVV/SSN --
@@ -425,11 +483,12 @@ both receive a processor token instead. This paragraph previously said the
 opposite; it described the state while PR #8 was still open and was not updated
 when it merged.
 
-What remains: the `pan`/`cvv` COLUMNS still exist, and `db/init/002_seed.sql`
-and `003_seed_bulk.sql` still write real values into them, so a freshly created
-database contains card data regardless of what the application does. PR #11
-(the `last4` back-fill) is merged; PR #15 drops the columns, and the seed
-writers must go with them (see `DEBT.md` D5b/D13).
+What remains: nothing, for this defect. The seed writers went in PR #11 (both
+files insert `last4`/`brand` only), and PR #15 completed the contract step --
+`db/migrations/0031` dropped `payments.pan`/`.cvv` and `db/init/001_schema.sql`
+stopped creating them, so a freshly created database has no card columns at all.
+`DEBT.md` D5b/D13 are closed. What is NOT claimed by that: PCI-DSS compliance,
+which needs a QSA assessment and a real processor rather than an empty column.
 
 **Also on PR #8, beyond this week's original scope** — added during review, not
 from the brief: a captured payment could be authorized on the card and never
@@ -439,10 +498,11 @@ repository. `payment-service/app/reconcile.py` + `db/migrations/0028` make that
 row a durable, self-draining work item with claim-safe concurrency, capped
 backoff, an operator report and two Prometheus gauges.
 
-Head `53ca666`, base `main`, CI 22/22, mergeable. Two documents this file cites
-— `specs/0001-online-payments-idempotency-tokenization.md` and
-`adr/0008-tokenize-card-data-stop-storing-pan-cvv.md` — exist **only on that
-branch**, not on `main`.
+Head `53ca666`, base `main`, CI 22/22 — **merged**. The two documents this file
+cites, `specs/0001-online-payments-idempotency-tokenization.md` and
+`adr/0008-tokenize-card-data-stop-storing-pan-cvv.md`, are on `main`. *This
+paragraph previously said they existed only on the branch; true while it was
+open, false once it merged.*
 
 ---
 
@@ -537,7 +597,8 @@ rows 1 to 4 all stand exactly as written.
 One row moved for a different reason: PR #8's reconciler now detects and reports
 captured-but-unapplied payments, which is a real partial answer to row 3's
 "nothing flags it". It flags the *unapplied* case, not the *double-charge*
-case, and it is not on `main` yet.
+case, and it is on `main` now that PR #8 has merged. *Previously read "not on
+`main` yet".*
 
 ---
 
@@ -643,8 +704,10 @@ built" is **not fully accurate**, checked today:
   reconciliation control) exists, so its own rows are all still open.
 - **Week 4** — merged to `main` (PR #6, 2026-08-05), including the
   auto-disclosure chain this capstone depends on.
-- **Week 5** — built and CI-green on PR #8, **not merged**. A showcase must not
-  present tokenization as delivered while it sits on an open branch.
+- **Week 5** — built, CI-green and **merged** (PR #8, 2026-08-05). A showcase must not
+  present tokenization as delivered while it sits on an open branch -- which is
+  no longer the situation: PR #8 merged on 2026-08-05 and tokenization is on
+  `main`, so a showcase may present it as delivered because it is.
 
 A showcase that just repeats "Weeks 3/6/7 are specs" would understate real,
 verifiable progress — the honest version says exactly which piece of each
@@ -654,8 +717,8 @@ week is built vs. planned, not a blanket status for all three.
 redaction policy table mapping every field across `applicants`/`applications`/
 `kyc_checks`/`decisions`/`offers`/`loans`/`balances`/`payments`/`audit_logs` to
 its legal basis and retain-vs-redact status, the corrected controls review
-above, a handoff package (`kal_docs/HANDOFF.md` — debt register, ADR catalog,
-risk-prioritized roadmap), and a board-framed showcase (`kal_docs/SHOWCASE.md`
+above, a handoff package (debt register, ADR catalog, risk-prioritized roadmap —
+**not yet committed, so not cited as a path**), and a board-framed showcase (likewise
 — fair-lending defensibility, money-correctness, audit-readiness). **Not yet
 started — plan only, pending go-ahead to build.**
 
@@ -745,13 +808,22 @@ top. The at-a-glance table is the one thing that must never be stale — it is
 what anyone skimming this file reads, and a wrong tick there is worse than no
 table at all.
 
-Two rules that this file has broken before, and which this pass fixed:
+Four rules that this file has broken before, and which later passes fixed:
 
-1. **Never mark a row ✅ for work on an unmerged branch.** Use 🔵 Built, not
-   landed. Week 5 claimed all four rows closed while two of them sat on an open
-   PR.
+1. **Never mark a row ✅ for work on an unmerged branch.** Use 🟠. Week 5 claimed
+   all four rows closed while two of them sat on an open PR.
 2. **Never cite a file as delivered without checking it is on `main`.** Week 5
    cited a spec and an ADR that exist only on a feature branch, and an earlier
    version cited a spec that had never been committed anywhere at all.
+3. **Never carry a status forward from a code comment.** Week 1's PII row said
+   origination's middleware still logged full request bodies. No such middleware
+   exists — the claim came from a docstring and was repeated twice before anyone
+   grepped for the call site (`DEBT.md` D5c).
+4. **Never leave a 🟠 standing after the PR it was waiting on merges.** Week 5
+   sat at 🔵 for a day after PR #8 landed, and its "none of that is true on
+   `main`" paragraph became actively misleading rather than merely stale. ✅ is
+   the *correct* marker once the PR lands — the defect is the stale marker
+   outliving the merge, not the tick replacing it.
 
-Last full accuracy pass: **2026-08-05**, against `main` at `ca1dbf9`.
+Last full accuracy pass: **2026-08-10**, against `main` at `e5f9d52` with PRs #10,
+#12, #13, #15 and #16 merged; #17 is this pass. The footer is the freshness marker for this file, so it names the base the rebuilt PR table and the current test counts were actually checked against. *It previously read 2026-08-06 against `90ebce2` with #10-#17 open.*
