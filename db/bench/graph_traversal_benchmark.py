@@ -493,26 +493,40 @@ def _server_settings(cur) -> dict:
     return out
 
 
+# The MEASURED scan of the adjacency relation, not the planner's guess about it.
+#
+# `EXPLAIN (ANALYZE)` prints both: `(cost=... rows=609883 width=8) (actual
+# time=... rows=553928 loops=5)`. A first version of this matched the first
+# `rows=` it found, which is the ESTIMATE -- so `results.json`, the transcript and
+# the ADR all published 609,883 as a measured figure while the plan directly
+# beside it said 553,928. Publishing an estimate as a measurement is the exact
+# failure this whole benchmark exists to stop, and it was doing it in the note
+# about honesty. Reviewed on PR #12.
+#
+# Anchored to `edge_rel` as well. The unrestricted pattern also matched the
+# ordinary `walk` CTE in the other two candidates, attaching a MATERIALIZED
+# rescan note to relations that are not materialized and do not rebuild anything.
 _CTE_SCAN_RE = re.compile(
-    r"CTE Scan on (\w+).*?rows=(\d+).*?loops=(\d+)", re.IGNORECASE
+    r"CTE Scan on (edge_rel)\b.*?\(actual [^)]*?rows=(\d+) loops=(\d+)\)",
+    re.IGNORECASE,
 )
 
 
 def _cte_rescans(plan_lines) -> dict:
-    """What the global-edge candidate's plan says about rescanning `edge_rel`.
+    """What the plan MEASURED about rescanning the materialized adjacency CTE.
 
-    `AS MATERIALIZED` stops PostgreSQL REBUILDING the adjacency relation on every
-    iteration, and that is all it stops. The recursive join still scans the
-    materialized CTE once per frontier iteration, unindexed -- the depth-5 plan
-    shows `CTE Scan on edge_rel ... loops=5`. Review of PR #12: reporting this
-    candidate as "one adjacency build" without that per-hop scan made a flat
-    baseline look flatter than it is. Recorded from the plan rather than
-    described in prose, so the number cannot drift from the run.
+    `AS MATERIALIZED` stops PostgreSQL rebuilding the relation on every
+    iteration, and that is all it stops: the recursive join still scans it once
+    per frontier iteration, unindexed. Reporting the candidate as "one adjacency
+    build" without that per-hop scan made a flat baseline look flatter than it is.
+    Taken from the plan rather than described in prose, so the number cannot drift
+    from the run -- which is only true if it is the measured number.
     """
     for line in plan_lines:
         m = _CTE_SCAN_RE.search(line)
         if m:
-            return {"relation": m.group(1), "rows_per_scan": int(m.group(2)),
+            return {"relation": m.group(1),
+                    "rows_per_scan": int(m.group(2)),
                     "scans": int(m.group(3))}
     return {}
 

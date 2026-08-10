@@ -213,3 +213,147 @@ def test_the_roadmap_traversal_claim_matches_the_artifact(results):
                 f"Transcribe from the artifact, or mark the number as historical.\n"
                 f"clause: {clause.strip()[:200]}"
             )
+
+
+def test_the_plan_parser_reads_measured_rows_not_the_planner_estimate():
+    """`EXPLAIN (ANALYZE)` prints both, and only one of them is evidence.
+
+    A first version matched the first `rows=` on the line, which is the planner's
+    ESTIMATE -- so results.json, the transcript and the ADR published 609,883 as a
+    measured figure while the plan beside it said 553,928. Publishing an estimate
+    as a measurement is the failure this whole benchmark exists to stop, and it
+    was doing it inside the note about honesty. Reviewed on PR #12.
+
+    Also asserts the pattern is anchored to `edge_rel`: unanchored, it attached a
+    MATERIALIZED rescan note to the ordinary `walk` CTE in the other two
+    candidates, which are not materialized and rebuild nothing.
+    """
+    import importlib.util
+
+    tool = BENCH / "graph_traversal_benchmark.py"
+    spec = importlib.util.spec_from_file_location("graph_bench", tool)
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+
+    edge_line = (
+        "  ->  CTE Scan on edge_rel e  (cost=0.00..12197.66 rows=609883 width=8) "
+        "(actual time=136.043..243.703 rows=553928 loops=5)"
+    )
+    parsed = bench._cte_rescans([edge_line])
+    assert parsed == {"relation": "edge_rel", "rows_per_scan": 553928, "scans": 5}, parsed
+    assert parsed["rows_per_scan"] != 609883, "the planner estimate was published as measured"
+
+    walk_line = (
+        "  ->  CTE Scan on walk  (cost=0.00..1829.62 rows=91481 width=4) "
+        "(actual time=63.817..1617.762 rows=5936 loops=1)"
+    )
+    assert bench._cte_rescans([walk_line]) == {}, (
+        "a non-materialized CTE was reported as a materialized rescan"
+    )
+
+    # The invisible failure this repository has now hit three times: a `\b`
+    # written through a shell becomes a literal U+0008, the pattern still
+    # compiles, and it silently matches nothing.
+    assert "\x08" not in bench._CTE_SCAN_RE.pattern, (
+        "the plan pattern contains a control character -- it will match nothing "
+        "and every rescan note will silently disappear"
+    )
+
+
+def test_the_published_rescan_figure_is_the_one_in_the_committed_plan(results):
+    """results.json must agree with the plan it was parsed from."""
+    entry = results["explain"].get("global-edge", {}).get("cte_rescans")
+    assert entry, "results.json has no cte_rescans for global-edge"
+    plan = "\n".join(results["explain"]["global-edge"]["plan"])
+    assert "CTE Scan on edge_rel" in plan, "the committed plan has no edge_rel scan"
+    assert re.search(
+        r"CTE Scan on edge_rel\b.*?\(actual [^)]*?rows=%d loops=%d\)"
+        % (entry["rows_per_scan"], entry["scans"]),
+        plan,
+    ), (
+        "the published rescan figures (%s) do not appear as measured values in the "
+        "committed plan" % entry
+    )
+
+
+# --- prose, not just table cells ---------------------------------------------
+#
+# Reviewed on PR #12: the tables were transcribed from the regenerated run while
+# the surrounding NARRATIVE still quoted the previous one, and
+# `services/origination-service/app/kg.py` repeated the old figures in its module
+# docstring. A reader got contradictory evidence from the same page. Table-cell
+# checking could not see any of it, so the scan is widened to every second-shaped
+# figure in the documents that cite this benchmark.
+
+PROSE_SOURCES = [
+    ADR,
+    REPO / "services" / "origination-service" / "app" / "kg.py",
+]
+
+_SECONDS = re.compile(r"(\d+\.\d+)\s*(?:s\b|seconds\b|s\*\*)", re.IGNORECASE)
+# A figure may be quoted as history if its own clause says so -- the same
+# same-clause rule the logging guard uses. Without this, recording "an earlier
+# run reported 0.108s" would be forbidden, which would push authors to delete the
+# history rather than mark it.
+_HISTORICAL = re.compile(
+    r"\b(?:earlier|previously|former|used to|was|were|no longer|old|first|then|"
+    r"before|retracted|superseded|stale|drifted|had claimed)\b", re.IGNORECASE
+)
+
+
+def _artifact_figures(results):
+    values = {
+        results["build"]["identity_attr_seconds"],
+        results["build"]["edges_seconds"],
+        results["unbounded_with_path"]["walk_seconds"],
+        results["unbounded_with_path"]["path_reconstruction_seconds"],
+        results["unbounded_with_path"]["total_seconds"],
+    }
+    values |= {v["seconds"] for v in results["unbounded"].values() if v.get("seconds")}
+    values |= {
+        v["seconds"]
+        for cand in results["candidates"].values()
+        for v in cand["depths"].values()
+        if v.get("seconds") is not None
+    }
+    return values
+
+
+@pytest.mark.parametrize("source", PROSE_SOURCES, ids=lambda p: p.name)
+def test_prose_quotes_no_timing_absent_from_the_artifact(results, source):
+    """Every second-shaped figure in the narrative must be from this run."""
+    assert source.is_file(), f"{source} is missing"
+    allowed = _artifact_figures(results)
+    text = source.read_text(encoding="utf-8")
+
+    offenders = []
+    for clause in re.split(r"(?<=[.;])\s+|\n\n", text):
+        for raw in _SECONDS.findall(clause):
+            value = float(raw)
+            if any(abs(value - a) < 0.0005 for a in allowed):
+                continue
+            if _HISTORICAL.search(clause):
+                continue
+            offenders.append("%s -> %s" % (value, " ".join(clause.split())[:150]))
+
+    assert not offenders, (
+        "%s quotes timings that are not in db/bench/results.json:\n  %s\n\n"
+        "Transcribe from the artifact, or mark the figure as historical in the "
+        "same clause." % (source.name, "\n  ".join(offenders))
+    )
+
+
+@pytest.mark.parametrize("source", PROSE_SOURCES, ids=lambda p: p.name)
+def test_prose_names_the_run_it_quotes(results, source):
+    """A document quoting these numbers must name the run they came from.
+
+    `kg.py` cited a run id that no longer existed anywhere, which is how its
+    figures drifted unnoticed: nothing tied them to an artifact.
+    """
+    text = source.read_text(encoding="utf-8")
+    if not _SECONDS.search(text):
+        pytest.skip(f"{source.name} quotes no timings")
+    assert results["run_id"] in text, (
+        f"{source.name} quotes timings but does not name run_id "
+        f"{results['run_id']} -- a reader cannot tell which run governs"
+    )

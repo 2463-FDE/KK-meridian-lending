@@ -145,7 +145,7 @@ means worse, so these are a lower bound on the problem.
 All timings on this page come from a single run, recorded as
 `db/bench/results.json` with the plans in `db/bench/run-output.txt`:
 
-- **2026-08-09T20:59Z** (`run_started_utc` in the artifact), N = 10,000
+- **2026-08-10T17:26Z-rows10000-depth5-root1** (`run_started_utc` in the artifact), N = 10,000
   applicants, root = 1, 240 s statement timeout
 - PostgreSQL **16.14** — `shared_buffers` 128MB, `work_mem` 4MB,
   `effective_cache_size` 4GB, `max_parallel_workers_per_gather` 2, `jit` on
@@ -179,14 +179,14 @@ comparison is sound.
 
 | Depth | Reached | frontier-attr | materialized | global-edge *(pessimistic)* |
 |---|---|---|---|---|
-| 1 | 55 | **0.031** | 0.003 | 1.571 |
-| 2 | 466 | **0.01** | 0.003 | 1.154 |
-| 3 | 850 | **0.042** | 0.021 | 0.89 |
-| 4 | 1,621 | **0.104** | 0.035 | 0.772 |
-| 5 | 2,944 | **0.282** | 0.075 | 1.284 |
+| 1 | 55 | **0.053** | 0.026 | 6.216 |
+| 2 | 466 | **0.025** | 0.036 | 0.655 |
+| 3 | 850 | **0.047** | 0.035 | 1.291 |
+| 4 | 1,621 | **0.155** | 0.105 | 1.287 |
+| 5 | 2,944 | **0.322** | 0.139 | 1.156 |
 
 **What the pessimistic baseline is NOT.** `global-edge` declares the adjacency
-relation `AS MATERIALIZED`, and that stops PostgreSQL *rebuilding* all 609,883 rows on
+relation `AS MATERIALIZED`, and that stops PostgreSQL *rebuilding* all 553,928 rows on
 every iteration -- it does not stop it *rescanning* them. The plan for this run
 records `CTE Scan on edge_rel ... loops=5`: one unindexed scan of the materialized
 relation per frontier iteration. So this column is not "one adjacency build plus
@@ -201,8 +201,8 @@ different engineering proposition from one that is free:
 
 | Structure | Build | Rows |
 |---|---|---|
-| `identity_attr` (postings) | 0.325 s | 40,140 |
-| `edges` (materialised pairs, labelled) | 4.713 s | 553,928 |
+| `identity_attr` (postings) | 0.345 s | 40,140 |
+| `edges` (materialised pairs, labelled) | 5.761 s | 553,928 |
 
 ### The unbounded traversal, which is the one this ADR actually asked about
 
@@ -230,7 +230,7 @@ SELECT count(*) FROM walk;
 
 | Traversal | frontier-attr | materialized | Reached |
 |---|---|---|---|
-| unbounded, reachability only | **0.978 s** | 0.546 s | 10,000 |
+| unbounded, reachability only | **0.723 s** | 0.397 s | 10,000 |
 
 On this population every applicant is in one component — households, shared
 phones and 200 employers connect the lot — so the unbounded answer is the entire
@@ -257,9 +257,9 @@ predecessors afterwards:
 
 | Phase | Time | Result |
 |---|---|---|
-| walk, one predecessor + the attribute per applicant | **0.929 s** | 10,000 applicants, 12 levels |
-| route reconstruction, all applicants | **0.492 s** | 9,999 labelled routes |
-| **total** | **1.421 s** | every applicant, and how each connects |
+| walk, one predecessor + the attribute per applicant | **0.732 s** | 10,000 applicants, 12 levels |
+| route reconstruction, all applicants | **0.291 s** | 9,999 labelled routes |
+| **total** | **1.023 s** | every applicant, and how each connects |
 
 Each hop carries the attribute that justifies it, not just the pair of
 applicant IDs: the walk stores `via_kind`/`via_value` on the visited row at the
@@ -280,7 +280,7 @@ path -- is answered in about a third of a second on a 10,000-applicant book.
 What is still NOT measured is the distance to each applicant as a separate
 ranked output, and weighted-path scoring; those are different queries.
 
-The `global-edge` column now runs 0.33–0.50 s, rising gently with depth. Two
+The `global-edge` column runs 0.655–6.216 s, and it does NOT rise gently with depth -- the depth-1 figure is the largest of the five. That is a cold-cache and JIT artefact on the first query of the run, not a property of the traversal, and it is left in rather than smoothed away because re-running until the numbers look monotonic is how a benchmark stops being evidence. The comparison BETWEEN candidates is the finding; these absolutes carry the noise of the machine that produced them. Two
 costs, and it is worth naming both rather than calling it flat: the 553,928-row
 adjacency relation is built **once** per query (that is the constant, and the
 variable this candidate exists to isolate), and then each hop performs a full
@@ -320,7 +320,7 @@ and depth 5 — which never returned before — answers in **0.108 s**, reaching
 what establishes this is the same question answered a cheaper way.
 
 Even the pessimistic baseline is rescued: building the entire adjacency
-relation once per query, then rescanning it per hop, costs 0.33–0.50 s across
+relation once per query, then rescanning it per hop, costs 0.655–6.216 s across
 depths 1–5. Its old 15–22 s at depth 4 was the same path-enumeration defect,
 not the cost of the build.
 
@@ -382,8 +382,8 @@ a permanent refusal:
 - a production traversal is measured missing its interactive budget on a real
   book size. Stated as "re-measure", not as a depth: the depth-based version of
   this trigger ("depth > 3 at interactive latency") was derived from a benchmark
-  that measured path enumeration; depth 5 now costs 0.108 s, the unbounded walk
-  0.32 s, and the unbounded walk with paths 0.31 s.
+  that measured path enumeration; depth 5 now costs 0.322 s, the unbounded walk
+  0.723 s, and the unbounded walk with paths 1.023 s.
 
 If it is revisited, the likely shape is a **derived read model, not a second
 source of truth** — the graph projected from Postgres and rebuilt from it, so
