@@ -39,21 +39,52 @@ test("a legacy loan's schedule is labelled as reconstructed, not contractual", a
   // columns on one high-id bulk loan, which is filler data no other spec
   // asserts on. Depending on a seed's shape for a fixture was the coupling
   // that broke here.
+  // The borrowed row is PUT BACK before the test ends, pass or fail.
+  //
+  // Clearing the columns and walking away left the shared seed permanently
+  // legacy, which made db/tests/test_schema_parity.py fail afterwards -- the
+  // parity check asserts the seed carries its contractual schedules, and it was
+  // right; this spec had broken it. A fixture that mutates shared data and does
+  // not restore it turns unrelated suites into order-dependent coin flips.
   const client = dbClient();
   await client.connect();
-  let legacyLoanId: number;
   try {
+    // Read the prior state BEFORE clearing it. Postgres RETURNING hands back
+    // post-update values, so `RETURNING schedule_version` on this statement
+    // would return the NULL it just wrote and "restore" the row to broken.
     const row = await client.query(
-      "UPDATE loans SET regular_payment = NULL, regular_payment_count = NULL, " +
-      "final_payment = NULL, schedule_version = NULL " +
-      "WHERE id = (SELECT max(id) FROM loans) RETURNING id",
+      "SELECT id, regular_payment AS rp, regular_payment_count AS rpc, " +
+      "final_payment AS fp, schedule_version AS sv " +
+      "FROM loans WHERE id = (SELECT max(id) FROM loans)",
     );
     expect(row.rowCount, "the seed should contain at least one loan").toBe(1);
-    legacyLoanId = row.rows[0].id;
+    const legacyLoanId: number = row.rows[0].id;
+    const restore = row.rows[0];
+    expect(restore.sv, "the borrowed loan should start with a stored schedule").not.toBeNull();
+
+    await client.query(
+      "UPDATE loans SET regular_payment = NULL, regular_payment_count = NULL, " +
+      "final_payment = NULL, schedule_version = NULL WHERE id = $1",
+      [legacyLoanId],
+    );
+
+    try {
+      await assertReconstructedLabelling(page, legacyLoanId);
+    } finally {
+      // Put back exactly what was read above, so the row returns to its seeded
+      // state rather than to a value invented here.
+      await client.query(
+        "UPDATE loans SET regular_payment = $2, regular_payment_count = $3, " +
+        "final_payment = $4, schedule_version = $5 WHERE id = $1",
+        [legacyLoanId, restore.rp, restore.rpc, restore.fp, restore.sv],
+      );
+    }
   } finally {
     await client.end();
   }
+});
 
+async function assertReconstructedLabelling(page: any, legacyLoanId: number) {
   await signInAsStaff(page);
   // Wait for the schedule RESPONSE, not just for the element.
   //
@@ -89,7 +120,7 @@ test("a legacy loan's schedule is labelled as reconstructed, not contractual", a
   // And the warning is outside the collapsed section -- a caveat behind a
   // "Show schedule" click is a caveat that gets missed.
   await expect(note).toBeVisible();
-});
+}
 
 test("a loan boarded with its contractual schedule shows no such warning", async ({ page }) => {
   const applicant = fictionalApplicant("Nima", /* even ssn */ true, 100_000);

@@ -54,7 +54,7 @@ def _conflict(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
 
-def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
+def _to_offer_out(app_id: int, resp: dict, offer_ready: bool = False) -> OfferOut:
     """Map a disclosure-service OfferResponse into the LOS OfferOut/Disclosure shape."""
     d = resp.get("disclosure") or {}
     rows = resp.get("schedule") or d.get("schedule") or []
@@ -83,11 +83,12 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
         term_months=d.get("term_months"),
         schedule=[ScheduleRow(**row) for row in rows],
     )
-    # Readiness from the SAME server-side check accept_offer enforces, not from
-    # whichever subset of fields a client happens to look at.
+    # Readiness is passed IN, not looked up here. This function is a pure
+    # mapper -- giving it a database query made it untestable without a schema
+    # and coupled response shaping to storage. The callers already have both.
     return OfferOut(
         app_id=app_id, disclosure=disclosure, created=resp.get("created", True),
-        offer_ready=_complete_offer_exists(app_id),
+        offer_ready=offer_ready,
     )
 
 
@@ -191,7 +192,7 @@ def make_offer(
             "Could not create the offer -- please try again.",
         ) from exc
 
-    return _to_offer_out(body.app_id, resp)
+    return _to_offer_out(body.app_id, resp, _complete_offer_exists(body.app_id))
 
 
 @router.get("/applications/{app_id}/offer", response_model=OfferOut)
@@ -243,4 +244,4 @@ def get_offer(
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="no offer for this application")
     resp.raise_for_status()
-    return _to_offer_out(app_id, resp.json())
+    return _to_offer_out(app_id, resp.json(), _complete_offer_exists(app_id))
