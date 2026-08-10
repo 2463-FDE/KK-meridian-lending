@@ -395,20 +395,41 @@ def create_offer(
         # figure. The monetary and schedule columns stay under the repair path
         # below, which refuses accepted offers outright.
         if row.get("decision_id") is None:
-            stamped = db.query(
-                f"UPDATE offers o SET decision_id = d.app_id "
-                "FROM decisions d "
-                "WHERE d.app_id = o.app_id AND d.outcome = 'approve' "
-                "  AND o.id = %s AND o.decision_id IS NULL "
-                f"RETURNING {_OFFER_FIELDS_Q}",
-                (row["id"],),
+            # Not attempted on an accepted PARTIAL contract, because it cannot
+            # succeed. 0030 installs the all-or-nothing CHECK as NOT VALID when
+            # such a row exists (it can be neither demoted nor completed), and
+            # PostgreSQL enforces a NOT VALID check on every subsequent UPDATE --
+            # including one that touches only `decision_id`. Attempting the stamp
+            # would raise a check violation and turn a readable legacy offer into
+            # a 500. 0030 stamps these rows itself, before the constraint exists,
+            # so reaching this branch with one means the migration has not run
+            # here yet. Reviewed on PR #10.
+            facts_present = sum(
+                1 for name in CONTRACT_FACTS
+                if name != "monthly_payment" and row.get(name) is not None
             )
-            if stamped:
-                row = stamped[0]
-                log.info(
-                    "adopted a pre-0011 offer offer_id=%s app_id=%s: decision_id set "
-                    "from its own approved decision", row["id"], row["app_id"],
+            if 0 < facts_present < len(CONTRACT_FACTS) - 1:
+                log.warning(
+                    "offer_id=%s has a partial contract and no decision_id; leaving "
+                    "it as-is (an accepted partial row cannot be updated while the "
+                    "all-or-nothing CHECK is NOT VALID -- see db/migrations/0030)",
+                    row["id"],
                 )
+            else:
+                stamped = db.query(
+                    f"UPDATE offers o SET decision_id = d.app_id "
+                    "FROM decisions d "
+                    "WHERE d.app_id = o.app_id AND d.outcome = 'approve' "
+                    "  AND o.id = %s AND o.decision_id IS NULL "
+                    f"RETURNING {_OFFER_FIELDS_Q}",
+                    (row["id"],),
+                )
+                if stamped:
+                    row = stamped[0]
+                    log.info(
+                        "adopted a pre-0011 offer offer_id=%s app_id=%s: decision_id "
+                        "set from its own approved decision", row["id"], row["app_id"],
+                    )
 
         # Review fix: DO NOTHING + read-back returns the row that is ALREADY
         # there -- so for a pre-0026 incomplete row this endpoint handed the

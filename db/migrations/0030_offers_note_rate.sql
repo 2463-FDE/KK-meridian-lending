@@ -274,6 +274,28 @@ END $$;
 -- compares both provisioning paths inside one database and so reproduces the
 -- cross-schema collision exactly.
 
+-- Pre-0011 offers get their decision_id here, while it is still possible.
+--
+-- A row written before migration 0011 has `app_id` set and `decision_id` NULL.
+-- disclosure-service recovers that link at runtime by joining the offer's own
+-- app_id to decisions.app_id -- but it cannot do so for an ACCEPTED row that is
+-- also a partial contract, because the CHECK added at the end of this file is
+-- installed NOT VALID and PostgreSQL enforces a NOT VALID check on every
+-- subsequent UPDATE, including an update that touches only unrelated columns.
+-- The stamp would raise a check violation instead of adopting the offer, and the
+-- offer would stay unreachable -- exactly the state the runtime fix exists to
+-- end. Reviewed on PR #10.
+--
+-- So it is done now: before the constraint exists, when an UPDATE of one column
+-- is still just an UPDATE of one column. Only where an approved decision exists,
+-- and it changes no agreed figure, so it is safe on accepted rows.
+UPDATE offers o
+   SET decision_id = d.app_id
+  FROM decisions d
+ WHERE d.app_id = o.app_id
+   AND d.outcome = 'approve'
+   AND o.decision_id IS NULL;
+
 -- Partial contracts, demoted before the constraint that forbids them.
 --
 -- The all-or-nothing CHECK below covers SIX columns, not four: `principal` and

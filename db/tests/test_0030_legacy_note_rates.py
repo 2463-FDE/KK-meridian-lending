@@ -71,6 +71,15 @@ def _legacy_database(conn):
                 detail TEXT,
                 at TIMESTAMPTZ DEFAULT now()
             );
+            -- Also present in every real database since 001. 0030 stamps a
+            -- pre-0011 offer's decision_id by joining to this table, which it
+            -- must do BEFORE installing the NOT VALID check -- afterwards
+            -- PostgreSQL rejects any UPDATE of a violating row, even of one
+            -- unrelated column. Reviewed on PR #10.
+            CREATE TABLE decisions (
+                app_id INTEGER PRIMARY KEY,
+                outcome TEXT NOT NULL
+            );
             CREATE TABLE offers (
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER UNIQUE,
@@ -110,6 +119,12 @@ def _legacy_database(conn):
                    (3, 3, 0.03, 10.07, 2369.15, 469.98, 14550.00, 16919.15),
                    (4, 4, 0.03, 5.196, 3628.70, 439.35, 17460.00, 21088.70);
 
+            -- One approved decision per application, matching what a real
+            -- database has. Without these the new decision_id stamp has nothing
+            -- to join to and the test would pass for the wrong reason.
+            INSERT INTO decisions (app_id, outcome)
+            VALUES (1, 'approve'), (2, 'approve'), (3, 'approve'), (4, 'approve');
+
             INSERT INTO loans (app_id, applicant_name, principal, apr, term_months, opened_at)
             VALUES (1, 'Boarded Eleven', 10000.00, 11.250, 36, '2026-01-02T00:00:00Z'),
                    (2, 'Boarded TwentyTwo', 20000.00, 22.990, 48, '2026-02-03T00:00:00Z'),
@@ -130,6 +145,15 @@ def _offers(conn):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("SELECT app_id, note_rate_pct, accepted_at FROM offers ORDER BY app_id")
+        return {r["app_id"]: r for r in cur.fetchall()}
+
+
+def _offers_full(conn):
+    """Every column the newer tests assert on. `_offers` projects three, which
+    reads as a KeyError rather than as a missing column."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT * FROM offers ORDER BY app_id")
         return {r["app_id"]: r for r in cur.fetchall()}
 
 
@@ -299,3 +323,77 @@ def test_separability_does_not_cost_ordinary_loans_their_recovered_rate(conn):
     assert float(_offers(conn)[7]["note_rate_pct"]) == pytest.approx(7.99, abs=1e-3), (
         "an ordinary loan lost its recoverable note rate to the separability guard"
     )
+
+
+def test_a_pre_0011_offer_gets_its_decision_id_before_the_constraint_exists(conn):
+    """The interaction the accepted-orphan test could not see.
+
+    Review of PR #10: this migration's own back-fill certifies `note_rate_pct` on
+    a legacy row while deliberately leaving the other contract fields NULL, so an
+    ACCEPTED row of that shape is a partial contract. It can be neither demoted
+    (an accepted disclosure is immutable) nor completed (that would invent
+    terms), which is why the all-or-nothing CHECK goes on NOT VALID.
+
+    PostgreSQL enforces a NOT VALID check on every subsequent UPDATE, including
+    one that touches a single unrelated column. So disclosure-service's runtime
+    `decision_id` stamp could not adopt such a row -- it would raise a check
+    violation and the offer would stay unreachable, which is the exact state the
+    runtime fix exists to end. The migration therefore stamps it here, before the
+    constraint exists.
+
+    Asserted against the real migration, not against a hand-built table: the
+    earlier test used its own schema and so could not reproduce the constraint at
+    all, which is why it missed this.
+    """
+    _legacy_database(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        # An accepted, boarded, pre-0011 offer: app_id set, decision_id NULL.
+        cur.execute("INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, "
+                    "finance_charge, monthly_payment, amount_financed, "
+                    "total_of_payments, accepted_at) "
+                    "VALUES (8, NULL, 0.03, 5.196, 3021.44, 439.35, 17460.00, "
+                    "21021.44, '2026-01-01T00:00:00+00:00')")
+        cur.execute("INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+                    "VALUES (8, 'Pre 0011', 18000.00, 5.196, 48)")
+        cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (8, 'approve')")
+    _apply_0030(conn)
+
+    row = _offers_full(conn)[8]
+    assert row["decision_id"] == 8, (
+        "a pre-0011 offer was left with a NULL decision_id; once the NOT VALID "
+        "check is installed the service can no longer stamp it"
+    )
+    # And the row is still accepted and still untouched in its money.
+    assert row["accepted_at"] is not None
+
+
+def test_an_accepted_partial_contract_survives_the_migration_unchanged(conn):
+    """The row that forces the constraint to be NOT VALID.
+
+    It must not be demoted, must not be completed, and must not abort the
+    migration. What it gets is a decision_id and nothing else.
+    """
+    _legacy_database(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, "
+                    "finance_charge, monthly_payment, amount_financed, "
+                    "total_of_payments, accepted_at) "
+                    "VALUES (9, NULL, 0.03, 11.250, 1934.10, 386.00, 11640.00, "
+                    "13574.10, '2026-02-02T00:00:00+00:00')")
+        # A loan whose stored rate reproduces the payment, so the back-fill
+        # certifies note_rate_pct and leaves this row PARTIAL.
+        cur.execute("INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+                    "VALUES (9, 'Accepted Partial', 12000.00, 11.250, 36)")
+        cur.execute("INSERT INTO decisions (app_id, outcome) VALUES (9, 'approve')")
+    _apply_0030(conn)
+
+    row = _offers_full(conn)[9]
+    assert row["accepted_at"] is not None, "an accepted offer was un-accepted"
+    assert float(row["monthly_payment"]) == 386.00, "an accepted offer's money changed"
+    assert row["decision_id"] == 9, "the accepted orphan never got its decision_id"
+    # Whatever the back-fill decided about the note rate, the schedule columns
+    # were not invented for it.
+    assert row["schedule_version"] is None
+    assert row["final_payment"] is None
