@@ -234,3 +234,57 @@ def test_a_small_dollar_loan_does_not_falsely_certify_its_apr(conn):
         "a disclosed APR was certified as the contractual note rate on a "
         "small-dollar loan"
     )
+
+
+def test_a_tiny_long_term_loan_is_left_null_because_its_cent_proves_nothing(conn):
+    """Tightening the window does not survive scaling the principal down.
+
+    The half-cent window fixes the $100/12mo case above by being narrower. It
+    does not fix the underlying problem, because the payment gap between an APR
+    and a note rate shrinks with the payment: a $5 loan over 84 months stores
+    $0.08, and its disclosed APR of 8.925% reproduces $0.0803 -- a gap of
+    $0.0003, inside half a cent. Agreement is not evidence here; this row's
+    stored cent is compatible with a wide band of rates, so 8.925% would be
+    certified as contractual fact on nothing at all.
+
+    0030 therefore also requires SEPARABILITY: moving the rate by 0.125pp must
+    move the computed payment by more than half a cent. On this row it moves it
+    by $0.0003, so the row stays NULL. Reviewed on PR #10.
+    """
+    _legacy_database(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, "
+                    "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+                    "VALUES (6, 6, 0.03, 8.925, 1.87, 0.08, 4.85, 6.72)")
+        cur.execute("INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+                    "VALUES (6, 'Tiny Long Term', 5.00, 8.925, 84)")
+    _apply_0030(conn)
+
+    assert _offers(conn)[6]["note_rate_pct"] is None, (
+        "a rate was certified on a row whose stored cent cannot distinguish it "
+        "from a materially different rate"
+    )
+
+
+def test_separability_does_not_cost_ordinary_loans_their_recovered_rate(conn):
+    """The guard above must not be a blanket refusal.
+
+    A rule that left every row NULL would pass the test above and destroy the
+    migration's purpose, so this asserts the other side: ordinary loans, whose
+    payments do resolve a 0.125pp change, still recover their note rate. Without
+    this pair, "safe" and "useless" are indistinguishable.
+    """
+    _legacy_database(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, "
+                    "finance_charge, monthly_payment, amount_financed, total_of_payments) "
+                    "VALUES (7, 7, 0.03, 7.99, 2369.17, 469.98, 14550.00, 16919.17)")
+        cur.execute("INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+                    "VALUES (7, 'Ordinary', 15000.00, 7.99, 36)")
+    _apply_0030(conn)
+
+    assert float(_offers(conn)[7]["note_rate_pct"]) == pytest.approx(7.99, abs=1e-3), (
+        "an ordinary loan lost its recoverable note rate to the separability guard"
+    )

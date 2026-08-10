@@ -59,31 +59,66 @@ ALTER TABLE offers
 -- against the amount financed rather than against the principal the payments
 -- actually run on. Review finding on PR #10.
 --
--- HALF A CENT, not two cents. An absolute $0.02 window is wide enough to admit
--- a false positive on a small-dollar loan: a $100 12-month loan priced at 7.99%
--- stores an $8.70 payment, and amortizing at its old disclosed APR of 7.609%
--- gives $8.681 -- inside $0.02, so the APR would have been certified as the
--- note rate. A genuine note rate reproduces its own stored payment to the cent
--- (the payment was computed from it and then rounded), so half a cent admits
--- every true case and excludes that one. Reviewed on PR #10.
+-- Two conditions, and the second is the one that makes this sound.
+--
+-- (1) AGREEMENT, to half a cent. A genuine note rate reproduces its own stored
+--     payment to the cent, because the payment was computed from it and then
+--     rounded. An absolute $0.02 window was too wide: a $100 12-month loan
+--     priced at 7.99% stores an $8.70 payment, and amortizing at an old
+--     disclosed APR of 7.609% gives $8.681 -- inside $0.02, so the APR would
+--     have been certified as the note rate.
+--
+-- (2) SEPARABILITY. Agreement alone is not evidence when the row cannot tell
+--     two different rates apart in the first place. Tightening the window does
+--     not fix that, because the payment gap between an APR and a note rate
+--     shrinks with the payment itself: a $5 loan over 84 months stores $0.08,
+--     and its disclosed APR of 8.925% reproduces $0.0803 -- inside half a cent,
+--     so the tighter window certifies it too. Eleven such rows exist in a
+--     principal x term grid of otherwise ordinary inputs, so this is reachable
+--     by scaling the principal down, exactly as the review said.
+--
+--     So the row must also be sensitive enough for the match to mean something:
+--     moving the rate by 0.125 percentage points -- the Reg-Z APR tolerance of
+--     12 CFR 1026.22(a)(1), used here as "the smallest rate difference this
+--     system treats as a real difference" -- must move the computed payment by
+--     more than half a cent. On $15,000/36mo that shifts the payment by $0.87
+--     and the match is informative; on $5/84mo it shifts it by $0.0003, so the
+--     stored cent is compatible with a wide band of rates and provenance is
+--     simply not recoverable. Those rows stay NULL, which reads downstream as
+--     "not recorded" rather than as a certified fact.
+--
+--     This is scale-free: it asks about the row's own resolving power instead of
+--     comparing dollars against a fixed threshold. Reviewed on PR #10.
+WITH candidate AS (
+    SELECT o.id                                        AS offer_id,
+           o.monthly_payment                           AS stored_payment,
+           l.apr                                       AS candidate_rate,
+           -- the payment this rate implies
+           CASE
+             WHEN l.apr = 0 THEN l.principal / l.term_months
+             ELSE (l.principal * (l.apr / 100 / 12))
+                  / (1 - power(1 + (l.apr / 100 / 12), -l.term_months))
+           END                                         AS payment_at_rate,
+           -- and the payment 0.125pp away, to measure this row's resolving power
+           (l.principal * ((l.apr + 0.125) / 100 / 12))
+             / (1 - power(1 + ((l.apr + 0.125) / 100 / 12), -l.term_months))
+                                                       AS payment_at_rate_plus
+      FROM offers o
+      JOIN loans  l ON l.app_id = o.app_id   -- offers.app_id is UNIQUE: at most one row per loan
+     WHERE o.note_rate_pct IS NULL
+       AND l.apr IS NOT NULL
+       AND l.principal IS NOT NULL
+       AND l.principal > 0
+       AND l.term_months IS NOT NULL
+       AND l.term_months > 0
+       AND o.monthly_payment IS NOT NULL
+)
 UPDATE offers o
-   SET note_rate_pct = l.apr
-  FROM loans l
- WHERE l.app_id = o.app_id
-   AND o.note_rate_pct IS NULL
-   AND l.apr IS NOT NULL
-   AND l.principal IS NOT NULL
-   AND l.term_months IS NOT NULL
-   AND l.term_months > 0
-   AND o.monthly_payment IS NOT NULL
-   AND abs(
-         CASE
-           WHEN l.apr = 0 THEN l.principal / l.term_months
-           ELSE (l.principal * (l.apr / 100 / 12))
-                / (1 - power(1 + (l.apr / 100 / 12), -l.term_months))
-         END
-         - o.monthly_payment
-       ) <= 0.005;   -- half a cent: see the note above
+   SET note_rate_pct = c.candidate_rate
+  FROM candidate c
+ WHERE o.id = c.offer_id
+   AND abs(c.payment_at_rate - c.stored_payment) <= 0.005          -- (1) agreement
+   AND abs(c.payment_at_rate_plus - c.payment_at_rate) > 0.005;    -- (2) separability
 
 -- Everything else stays NULL on purpose. An unboarded legacy offer has no
 -- second record of what it was priced at, and there is no way to recover it
