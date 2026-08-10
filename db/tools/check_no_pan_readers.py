@@ -30,6 +30,24 @@ an uppercase reader passed. Prose is excluded by WHERE it sits (see below)
 rather than by how it is capitalised, which is the distinction that actually
 holds. Reviewed on PR #15.
 
+What it resolves, and where it stops. SQL reaching a database execution call is
+folded from the syntax tree: literals, adjacent literals, concatenation,
+f-strings, `.format()` and `%` templates WITH their arguments, and names bound
+earlier in the same scope. Bindings are read in source order, so an assignment
+below an `execute()` cannot decide what that call meant. SQL that is being
+BUILT but cannot be finished -- an unknown `.format()` argument, a name assigned
+from an unresolvable string expression -- fails closed as "unresolved dynamic
+SQL passed to execute()".
+
+It does NOT follow calls. `stmt = select(...)` or `sql = build_query()` is
+opaque here, and is left alone rather than reported: telling a SQLAlchemy
+construct apart from a function returning a SQL string means analysing the whole
+application, which this tool deliberately does not do. Nor does it fail closed
+on a pass-through wrapper (`def query(sql, params): cur.execute(sql)`), which
+every service has -- the query text lives at the CALL SITES and is scanned
+there. Failing closed on those would leave the checker permanently red, unable
+to authorise the drop it exists to gate.
+
 Excluded from the search, each for a reason:
   * db/migrations/**  -- a migration necessarily names the columns it acts on
   * db/init/**        -- schema and seeds, handled separately
@@ -83,6 +101,11 @@ _BARE_COLUMN = re.compile(r"\b(pan|cvv)\b", re.IGNORECASE)
 # Methods that hand a statement to the database. Used only to report a
 # variable-carried query at the point it is EXECUTED -- the assignment may be
 # far away, or in another function entirely.
+# Fail-closed applies to RAW SQL execution only. `.scalar()`/`.fetchall()` on a
+# SQLAlchemy construct receive an ORM object, not a string, and reporting those
+# as "unresolved SQL" is noise rather than a finding.
+_FAIL_CLOSED_CALLS = {"execute", "executemany", "executescript"}
+
 _EXECUTE_CALLS = {
     "execute", "executemany", "executescript", "query", "fetch", "fetchone",
     "fetchall", "fetchval", "fetchrow", "scalar", "exec_driver_sql", "text",
@@ -202,15 +225,53 @@ def _fold(node: ast.AST, names: dict[str, str], depth: int = 0) -> str | None:
                 return left + right
             return None
         if isinstance(node.op, ast.Mod):
-            # "SELECT pan FROM payments WHERE id = %s" % (id,) -- the left side
-            # is the statement; the right side is parameters.
-            return _fold(node.left, names, depth + 1)
+            # "SELECT %s FROM payments" % ("pan",) names a column; the more
+            # common "... WHERE id = %s" % (id,) supplies a VALUE. Substitute
+            # when every operand is statically known, and fall back to the
+            # template otherwise -- the template is still the statement, and a
+            # %s standing in for a value changes no column name.
+            template = _fold(node.left, names, depth + 1)
+            if template is None:
+                return None
+            values = []
+            if isinstance(node.right, (ast.Tuple, ast.List)):
+                values = [_fold(e, names, depth + 1) for e in node.right.elts]
+            else:
+                values = [_fold(node.right, names, depth + 1)]
+            if values and all(v is not None for v in values):
+                try:
+                    return template % tuple(values)
+                except (TypeError, ValueError, KeyError):
+                    return template
+            return template
         return None
     if isinstance(node, ast.Call):
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr in ("format", "join"):
             if func.attr == "format":
-                return _fold(func.value, names, depth + 1)
+                template = _fold(func.value, names, depth + 1)
+                if template is None:
+                    return None
+                # Substitute the ARGUMENTS, not just the template. `"SELECT {}
+                # FROM payments".format("pan")` is a live read of pan, and
+                # returning the template alone hid it -- `{}` carries no column
+                # name, and the standalone "pan" carries no SQL context.
+                # Positional `{}` / `{0}` and named `{col}` only; anything whose
+                # value is not statically known keeps its placeholder, which is
+                # then reported as unresolved at the execution call.
+                args = [_fold(a, names, depth + 1) for a in node.args]
+                kwargs = {
+                    kw.arg: _fold(kw.value, names, depth + 1)
+                    for kw in node.keywords if kw.arg
+                }
+                if any(a is None for a in args) or any(v is None for v in kwargs.values()):
+                    return None
+                try:
+                    return template.format(*args, **kwargs)
+                except (IndexError, KeyError, ValueError):
+                    # A template this checker cannot fill is one it must not
+                    # pretend to have read.
+                    return None
             # "".join([...]) of static parts
             parts = []
             for arg in node.args:
@@ -278,36 +339,173 @@ def _bindings_for_scope(scope: ast.AST, inherited: dict[str, str]) -> dict[str, 
     return names
 
 
+def _expressions_of(stmt):
+    """Every expression node in one statement, not entering a nested scope."""
+    for node in ast.walk(stmt):
+        if isinstance(node, _SCOPES) and node is not stmt:
+            continue
+        yield node
+
+
+def _check_expression(node, names, doc_nodes, hits) -> None:
+    if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp, ast.Call)):
+        return
+    if id(node) in doc_nodes:
+        return
+    text = _fold(node, names)
+    if text and _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
+        excerpt = " ".join(
+            line.strip() for line in text.splitlines()
+            if _BARE_COLUMN.search(line)
+        ) or text.strip()
+        hits[(node.lineno, excerpt[:160])] = None
+
+
+def _looks_like_built_sql(node) -> bool:
+    """Whether this argument is a STRING being assembled, as opposed to an
+    opaque name.
+
+    Fail-closed only means something when the checker has positive reason to
+    think it is looking at constructed SQL. A bare name of unknown provenance
+    is not that: it is a pass-through parameter, a loop variable, or a
+    SQLAlchemy construct, and calling those "unresolved dynamic SQL" would make
+    the tool permanently red without telling anyone anything.
+    """
+    if isinstance(node, (ast.JoinedStr,)):
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return False
+        # `.join` only counts when the receiver is a string literal: SQLAlchemy's
+        # `select(...).join(...)` is a query construct, not string building, and
+        # treating it as one marked every ORM statement in the repo unresolved.
+        if func.attr == "join":
+            return isinstance(func.value, ast.Constant) and isinstance(func.value.value, str)
+        return func.attr == "format"
+    return False
+
+
+def _check_execution(node, names, hits, params=frozenset(), unresolved=frozenset()) -> None:
+    """SQL handed to the database, resolved at THIS call's program point.
+
+    Fails closed: a statement that cannot be resolved is reported rather than
+    assumed clean, because a clean exit is what authorises dropping the columns.
+    """
+    if not isinstance(node, ast.Call):
+        return
+    func = node.func
+    attr = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+    if attr not in _EXECUTE_CALLS or not node.args:
+        return
+
+    first = node.args[0]
+    text = _fold(first, names)
+    if text is None:
+        # A pass-through wrapper -- `def query(sql, params): cur.execute(sql)` --
+        # is not dynamic SQL. Every service here has one, and its callers' query
+        # text is scanned where it is written. Failing closed on those would
+        # make this checker permanently red and therefore useless: it could
+        # never authorise the drop it exists to gate.
+        if attr not in _FAIL_CLOSED_CALLS:
+            return
+        if isinstance(first, ast.Name) and first.id in params:
+            return
+        # Positive evidence only: a string being built here, or a name this
+        # scope assigned from something it could not resolve (`sql = build()`
+        # then `execute(sql)`). Anything else is opaque, not dynamic.
+        built = _looks_like_built_sql(first)
+        assigned_unresolvable = isinstance(first, ast.Name) and first.id in unresolved
+        if built or assigned_unresolvable:
+            hits[(node.lineno, f"unresolved dynamic SQL passed to {attr}()")] = None
+        return
+    if _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
+        label = f"{first.id} = {text.strip()[:140]}" if isinstance(first, ast.Name) else text.strip()[:160]
+        hits[(node.lineno, label)] = None
+
+
+def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), unresolved=None):
+    """Statements in SOURCE ORDER, binding as we go.
+
+    The previous version precomputed a scope's final binding map and then
+    scanned expressions against it, so a rebinding BELOW an execute() decided
+    what that execute() meant:
+
+        COL = "pan"
+        conn.execute("SELECT " + COL + " FROM payments")   # live read
+        COL = "last4"                                      # ...and this hid it
+
+    A name is now whatever it was bound to at the point the statement runs, and
+    a later assignment cannot reach backwards. Reviewed on PR #15.
+    """
+    if unresolved is None:
+        unresolved = set()
+    for stmt in body:
+        if isinstance(stmt, _SCOPES):
+            nested.append((stmt, dict(names)))
+            continue
+
+        for node in _expressions_of(stmt):
+            if isinstance(node, _SCOPES):
+                continue
+            _check_expression(node, names, doc_nodes, hits)
+            _check_execution(node, names, hits, params, unresolved)
+
+        # Nested scopes defined inside this statement (a def inside an if)
+        # inherit the bindings as they stand HERE.
+        for node in ast.iter_child_nodes(stmt):
+            if isinstance(node, _SCOPES):
+                nested.append((node, dict(names)))
+
+        # Bodies that run in this same scope: their statements continue the
+        # same binding sequence.
+        for field in ("body", "orelse", "finalbody"):
+            inner = getattr(stmt, field, None)
+            if isinstance(inner, list) and not isinstance(stmt, _SCOPES):
+                _walk_statements(inner, names, doc_nodes, hits, nested, params, unresolved)
+        for handler in getattr(stmt, "handlers", []) or []:
+            _walk_statements(handler.body, names, doc_nodes, hits, nested, params, unresolved)
+
+        # ...then this statement's own effect on the bindings.
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target = stmt.targets[0]
+            if isinstance(target, ast.Name):
+                text = _fold(stmt.value, names)
+                if text is not None:
+                    names[target.id] = text
+                    unresolved.discard(target.id)
+                else:
+                    names.pop(target.id, None)
+                    # Assigned from STRING construction this checker could not
+                    # finish resolving -- an f-string or concatenation with an
+                    # unknown piece. If that reaches execute(), it is dynamic
+                    # SQL and the run fails closed.
+                    #
+                    # A plain call (`stmt = select(...)`, `sql = build()`) is
+                    # deliberately NOT marked: telling a SQLAlchemy construct
+                    # apart from a function returning a SQL string means
+                    # following calls across the application, which this tool
+                    # does not do. Stated in the module docstring as a limit
+                    # rather than guessed at.
+                    if _looks_like_built_sql(stmt.value):
+                        unresolved.add(target.id)
+
+
 def _scan_scope(scope, inherited, doc_nodes, hits) -> None:
-    """Collect hits in one scope, then recurse into the scopes it contains."""
-    names = _bindings_for_scope(scope, inherited)
-
-    for node in _nodes_in_scope(scope):
-        if isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp, ast.Call)):
-            if id(node) not in doc_nodes:
-                text = _fold(node, names)
-                if text and _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
-                    excerpt = " ".join(
-                        line.strip() for line in text.splitlines()
-                        if _BARE_COLUMN.search(line)
-                    ) or text.strip()
-                    hits[(node.lineno, excerpt[:160])] = None
-
-        # A name carrying SQL is reported where it is EXECUTED: the assignment
-        # may be far away, and the execution is the live read.
-        if isinstance(node, ast.Call):
-            func = node.func
-            attr = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if attr in _EXECUTE_CALLS:
-                for arg in node.args:
-                    if not isinstance(arg, ast.Name):
-                        continue
-                    text = names.get(arg.id)
-                    if text and _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
-                        hits[(node.lineno, f"{arg.id} = {text.strip()[:140]}")] = None
-
-    for child in _child_scopes(scope):
-        _scan_scope(child, names, doc_nodes, hits)
+    """One scope, in source order, then the scopes it contains."""
+    names = dict(inherited)
+    nested: list[tuple[ast.AST, dict[str, str]]] = []
+    args = getattr(scope, "args", None)
+    params = frozenset(
+        a.arg for a in (list(getattr(args, "posonlyargs", []) or [])
+                        + list(getattr(args, "args", []) or [])
+                        + list(getattr(args, "kwonlyargs", []) or []))
+    ) if args else frozenset()
+    _walk_statements(getattr(scope, "body", []), names, doc_nodes, hits, nested, params, set())
+    for child, child_names in nested:
+        _scan_scope(child, child_names, doc_nodes, hits)
 
 
 def _sql_literal_hits(source: str) -> list[tuple[int, str]]:

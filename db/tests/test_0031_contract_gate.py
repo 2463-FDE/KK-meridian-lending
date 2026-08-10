@@ -688,3 +688,75 @@ def test_an_inner_rebinding_shadows_the_module_value(tmp_path):
         '    return conn.execute(f"SELECT {COL} FROM payments")\n'
     ))
     assert hits == [], f"a shadowed module value produced a false hit: {hits}"
+
+
+# --- SQL resolved at each execution's own program point -----------------------
+#
+# Two review findings on PR #15. The checker folded `.format()` down to its
+# template, discarding arguments, and it resolved names against a scope's FINAL
+# binding map -- so a rebinding BELOW an execute() decided what that execute()
+# meant. Both let a live read of pan exit clean, and a clean exit is what
+# authorises dropping the column.
+
+def test_format_argument_naming_a_legacy_column_is_detected(tmp_path):
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.execute("SELECT {} FROM payments".format("pan"))\n'
+    ))
+    assert hits, "a .format() argument naming pan was reported clean"
+
+
+def test_a_safe_static_format_query_passes(tmp_path):
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    return conn.execute("SELECT {} FROM payments".format("last4"))\n'
+    ))
+    assert hits == [], f"a clean .format() query was flagged: {hits}"
+
+
+def test_an_unresolved_format_argument_fails_closed(tmp_path):
+    """Cannot be resolved means cannot be cleared."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn, col):\n"
+        '    return conn.execute("SELECT {} FROM payments".format(col))\n'
+    ))
+    assert hits, "unresolvable SQL reaching execute() was reported clean"
+    assert any("unresolved dynamic SQL" in h[3] for h in hits), hits
+
+
+def test_a_later_rebinding_cannot_clear_an_earlier_execution(tmp_path):
+    """The reviewed defect: the assignment below decided the call above."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    COL = "pan"\n'
+        '    conn.execute("SELECT " + COL + " FROM payments")\n'
+        '    COL = "last4"\n'
+        "    return COL\n"
+    ))
+    assert hits, "a live read was cleared by a rebinding that runs after it"
+    assert all(h[1] == 3 for h in hits), f"reported at the wrong line: {hits}"
+
+
+def test_a_later_rebinding_to_a_legacy_column_is_not_a_hit_on_its_own(tmp_path):
+    """...and the mirror: rebinding alone, with no execution, reads nothing."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    COL = "last4"\n'
+        '    conn.execute("SELECT " + COL + " FROM payments")\n'
+        '    COL = "pan"\n'
+        "    return COL\n"
+    ))
+    assert hits == [], f"a name never executed was reported as a read: {hits}"
+
+
+def test_each_execution_is_evaluated_at_its_own_program_point(tmp_path):
+    """Two calls, two bindings: the second is the live read, the first is not."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    COL = "last4"\n'
+        '    conn.execute("SELECT " + COL + " FROM payments")\n'
+        '    COL = "pan"\n'
+        '    conn.execute("SELECT " + COL + " FROM payments")\n'
+    ))
+    assert hits, "the second execution's read of pan was missed"
+    assert all(h[1] == 5 for h in hits), f"the clean first call was flagged too: {hits}"
