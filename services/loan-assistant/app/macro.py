@@ -1,0 +1,402 @@
+"""One grounded external signal for the officer summary.
+
+Week 1-4 client review: the summary "collects almost everything from inside the
+application". Everything it says is derived from what the applicant themselves
+typed, so it can restate the file but cannot contextualise it. This module adds
+exactly one signal from outside: the current US unemployment rate, published by
+the Bureau of Labor Statistics.
+
+Why unemployment, and why national:
+
+  * It is the macro variable most directly tied to the risk this summary is
+    about -- an applicant's ability to keep earning. Employment stability is
+    already one of the two fields the summary refuses to assign a risk tier
+    without (`_RISK_GROUNDING_FIELDS`), and this puts that field in context.
+  * National, not state-level, because there is no state column in the schema.
+    `applicants` stores a free-text `address` plus `zip_code`; deriving a state
+    from a ZIP3 prefix is ambiguous at state boundaries, and inventing a
+    900-row prefix table to paper over that would be guessing dressed up as
+    data. State-level LAUS series exist and are the obvious upgrade the day a
+    real `state` column does.
+
+Design choices worth stating, because two of them are the opposite of what the
+other external calls in this codebase do:
+
+**Fails OPEN, deliberately.** The bureau pull and the AI scorer fail closed --
+they are decision inputs, and a missing one means the decision cannot be made
+honestly. This is not a decision input. It is context printed next to a summary,
+and a BLS outage must never stop a loan officer seeing their applicant's file.
+When the fetch fails the summary is produced without the signal, and the absence
+is visible rather than silent (no citation appears).
+
+**Caching is mandatory, not an optimisation.** The BLS public API v1 allows 25
+queries per day per IP without a registered key. One uncached call per summary
+would exhaust that in a morning and then fail for everyone. The series updates
+monthly, so a long TTL costs nothing in freshness.
+
+**No applicant data is sent anywhere.** The request carries a fixed series ID
+and nothing else -- no name, no ZIP, no amount, not even an application id. That
+is a property of choosing a national series, and it is worth keeping in mind if
+anyone later swaps in a geographic one: a state-level request leaks coarse
+location to a third party for every summary viewed.
+
+**The model never authors the citation.** `fetch()` returns the value, and the
+citation on the response is built from that return value server-side -- the same
+rule `_applicant_name` follows. The rate is put in the prompt as context so the
+model can reason about it, but if the model were to restate the number
+differently, the number the officer sees still comes from BLS.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from typing import Protocol
+
+import httpx
+
+from .config import (
+    MACRO_CACHE_TTL_SECONDS,
+    MACRO_ENABLED,
+    MACRO_FAILURE_TTL_SECONDS,
+    MACRO_SERIES_ID,
+    MACRO_STALE_SERVE_SECONDS,
+    MACRO_TIMEOUT_SECONDS,
+)
+log = logging.getLogger(__name__)
+
+_BLS_V1_URL = "https://api.bls.gov/publicAPI/v1/timeseries/data"
+
+# What each supported BLS series IS. A series id alone carries no caption, and a
+# caption invented for the wrong series is exactly the failure this whole
+# feature exists to avoid: a number an officer can check, described as something
+# it is not. So the caption lives here, keyed by series, and an unrecognised
+# series yields NO signal rather than a borrowed one.
+#
+# To support another series, add its id with a label and unit taken from the BLS
+# series description -- not guessed from the id. `unit` is what follows the
+# value in the citation, so it must match how BLS publishes that series
+# (percent, index points, thousands of persons, dollars).
+_SERIES_METADATA: dict[str, tuple[str, str]] = {
+    "LNS14000000": ("US unemployment rate (seasonally adjusted)", "percent"),
+}
+
+
+@dataclass(frozen=True)
+class MacroSignal:
+    """One published statistic, with everything needed to cite it."""
+
+    source: str          # "U.S. Bureau of Labor Statistics"
+    series_id: str       # "LNS14000000"
+    label: str           # "US unemployment rate (seasonally adjusted)"
+    value: float         # 4.2
+    unit: str            # "percent"
+    period: str          # "June 2026" -- the period the figure describes
+    url: str             # where a reader can verify it
+
+    def cite(self) -> str:
+        return (
+            f"{self.label}: {self.value}{'%' if self.unit == 'percent' else ' ' + self.unit} "
+            f"({self.period}). Source: {self.source}, series {self.series_id}."
+        )
+
+
+class MacroProvider(Protocol):
+    def fetch(self) -> MacroSignal | None: ...
+
+
+class StubMacroProvider:
+    """Deterministic stand-in for dev/test. Returns a fixed, obviously-marked
+    figure so a test never depends on what the real economy did this month, and
+    so a stub value can never be mistaken for a live one in a screenshot."""
+
+    def __init__(self, value: float = 4.0):
+        self._value = value
+        self.fetch_count = 0
+
+    def fetch(self) -> MacroSignal | None:
+        self.fetch_count += 1
+        return MacroSignal(
+            source="U.S. Bureau of Labor Statistics (STUB — not live data)",
+            series_id=MACRO_SERIES_ID,
+            label="US unemployment rate (seasonally adjusted)",
+            value=self._value,
+            unit="percent",
+            period="stub period",
+            url=f"{_BLS_V1_URL}/{MACRO_SERIES_ID}",
+        )
+
+
+class BlsMacroProvider:
+    """Live BLS public API v1. No API key: v1 is unauthenticated and capped at
+    25 requests/day per IP, which is why the cache below is not optional.
+
+    CONCURRENCY, and the outage this used to cause
+    ----------------------------------------------
+    The first version held one process-wide mutex across the outbound
+    `httpx.get`. Reviewed and correct: during a BLS outage that turns an
+    optional citation into a service-wide stall. N concurrent staff summaries
+    queue on the lock, and because a failure was never recorded each one then
+    spends its own full MACRO_TIMEOUT_SECONDS discovering the same outage --
+    roughly N x timeout of serialized delay before the LLM call even starts,
+    with a FastAPI worker thread blocked for every one of them.
+
+    The fix is not to drop the lock. That trades a stall for a thundering herd:
+    every concurrent request firing its own request at an API with a 25-per-day
+    cap, which would exhaust the quota during the one outage where retrying is
+    least useful.
+
+    So: single-flight, fail-open, and never blocking.
+
+      * `_state_lock` guards in-memory state ONLY and is never held across IO.
+        Every critical section under it is a few field reads.
+      * `_refresh_lock` is a single-flight token acquired with blocking=False.
+        Exactly one caller at a time performs the network call. Everyone else
+        returns IMMEDIATELY with whatever is known -- they never queue.
+      * A failure is recorded and suppresses further attempts for
+        MACRO_FAILURE_TTL_SECONDS. During an outage the steady state is one
+        attempt per window, not one per request.
+
+    So N concurrent requests against a slow-failing BLS cost approximately ONE
+    timeout in total, not N. That is the property
+    test_macro_concurrency.py asserts directly.
+
+    On serving a previously-fetched value past its TTL
+    --------------------------------------------------
+    An earlier revision refused to, reasoning that "a stale figure presented
+    with a current-looking period would be worse than no figure". That reasoning
+    does not survive inspection: MacroSignal carries its own `period`, and the
+    citation prints it, so a figure fetched yesterday still reads "June 2026"
+    and claims nothing about when it was retrieved. Withholding it during an
+    outage removes true, correctly-labelled context for no gain. It is served
+    within MACRO_STALE_SERVE_SECONDS and dropped after that.
+    """
+
+    def __init__(self):
+        # Guards state. NEVER held across a network call.
+        self._state_lock = threading.Lock()
+        # Single-flight token. Acquired non-blocking; a caller that misses it
+        # does not wait, it answers from what is already known.
+        self._refresh_lock = threading.Lock()
+        self._cached: MacroSignal | None = None
+        self._cached_at: float = 0.0
+        self._failed_at: float = 0.0
+        # Observability: an outage should be visible in metrics and logs, not
+        # only in the absence of a citation nobody was looking for.
+        self.fetch_count = 0          # outbound calls actually attempted
+        self.failure_count = 0        # of those, how many failed
+        self.suppressed_count = 0     # requests that skipped the call entirely
+        self.stale_served_count = 0   # requests answered with a past-TTL value
+        self.degraded_since: float | None = None
+
+    def _fresh(self) -> bool:
+        return (
+            self._cached is not None
+            and (time.monotonic() - self._cached_at) < MACRO_CACHE_TTL_SECONDS
+        )
+
+    def _suppressed(self) -> bool:
+        """Whether a recent failure is still suppressing outbound attempts."""
+        return (
+            self._failed_at > 0.0
+            and (time.monotonic() - self._failed_at) < MACRO_FAILURE_TTL_SECONDS
+        )
+
+    def _servable_stale(self) -> MacroSignal | None:
+        """A previously-fetched figure still inside the stale-serve window.
+
+        The window is measured PAST the freshness TTL, which is how config.py
+        documents it ("how long past MACRO_CACHE_TTL_SECONDS a figure may still
+        be served"). Comparing the total age against MACRO_STALE_SERVE_SECONDS
+        alone quietly redefined it as a maximum total age: on the defaults that
+        made the promised 24 hours into 18, and any deployment configuring a
+        stale window shorter than its TTL would have served nothing stale at
+        all -- the feature silently off, in the outage it exists for. Reviewed
+        on PR #13.
+        """
+        if self._cached is None:
+            return None
+        age = time.monotonic() - self._cached_at
+        if age < (MACRO_CACHE_TTL_SECONDS + MACRO_STALE_SERVE_SECONDS):
+            return self._cached
+        return None
+
+    def _answer_without_calling(self) -> MacroSignal | None:
+        """What to return when no outbound call will be made. Caller must NOT
+        hold _state_lock."""
+        with self._state_lock:
+            stale = self._servable_stale()
+            if stale is not None:
+                self.stale_served_count += 1
+        if stale is not None:
+            log.info(
+                "macro signal served from cache past its TTL "
+                "(refresh in flight or suppressed) period=%s", stale.period,
+            )
+        return stale
+
+    def fetch(self) -> MacroSignal | None:
+        with self._state_lock:
+            if self._fresh():
+                return self._cached
+            suppressed = self._suppressed()
+            if suppressed:
+                self.suppressed_count += 1
+        if suppressed:
+            # A recent failure is still being remembered. Do not call BLS, do
+            # not wait for anyone: answer now. This is the branch that turns
+            # N x timeout into one timeout per failure window.
+            return self._answer_without_calling()
+
+        if not self._refresh_lock.acquire(blocking=False):
+            # Another thread is already refreshing. Blocking here would rebuild
+            # exactly the queue this class exists to avoid.
+            return self._answer_without_calling()
+
+        try:
+            # Re-check now that the token is actually held. The checks above
+            # happened under a lock this thread has since dropped, so between
+            # them and the acquire another thread can have completed an entire
+            # refresh -- fetched, committed, released -- and this thread would
+            # then fetch again for a figure already cached, spending a second
+            # request from a 25-a-day budget. Cheap: two comparisons against a
+            # lock nobody holds for long. Reviewed on PR #13.
+            with self._state_lock:
+                if self._fresh():
+                    return self._cached
+                now_suppressed = self._suppressed()
+                if now_suppressed:
+                    self.suppressed_count += 1
+            if now_suppressed:
+                # Someone else just failed. Their negative cache applies to this
+                # thread too -- retrying immediately is what the suppression
+                # window exists to prevent.
+                return self._answer_without_calling()
+
+            # Deliberately outside _state_lock: this is the only slow operation
+            # in the class, and holding a lock across it was the defect.
+            signal = self._fetch_uncached()
+
+            # The result is COMMITTED BEFORE THE TOKEN IS RELEASED. Releasing
+            # first left a window in which the outcome existed but no thread
+            # could see it: a request arriving there found neither a fresh
+            # `_cached` nor a suppressing `_failed_at`, took the free refresh
+            # token, and started a second outbound call. That is exactly the
+            # single flight this class promises, and against a 25-request daily
+            # quota a burst of summaries could spend several of them on the same
+            # figure. Reviewed on PR #13.
+            #
+            # Committing inside the try also means a raising `_fetch_uncached`
+            # still releases the token in `finally` -- it just never publishes a
+            # state it does not have.
+            now = time.monotonic()
+            with self._state_lock:
+                if signal is not None:
+                    self._cached = signal
+                    self._cached_at = now
+                    self._failed_at = 0.0
+                    recovered_from = self.degraded_since
+                    self.degraded_since = None
+                else:
+                    self.failure_count += 1
+                    self._failed_at = now
+                    recovered_from = None
+                    if self.degraded_since is None:
+                        self.degraded_since = now
+                    began = self.degraded_since
+        finally:
+            self._refresh_lock.release()
+        if signal is None:
+            log.warning(
+                "macro signal degraded: suppressing BLS calls for %.0fs "
+                "degraded_for=%.1fs failures=%d",
+                MACRO_FAILURE_TTL_SECONDS, now - began, self.failure_count,
+            )
+            return self._answer_without_calling()
+        if recovered_from is not None:
+            log.info(
+                "macro signal recovered after %.1fs degraded", now - recovered_from
+            )
+        return signal
+
+    def _fetch_uncached(self) -> MacroSignal | None:
+        if MACRO_SERIES_ID not in _SERIES_METADATA:
+            # Refused before the call, not after: there is nothing this response
+            # could contain that we would be able to caption, so spending one of
+            # the 25 daily requests to find that out is pure waste. Logged at
+            # warning because it is a misconfiguration an operator must fix, not
+            # a transient outage.
+            log.warning(
+                "MACRO_SERIES_ID=%s has no label/unit metadata -- omitting the "
+                "external signal rather than captioning it as another series",
+                MACRO_SERIES_ID,
+            )
+            return None
+        self.fetch_count += 1
+        url = f"{_BLS_V1_URL}/{MACRO_SERIES_ID}"
+        try:
+            resp = httpx.get(url, timeout=MACRO_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001 -- fails open, see module docstring
+            log.warning(
+                "macro signal unavailable, summary will omit it error_type=%s",
+                type(exc).__name__,
+            )
+            return None
+
+        try:
+            if payload.get("status") != "REQUEST_SUCCEEDED":
+                raise ValueError(f"BLS status {payload.get('status')!r}")
+            series = payload["Results"]["series"][0]
+            returned_id = series["seriesID"]
+            # The label and unit used to be hardcoded, so a deployment that
+            # overrode MACRO_SERIES_ID with any other valid BLS series got that
+            # series' number captioned "US unemployment rate (seasonally
+            # adjusted)" and forced to percent -- a wrong figure presented to an
+            # officer, and fed to the model, as GROUNDED context. Grounding is
+            # the entire value of this feature, so mislabelling is worse than
+            # having no signal. Metadata is keyed on what BLS actually returned,
+            # not on what was configured, so a redirect or a shape change fails
+            # closed too. Reviewed on PR #13.
+            meta = _SERIES_METADATA.get(returned_id)
+            if meta is None:
+                raise ValueError(
+                    f"no label/unit metadata for BLS series {returned_id!r}; add "
+                    f"it to _SERIES_METADATA rather than captioning it as another "
+                    f"series"
+                )
+            label, unit = meta
+            latest = series["data"][0]
+            return MacroSignal(
+                source="U.S. Bureau of Labor Statistics",
+                series_id=returned_id,
+                label=label,
+                value=float(latest["value"]),
+                unit=unit,
+                period=f"{latest['periodName']} {latest['year']}",
+                url=url,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A shape change upstream must not surface as a 500 on a summary.
+            log.warning(
+                "macro signal response not understood, omitting it error_type=%s",
+                type(exc).__name__,
+            )
+            return None
+
+
+# Module-level provider so the cache is shared across requests. Swapped in tests.
+provider: MacroProvider = BlsMacroProvider() if MACRO_ENABLED else StubMacroProvider()
+
+
+def current_signal() -> MacroSignal | None:
+    """The signal to attach to a summary, or None if it is unavailable or off."""
+    if not MACRO_ENABLED:
+        return None
+    try:
+        return provider.fetch()
+    except Exception as exc:  # noqa: BLE001 -- belt and braces; never break a summary
+        log.warning("macro provider raised error_type=%s", type(exc).__name__)
+        return None

@@ -39,9 +39,9 @@ from tenacity import (
     wait_exponential,
 )
 
-from . import config
+from . import config, macro
 from .redactor import redact_dict, redact_str
-from .schemas import LoanSummary
+from .schemas import ExternalSignal, LoanSummary
 
 try:
     from langsmith.wrappers import wrap_anthropic
@@ -188,13 +188,28 @@ def _missing_risk_grounding_fields(app_data: dict) -> list[str]:
     return [field for field in _RISK_GROUNDING_FIELDS if app_data.get(field) is None]
 
 
-def _build_prompt(app_data: dict) -> str:
+def _build_prompt(app_data: dict, signal=None) -> str:
     allowed = {k: app_data.get(k) for k in _PROMPT_ALLOWED_FIELDS if app_data.get(k) is not None}
     safe = redact_dict(allowed)
+    # The signal is context, not an input the model may invent. Appended as a
+    # labelled block rather than merged into the application data, so the model
+    # cannot mistake a published statistic for something the applicant stated.
+    # The value the officer finally sees is attached server-side from the same
+    # fetch (see summarize_application), not read back out of here.
+    context = ""
+    if signal is not None:
+        context = (
+            "External context (published statistic, NOT supplied by the applicant):"
+            + chr(10) + signal.cite() + chr(10)
+            + "You may reference this when it is relevant to employment or repayment "
+            "risk. Do not restate it as a fact about this applicant, and do not "
+            "invent any other external figures." + chr(10) + chr(10)
+        )
     return (
         "Summarize this loan application as JSON with fields: loan_amount, "
         "term_months, purpose, risk_tier, summary, flags.\n\n"
         f"Application data:\n{json.dumps(safe, indent=2)}\n\n"
+        f"{context}"
         "Respond with only the JSON object — no markdown fences, no extra text."
     )
 
@@ -255,6 +270,218 @@ def call_api(
         raise LLMTimeoutError(f"LLM call timed out after {TIMEOUT_SECONDS}s") from exc
 
 
+# Words that mark a sentence as being ABOUT the external signal. Derived from
+# the signal's own label rather than hardcoded, so adding a series to
+# macro._SERIES_METADATA does not silently leave its prose unguarded. The
+# generic parts of a label carry no topic, so they are dropped.
+_LABEL_STOPWORDS = frozenset({
+    "us", "u.s.", "the", "and", "rate", "index", "seasonally", "adjusted",
+    "national", "total", "all", "persons", "of",
+})
+# A percentage or bare decimal, e.g. "11.9%", "11.9 percent", "4.2".
+_FIGURE_RE = re.compile(r"\d+(?:\.\d+)?")
+# The same figure, but only where it is written AS the signal's unit -- "4.2%"
+# or "4.2 percent". Used to tell a claim about the signal apart from an
+# unrelated number in the same sentence (an income, a loan amount).
+_UNIT_FIGURE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|pct\b)", re.IGNORECASE)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Words, for reading the few tokens either side of a figure. Keeps full stops and
+# apostrophes inside the token so "U.S." and "don't" stay whole.
+_WORD_RE = re.compile(r"[\w.']+")
+# Abbreviations whose full stop does not end a sentence. Without this the
+# splitter cut "The U.S. unemployment rate is 11.9%." into "The U.S." plus the
+# rest -- removing the false claim left the orphan "The U.S." in the summary,
+# which passed the nonempty check and put malformed prose in front of an
+# officer. Reviewed on PR #13.
+_ABBREVIATIONS = (
+    "U.S.", "U.K.", "E.U.", "e.g.", "i.e.", "etc.", "approx.", "vs.", "No.",
+    "Inc.", "Ltd.", "Co.", "Mr.", "Mrs.", "Ms.", "Dr.", "Jr.", "Sr.", "St.",
+)
+_ABBREV_SENTINEL = "<<ABBREV>>"
+
+
+def _split_sentences(text: str) -> list:
+    """Sentence split that does not treat an abbreviation's dot as a full stop."""
+    masked = text
+    for i, abbrev in enumerate(_ABBREVIATIONS):
+        masked = masked.replace(abbrev, abbrev.replace(".", f"{_ABBREV_SENTINEL}{i}{_ABBREV_SENTINEL}"))
+    parts = _SENTENCE_SPLIT_RE.split(masked)
+    restored = []
+    for part in parts:
+        for i, abbrev in enumerate(_ABBREVIATIONS):
+            part = part.replace(f"{_ABBREV_SENTINEL}{i}{_ABBREV_SENTINEL}", ".")
+        restored.append(part)
+    return restored
+
+
+def _signal_topic_words(signal) -> set[str]:
+    """Words that make a sentence ABOUT this signal.
+
+    The signal's LABEL only, plus its series id. The source name used to be in
+    here too, and "U.S. Bureau of Labor Statistics" contributed `labor` -- which
+    matches "5 years of labor experience", an ordinary sentence about the
+    applicant. A publisher's name says who published a figure, not what the
+    figure is about. Reviewed on PR #13.
+    """
+    words = {w.strip("(),.").lower() for w in signal.label.split()}
+    words |= {signal.series_id.lower()}
+    return {w for w in words if len(w) > 2 and w not in _LABEL_STOPWORDS}
+
+
+# Words that may sit BETWEEN a topic word and its figure without breaking the
+# link: the signal's own label parts, the generic label words, and ordinary
+# connectors. A fixed token window was not enough -- the model is handed the full
+# label in the prompt, so "The US unemployment rate (seasonally adjusted) is
+# 11.9%" is the phrasing to expect, and its four preceding tokens are
+# "rate seasonally adjusted is", which excludes the topic word itself. Reviewed
+# on PR #13.
+_CONNECTOR_WORDS = frozenset({
+    "is", "was", "are", "were", "at", "of", "the", "a", "an", "to", "and",
+    "currently", "now", "stands", "sits", "remains", "held", "about",
+    "approximately", "around", "roughly", "near", "nearly", "just", "still",
+    "reported", "measured", "recorded", "published",
+})
+
+
+def _macro_claims(text: str, topic: set, signal) -> list:
+    """Unit-shaped figures in `text` that are ABOUT the signal, with their values.
+
+    A sentence can mention the signal and also carry a percentage that has
+    nothing to do with it. Treating every unit-shaped figure in such a sentence
+    as a macro claim deleted ordinary underwriting prose -- "Unemployment remains
+    relevant, while the requested loan is 22% of annual income" was dropped
+    because 22 != 4.2, and if it was the only sentence the endpoint answered 502.
+    Worse, it also dropped sentences whose macro figure was CORRECT: "the loan is
+    22% of income and unemployment is 4.2%" failed on the 22.
+
+    So each figure is bound to its own context rather than to the sentence. The
+    binding walks backwards from the figure and keeps going THROUGH label words,
+    generic label words and connectors, stopping at the first word that is none of
+    those -- so it reaches `unemployment` across "rate (seasonally adjusted) is",
+    and stops dead at `loan` in "the requested loan is". A fixed four-token window
+    could not do both, and the label phrasing is the one the prompt itself
+    supplies. Two tokens after the figure are also checked, for "11.9%
+    unemployment". Reviewed on PR #13.
+
+    Bounded rather than clever on purpose: this is a backstop for a model asked
+    not to restate the figure at all, so it refuses to guess rather than reaching
+    for a parser. A figure with no topic word reachable from it is not treated as
+    a macro claim -- stated as a limitation in the caller.
+    """
+    label_words = {w.strip("(),.").lower() for w in signal.label.split()}
+    passable = label_words | _LABEL_STOPWORDS | _CONNECTOR_WORDS | topic
+    claims = []
+    for match in _UNIT_FIGURE_RE.finditer(text):
+        before = _WORD_RE.findall(text[:match.start()])
+        after = _WORD_RE.findall(text[match.end():])[:2]
+        found = any(w.strip("(),.").lower() in topic for w in after)
+        # Backwards through everything the label may legitimately put in the way.
+        for raw in reversed(before):
+            word = raw.strip("(),.").lower()
+            if word in topic:
+                found = True
+                break
+            if word not in passable:
+                break
+        if found:
+            claims.append(float(match.group(1)))
+    return claims
+
+
+def _drops_a_contradicting_claim(text: str, signal) -> bool:
+    """Whether `text` states a figure for the signal that is not the published one.
+
+    Narrow on purpose. It only fires on a sentence that both NAMES the signal's
+    subject and carries a number that is not the published value -- so "the
+    labour market is weakening" survives, and so does an accurate restatement.
+    """
+    topic = _signal_topic_words(signal)
+    lowered = text.lower()
+    if not any(word in lowered for word in topic):
+        return False
+
+    # A claim about the signal is a figure written AS the signal's unit --
+    # "4.2%", "4.2 percent". Nothing else counts.
+    #
+    # This used to fall back to EVERY number in the sentence when no
+    # unit-shaped figure was found, which turned a topic-word match into a
+    # licence to delete: "The applicant has 5 years of labor experience and
+    # adequate income" matched on a topic word, had its `5` compared against
+    # the published 4.2, and was removed -- and if it was the only sentence,
+    # the summary failed closed with a 502 over a sentence that said nothing
+    # about unemployment at all. Reviewed on PR #13.
+    #
+    # Dropping the fallback narrows what this can delete rather than adding
+    # another pattern to catch the exception. The cost is stated plainly: a
+    # bare "unemployment is 11.9" with no unit is not treated as a claim,
+    # because a bare number beside a topic word is not distinguishable from a
+    # count of years, applications or anything else. The prompt asks the model
+    # not to restate the figure at all; this is the backstop for when it does
+    # so in the form a reader would actually read as a rate.
+    published = float(signal.value)
+    # Only figures bound to the signal's own topic -- see _macro_claims. A
+    # percentage elsewhere in the sentence is somebody else's number.
+    claims = _macro_claims(text, topic, signal)
+    if not claims:
+        return False
+
+    # EVERY claim must be the published one. The previous version accepted the
+    # whole sentence as soon as ONE number matched, so "Unemployment is 11.9%,
+    # while the cited series value is 4.2%" survived intact and was rendered
+    # beside the 4.2% citation -- the reviewed defect, in a sentence that
+    # contradicts itself as well as the source. Reviewed on PR #13.
+    return any(abs(f - published) >= 0.05 for f in claims)
+
+
+def _strip_contradicting_macro_claims(summary: str, flags: list, signal):
+    """Remove model prose that gives the external figure a different value.
+
+    The prompt asks the model not to repeat the number at all. This is what
+    happens when it does so anyway and gets it wrong -- which a prompt cannot
+    prevent, only discourage. Reviewed on PR #13: the officer was shown the
+    model's "unemployment is 11.9%" directly above the provider's cited 4.2%,
+    and the whole point of a grounded citation is that it is not contradicted
+    on the same screen.
+
+    Removal rather than correction: rewriting a number inside a sentence would
+    make the service the author of a claim it cannot stand behind, and the
+    published figure is already displayed in full beside the summary.
+    """
+    if signal is None:
+        return summary, flags, 0
+
+    dropped = 0
+    kept_sentences = []
+    for sentence in _split_sentences(summary):
+        if sentence and _drops_a_contradicting_claim(sentence, signal):
+            dropped += 1
+            continue
+        kept_sentences.append(sentence)
+    kept_flags = []
+    for flag in flags:
+        if isinstance(flag, str) and _drops_a_contradicting_claim(flag, signal):
+            dropped += 1
+            continue
+        kept_flags.append(flag)
+
+    cleaned = " ".join(s for s in kept_sentences if s).strip()
+    if dropped:
+        log.warning(
+            "removed %d model claim(s) contradicting the published %s "
+            "(published=%s%s, period=%s)",
+            dropped, signal.label, signal.value, signal.unit, signal.period,
+        )
+    if not cleaned:
+        # Everything the model wrote was a false statement about the signal.
+        # There is no summary left to show, and inventing one here would make
+        # this service the author. Fail closed, like every other guardrail.
+        raise LLMResponseError(
+            "the model's summary consisted only of claims contradicting the "
+            "published external figure"
+        )
+    return cleaned, kept_flags, dropped
+
+
 def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     """
     Summarize a loan application for a loan officer.
@@ -276,19 +503,52 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
             "model assign a risk_tier it has no data to support."
         )
 
-    prompt = _build_prompt(app_data)
+    # One grounded external signal (app/macro.py). Fetched before the cost
+    # guard, never after: it adds tokens, so the guard has to see the prompt
+    # that will actually be sent. Fails open -- None simply means no context.
+    signal = macro.current_signal()
 
-    estimated = _estimate_tokens(_SYSTEM + prompt)
-    if estimated > MAX_INPUT_TOKENS:
+    # The BASE prompt is measured first, and it is the one the guard judges. The
+    # signal is optional context that fails open everywhere else; letting its
+    # tokens push an otherwise-valid application over the ceiling would make an
+    # optional extra the reason a summary 400s -- and it is reachable, because
+    # `purpose`, `employer` and `job_title` carry no maximum length in
+    # origination's ApplicationIn. Reviewed on PR #13.
+    base_prompt = _build_prompt(app_data, None)
+    base_estimated = _estimate_tokens(_SYSTEM + base_prompt)
+    if base_estimated > MAX_INPUT_TOKENS:
         raise LLMCostGuardError(
-            f"Estimated input tokens ({estimated}) exceeds guard ({MAX_INPUT_TOKENS}). "
+            f"Estimated input tokens ({base_estimated}) exceeds guard ({MAX_INPUT_TOKENS}). "
             "Trim the application payload before calling summarize_application()."
         )
 
+    prompt = _build_prompt(app_data, signal)
+    estimated = _estimate_tokens(_SYSTEM + prompt)
+    # The review asked for the signal's cost to be measured, not assumed, so the
+    # delta is computed here and logged on every call.
+    signal_tokens = estimated - base_estimated if signal is not None else 0
+
+    if signal is not None and estimated > MAX_INPUT_TOKENS:
+        # Only the citation crosses the line. Drop it and answer without the
+        # external context, which is exactly what happens when the provider is
+        # disabled or unreachable -- the summary is still valid, it simply has
+        # nothing external to show.
+        log.warning(
+            "omitting the external signal to stay inside the cost guard "
+            "app_id=%s base_tokens=%d with_signal=%d guard=%d",
+            app_data.get("id", "unknown"), base_estimated, estimated, MAX_INPUT_TOKENS,
+        )
+        signal = None
+        prompt = base_prompt
+        estimated = base_estimated
+        signal_tokens = 0
+
     log.info(
-        "llm_client summarize app_id=%s estimated_tokens=%d",
+        "llm_client summarize app_id=%s estimated_tokens=%d signal=%s signal_tokens=%d",
         app_data.get("id", "unknown"),
         estimated,
+        signal.series_id if signal else "none",
+        signal_tokens,
     )
 
     client = make_client()
@@ -311,7 +571,33 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         log.error("llm_client parse error response=%s", safe_raw)
         raise LLMResponseError(f"Could not parse LLM response: {exc}") from exc
 
-    return LoanSummary(applicant_name=_applicant_name(app_data), **llm_output.model_dump())
+    # The citation is built from what the provider returned, not from anything
+    # the model produced -- the same rule _applicant_name follows. If the model
+    # restated the rate differently in its prose, the cited figure is still the
+    # published one.
+    signals = []
+    if signal is not None:
+        signals.append(
+            ExternalSignal(
+                source=signal.source, series_id=signal.series_id, label=signal.label,
+                value=signal.value, unit=signal.unit, period=signal.period,
+                url=signal.url, citation=signal.cite(),
+            )
+        )
+
+    # The prose must not contradict the figure printed beside it. The prompt
+    # asks the model not to repeat the number at all; this is the half that
+    # holds when it does anyway and gets it wrong.
+    fields = llm_output.model_dump()
+    fields["summary"], fields["flags"], _ = _strip_contradicting_macro_claims(
+        fields["summary"], fields.get("flags") or [], signal,
+    )
+
+    return LoanSummary(
+        applicant_name=_applicant_name(app_data),
+        external_signals=signals,
+        **fields,
+    )
 
 
 def _applicant_name(app_data: dict) -> str:
