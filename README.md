@@ -104,11 +104,16 @@ and a borrower login `maria`.
 ## Compliance
 
 **Not PCI-DSS compliant** — the `payments` table still carries plaintext `pan` and `cvv`
-columns (`db/init/001_schema.sql`), and `db/init`'s seed scripts still write card values
-into them (`002_seed.sql`, `003_seed_bulk.sql`), so every freshly initialised database
-contains card data. Storing CVV/SAD post-authorization is a flat PCI-DSS violation
-independent of encryption; it predates the current engagement (vendor debt, see
+columns (`db/init/001_schema.sql`). Storing CVV/SAD post-authorization is a flat PCI-DSS
+violation independent of encryption; it predates the current engagement (vendor debt, see
 `adr/0003`) and the columns are still there — tracked as `docs/DEBT.md` D5b/D13.
+
+What is *no longer* true, and was corrected here rather than left to be re-reported: the
+seed scripts do **not** write card values any more (`002_seed.sql`, `003_seed_bulk.sql`
+insert `last4`/`brand` only), so a freshly initialised database does not contain card data.
+The columns are empty and unwritten, waiting to be dropped by the contract migration
+(`db/migrations/0031`). "The columns exist" and "there is card data in them" are different
+claims, and only the first one holds.
 
 This section previously said that `payment-service` logs them at INFO and persists the PAN
 and CVV itself. Both claims are false against the current code, and were verified against

@@ -82,7 +82,21 @@ def _sanitize_non_finite(obj):
         return {k: _sanitize_non_finite(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_sanitize_non_finite(v) for v in obj]
-    return obj
+    # Same problem, different type. A field validator that raises ValueError --
+    # `PaymentIn.idempotency_key` does, to refuse card data in a stored field --
+    # makes Pydantic put the EXCEPTION OBJECT in the error's `ctx`, which
+    # JSONResponse cannot render either. That turned a 422 into a 500 with
+    # "Object of type ValueError is not JSON serializable", so the boundary check
+    # rejected the request and the caller was told the server had broken. Any
+    # value that is not JSON is rendered as its string form rather than crashing
+    # the error response, which is the whole point of this function.
+    if isinstance(obj, BaseException):
+        return str(obj)
+    if isinstance(obj, (str, int, bool, type(None))):
+        return obj
+    if isinstance(obj, float):
+        return obj
+    return str(obj)
 
 
 @app.exception_handler(RequestValidationError)

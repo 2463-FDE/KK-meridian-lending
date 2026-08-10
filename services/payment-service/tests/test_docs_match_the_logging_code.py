@@ -97,6 +97,22 @@ FALSE_CLAIMS = [
         "no service logs PAN/CVV/SSN; ADR 0008 removed the fields from the wire",
     ),
     (
+        # README said the seeds "still write card values into them", so "every
+        # freshly initialised database contains card data". PR #11 stopped that:
+        # both seed files insert last4/brand only. The columns still exist and
+        # are still a PCI finding (D5b/D13) -- "the columns exist" and "there is
+        # card data in them" are different claims, and conflating them made the
+        # user-facing document overstate a real defect, which produces false
+        # findings as reliably as understating one (see D5c). Guarded because it
+        # is the sentence a reader meets first. Reviewed on PR #16.
+        re.compile(
+            r"seed\s+scripts\s+still\s+write\s+card\s+values"
+            r"|freshly\s+initialised\s+database\s+contains\s+card\s+data",
+            re.IGNORECASE,
+        ),
+        "db/init seeds insert last4/brand only; the pan/cvv columns are left NULL",
+    ),
+    (
         re.compile(r"origination\s+still\s+logs\s+full\s+PII", re.IGNORECASE),
         "origination's intake logs app_id/applicant_id only (PR #6 review, Gap C)",
     ),
@@ -530,3 +546,34 @@ def test_a_rejected_payload_carrying_a_pan_never_becomes_a_log_line():
     # auditable rather than merely effective.
     message = str(exc.value)
     assert "pan" in message and "cvv" in message
+
+
+def test_the_seed_files_do_not_write_card_values():
+    """The evidence behind README's corrected claim, checked rather than trusted.
+
+    README now says the seed scripts insert `last4`/`brand` only, so a fresh
+    database holds no card data. That is a statement about two SQL files, and the
+    guard above only stops the OLD wording coming back -- it cannot notice if the
+    seeds start writing card numbers again and make the NEW wording false. This
+    reads the files.
+
+    Asserted on the INSERT column list rather than by grepping for "pan", because
+    both files legitimately discuss PAN in comments; the question is what they
+    write. Reviewed on PR #16.
+    """
+    inserts = 0
+    for name in ("002_seed.sql", "003_seed_bulk.sql"):
+        sql = (REPO_ROOT / "db" / "init" / name).read_text(encoding="utf-8")
+        for match in re.finditer(
+            r"INSERT\s+INTO\s+payments\s*\(([^)]*)\)", sql, re.IGNORECASE
+        ):
+            inserts += 1
+            columns = {c.strip().lower() for c in match.group(1).split(",")}
+            assert "pan" not in columns and "cvv" not in columns, (
+                f"{name} writes card data into payments{sorted(columns)} -- README "
+                f"claims a fresh database contains none"
+            )
+    assert inserts >= 2, (
+        f"found only {inserts} payments INSERT(s) in the seed files; the walk is "
+        f"broken and this test is vacuous"
+    )

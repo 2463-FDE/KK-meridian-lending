@@ -27,6 +27,7 @@ to a processor for real authorization. test_post_payment_with_a_made_up_
 token_never_captures_or_touches_the_balance is the exact attack: an arbitrary
 token gets declined, no balance-affecting call ever reaches servicing.
 """
+import logging
 from decimal import Decimal
 
 import httpx as httpx_module
@@ -621,44 +622,104 @@ def test_authorize_charge_fails_closed_when_no_processor_is_configured(monkeypat
 # request and written in the clear on the retry, which is the one request that
 # is guaranteed to happen twice.
 
+@pytest.mark.parametrize("secret", ["4111111111111111", "412-55-9981"])
+def test_the_api_refuses_a_key_carrying_card_or_personal_data(fake_db, caplog, secret):
+    """The boundary, which is the fix that actually removes the exposure.
+
+    Redaction protects the log; it does nothing about the copy PostgreSQL keeps,
+    and `idempotency_key` is persisted on the payments row. So a key carrying a
+    PAN or an SSN is refused outright -- 422, nothing inserted, and the value
+    never reaches a log line either.
+
+    422 and not 500 is part of the assertion. Pydantic puts the raised
+    ValueError object into the error's `ctx`, which this service's own 422
+    handler could not serialise, so the first version of this validator turned a
+    rejected request into "internal error" -- a boundary check that reports the
+    server is broken is not a boundary check.
+    """
+    with caplog.at_level(logging.INFO, logger=payments.log.name):
+        resp = client.post("/payments", json=_payload(idempotency_key=secret))
+
+    assert resp.status_code == 422, resp.text
+    assert "idempotency_key" in resp.text
+    inserts = [c for c in fake_db.calls if c[0].strip().startswith("INSERT")]
+    assert not inserts, "a rejected request still wrote a payments row"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert secret not in logged, f"the rejected value was logged: {logged!r}"
+
+
 @pytest.mark.parametrize("secret,marker", [
     ("4111111111111111", "[PAN-REDACTED]"),
     ("412-55-9981", "[SSN-REDACTED]"),
 ])
-def test_a_duplicate_charge_does_not_log_a_raw_key(monkeypatch, caplog, secret, marker):
-    from app import payments as payments_mod
+def test_the_duplicate_branch_still_redacts_a_key_that_bypassed_the_api(
+    fake_db, monkeypatch, caplog, secret, marker
+):
+    """Defence in depth, exercised through the REAL duplicate branch.
 
-    safe = payments_mod.redact_str(secret)
-    assert marker in safe, "the redactor does not recognise this shape"
+    The validator above stops such a key arriving over HTTP, so this calls
+    `charge()` directly -- which is not a contrivance: `app/reconcile.py` drives
+    the same function from stored rows, and a key predating the validator is
+    exactly what it would replay.
 
-    emitted = []
-
-    class _Log:
-        def info(self, msg, *args):
-            emitted.append(msg % args if args else msg)
-        warning = error = info
-
-    monkeypatch.setattr(payments_mod, "log", _Log())
-    payments_mod.log.info(
-        "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
-        "(already applied)", safe, 1,
+    The previous version of this test called `log.info` itself with an
+    already-redacted string, which asserted that logging a redacted value logs a
+    redacted value -- true of any implementation, including one that formats the
+    raw key three lines further down. Review of PR #16 asked for the actual
+    duplicate flow, and that is the right ask: the redaction has to happen inside
+    `charge()`, on the retry path, where the defect was. So this charges twice and
+    reads `caplog`; the second call takes the duplicate branch.
+    """
+    monkeypatch.setattr(
+        payments.httpx, "post", lambda *a, **k: _FakeServicingResponse()
     )
+    kwargs = dict(loan_id=42, processor_token=_VALID_MOCK_TOKEN, last4="1111",
+                  brand="visa", amount=125.0, method="card", idempotency_key=secret)
 
-    line = " ".join(emitted)
-    assert secret not in line
-    assert marker in line
+    with caplog.at_level(logging.INFO, logger=payments.log.name):
+        first = payments.charge(**kwargs)
+        second = payments.charge(**kwargs)
 
+    # The precondition that makes this meaningful: the second call really did
+    # take the duplicate path rather than charging again.
+    assert first["payment_id"] == second["payment_id"]
 
-def test_the_conflict_message_does_not_echo_a_raw_key():
-    """The 409 body is caller-visible and was formatting the key verbatim."""
-    from app import payments as payments_mod
-    import inspect
-
-    source = inspect.getsource(payments_mod.charge)
-    assert "idempotency_key={safe_key!r}" in source, (
-        "the conflict message interpolates the raw key again"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "duplicate POST /payments" in logged, (
+        "the duplicate branch never logged, so this test proves nothing about it"
     )
-    assert "idempotency_key={idempotency_key!r}" not in source
+    assert secret not in logged, (
+        f"the retry log wrote the caller's key verbatim: {logged!r}"
+    )
+    assert marker in logged
+
+
+def test_the_conflict_message_does_not_echo_a_raw_key(fake_db, monkeypatch):
+    """The 409 body is caller-visible, and it was formatting the key verbatim.
+
+    Asserted on the RAISED ERROR, not on `inspect.getsource`. Matching source
+    text passes whenever the string happens to be spelled that way and fails on a
+    refactor that is still correct -- it tests the file, not the behaviour. The
+    key here is one the API would now reject, so `charge()` is called directly for
+    the same reason as the test above.
+    """
+    monkeypatch.setattr(
+        payments.httpx, "post", lambda *a, **k: _FakeServicingResponse()
+    )
+    secret = "4111111111111111"
+    base = dict(processor_token=_VALID_MOCK_TOKEN, last4="1111", brand="visa",
+                amount=250.0, method="card", idempotency_key=secret)
+
+    payments.charge(loan_id=42, **base)
+    # Same key, different loan: the conflict the 409 exists for. `charge()` raises
+    # the domain error; the router is what turns it into a 409, so this asserts on
+    # the message that becomes the response body.
+    with pytest.raises(payments.IdempotencyKeyConflict) as exc:
+        payments.charge(loan_id=43, **base)
+
+    message = str(exc.value)
+    assert secret not in message, f"the conflict echoed the caller's key: {message!r}"
+    assert "[PAN-REDACTED]" in message
 
 
 def test_brand_cannot_carry_a_card_number_into_the_payments_row():

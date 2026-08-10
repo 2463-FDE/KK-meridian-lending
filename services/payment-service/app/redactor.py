@@ -74,6 +74,23 @@ def redact_str(text: str) -> str:
     return text
 
 
+def looks_sensitive(text: str) -> bool:
+    """True if `text` carries one of the shapes this module knows how to redact.
+
+    For deciding whether to REJECT a value rather than mask it. Redaction covers
+    the log; it does nothing about a value that gets stored, so a caller-supplied
+    field that lands on a database row needs to be refused at the boundary
+    instead (`schemas.PaymentIn.idempotency_key`, reviewed on PR #16).
+
+    Defined here, next to the patterns, on purpose: a second private copy of
+    "looks like a PAN" in the schema module would drift from this one, and this
+    is the copy with tests and Luhn validation behind it. Equivalent to "does
+    redaction change this string", which is the property actually wanted -- so it
+    cannot silently disagree with `redact_str`.
+    """
+    return redact_str(text) != text
+
+
 def redact_dict(data: dict) -> dict:
     """Return a deep copy with sensitive key values replaced."""
     result = copy.deepcopy(data)
