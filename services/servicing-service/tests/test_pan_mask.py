@@ -47,43 +47,36 @@ def test_the_display_never_reads_a_pan_attribute():
     assert _display_last4(_Last4Only()) == "•••• 4242"
 
 
-def test_a_pre_0029_row_still_displays_from_the_legacy_pan():
-    """The deployment window automated review caught on PR #11.
+def test_a_row_with_a_legacy_pan_and_no_last4_still_shows_nothing():
+    """The expand-phase fallback is GONE, and this is the case that proves it.
 
-    Nothing in this change enforces that db/migrations/0029 has back-filled
-    `last4` before this service version serves traffic, and deploys are not
-    atomic. So this row shape is real: `pan` populated, `last4` still NULL.
+    PR #11 added a fallback for the deployment window where this service was live
+    before 0029 had back-filled `last4`, and annotated it "remove in PR #15, the
+    contract step". This is that step, so the row shape that fallback existed for
+    -- `pan` populated, `last4` NULL -- must now render nothing instead of
+    slicing digits out of a card number.
 
-    Without the fallback the card column blanks on every historical payment --
-    no error, just missing data, which is precisely what the back-fill exists to
-    prevent. Only the last four digits are ever returned.
+    That is safe rather than a regression because 0031 refuses to drop the
+    columns until the back-fill is complete: a row can be in this shape before
+    the contract step, not after it. The two tests that asserted the fallback's
+    output were removed rather than inverted, because the behaviour they pinned
+    no longer exists.
     """
-    class _PreBackfillRow:
+    class _LegacyRow:
         last4 = None
         brand = "visa"
         pan = "4111111111111111"
 
-    assert _display_last4(_PreBackfillRow()) == "•••• 1111"
+    assert _display_last4(_LegacyRow()) is None
 
 
-def test_the_legacy_fallback_never_returns_more_than_four_digits():
-    """The fallback reads a column that still holds a full PAN, so the slice is
-    the control. A regression that returned the whole value would put a card
-    number on screen."""
-    class _PreBackfillRow:
-        last4 = None
-        brand = "amex"
-        pan = "340000000000009"
+def test_last4_is_used_even_when_a_legacy_pan_is_present():
+    """Precedence, asserted for a row carrying both.
 
-    out = _display_last4(_PreBackfillRow())
-    assert out == "•••• 0009"
-    assert "340000000000009" not in out
-    assert len(out.replace("•••• ", "")) == 4
-
-
-def test_last4_wins_over_the_legacy_pan_once_the_backfill_has_run():
-    """After 0029 both columns are populated. The back-filled `last4` is the
-    supported source; the fallback must not shadow it."""
+    Paired with the test above so "reads last4" and "reads nothing at all" stay
+    distinguishable: a display that had simply stopped working would pass that
+    one and fail this one.
+    """
     class _PostBackfillRow:
         last4 = "4242"
         brand = "visa"
@@ -144,3 +137,18 @@ def test_the_list_item_no_longer_aliases_apr_unconditionally():
     )
     item = LoanListItem(id=1, principal=1000.0, term_months=12)
     assert item.note_rate_pct is None and item.note_rate_proven is False
+
+def test_the_orm_no_longer_maps_the_dropped_column():
+    """The other half of the contract step, and the one that breaks loudly.
+
+    SQLAlchemy names every mapped column in its SELECT, so a lingering `pan`
+    mapping would make every payment query fail the moment 0031 commits -- an
+    outage, not a display bug. `_display_last4` not reading the attribute is not
+    enough on its own; the column must be off the model.
+    """
+    from app import models
+
+    mapped = set(models.Payment.__table__.columns.keys())
+    assert "pan" not in mapped, "payments.pan is still mapped; 0031 would break every query"
+    assert "cvv" not in mapped, "payments.cvv is still mapped; 0031 would break every query"
+    assert "last4" in mapped

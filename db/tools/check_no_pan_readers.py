@@ -39,6 +39,21 @@ BUILT but cannot be finished -- an unknown `.format()` argument, a name assigned
 from an unresolvable string expression -- fails closed as "unresolved dynamic
 SQL passed to execute()".
 
+Where the folding stops, and why that is not this file's problem to solve. A
+static folder can always be defeated by a program that is dynamic enough: a
+column name read from a config file, fetched from the database, or reached
+through `getattr` is not knowable from the syntax tree, and extending this tool
+until it were would turn a purpose-built check into a worse Python interpreter.
+Review of PR #15 raised five concrete evasion shapes (a runtime-selected
+f-string column, a `%` template with an unknown operand, SQL assigned before it
+is executed, a joined tuple of columns, a module constant rebound after the
+function that uses it). Rather than chase them here, the PREMISE they all need is
+enforced elsewhere: `db/tests/test_payments_sql_is_static.py` asserts that no
+application code composes SQL against `payments` at all, and each of those five
+shapes fails that test if it is ever added. While that invariant holds, this
+tool never has to fold anything interesting to be right about this repository.
+The residual is recorded as D20 in docs/DEBT.md.
+
 It does NOT follow calls. `stmt = select(...)` or `sql = build_query()` is
 opaque here, and is left alone rather than reported: telling a SQLAlchemy
 construct apart from a function returning a SQL string means analysing the whole

@@ -49,11 +49,12 @@ def _display_last4(payment) -> str | None:
     """
     if payment.last4:
         return "•••• " + payment.last4
-    # Expand-phase compatibility only. Guarded with getattr so this keeps working
-    # after 0031 drops the column and the attribute disappears from the model.
-    legacy_pan = getattr(payment, "pan", None)
-    if legacy_pan:
-        return "•••• " + str(legacy_pan)[-4:]
+    # No fallback. The expand-phase read of `pan` was removed here, in the
+    # contract step it was annotated for: 0031 refuses to drop the columns until
+    # `last4` is back-filled for every row that had a PAN, so a row reaching this
+    # line has no card digits recorded anywhere and there is nothing to fall back
+    # TO. Returning None renders nothing rather than a placeholder a reader could
+    # mistake for real digits.
     return None
 
 
