@@ -29,13 +29,27 @@ during Week 4); those are marked where they occur.
 
 ## Status at a glance
 
+**Suite as of this pass** (`main` after PR #10, #15 and #16; re-run, not
+transcribed from an earlier record): disclosure 166, origination 210, servicing
+96, gateway 83, payment 138, loan-assistant 90, kyc 12, decision 40 — **835
+service tests** — plus **203** database/migration tests and **36** Playwright
+browser tests across 11 files. The browser suite needs the documented rate-limit
+overlay (`docker-compose.e2e.yml`); without it later specs trip the shipped
+120-request control and fail on unrelated assertions.
+
+Counts quoted further down this file are deliberately point-in-time ("41 tests at
+the time", "102 tests passing") and are left as written — they record what was
+true when a week closed, which is the only thing that makes them useful. This
+block is the current number; those are history.
+
+
 | Week | Feature | Status |
 |---|---|---|
 | 1 | Safe LLM engine (client, redactor, secrets cleanup) | ✅ Landed |
 | 2 | RAG retrieval + corpus hygiene | ✅ Landed |
 | 3 | AI scorer wrapper + append-only decision memory | ✅ Landed |
 | 4 | Auto-disclosure on approval + KG traversal | ✅ Landed |
-| 5 | Card tokenization + payment reconciliation | ✅ Landed (PR #8, 2026-08-05). Column drop 🟠 PR #15 |
+| 5 | Card tokenization + payment reconciliation | ✅ Landed (PR #8, 2026-08-05). Column drop ✅ landed (PR #15) |
 | 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC landed; ledger + maker-checker open |
 | 7 | Trace ID + scoped reconciliation control | ⬜ Open (Prometheus/Grafana landed early) |
 | 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
@@ -50,26 +64,42 @@ row rather than asserted for all — GitHub Actions has been in a major outage
 since 2026-08-06 15:22 UTC, so a red or pending check on these is not evidence
 about the branch.
 
-| PR | Concern | Additions | Status |
+| PR | Concern | Head | Status |
 |---|---|---|---|
-| #10 | Actuarial APR + TILA box foots | +598 | 🟠 CI green |
-| #11 | `payments.pan`/`cvv` removal — expand half | +281 | 🟠 CI green |
-| #12 | Graph-store threshold answered by measurement (`adr/0009`) | +400 | 🟠 CI green |
-| #13 | One grounded external signal on the officer summary | +514 | 🟠 CI green |
-| #14 | Correct a wrong answer from the review screen | +211 | 🟠 CI green |
-| #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | +108 | 🟠 CI green · base is #11's branch |
-| #16 | Four docstrings claiming a PII leak the code does not have | +52 | 🟠 **CI not green** — `e2e` reaped at 56m with zero steps recorded during the outage; 19 of 22 checks still queued; `mergeStateStatus` UNSTABLE |
-| #17 | This status and citation pass | +114 | 🟠 **No CI run exists.** The outage swallowed the `pull_request` trigger, so unlike #16 there is nothing queued to drain — it needed a re-push to create a run. Not a path filter: `ci.yml` has none, and the docs-only PR #9 ran the full suite |
+| #10 | Actuarial APR + TILA box foots | `7875658d81` | ✅ **Merged** 2026-08-10, CI 22/22 |
+| #11 | `payments.pan`/`cvv` removal — expand half | `69b563448d` | ✅ **Merged** 2026-08-07, CI 22/22 |
+| #12 | Graph-store threshold answered by measurement (`adr/0009`) | `6e1823884d` | 🟠 **Open**, CI 22/22, mergeable |
+| #13 | One grounded external signal on the officer summary | `355811f165` | 🟠 **Open**, CI 22/22, mergeable |
+| #14 | Correct a wrong answer from the review screen | `d6afd88135` | ✅ **Merged** 2026-08-09, CI 22/22 |
+| #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | `50c4b3f2f2` | ✅ **Merged** 2026-08-10, CI 22/22. Rebased onto `main` before merge, so its base is `main` and not #11's branch |
+| #16 | Four docstrings claiming a PII leak the code does not have | `2b5fd291ad` | ✅ **Merged** 2026-08-10, CI 22/22 |
+| #17 | This status and citation pass | — | 🟠 **Open**, this PR |
 
-**Merge order — not arbitrary:**
+*What this table used to say, kept because the reason matters.* Every row above
+read "🟠 CI green" or worse, and two rows carried an explanation about GitHub
+Actions being in a major outage from 2026-08-06 — #16 "CI not green, 19 of 22
+checks still queued" and #17 "no CI run exists, the outage swallowed the
+`pull_request` trigger". That was accurate when written. The outage ended, the
+runs completed, and five of these PRs have since merged with 22/22 — so the
+table had become a snapshot of a bad afternoon presented as current status. The
+`Additions` column went too: those line counts were measured at heads that no
+longer exist, and a stale diffstat is worse than no diffstat because it reads as
+precise.
 
-1. **#16 before #17.** #17 cites `DEBT.md` D5c, which only exists on #16's branch.
-2. **#11 before #15.** #15's base *is* #11's branch.
-3. **#12 and #13 conflict with #17** — all three edit the same two rows of the
-   "Owed to the client" table below. Whichever lands second needs a manual
-   resolution, and #12/#13 mark those rows ✅ where rule 1 of *Keeping this file
-   honest* requires 🟠. Take the 🟠 version.
-4. #10 and #14 are independent of the rest.
+**Merge order — what is left of it.** Rules 1, 2 and 4 are spent: #16 merged
+before this PR, so the `DEBT.md` D5c it cites is on `main`; #15 was rebased onto
+`main` and merged after #11, so its base is no longer another PR's branch; and
+#10 and #14 have both landed. What remains is rule 3, and it is the reason this
+row-by-row pass is worth reading twice:
+
+**#12 and #13 still edit the same two rows of the "Owed to the client" table as
+this PR.** Whichever lands second needs a manual resolution, and the resolution
+is not mechanical — #12 and #13 mark those rows answered *on their branches*,
+which is a different claim from answered *on `main`*. Take the version that names
+where the answer lives, and keep the ⚠️ marker until the branch it points at has
+actually merged. This PR deliberately does **not** describe #12's benchmark or
+#13's macro signal as landed.
+Its one forward citation, `db/bench/graph_traversal_benchmark.py`, arrives with #12 and does not exist on `main`.
 
 ## Owed to the client
 
@@ -168,7 +198,7 @@ PAN/CVV/SSN. Float-based money math. A README claiming PCI-DSS compliance.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | 🟡 **Partial — three halves, one closed.** ✅ `payment-service.charge()` redacts via a ported copy of `loan-assistant/redactor.py` before logging. ✅ `servicing-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. 🟨 Storage: the `pan`/`cvv` columns still exist, nullable and **unwritten** — the seed writers went in PR #11, so both seed files insert `last4`/`brand` only and a fresh database contains no card data (a seed-content test enforces that, failing on a PAN-shaped literal in any inserted column or seed target). PR #15 drops the columns, which closes D5b/D13. *This line previously said the seeds "still write real values into them, so every fresh database contains card data" — true when written, false since PR #11.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
+| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | ✅ **Closed, all four halves — the last one by PR #15.** ✅ `payment-service.charge()` redacts via a ported copy of `services/loan-assistant/app/redactor.py` before logging. ✅ `servicing-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. ✅ Storage: the `pan`/`cvv` columns are **gone** — `db/migrations/0031` dropped them and `db/init/001_schema.sql` no longer creates them, so neither a migrated nor a fresh database has them (PR #15). The writers went first: the application in PR #8, the seeds in PR #11, with `0029` back-filling `last4` so payment history still displays and `0031` refusing to run until that was complete and an operator acknowledged the drop. Closes D5b/D13. *Two earlier versions of this line were wrong in opposite directions — it claimed the seeds "still write real values into them, so every fresh database contains card data" after PR #11 had stopped them, and before that it had understated the seeds entirely.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
 | 2 | Origination / Decisioning | Bureau + core-banking + processor keys hardcoded in `config.py`, also committed in root `.env` | ✅ Effectively closed — `.env` untracked, hardcoded fallbacks removed from all 7 services. **Confirmed with the project owner: these were training placeholders (`EXAMPLE-LEAKED-KEY-rotate-me`), never real provider accounts** — so there's no live credential to rotate, and the old values still in git history aren't a real security exposure, just cosmetic (a reviewer seeing placeholder-labeled strings in `git log`). A history rewrite remains available on request but isn't fixing an actual vulnerability here | For a *real* deployment this would be a genuine breach risk (a leaked bureau key pulling real credit data under Meridian's name) — confirmed not the case for this training instance specifically |
 | 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers — **but see the ⚠️ note under Owed to the client: exact arithmetic is not the same as the right formula, and `compute_apr` on `main` still uses the wrong one.** Details:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
 | 4 | Payments | README claims "PCI-DSS compliant," schema has plaintext `pan`/`cvv` columns | ✅ Fixed:<br>• Removed the false "PCI-DSS compliant" claim<br>• README now states plainly it's **not** compliant and names the specific gaps (raw PAN/CVV storage, plaintext logging half still open) | a false claim is worse than an honest gap |
@@ -449,11 +479,12 @@ both receive a processor token instead. This paragraph previously said the
 opposite; it described the state while PR #8 was still open and was not updated
 when it merged.
 
-What remains: the `pan`/`cvv` COLUMNS still exist, and `db/init/002_seed.sql`
-and `003_seed_bulk.sql` still write real values into them, so a freshly created
-database contains card data regardless of what the application does. PR #11
-(the `last4` back-fill) is merged; PR #15 drops the columns, and the seed
-writers must go with them (see `DEBT.md` D5b/D13).
+What remains: nothing, for this defect. The seed writers went in PR #11 (both
+files insert `last4`/`brand` only), and PR #15 completed the contract step --
+`db/migrations/0031` dropped `payments.pan`/`.cvv` and `db/init/001_schema.sql`
+stopped creating them, so a freshly created database has no card columns at all.
+`DEBT.md` D5b/D13 are closed. What is NOT claimed by that: PCI-DSS compliance,
+which needs a QSA assessment and a real processor rather than an empty column.
 
 **Also on PR #8, beyond this week's original scope** — added during review, not
 from the brief: a captured payment could be authorized on the card and never
@@ -463,10 +494,11 @@ repository. `payment-service/app/reconcile.py` + `db/migrations/0028` make that
 row a durable, self-draining work item with claim-safe concurrency, capped
 backoff, an operator report and two Prometheus gauges.
 
-Head `53ca666`, base `main`, CI 22/22, mergeable. Two documents this file cites
-— `specs/0001-online-payments-idempotency-tokenization.md` and
-`adr/0008-tokenize-card-data-stop-storing-pan-cvv.md` — exist **only on that
-branch**, not on `main`.
+Head `53ca666`, base `main`, CI 22/22 — **merged**. The two documents this file
+cites, `specs/0001-online-payments-idempotency-tokenization.md` and
+`adr/0008-tokenize-card-data-stop-storing-pan-cvv.md`, are on `main`. *This
+paragraph previously said they existed only on the branch; true while it was
+open, false once it merged.*
 
 ---
 
@@ -561,7 +593,8 @@ rows 1 to 4 all stand exactly as written.
 One row moved for a different reason: PR #8's reconciler now detects and reports
 captured-but-unapplied payments, which is a real partial answer to row 3's
 "nothing flags it". It flags the *unapplied* case, not the *double-charge*
-case, and it is not on `main` yet.
+case, and it is on `main` now that PR #8 has merged. *Previously read "not on
+`main` yet".*
 
 ---
 
@@ -667,7 +700,7 @@ built" is **not fully accurate**, checked today:
   reconciliation control) exists, so its own rows are all still open.
 - **Week 4** — merged to `main` (PR #6, 2026-08-05), including the
   auto-disclosure chain this capstone depends on.
-- **Week 5** — built and CI-green on PR #8, **not merged**. A showcase must not
+- **Week 5** — built, CI-green and **merged** (PR #8, 2026-08-05). A showcase must not
   present tokenization as delivered while it sits on an open branch.
 
 A showcase that just repeats "Weeks 3/6/7 are specs" would understate real,

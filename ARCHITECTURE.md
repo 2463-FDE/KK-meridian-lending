@@ -18,7 +18,7 @@ production — there is no production environment.
 | **Deferred** | Deliberately not built. A decision, not an oversight — usually recorded in an ADR, `docs/ROADMAP.md`, or `docs/DEBT.md`. |
 | **Not production-ready** | Code exists and may pass tests, but a known defect, missing control, or missing operational requirement makes it unsafe to run for real. |
 | **Fixed in PR #6** | Was a defect; the fix is on `kalab-week4-disclosure-automation` with a test that fails without it. |
-| **Still open for PR #8** | A known defect or gap that PR #6 deliberately did not close. |
+| **Closed by PR #8** | A defect PR #6 deliberately did not close, and PR #8 did (merged 2026-08-05). The label read "Still open for PR #8" while that was true. |
 
 Scope limit: this repo is a **local training/demo build**. Nothing here is an assertion of
 regulatory compliance. Where a regulation is named (TILA/Reg Z, ECOA, BSA/CIP, PCI-DSS) it

@@ -30,7 +30,7 @@ which a merge to `main` erases. Hence the gate below.
 | # | Step | Verified by |
 |---|---|---|
 | 1 | PR #11 merged: `last4` back-filled, servicing reads `last4` first and falls back to `pan` only for pre-`0029` rows | `db/tests/test_expand_contract_pan_cvv.py`, `services/servicing-service/tests/test_pan_mask.py` |
-| 2 | PR #11 **deployed everywhere**. Not merged — deployed. No instance may still be serving the pre-cutover image | operator; see below |
+| 2 | PR #11 **deployed everywhere** — merging it is not sufficient, the image must be running. No instance may still be serving the pre-cutover build | operator; see below |
 | 3 | ~~Seed writers removed~~ — **already done, no action.** `db/init/002_seed.sql` and `db/init/003_seed_bulk.sql` insert only `last4`/`brand`, and the seeded audit row reads `charge req last4=1111`. A fresh database no longer reintroduces card data | read the two seed files; `db/tests/test_expand_contract_pan_cvv.py` |
 | 4 | Source check passes | `python db/tools/check_no_pan_readers.py` |
 | 5 | Run `0031` with the acknowledgement set | the migration's own gate |

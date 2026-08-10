@@ -14,7 +14,7 @@ never resolved: "Are we *sure* about storing CVV?"
 Week 5's client brief (Dana): "let customers pay online — just add a payment
 form," dismissing three "charged twice" tickets as customer confusion.
 Verified directly against the code, not the framing: the double-charge was
-real (fixed separately — idempotency, see `specs/0001-...md` Part 1). The
+real (fixed separately — idempotency, see `specs/0001-online-payments-idempotency-tokenization.md` Part 1). The
 PAN/CVV storage ADR 0003 accepted was never revisited, and turned out to be
 the same shape of problem as ADR 0003's own unresolved reviewer question:
 

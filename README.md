@@ -21,7 +21,7 @@ Halcyon Software Group (now dissolved) as **three** backend services — `gatewa
 > card rails. Capability claims in this README and in `ARCHITECTURE.md` use the status
 > labels defined in [ARCHITECTURE.md § Status legend](ARCHITECTURE.md#status-legend)
 > (Implemented and tested / Local/training-only / Deferred / Not production-ready / Fixed
-> in PR #6 / Still open for PR #8). Naming a regulation identifies the rule a control is
+> in PR #6 / Closed by PR #8). Naming a regulation identifies the rule a control is
 > modelled on, not a compliance status.
 
 This is a brownfield monorepo: a **Loan Origination System (LOS)** and a **Loan Servicing
