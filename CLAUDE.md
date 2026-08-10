@@ -40,9 +40,18 @@ was never my problem; **sitting** was. A PR that is ready to merge gets merged t
 ### Every citation resolves
 Before I cite a document, it is committed. A citation that does not resolve is a broken claim.
 
-Two live examples, both verified rather than assumed. `kal_docs/` holds my private notes,
+Two examples, both verified rather than assumed. `kal_docs/` holds my private notes,
 including a `ROADMAP.md` that is **not** the tracked `docs/ROADMAP.md` — a reviewer already
-mistook one for the other, so it is gitignored now. And `docs/ROADMAP.md` currently cites
-`DEBT.md` D5c, which exists only on PR #16's branch; that is why #16 merges first. The
-review copy of this rule cited `kal_docs/10_WEEK_PLAN.md` as the example — that file has
-never existed in this repository, on any branch, so the example itself did not resolve.
+mistook one for the other, so it is gitignored now. The review copy of this rule cited
+`kal_docs/10_WEEK_PLAN.md` as its example — that file has never existed in this repository,
+on any branch, so the example itself did not resolve, which is the rule failing on the page
+that states it.
+
+The second example has since expired, and saying so is the point. This section used to read
+"`docs/ROADMAP.md` currently cites `DEBT.md` D5c, which exists only on PR #16's branch; that
+is why #16 merges first." PR #16 merged on 2026-08-10, so D5c is on `main` and that
+dependency is gone. A merge-order instruction that outlives its reason is the same defect as
+a stale citation: it makes future work carry a constraint nothing enforces any more.
+
+`db/tests/test_docs_citations_resolve.py` now checks this mechanically — every cited path
+must resolve, and no document may describe a merged PR as open.
