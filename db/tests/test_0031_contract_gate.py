@@ -625,13 +625,35 @@ def test_a_statically_known_fstring_substitution_is_resolved(tmp_path):
     assert hits, "an f-string substituting a known column name was reported clean"
 
 
-def test_a_runtime_substitution_remains_a_hole(tmp_path):
-    """The boundary: an unknown value is not guessed at."""
+def test_a_runtime_substitution_in_the_projection_fails_closed(tmp_path):
+    """Superseded expectation, corrected.
+
+    This used to assert that `execute(f"SELECT {column} FROM payments")` was
+    clean, on the grounds that the hole was not a known column. Review on PR #15
+    called that out: the runtime query can select anything, so a hole in the
+    PROJECTION is an unresolved statement, not a clean one. A hole in a value
+    position -- `WHERE id = {loan_id}` -- is still fine and is covered
+    separately.
+    """
     hits = _run_checker_over(tmp_path, (
         "def read(conn, column):\n"
         '    return conn.execute(f"SELECT {column} FROM payments")\n'
     ))
-    assert hits == [], f"a runtime value was treated as if it were known: {hits}"
+    assert hits, "an unresolved projection reaching execute() was reported clean"
+    assert any("unresolved dynamic SQL" in h[3] for h in hits), hits
+
+
+def test_a_runtime_value_in_a_where_clause_is_still_clean(tmp_path):
+    """Ordinary parameterised SQL must not be refused.
+
+    Failing closed on every hole would refuse most legitimate queries here and
+    leave the checker permanently red.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn, loan_id):\n"
+        '    return conn.execute(f"SELECT last4 FROM payments WHERE id = {loan_id}")\n'
+    ))
+    assert hits == [], f"parameterised SQL was flagged: {hits}"
 
 
 def test_a_statically_known_substitution_of_an_allowed_column_passes(tmp_path):
@@ -760,3 +782,87 @@ def test_each_execution_is_evaluated_at_its_own_program_point(tmp_path):
     ))
     assert hits, "the second execution's read of pan was missed"
     assert all(h[1] == 5 for h in hits), f"the clean first call was flagged too: {hits}"
+
+
+def test_an_unresolved_fstring_field_fails_closed(tmp_path):
+    """A hole in SQL that reaches the database is unresolved, not clean.
+
+    `f"SELECT {column} FROM payments"` folded to `SELECT ? FROM payments` --
+    a string with no column name, which read as clean while the runtime query
+    could select anything. Consistent with `.format()`. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn, column):\n"
+        '    return conn.execute(f"SELECT {column} FROM payments")\n'
+    ))
+    assert hits, "an unresolved f-string field reaching execute() was reported clean"
+    assert any("unresolved dynamic SQL" in h[3] for h in hits), hits
+
+
+def test_a_conditional_rebinding_is_not_assumed_to_have_run(tmp_path):
+    """One branch must not clear a query built from the other.
+
+    `COL = "pan"; if migrated: COL = "last4"; execute(...)` reads pan whenever
+    the branch does not run, and walking the body as though it always did
+    cleared it. Rather than model both branches -- the control-flow analysis
+    this tool does not do -- the name becomes uncertain and the query fails
+    closed. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn, migrated):\n"
+        '    COL = "pan"\n'
+        "    if migrated:\n"
+        '        COL = "last4"\n'
+        '    return conn.execute("SELECT " + COL + " FROM payments")\n'
+    ))
+    assert hits, "a conditionally rebound name cleared a live read"
+
+
+def test_an_unconditional_rebinding_still_resolves(tmp_path):
+    """The uncertainty is about branches, not about assignment in general."""
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn):\n"
+        '    COL = "pan"\n'
+        '    COL = "last4"\n'
+        '    return conn.execute("SELECT " + COL + " FROM payments")\n'
+    ))
+    assert hits == [], f"a straight-line rebinding was treated as uncertain: {hits}"
+
+
+def test_an_orm_construct_built_in_a_branch_is_not_dynamic_sql(tmp_path):
+    """A name that was never a SQL string stays opaque.
+
+    `stmt = select(...)` refined inside an `if` is a query construct, not string
+    assembly; failing closed on it would refuse every ORM statement in the
+    repository and leave the checker permanently red.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(session, status):\n"
+        "    stmt = select(Loan)\n"
+        "    if status:\n"
+        "        stmt = stmt.where(Loan.status == status)\n"
+        "    return session.execute(stmt).all()\n"
+    ))
+    assert hits == [], f"an ORM construct was reported as dynamic SQL: {hits}"
+
+
+def test_no_source_file_contains_a_control_character_escape():
+    """A literal U+0008 where `\b` was intended silently disables a pattern.
+
+    This has happened twice in this tool -- once in the unit pattern, once in
+    the FROM boundary -- both times because an escape was written through a
+    shell heredoc that interpreted it. The symptom is invisible: the regex still
+    compiles, matches nothing, and the checker reports clean. Cheap to assert
+    mechanically, so it is asserted here rather than noticed later.
+    """
+    for path in [
+        REPO_ROOT / "db" / "tools" / "check_no_pan_readers.py",
+        REPO_ROOT / "db" / "tests" / "test_0031_contract_gate.py",
+    ]:
+        raw = path.read_bytes()
+        for code in (0x08, 0x00, 0x0C, 0x1B):
+            assert bytes([code]) not in raw, (
+                f"{path.name} contains a raw control character 0x{code:02x} -- "
+                f"almost certainly an escape sequence that was interpreted "
+                f"instead of written literally"
+            )

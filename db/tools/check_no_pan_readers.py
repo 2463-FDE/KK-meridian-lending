@@ -361,6 +361,43 @@ def _check_expression(node, names, doc_nodes, hits) -> None:
         hits[(node.lineno, excerpt[:160])] = None
 
 
+def _has_unresolved_field(node, names) -> bool:
+    """An f-string with a substitution this checker cannot resolve.
+
+    `f"SELECT {column} FROM payments"` folds to `SELECT ? FROM payments` --
+    a string with no column name in it, which read as clean. Consistent with
+    `.format()`, a hole in SQL that actually reaches the database is an
+    unresolved statement, not a clean one. Reviewed on PR #15.
+    """
+    if not isinstance(node, ast.JoinedStr):
+        return False
+
+    # Only a hole in the PROJECTION matters -- the part that chooses columns.
+    # `f"SELECT last4 FROM payments WHERE id = {loan_id}"` is ordinary
+    # parameterised SQL: the hole is a value, it cannot name a column, and
+    # failing closed on it would refuse most legitimate queries in the
+    # repository. `f"SELECT {column} FROM payments"` is the risky shape,
+    # because the hole IS the column list.
+    rendered = []
+    hole_positions = []
+    for value in node.values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            rendered.append(value.value)
+        elif isinstance(value, ast.FormattedValue):
+            resolved = _fold(value.value, names)
+            if resolved is None:
+                hole_positions.append(sum(len(r) for r in rendered))
+                rendered.append(_RUNTIME_HOLE)
+            else:
+                rendered.append(resolved)
+    if not hole_positions:
+        return False
+    text = "".join(rendered)
+    match = re.search(r"\bfrom\b", text, re.IGNORECASE)
+    boundary = match.start() if match else len(text)
+    return any(pos < boundary for pos in hole_positions)
+
+
 def _looks_like_built_sql(node) -> bool:
     """Whether this argument is a STRING being assembled, as opposed to an
     opaque name.
@@ -402,6 +439,9 @@ def _check_execution(node, names, hits, params=frozenset(), unresolved=frozenset
         return
 
     first = node.args[0]
+    if _has_unresolved_field(first, names) and attr in _FAIL_CLOSED_CALLS:
+        hits[(node.lineno, f"unresolved dynamic SQL passed to {attr}()")] = None
+        return
     text = _fold(first, names)
     if text is None:
         # A pass-through wrapper -- `def query(sql, params): cur.execute(sql)` --
@@ -424,6 +464,21 @@ def _check_execution(node, names, hits, params=frozenset(), unresolved=frozenset
     if _SQL_CONTEXT.search(text) and _BARE_COLUMN.search(text):
         label = f"{first.id} = {text.strip()[:140]}" if isinstance(first, ast.Name) else text.strip()[:160]
         hits[(node.lineno, label)] = None
+
+
+def _names_assigned_in(body) -> set:
+    """Names any statement in `body` binds, however deeply nested."""
+    assigned = set()
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        assigned.add(target.id)
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                if isinstance(node.target, ast.Name):
+                    assigned.add(node.target.id)
+    return assigned
 
 
 def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), unresolved=None):
@@ -459,14 +514,46 @@ def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), u
             if isinstance(node, _SCOPES):
                 nested.append((node, dict(names)))
 
-        # Bodies that run in this same scope: their statements continue the
-        # same binding sequence.
+        # Bodies that run in this same scope.
+        #
+        # A `with` block runs unconditionally, so its statements continue the
+        # same binding sequence. An `if`/`for`/`while`/`try` body MIGHT not run,
+        # and assuming it did was the reviewed defect:
+        #
+        #     COL = "pan"
+        #     if migrated: COL = "last4"
+        #     execute(f"SELECT {COL} FROM payments")   # reads pan when False
+        #
+        # Rather than model both branches -- that is the control-flow analysis
+        # this tool deliberately does not do -- a name a conditional body
+        # rebinds becomes UNCERTAIN afterwards: dropped from the bindings and
+        # marked unresolved, so a query built from it fails closed instead of
+        # being cleared by one branch. Reviewed on PR #15.
+        conditional = isinstance(stmt, (ast.If, ast.For, ast.While, ast.Try, ast.AsyncFor))
         for field in ("body", "orelse", "finalbody"):
             inner = getattr(stmt, field, None)
-            if isinstance(inner, list) and not isinstance(stmt, _SCOPES):
-                _walk_statements(inner, names, doc_nodes, hits, nested, params, unresolved)
+            if not isinstance(inner, list) or isinstance(stmt, _SCOPES):
+                continue
+            branch_names = dict(names) if conditional else names
+            branch_unresolved = set(unresolved) if conditional else unresolved
+            _walk_statements(inner, branch_names, doc_nodes, hits, nested, params, branch_unresolved)
+            if conditional:
+                for name in _names_assigned_in(inner):
+                    # Only names that ARE resolvable SQL strings -- before the
+                    # branch or inside it. A name that was never a string is
+                    # opaque (a SQLAlchemy construct, a cursor), and calling it
+                    # "unresolved dynamic SQL" would refuse every ORM statement
+                    # in the repository.
+                    if name in names or name in branch_names:
+                        names.pop(name, None)
+                        unresolved.add(name)
         for handler in getattr(stmt, "handlers", []) or []:
-            _walk_statements(handler.body, names, doc_nodes, hits, nested, params, unresolved)
+            branch_names = dict(names)
+            _walk_statements(handler.body, branch_names, doc_nodes, hits, nested, params, set(unresolved))
+            for name in _names_assigned_in(handler.body):
+                if name in names or name in branch_names:
+                    names.pop(name, None)
+                    unresolved.add(name)
 
         # ...then this statement's own effect on the bindings.
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
