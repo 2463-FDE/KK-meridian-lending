@@ -866,3 +866,86 @@ def test_no_source_file_contains_a_control_character_escape():
                 f"almost certainly an escape sequence that was interpreted "
                 f"instead of written literally"
             )
+
+
+def test_unresolved_sql_reaching_db_query_fails_closed(tmp_path):
+    """`db.query` is the raw-SQL entry point in this repository.
+
+    Fail-closed covered `execute` only, so the path most queries here actually
+    take was exempt. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(db, column):\n"
+        '    return db.query(f"SELECT {column} FROM payments")\n'
+    ))
+    assert hits, "unresolved SQL via db.query was reported clean"
+    assert any("unresolved dynamic SQL" in h[3] for h in hits), hits
+
+
+def test_unresolved_sql_on_another_table_does_not_block_the_drop(tmp_path):
+    """Fail-closed is about the table whose columns are being dropped.
+
+    An unresolved projection over `applications` cannot read payments.pan, and
+    refusing it would block this migration over a query with nothing to do with
+    it. This repository builds several projections from cross-module constants,
+    which are out of this tool's reach by design.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(db, fields):\n"
+        '    return db.query(f"SELECT {fields} FROM applications WHERE id = %s", (1,))\n'
+    ))
+    assert hits == [], f"an unrelated table's query blocked the drop: {hits}"
+
+
+def test_a_projection_joined_from_a_literal_tuple_is_resolved(tmp_path):
+    """How every projection in this repository is actually built."""
+    legacy = _run_checker_over(tmp_path, (
+        'COLUMNS = ("id", "pan", "last4")\n'
+        'FIELDS = ", ".join(COLUMNS)\n'
+        "\n"
+        "def read(db):\n"
+        '    return db.query(f"SELECT {FIELDS} FROM payments")\n'
+    ))
+    assert legacy, "a projection joined from a tuple containing pan was reported clean"
+
+    clean = _run_checker_over(tmp_path, (
+        'COLUMNS = ("id", "last4", "brand")\n'
+        'FIELDS = ", ".join(COLUMNS)\n'
+        "\n"
+        "def read(db):\n"
+        '    return db.query(f"SELECT {FIELDS} FROM payments")\n'
+    ))
+    assert clean == [], f"a clean joined projection was flagged: {clean}"
+
+
+def test_an_expression_inside_a_branch_is_judged_with_that_branch_state(tmp_path):
+    """The initial walk must not evaluate nested bodies with outer bindings.
+
+    Walking a statement's own expressions used to descend into its `if` body,
+    so those expressions were judged twice -- once against the bindings from
+    BEFORE the branch. Reviewed on PR #15.
+    """
+    hits = _run_checker_over(tmp_path, (
+        "def read(conn, flag):\n"
+        '    COL = "last4"\n'
+        "    if flag:\n"
+        '        COL = "pan"\n'
+        '        conn.execute("SELECT " + COL + " FROM payments")\n'
+    ))
+    assert hits, "a read inside a branch was judged with pre-branch bindings"
+    assert all(h[1] == 5 for h in hits), f"reported at the wrong line: {hits}"
+
+
+def test_a_nested_function_does_not_rely_on_a_later_rebinding(tmp_path):
+    """A closure reads its outer name when it RUNS, not when it is defined."""
+    hits = _run_checker_over(tmp_path, (
+        "def outer(conn):\n"
+        '    COL = "last4"\n'
+        "\n"
+        "    def inner():\n"
+        '        return conn.execute("SELECT " + COL + " FROM payments")\n'
+        "\n"
+        '    COL = "pan"\n'
+        "    return inner\n"
+    ))
+    assert hits, "a closure was cleared by the binding at its definition point"

@@ -104,7 +104,11 @@ _BARE_COLUMN = re.compile(r"\b(pan|cvv)\b", re.IGNORECASE)
 # Fail-closed applies to RAW SQL execution only. `.scalar()`/`.fetchall()` on a
 # SQLAlchemy construct receive an ORM object, not a string, and reporting those
 # as "unresolved SQL" is noise rather than a finding.
-_FAIL_CLOSED_CALLS = {"execute", "executemany", "executescript"}
+# The table this migration drops columns from. Unresolved SQL matters only
+# where it could reach that table.
+_TARGET_TABLE = re.compile(r"\bpayments\b", re.IGNORECASE)
+
+_FAIL_CLOSED_CALLS = {"execute", "executemany", "executescript", "query"}
 
 _EXECUTE_CALLS = {
     "execute", "executemany", "executescript", "query", "fetch", "fetchone",
@@ -160,6 +164,27 @@ def _docstring_lines(source: str) -> set[int]:
             end = getattr(first, "end_lineno", first.lineno)
             lines.update(range(first.lineno, end + 1))
     return lines
+
+
+# Names bound to a literal tuple/list of strings, for the file being scanned.
+# Populated per file; a projection built by joining one of these is statically
+# known, which is the whole point of resolving it.
+_SEQUENCES: dict[str, list] = {}
+
+
+def _collect_sequences(tree: ast.AST) -> dict:
+    found = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+            if isinstance(target, ast.Name) and isinstance(value, (ast.Tuple, ast.List)):
+                if value.elts and all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    for e in value.elts
+                ):
+                    found[target.id] = list(value.elts)
+    return found
 
 
 def _docstring_nodes(tree: ast.AST) -> set[int]:
@@ -272,12 +297,22 @@ def _fold(node: ast.AST, names: dict[str, str], depth: int = 0) -> str | None:
                     # A template this checker cannot fill is one it must not
                     # pretend to have read.
                     return None
-            # "".join([...]) of static parts
+            # `", ".join(...)` over a literal sequence, or over a name bound to
+            # one. `_OFFER_FIELDS = ", ".join(_OFFER_COLUMNS)` is how every
+            # projection in this repository is built, and leaving it unresolved
+            # made each of those queries fail closed for no reason.
             parts = []
             for arg in node.args:
-                for element in getattr(arg, "elts", []):
+                elements = getattr(arg, "elts", None)
+                if elements is None and isinstance(arg, ast.Name):
+                    elements = _SEQUENCES.get(arg.id)
+                if not elements:
+                    return None
+                for element in elements:
                     piece = _fold(element, names, depth + 1)
-                    parts.append(piece if piece is not None else _RUNTIME_HOLE)
+                    if piece is None:
+                        return None
+                    parts.append(piece)
             sep = _fold(func.value, names, depth + 1) or ""
             return sep.join(parts) if parts else None
         return None
@@ -339,12 +374,28 @@ def _bindings_for_scope(scope: ast.AST, inherited: dict[str, str]) -> dict[str, 
     return names
 
 
+_BODY_FIELDS = ("body", "orelse", "finalbody", "handlers")
+
+
 def _expressions_of(stmt):
-    """Every expression node in one statement, not entering a nested scope."""
-    for node in ast.walk(stmt):
-        if isinstance(node, _SCOPES) and node is not stmt:
-            continue
+    """This statement's OWN expressions.
+
+    Does not enter nested scopes, and does not enter nested statement bodies
+    either: an `if` body is walked separately, in order, with the bindings that
+    hold there. Walking it from here evaluated its expressions against the
+    bindings from BEFORE the branch -- so the same expression was judged twice,
+    once against the wrong state. Reviewed on PR #15.
+    """
+    stack = [stmt]
+    while stack:
+        node = stack.pop()
         yield node
+        for field, value in ast.iter_fields(node):
+            if field in _BODY_FIELDS and node is stmt:
+                continue
+            for child in (value if isinstance(value, list) else [value]):
+                if isinstance(child, ast.AST) and not isinstance(child, _SCOPES):
+                    stack.append(child)
 
 
 def _check_expression(node, names, doc_nodes, hits) -> None:
@@ -440,7 +491,14 @@ def _check_execution(node, names, hits, params=frozenset(), unresolved=frozenset
 
     first = node.args[0]
     if _has_unresolved_field(first, names) and attr in _FAIL_CLOSED_CALLS:
-        hits[(node.lineno, f"unresolved dynamic SQL passed to {attr}()")] = None
+        # Only if it could touch the table whose columns are being dropped. An
+        # unresolved projection over `applications` cannot read payments.pan,
+        # and refusing it would block the migration over a query that has
+        # nothing to do with it -- this repo builds several such projections
+        # from cross-module constants, which are out of this tool's reach by
+        # design.
+        if _TARGET_TABLE.search(_fold(first, names) or ""):
+            hits[(node.lineno, f"unresolved dynamic SQL passed to {attr}()")] = None
         return
     text = _fold(first, names)
     if text is None:
@@ -497,9 +555,17 @@ def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), u
     """
     if unresolved is None:
         unresolved = set()
-    for stmt in body:
+    for index, stmt in enumerate(body):
         if isinstance(stmt, _SCOPES):
-            nested.append((stmt, dict(names)))
+            # A closure reads its outer name when it RUNS, not when it is
+            # defined, so a rebinding later in the enclosing scope is what the
+            # body may actually see. Names the parent rebinds after this point
+            # are therefore withheld rather than frozen at their current value.
+            # Reviewed on PR #15.
+            snapshot = dict(names)
+            for later in _names_assigned_in(body[index + 1:]):
+                snapshot.pop(later, None)
+            nested.append((stmt, snapshot))
             continue
 
         for node in _expressions_of(stmt):
@@ -610,8 +676,11 @@ def _sql_literal_hits(source: str) -> list[tuple[int, str]]:
     except SyntaxError:
         return []
 
+    global _SEQUENCES
+    _SEQUENCES = _collect_sequences(tree)
     hits: dict[tuple[int, str], None] = {}
     _scan_scope(tree, {}, _docstring_nodes(tree), hits)
+    _SEQUENCES = {}
     return sorted(hits)
 
 
