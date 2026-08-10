@@ -1,120 +1,132 @@
 building 10000 applicants in schema graph_bench ...
+run_id: 2026-08-10T16:23Z-rows10000-depth5-root1
 
 one-off build costs (NOT part of any per-query timing below)
-  identity_attr :    0.238 s  (40140 rows)
-  edges         :    2.317 s  (553928 rows)
+  identity_attr :    0.325 s  (40140 rows)
+  edges         :    4.713 s  (553928 rows)
 
  depth     frontier-attr      materialized       global-edge
 ------------------------------------------------------------
-     1            0.00 s            0.00 s            0.56 s
-     2            0.02 s            0.01 s            0.57 s
-     3            0.03 s            0.01 s            0.66 s
-     4            0.06 s            0.02 s            0.67 s
-     5            0.15 s            0.04 s            0.81 s
+     1            0.03 s            0.00 s            1.57 s
+     2            0.01 s            0.00 s            1.15 s
+     3            0.04 s            0.02 s            0.89 s
+     4            0.10 s            0.03 s            0.77 s
+     5            0.28 s            0.08 s            1.28 s
 
 unbounded (no depth bound -- terminates when the component is exhausted)
-     frontier-attr :    0.406 s  (10000 applicants)
-      materialized :    0.136 s  (10000 applicants)
+     frontier-attr :    0.978 s  (10000 applicants)
+      materialized :    0.546 s  (10000 applicants)
+
+unbounded WITH the connecting path (frontier/visited, one predecessor per applicant)
+  walk (one predecessor each) :    0.929 s  (10000 applicants, 12 levels, max depth 12)
+  path reconstruction        :    0.492 s  (9999 routes)
+  validated                  : 205 sampled, 0 invalid
 
 EXPLAIN (ANALYZE, BUFFERS) -- frontier-attr at depth 5:
 
-    Aggregate  (cost=643.38..643.39 rows=1 width=8) (actual time=175.830..175.835 rows=1 loops=1)
-      Buffers: shared hit=201873, temp read=204 written=205
+
+    NOTE: frontier-attr scans the materialized walk CTE 1 time(s) (271 rows per scan). MATERIALIZED prevents REBUILDING it, not rescanning it -- this candidate is not a one-time adjacency cost.
+    Aggregate  (cost=1596.53..1596.54 rows=1 width=8) (actual time=418.930..418.934 rows=1 loops=1)
+      Buffers: shared hit=201873
       CTE walk
-        ->  Recursive Union  (cost=0.00..624.92 rows=281 width=8) (actual time=0.003..173.271 rows=5936 loops=1)
-              Buffers: shared hit=201873, temp read=204 written=205
-              ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.002 rows=1 loops=1)
-              ->  Unique  (cost=62.00..62.21 rows=28 width=8) (actual time=24.648..28.482 rows=989 loops=6)
-                    Buffers: shared hit=201873, temp read=204 written=205
-                    ->  Sort  (cost=62.00..62.07 rows=28 width=8) (actual time=24.508..26.497 rows=28467 loops=6)
-                          Sort Key: x2.applicant_id, ((w.depth + 1))
-                          Sort Method: quicksort  Memory: 25kB
-                          Buffers: shared hit=201873, temp read=204 written=205
-                          ->  Nested Loop  (cost=4.61..61.33 rows=28 width=8) (actual time=0.049..17.986 rows=28467 loops=6)
-                                Join Filter: (x2.applicant_id <> w.id)
-                                Rows Removed by Join Filter: 2048
+        ->  Recursive Union  (cost=0.00..1578.80 rows=271 width=8) (actual time=0.006..412.825 rows=5936 loops=1)
+              Buffers: shared hit=201873
+              ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.003..0.003 rows=1 loops=1)
+              ->  Nested Loop  (cost=52.30..157.61 rows=27 width=8) (actual time=0.123..60.929 rows=27674 loops=6)
+                    Buffers: shared hit=201873
+                    ->  WorkTable Scan on walk w  (cost=0.00..0.22 rows=3 width=8) (actual time=0.024..0.194 rows=499 loops=6)
+                          Filter: (depth < 5)
+                          Rows Removed by Filter: 491
+                    ->  Unique  (cost=52.30..52.35 rows=9 width=4) (actual time=0.094..0.112 rows=55 loops=2992)
+                          Buffers: shared hit=201873
+                          ->  Sort  (cost=52.30..52.33 rows=9 width=4) (actual time=0.092..0.097 rows=57 loops=2992)
+                                Sort Key: x2.applicant_id
+                                Sort Method: quicksort  Memory: 25kB
                                 Buffers: shared hit=201873
-                                ->  Nested Loop  (cost=4.32..56.96 rows=12 width=24) (actual time=0.040..2.957 rows=2048 loops=6)
-                                      Buffers: shared hit=18260
-                                      ->  WorkTable Scan on walk w  (cost=0.00..0.22 rows=3 width=8) (actual time=0.016..0.089 rows=499 loops=6)
-                                            Filter: (depth < 5)
-                                            Rows Removed by Filter: 491
-                                      ->  Bitmap Heap Scan on identity_attr x1  (cost=4.32..18.87 rows=4 width=20) (actual time=0.003..0.004 rows=4 loops=2992)
+                                ->  Nested Loop  (cost=4.61..52.16 rows=9 width=4) (actual time=0.019..0.082 rows=57 loops=2992)
+                                      Buffers: shared hit=201873
+                                      ->  Bitmap Heap Scan on identity_attr x1  (cost=4.32..18.87 rows=4 width=20) (actual time=0.009..0.013 rows=4 loops=2992)
                                             Recheck Cond: (applicant_id = w.id)
                                             Heap Blocks: exact=12276
                                             Buffers: shared hit=18260
-                                            ->  Bitmap Index Scan on identity_attr_applicant_id_idx  (cost=0.00..4.32 rows=4 width=0) (actual time=0.002..0.002 rows=4 loops=2992)
+                                            ->  Bitmap Index Scan on identity_attr_applicant_id_idx  (cost=0.00..4.32 rows=4 width=0) (actual time=0.005..0.005 rows=4 loops=2992)
                                                   Index Cond: (applicant_id = w.id)
                                                   Buffers: shared hit=5984
-                                ->  Index Scan using identity_attr_kind_value_idx on identity_attr x2  (cost=0.29..0.35 rows=1 width=20) (actual time=0.002..0.006 rows=15 loops=12288)
-                                      Index Cond: ((kind = x1.kind) AND (value = x1.value))
-                                      Buffers: shared hit=183613
-      ->  Sort  (cost=17.05..17.75 rows=281 width=4) (actual time=175.342..175.549 rows=5936 loops=1)
+                                      ->  Index Scan using identity_attr_kind_value_idx on identity_attr x2  (cost=0.29..8.31 rows=1 width=20) (actual time=0.005..0.013 rows=14 loops=12288)
+                                            Index Cond: ((kind = x1.kind) AND (value = x1.value))
+                                            Filter: (applicant_id <> x1.applicant_id)
+                                            Rows Removed by Filter: 1
+                                            Buffers: shared hit=183613
+      ->  Sort  (cost=16.37..17.05 rows=271 width=4) (actual time=418.227..418.511 rows=5936 loops=1)
             Sort Key: walk.id
             Sort Method: quicksort  Memory: 193kB
-            Buffers: shared hit=201873, temp read=204 written=205
-            ->  CTE Scan on walk  (cost=0.00..5.62 rows=281 width=4) (actual time=0.004..174.543 rows=5936 loops=1)
-                  Buffers: shared hit=201873, temp read=204 written=205
-    Planning Time: 0.434 ms
-    Execution Time: 176.236 ms
+            Buffers: shared hit=201873
+            ->  CTE Scan on walk  (cost=0.00..5.42 rows=271 width=4) (actual time=0.009..416.350 rows=5936 loops=1)
+                  Buffers: shared hit=201873
+    Planning Time: 0.814 ms
+    Execution Time: 419.771 ms
 
 EXPLAIN (ANALYZE, BUFFERS) -- materialized at depth 5:
 
-    Aggregate  (cost=451.52..451.53 rows=1 width=8) (actual time=81.040..81.045 rows=1 loops=1)
-      Buffers: shared hit=12692
+
+    NOTE: materialized scans the materialized walk CTE 1 time(s) (1671 rows per scan). MATERIALIZED prevents REBUILDING it, not rescanning it -- this candidate is not a one-time adjacency cost.
+    Aggregate  (cost=453.32..453.33 rows=1 width=8) (actual time=191.041..191.046 rows=1 loops=1)
+      Buffers: shared hit=13074
       CTE walk
-        ->  Recursive Union  (cost=0.00..321.14 rows=1661 width=8) (actual time=0.003..77.098 rows=5936 loops=1)
-              Buffers: shared hit=12692
-              ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.002 rows=1 loops=1)
-              ->  Nested Loop  (cost=0.42..30.45 rows=166 width=8) (actual time=0.029..8.261 rows=27674 loops=6)
-                    Buffers: shared hit=12692
-                    ->  WorkTable Scan on walk w  (cost=0.00..0.22 rows=3 width=8) (actual time=0.023..0.116 rows=499 loops=6)
+        ->  Recursive Union  (cost=0.00..322.09 rows=1671 width=8) (actual time=0.006..180.362 rows=5936 loops=1)
+              Buffers: shared hit=13074
+              ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.003..0.003 rows=1 loops=1)
+              ->  Nested Loop  (cost=0.42..30.54 rows=167 width=8) (actual time=0.043..19.133 rows=27674 loops=6)
+                    Buffers: shared hit=13074
+                    ->  WorkTable Scan on walk w  (cost=0.00..0.22 rows=3 width=8) (actual time=0.031..0.190 rows=499 loops=6)
                           Filter: (depth < 5)
                           Rows Removed by Filter: 491
-                    ->  Index Scan using edges_src_idx on edges e  (cost=0.42..9.39 rows=55 width=8) (actual time=0.003..0.010 rows=55 loops=2992)
+                    ->  Index Scan using edges_src_idx on edges e  (cost=0.42..9.41 rows=56 width=8) (actual time=0.006..0.025 rows=55 loops=2992)
                           Index Cond: (src = w.id)
-                          Buffers: shared hit=12692
-      ->  Sort  (cost=122.07..126.22 rows=1661 width=4) (actual time=80.297..80.606 rows=5936 loops=1)
+                          Buffers: shared hit=13074
+      ->  Sort  (cost=122.87..127.05 rows=1671 width=4) (actual time=190.104..190.474 rows=5936 loops=1)
             Sort Key: walk.id
             Sort Method: quicksort  Memory: 193kB
-            Buffers: shared hit=12692
-            ->  CTE Scan on walk  (cost=0.00..33.22 rows=1661 width=4) (actual time=0.004..79.196 rows=5936 loops=1)
-                  Buffers: shared hit=12692
-    Planning Time: 0.156 ms
-    Execution Time: 81.378 ms
+            Buffers: shared hit=13074
+            ->  CTE Scan on walk  (cost=0.00..33.42 rows=1671 width=4) (actual time=0.008..188.030 rows=5936 loops=1)
+                  Buffers: shared hit=13074
+    Planning Time: 0.327 ms
+    Execution Time: 191.622 ms
 
 EXPLAIN (ANALYZE, BUFFERS) -- global-edge at depth 5:
 
-    Aggregate  (cost=298781.48..298781.49 rows=1 width=8) (actual time=1086.668..1086.679 rows=1 loops=1)
+
+    NOTE: global-edge scans the materialized edge_rel CTE 5 time(s) (609883 rows per scan). MATERIALIZED prevents REBUILDING it, not rescanning it -- this candidate is not a one-time adjacency cost.
+    Aggregate  (cost=298781.48..298781.49 rows=1 width=8) (actual time=1620.640..1620.663 rows=1 loops=1)
       Buffers: shared hit=71127, temp read=6095 written=2448
       CTE edge_rel
-        ->  Unique  (cost=137473.60..142047.72 rows=609883 width=8) (actual time=374.129..521.571 rows=553928 loops=1)
+        ->  Unique  (cost=137473.60..142047.72 rows=609883 width=8) (actual time=680.171..839.699 rows=553928 loops=1)
               Buffers: shared hit=71127, temp read=1223 written=1230
-              ->  Sort  (cost=137473.60..138998.31 rows=609883 width=8) (actual time=374.126..444.932 rows=553928 loops=1)
+              ->  Sort  (cost=137473.60..138998.31 rows=609883 width=8) (actual time=680.168..758.543 rows=553928 loops=1)
                     Sort Key: a.id, b.id
                     Sort Method: external merge  Disk: 9784kB
                     Buffers: shared hit=71127, temp read=1223 written=1230
-                    ->  Append  (cost=1.61..70528.91 rows=609883 width=8) (actual time=0.069..193.635 rows=553928 loops=1)
+                    ->  Append  (cost=1.61..70528.91 rows=609883 width=8) (actual time=0.144..385.916 rows=553928 loops=1)
                           Buffers: shared hit=71127
-                          ->  Nested Loop  (cost=1.61..60144.50 rows=109933 width=8) (actual time=0.068..90.538 rows=63928 loops=1)
+                          ->  Nested Loop  (cost=1.61..60144.50 rows=109933 width=8) (actual time=0.142..220.327 rows=63928 loops=1)
                                 Buffers: shared hit=71017
-                                ->  Seq Scan on applicants b  (cost=0.00..187.00 rows=10000 width=44) (actual time=0.018..0.855 rows=10000 loops=1)
+                                ->  Seq Scan on applicants b  (cost=0.00..187.00 rows=10000 width=44) (actual time=0.027..1.887 rows=10000 loops=1)
                                       Buffers: shared hit=87
-                                ->  Bitmap Heap Scan on applicants a  (cost=1.61..5.89 rows=11 width=44) (actual time=0.007..0.008 rows=6 loops=10000)
+                                ->  Bitmap Heap Scan on applicants a  (cost=1.61..5.89 rows=11 width=44) (actual time=0.017..0.018 rows=6 loops=10000)
                                       Recheck Cond: (((address IS NOT NULL) AND (address = b.address)) OR ((phone IS NOT NULL) AND (phone = b.phone)) OR ((email IS NOT NULL) AND (email = b.email)) OR ((ssn IS NOT NULL) AND (ssn = b.ssn)) OR ((ein IS NOT NULL) AND (ein = b.ein)))
                                       Filter: (id <> b.id)
                                       Rows Removed by Filter: 1
                                       Heap Blocks: exact=10650
                                       Buffers: shared hit=70930
-                                      ->  BitmapOr  (cost=1.61..1.61 rows=11 width=0) (actual time=0.006..0.006 rows=0 loops=10000)
+                                      ->  BitmapOr  (cost=1.61..1.61 rows=11 width=0) (actual time=0.015..0.015 rows=0 loops=10000)
                                             Buffers: shared hit=60280
-                                            ->  Bitmap Index Scan on applicants_address_idx  (cost=0.00..0.33 rows=3 width=0) (actual time=0.002..0.002 rows=3 loops=10000)
+                                            ->  Bitmap Index Scan on applicants_address_idx  (cost=0.00..0.33 rows=3 width=0) (actual time=0.004..0.004 rows=3 loops=10000)
                                                   Index Cond: ((address IS NOT NULL) AND (address = b.address))
                                                   Buffers: shared hit=20000
-                                            ->  Bitmap Index Scan on applicants_phone_idx  (cost=0.00..0.36 rows=7 width=0) (actual time=0.002..0.002 rows=7 loops=10000)
+                                            ->  Bitmap Index Scan on applicants_phone_idx  (cost=0.00..0.36 rows=7 width=0) (actual time=0.004..0.004 rows=7 loops=10000)
                                                   Index Cond: ((phone IS NOT NULL) AND (phone = b.phone))
                                                   Buffers: shared hit=20000
-                                            ->  Bitmap Index Scan on applicants_email_idx  (cost=0.00..0.31 rows=1 width=0) (actual time=0.002..0.002 rows=1 loops=10000)
+                                            ->  Bitmap Index Scan on applicants_email_idx  (cost=0.00..0.31 rows=1 width=0) (actual time=0.004..0.004 rows=1 loops=10000)
                                                   Index Cond: ((email IS NOT NULL) AND (email = b.email))
                                                   Buffers: shared hit=20000
                                             ->  Bitmap Index Scan on applicants_ssn_idx  (cost=0.00..0.30 rows=1 width=0) (actual time=0.000..0.000 rows=0 loops=10000)
@@ -123,47 +135,47 @@ EXPLAIN (ANALYZE, BUFFERS) -- global-edge at depth 5:
                                             ->  Bitmap Index Scan on applicants_ein_idx  (cost=0.00..0.30 rows=1 width=0) (actual time=0.000..0.000 rows=0 loops=10000)
                                                   Index Cond: ((ein IS NOT NULL) AND (ein = b.ein))
                                                   Buffers: shared hit=80
-                          ->  Hash Join  (cost=280.00..7335.00 rows=499950 width=8) (actual time=2.416..68.062 rows=490000 loops=1)
+                          ->  Hash Join  (cost=280.00..7335.00 rows=499950 width=8) (actual time=5.552..110.425 rows=490000 loops=1)
                                 Hash Cond: (ap1.employer = ap2.employer)
                                 Join Filter: (ap1.applicant_id <> ap2.applicant_id)
                                 Rows Removed by Join Filter: 10000
                                 Buffers: shared hit=110
-                                ->  Seq Scan on applications ap1  (cost=0.00..155.00 rows=10000 width=11) (actual time=0.045..1.649 rows=10000 loops=1)
+                                ->  Seq Scan on applications ap1  (cost=0.00..155.00 rows=10000 width=11) (actual time=0.071..3.446 rows=10000 loops=1)
                                       Filter: (employer IS NOT NULL)
                                       Buffers: shared hit=55
-                                ->  Hash  (cost=155.00..155.00 rows=10000 width=11) (actual time=2.269..2.269 rows=10000 loops=1)
+                                ->  Hash  (cost=155.00..155.00 rows=10000 width=11) (actual time=3.773..3.774 rows=10000 loops=1)
                                       Buckets: 16384  Batches: 1  Memory Usage: 553kB
                                       Buffers: shared hit=55
-                                      ->  Seq Scan on applications ap2  (cost=0.00..155.00 rows=10000 width=11) (actual time=0.006..0.777 rows=10000 loops=1)
+                                      ->  Seq Scan on applications ap2  (cost=0.00..155.00 rows=10000 width=11) (actual time=0.100..1.336 rows=10000 loops=1)
                                             Buffers: shared hit=55
       CTE walk
-        ->  Recursive Union  (cost=0.00..146908.16 rows=91481 width=8) (actual time=26.416..1083.522 rows=5936 loops=1)
+        ->  Recursive Union  (cost=0.00..146908.16 rows=91481 width=8) (actual time=63.796..1615.610 rows=5936 loops=1)
               Buffers: shared hit=71127, temp read=6095 written=2448
-              ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=26.409..26.409 rows=1 loops=1)
-              ->  Hash Join  (cost=0.26..14599.33 rows=9148 width=8) (actual time=62.791..171.268 rows=27674 loops=6)
+              ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=63.783..63.784 rows=1 loops=1)
+              ->  Hash Join  (cost=0.26..14599.33 rows=9148 width=8) (actual time=113.897..251.012 rows=27674 loops=6)
                     Hash Cond: (e.src = w.id)
                     Buffers: shared hit=71127, temp read=6095 written=2448
-                    ->  CTE Scan on edge_rel e  (cost=0.00..12197.66 rows=609883 width=8) (actual time=74.848..164.126 rows=553928 loops=5)
+                    ->  CTE Scan on edge_rel e  (cost=0.00..12197.66 rows=609883 width=8) (actual time=136.043..243.703 rows=553928 loops=5)
                           Buffers: shared hit=71127, temp read=6095 written=2448
-                    ->  Hash  (cost=0.22..0.22 rows=3 width=8) (actual time=0.399..0.399 rows=499 loops=6)
+                    ->  Hash  (cost=0.22..0.22 rows=3 width=8) (actual time=0.508..0.508 rows=499 loops=6)
                           Buckets: 2048 (originally 1024)  Batches: 1 (originally 1)  Memory Usage: 80kB
-                          ->  WorkTable Scan on walk w  (cost=0.00..0.22 rows=3 width=8) (actual time=0.255..0.302 rows=499 loops=6)
+                          ->  WorkTable Scan on walk w  (cost=0.00..0.22 rows=3 width=8) (actual time=0.369..0.413 rows=499 loops=6)
                                 Filter: (depth < 5)
                                 Rows Removed by Filter: 491
-      ->  Sort  (cost=9368.20..9596.90 rows=91481 width=4) (actual time=1086.211..1086.391 rows=5936 loops=1)
+      ->  Sort  (cost=9368.20..9596.90 rows=91481 width=4) (actual time=1619.507..1619.930 rows=5936 loops=1)
             Sort Key: walk.id
             Sort Method: quicksort  Memory: 193kB
             Buffers: shared hit=71127, temp read=6095 written=2448
-            ->  CTE Scan on walk  (cost=0.00..1829.62 rows=91481 width=4) (actual time=26.425..1085.122 rows=5936 loops=1)
+            ->  CTE Scan on walk  (cost=0.00..1829.62 rows=91481 width=4) (actual time=63.817..1617.762 rows=5936 loops=1)
                   Buffers: shared hit=71127, temp read=6095 written=2448
     Planning:
       Buffers: shared hit=12
-    Planning Time: 0.950 ms
+    Planning Time: 1.569 ms
     JIT:
       Functions: 48
       Options: Inlining false, Optimization false, Expressions true, Deforming true
-      Timing: Generation 3.769 ms, Inlining 0.000 ms, Optimization 0.691 ms, Emission 27.183 ms, Total 31.643 ms
-    Execution Time: 1095.689 ms
+      Timing: Generation 5.326 ms, Inlining 0.000 ms, Optimization 2.416 ms, Emission 63.593 ms, Total 71.335 ms
+    Execution Time: 1643.101 ms
 
-result artifact written to db/bench/results.json
+result artifact written to results.json
 Every timing published in adr/0009, kg.py and docs/ROADMAP.md must be transcribed from this file and no other run.

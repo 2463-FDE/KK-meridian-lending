@@ -99,6 +99,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import sys
 import time
 
@@ -138,16 +139,30 @@ EDGE_SQL = """
 # every identity attribute into one relation keeps all six edge kinds in a
 # single index-driven join and keeps this candidate's edge set identical to the
 # other two, which is the property that makes the comparison mean anything.
+# Neighbours are deduplicated PER FRONTIER NODE, inside a LATERAL, before the
+# recursion consumes them. `SELECT DISTINCT` on the recursive term was not
+# enough: it collapses the term's OUTPUT, so the walk returned the right answer
+# while the join underneath still emitted one row per shared attribute. Two
+# applicants who share both an address and a phone produced that transition
+# twice, and the committed plans showed it -- 9,419,712 recursive rows here
+# against 8,486,438 for the candidates walking `edges`, which collapses parallel
+# attributes with UNION. Three timings over three different transition sets are
+# three numbers that cannot be compared, which is the only thing this benchmark
+# exists to do. Reviewed on PR #12.
 FRONTIER_ATTR_SQL = """
 WITH RECURSIVE walk(id, depth) AS (
     SELECT %(root)s::int, 0
     UNION
-    SELECT DISTINCT x2.applicant_id, w.depth + 1
+    SELECT n.dst, w.depth + 1
       FROM walk w
-      JOIN identity_attr x1 ON x1.applicant_id = w.id
-      JOIN identity_attr x2 ON x2.kind = x1.kind
-                           AND x2.value = x1.value
-                           AND x2.applicant_id <> w.id
+      JOIN LATERAL (
+          SELECT DISTINCT x2.applicant_id AS dst
+            FROM identity_attr x1
+            JOIN identity_attr x2 ON x2.kind = x1.kind
+                                 AND x2.value = x1.value
+                                 AND x2.applicant_id <> x1.applicant_id
+           WHERE x1.applicant_id = w.id
+      ) n ON TRUE
      WHERE w.depth < %(max_depth)s
 )
 SELECT count(DISTINCT id) AS reached FROM walk
@@ -213,12 +228,16 @@ UNBOUNDED_ATTR_SQL = """
 WITH RECURSIVE walk(id) AS (
     SELECT %(root)s::int
     UNION
-    SELECT DISTINCT x2.applicant_id
+    SELECT n.dst
       FROM walk w
-      JOIN identity_attr x1 ON x1.applicant_id = w.id
-      JOIN identity_attr x2 ON x2.kind = x1.kind
-                           AND x2.value = x1.value
-                           AND x2.applicant_id <> w.id
+      JOIN LATERAL (
+          SELECT DISTINCT x2.applicant_id AS dst
+            FROM identity_attr x1
+            JOIN identity_attr x2 ON x2.kind = x1.kind
+                                 AND x2.value = x1.value
+                                 AND x2.applicant_id <> x1.applicant_id
+           WHERE x1.applicant_id = w.id
+      ) n ON TRUE
 )
 SELECT count(*) AS reached FROM walk
 """
@@ -262,7 +281,15 @@ DROP TABLE IF EXISTS bfs_visited;
 CREATE TABLE bfs_visited (
     applicant_id INT PRIMARY KEY,
     depth        INT NOT NULL,
-    parent       INT
+    parent       INT,
+    -- WHY this applicant was reached from that parent. Reviewed on PR #12: the
+    -- walk stored only the predecessor, so a reconstructed route was a list of
+    -- applicant IDs and could not say whether a hop shares a phone, an address
+    -- or an employer -- which is the part an investigator actually needs. Stored
+    -- on the visited row at the moment the edge is chosen, so no extra join is
+    -- needed later and the timing below includes the cost of keeping it.
+    via_kind     TEXT,
+    via_value    TEXT
 );
 CREATE INDEX ON bfs_visited (depth);
 """
@@ -273,8 +300,8 @@ BFS_SEED_SQL = "INSERT INTO bfs_visited (applicant_id, depth, parent) VALUES (%(
 # applicant; the NOT EXISTS is the visited set, so an applicant already reached
 # at a shallower depth is never re-expanded.
 BFS_STEP_SQL = """
-INSERT INTO bfs_visited (applicant_id, depth, parent)
-SELECT DISTINCT ON (e.dst) e.dst, %(depth)s + 1, e.src
+INSERT INTO bfs_visited (applicant_id, depth, parent, via_kind, via_value)
+SELECT DISTINCT ON (e.dst) e.dst, %(depth)s + 1, e.src, e.kind, e.value
   FROM edges e
   JOIN bfs_visited v ON v.applicant_id = e.src AND v.depth = %(depth)s
  WHERE NOT EXISTS (SELECT 1 FROM bfs_visited w WHERE w.applicant_id = e.dst)
@@ -284,17 +311,26 @@ SELECT DISTINCT ON (e.dst) e.dst, %(depth)s + 1, e.src
 # Every applicant's route back to the root, walked through the predecessor
 # column. Bounded by the sum of path lengths rather than by the number of
 # paths, which is the whole point of storing one predecessor.
+# Each route carries the applicant IDs AND the attribute traversed at every hop.
+# `hops[i]` is the attribute shared between `path[i]` and `path[i+1]`, so the two
+# arrays together read as "root --address--> B --phone--> target" rather than as
+# an unexplained list of integers.
 BFS_PATHS_SQL = """
-WITH RECURSIVE route(target, node, parent, path) AS (
-    SELECT applicant_id, applicant_id, parent, ARRAY[applicant_id]
+WITH RECURSIVE route(target, node, parent, path, hops) AS (
+    SELECT applicant_id, applicant_id, parent,
+           ARRAY[applicant_id],
+           ARRAY[via_kind || '=' || via_value]
       FROM bfs_visited
      WHERE parent IS NOT NULL
     UNION ALL
-    SELECT r.target, v.applicant_id, v.parent, v.applicant_id || r.path
+    SELECT r.target, v.applicant_id, v.parent,
+           v.applicant_id || r.path,
+           CASE WHEN v.via_kind IS NULL THEN r.hops
+                ELSE (v.via_kind || '=' || v.via_value) || r.hops END
       FROM route r
       JOIN bfs_visited v ON v.applicant_id = r.parent
 )
-SELECT target, path FROM route WHERE parent IS NULL
+SELECT target, path, hops FROM route WHERE parent IS NULL
 """
 
 CANDIDATES = [
@@ -364,8 +400,30 @@ CREATE INDEX ON identity_attr (applicant_id);
 ANALYZE identity_attr;
 """
 
-BUILD_EDGES_SQL = f"""
-CREATE TABLE edges AS {EDGE_SQL};
+# `edges` carries the ATTRIBUTE that justifies each transition, not just the pair.
+# An investigator's answer is "shares a phone with B, who shares an address with
+# C", so a path of bare applicant IDs does not answer the question adr/0009 asks.
+# Built from identity_attr's self-join rather than from the column predicates in
+# EDGE_SQL, so the labelled relation and the posting table are the same set BY
+# CONSTRUCTION -- EDGE_PARITY_SQL still checks it, in both directions, because a
+# construction argument is not evidence.
+#
+# DISTINCT ON keeps exactly one attribute per pair, chosen deterministically:
+# a pair sharing both an address and a phone is ONE edge, and it is labelled
+# 'address' on every run. Without the ordering the label would vary between runs
+# and the committed path artifact would not be reproducible. Reviewed on PR #12.
+BUILD_EDGES_SQL = """
+CREATE TABLE edges AS
+    SELECT DISTINCT ON (src, dst) src, dst, kind, value
+      FROM (
+        SELECT x1.applicant_id AS src, x2.applicant_id AS dst,
+               x1.kind AS kind, x1.value AS value
+          FROM identity_attr x1
+          JOIN identity_attr x2 ON x2.kind = x1.kind
+                               AND x2.value = x1.value
+                               AND x2.applicant_id <> x1.applicant_id
+      ) labelled
+     ORDER BY src, dst, kind, value;
 CREATE INDEX ON edges (src);
 ANALYZE edges;
 """
@@ -400,6 +458,27 @@ SELECT (SELECT count(*) FROM attr_edges),
 """
 
 
+class _Tee:
+    """Write to the console and to the transcript file at once.
+
+    So a single invocation produces both evidence artifacts and they cannot
+    disagree. Nothing clever: `write` and `flush` are the only interface `print`
+    needs.
+    """
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+        return len(data)
+
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
+
 def _server_settings(cur) -> dict:
     """The knobs that actually move these timings. Recorded so the ADR's
     revisit threshold is a number somebody can reproduce rather than a number
@@ -412,6 +491,30 @@ def _server_settings(cur) -> dict:
         cur.execute(f"SHOW {knob}")
         out[knob] = cur.fetchone()[0]
     return out
+
+
+_CTE_SCAN_RE = re.compile(
+    r"CTE Scan on (\w+).*?rows=(\d+).*?loops=(\d+)", re.IGNORECASE
+)
+
+
+def _cte_rescans(plan_lines) -> dict:
+    """What the global-edge candidate's plan says about rescanning `edge_rel`.
+
+    `AS MATERIALIZED` stops PostgreSQL REBUILDING the adjacency relation on every
+    iteration, and that is all it stops. The recursive join still scans the
+    materialized CTE once per frontier iteration, unindexed -- the depth-5 plan
+    shows `CTE Scan on edge_rel ... loops=5`. Review of PR #12: reporting this
+    candidate as "one adjacency build" without that per-hop scan made a flat
+    baseline look flatter than it is. Recorded from the plan rather than
+    described in prose, so the number cannot drift from the run.
+    """
+    for line in plan_lines:
+        m = _CTE_SCAN_RE.search(line)
+        if m:
+            return {"relation": m.group(1), "rows_per_scan": int(m.group(2)),
+                    "scans": int(m.group(3))}
+    return {}
 
 
 def _timed(cur, sql: str) -> float:
@@ -428,7 +531,21 @@ def main() -> int:
     ap.add_argument("--root", type=int, default=1)
     ap.add_argument("--explain", action="store_true")
     ap.add_argument("--json", dest="json_path", default=None)
+    # Both artifacts, one invocation. Review of PR #12: the committed
+    # results.json and run-output.txt were from DIFFERENT runs -- 0.139/1.210s
+    # against 0.238/2.317s, and the text file had no path section at all while
+    # its own footer claimed it had written that JSON. Two files from two runs
+    # cannot provide provenance for either, so the transcript is no longer a
+    # shell redirect the caller might forget: this writes it, beside the JSON,
+    # stamped with the same run id.
+    ap.add_argument("--transcript", dest="transcript_path", default=None,
+                    help="write the console output here as well (same run as --json)")
     args = ap.parse_args()
+
+    tee = None
+    if args.transcript_path:
+        tee = _Tee(sys.stdout, open(args.transcript_path, "w", encoding="utf-8"))
+        sys.stdout = tee
 
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -464,6 +581,13 @@ def main() -> int:
             cur.execute("SELECT to_char(now() AT TIME ZONE 'UTC', "
                         "'YYYY-MM-DD\"T\"HH24:MI\"Z\"')")
             artifact["run_started_utc"] = cur.fetchone()[0]
+            # One id in BOTH artifacts. A reader can now check that the JSON and
+            # the transcript came from the same invocation instead of taking the
+            # footer's word for it, and db/tests asserts they match.
+            artifact["run_id"] = "%s-rows%d-depth%d-root%d" % (
+                artifact["run_started_utc"], args.rows, args.max_depth, args.root,
+            )
+            print(f"run_id: {artifact['run_id']}")
 
             # Build costs, reported on their own. A derived structure that takes
             # a minute to build and answers in milliseconds is a different
@@ -610,15 +734,28 @@ def main() -> int:
             # the applicant it claims to reach.
             sample = routes[:: max(1, len(routes) // 200)] if routes else []
             bad = 0
-            for target, path in sample:
+            for target, path, hops in sample:
                 if not path or path[0] != args.root or path[-1] != target:
                     bad += 1
                     continue
                 pairs = list(zip(path, path[1:]))
+                # One label per hop, or the route does not explain itself.
+                if len(hops) != len(pairs):
+                    bad += 1
+                    continue
+                # Each (src, dst, kind, value) must be a real labelled edge --
+                # not merely a real pair. A label that named the wrong attribute
+                # would read as an explanation and be fiction, which is worse
+                # than returning the bare IDs. Reviewed on PR #12.
+                kinds = [h.split("=", 1)[0] for h in hops]
+                values = [h.split("=", 1)[1] for h in hops]
                 cur.execute(
-                    "SELECT count(*) FROM edges e JOIN unnest(%s::int[], %s::int[]) "
-                    "AS p(src, dst) ON e.src = p.src AND e.dst = p.dst",
-                    ([a for a, _ in pairs], [b for _, b in pairs]),
+                    "SELECT count(*) FROM edges e "
+                    "JOIN unnest(%s::int[], %s::int[], %s::text[], %s::text[]) "
+                    "AS p(src, dst, kind, value) "
+                    "  ON e.src = p.src AND e.dst = p.dst "
+                    " AND e.kind = p.kind AND e.value = p.value",
+                    ([a for a, _ in pairs], [b for _, b in pairs], kinds, values),
                 )
                 if cur.fetchone()[0] != len(pairs):
                     bad += 1
@@ -670,6 +807,14 @@ def main() -> int:
                                 {"root": args.root, "max_depth": deepest})
                     lines = [line for (line,) in cur.fetchall()]
                 artifact["explain"][name] = {"depth": deepest, "plan": lines}
+                rescans = _cte_rescans(lines)
+                if rescans:
+                    artifact["explain"][name]["cte_rescans"] = rescans
+                    print(f"\n    NOTE: {name} scans the materialized "
+                          f"{rescans['relation']} CTE {rescans['scans']} time(s) "
+                          f"({rescans['rows_per_scan']} rows per scan). "
+                          f"MATERIALIZED prevents REBUILDING it, not rescanning it "
+                          f"-- this candidate is not a one-time adjacency cost.")
                 for line in lines:
                     print("   ", line)
 
@@ -683,6 +828,9 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         conn.close()
+        if tee is not None:
+            sys.stdout = tee._streams[0]
+            tee._streams[1].close()
     return 0
 
 

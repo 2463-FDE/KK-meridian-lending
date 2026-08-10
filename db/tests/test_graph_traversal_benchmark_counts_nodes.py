@@ -277,7 +277,11 @@ def _bfs_with_paths(cur, root=1):
             break
         depth += 1
     cur.execute(bench.BFS_PATHS_SQL)
-    return {target: path for target, path in cur.fetchall()}
+    # (path, hops) per target. `hops[i]` is the attribute shared between
+    # `path[i]` and `path[i+1]`, added on PR #12 -- a route of bare applicant IDs
+    # cannot say whether a hop is a phone, an address or an employer, which is
+    # the part the ADR's use case actually needs.
+    return {target: (path, hops) for target, path, hops in cur.fetchall()}
 
 
 def test_the_path_walk_returns_a_real_route_to_every_applicant(cur):
@@ -297,14 +301,28 @@ def test_the_path_walk_returns_a_real_route_to_every_applicant(cur):
     # Everything except the root itself.
     assert set(routes) == {2, 3, 4}
 
-    cur.execute("SELECT src, dst FROM edges")
-    edges = {(s, d) for s, d in cur.fetchall()}
-    for target, path in routes.items():
+    cur.execute("SELECT src, dst, kind, value FROM edges")
+    labelled = {(s, d, k, v) for s, d, k, v in cur.fetchall()}
+    edges = {(s, d) for s, d, _, _ in labelled}
+    for target, (path, hops) in routes.items():
         assert path[0] == 1, f"route to {target} does not start at the root"
         assert path[-1] == target, f"route to {target} ends at {path[-1]}"
         assert len(set(path)) == len(path), f"route to {target} revisits a node"
-        for a, b in zip(path, path[1:]):
+        pairs = list(zip(path, path[1:]))
+        for a, b in pairs:
             assert (a, b) in edges, f"route to {target} uses a non-edge {a}->{b}"
+        # One label per hop, and each label must name the attribute that
+        # actually justifies that edge. A plausible-looking wrong label is worse
+        # than no label: it reads as an explanation and is fiction.
+        assert len(hops) == len(pairs), (
+            f"route to {target} has {len(hops)} labels for {len(pairs)} hops"
+        )
+        for (a, b), hop in zip(pairs, hops):
+            kind, _, value = hop.partition("=")
+            assert (a, b, kind, value) in labelled, (
+                f"route to {target} claims {a}->{b} shares {hop!r}, which is not "
+                f"the attribute recorded for that edge"
+            )
 
 
 def test_each_applicant_is_expanded_once_with_exactly_one_predecessor(cur):

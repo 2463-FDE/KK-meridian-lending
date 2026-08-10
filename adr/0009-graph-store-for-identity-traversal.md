@@ -179,11 +179,21 @@ comparison is sound.
 
 | Depth | Reached | frontier-attr | materialized | global-edge *(pessimistic)* |
 |---|---|---|---|---|
-| 1 | 55 | **0.002** | 0.001 | 0.33 |
-| 2 | 466 | **0.004** | 0.002 | 0.37 |
-| 3 | 850 | **0.019** | 0.006 | 0.38 |
-| 4 | 1,621 | **0.050** | 0.015 | 0.45 |
-| 5 | 2,944 | **0.108** | 0.032 | 0.50 |
+| 1 | 55 | **0.031** | 0.003 | 1.571 |
+| 2 | 466 | **0.01** | 0.003 | 1.154 |
+| 3 | 850 | **0.042** | 0.021 | 0.89 |
+| 4 | 1,621 | **0.104** | 0.035 | 0.772 |
+| 5 | 2,944 | **0.282** | 0.075 | 1.284 |
+
+**What the pessimistic baseline is NOT.** `global-edge` declares the adjacency
+relation `AS MATERIALIZED`, and that stops PostgreSQL *rebuilding* all 609,883 rows on
+every iteration -- it does not stop it *rescanning* them. The plan for this run
+records `CTE Scan on edge_rel ... loops=5`: one unindexed scan of the materialized
+relation per frontier iteration. So this column is not "one adjacency build plus
+a cheap walk", and reading its flatness as a fixed one-time cost overstates the
+naive approach's case. The number is taken from the plan and written into
+`results.json` (`explain.global-edge.cte_rescans`) rather than described here in
+prose, so it cannot drift from the run. Review finding on PR #12.
 
 One-off build costs, kept out of the per-query numbers on purpose — a derived
 structure that takes a second to build and answers in milliseconds is a
@@ -191,8 +201,8 @@ different engineering proposition from one that is free:
 
 | Structure | Build | Rows |
 |---|---|---|
-| `identity_attr` (postings) | 0.139 s | 40,140 |
-| `edges` (materialised pairs) | 1.210 s | 553,928 |
+| `identity_attr` (postings) | 0.325 s | 40,140 |
+| `edges` (materialised pairs, labelled) | 4.713 s | 553,928 |
 
 ### The unbounded traversal, which is the one this ADR actually asked about
 
@@ -220,7 +230,7 @@ SELECT count(*) FROM walk;
 
 | Traversal | frontier-attr | materialized | Reached |
 |---|---|---|---|
-| unbounded, reachability only | **0.318 s** | 0.096 s | 10,000 |
+| unbounded, reachability only | **0.978 s** | 0.546 s | 10,000 |
 
 On this population every applicant is in one component — households, shared
 phones and 200 employers connect the lot — so the unbounded answer is the entire
@@ -247,9 +257,17 @@ predecessors afterwards:
 
 | Phase | Time | Result |
 |---|---|---|
-| walk, one predecessor per applicant | **0.231 s** | 10,000 applicants, 12 levels |
-| route reconstruction, all applicants | **0.074 s** | 9,999 routes |
-| **total** | **0.305 s** | every applicant, and how each connects |
+| walk, one predecessor + the attribute per applicant | **0.929 s** | 10,000 applicants, 12 levels |
+| route reconstruction, all applicants | **0.492 s** | 9,999 labelled routes |
+| **total** | **1.421 s** | every applicant, and how each connects |
+
+Each hop carries the attribute that justifies it, not just the pair of
+applicant IDs: the walk stores `via_kind`/`via_value` on the visited row at the
+moment the edge is chosen, so a returned route reads as *root --address--> B
+--phone--> target*. The earlier revision returned bare IDs, which cannot answer
+"how are these two connected" -- the question the use case is built on -- and
+recovering it afterwards would have needed joins the published timing did not
+include. It is included here, in the numbers above. Review finding on PR #12.
 
 The routes are checked rather than trusted: the harness samples them and
 verifies every consecutive pair is a real edge, that each starts at the root and
