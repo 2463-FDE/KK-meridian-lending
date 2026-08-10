@@ -29,16 +29,16 @@ during Week 4); those are marked where they occur.
 
 ## Status at a glance
 
-**Suite as of this pass** (`main` after PR #10, #15 and #16; re-run, not
-transcribed from an earlier record): disclosure 166, origination 210, servicing
-96, gateway 83, payment 138, loan-assistant 90, kyc 12, decision 40 — **835
-service tests** — plus **203** database/migration tests and **36** Playwright
-browser tests across 11 files. The browser suite needs the documented rate-limit
-overlay (`docker-compose.e2e.yml`); without it later specs trip the shipped
-120-request control and fail on unrelated assertions.
+**Suite as of this pass** (`main` with #10, #12, #13, #15 and #16 all merged;
+re-run, not transcribed from an earlier record): disclosure 166, origination 210,
+servicing 96, gateway 83, payment 138, loan-assistant 153, kyc 12, decision 40 --
+**898 service tests** -- plus **231** database/migration tests and **38**
+Playwright browser tests across 12 files. The browser suite needs the documented
+rate-limit overlay (`docker-compose.e2e.yml`); without it later specs trip the
+shipped 120-request control and fail on unrelated assertions.
 
 Counts quoted further down this file are deliberately point-in-time ("41 tests at
-the time", "102 tests passing") and are left as written — they record what was
+the time", "102 tests passing") and are left as written -- they record what was
 true when a week closed, which is the only thing that makes them useful. This
 block is the current number; those are history.
 
@@ -68,8 +68,8 @@ about the branch.
 |---|---|---|---|
 | #10 | Actuarial APR + TILA box foots | `7875658d81` | ✅ **Merged** 2026-08-10, CI 22/22 |
 | #11 | `payments.pan`/`cvv` removal — expand half | `69b563448d` | ✅ **Merged** 2026-08-07, CI 22/22 |
-| #12 | Graph-store threshold answered by measurement (`adr/0009`) | `6e1823884d` | 🟠 **Open**, CI 22/22, mergeable |
-| #13 | One grounded external signal on the officer summary | `355811f165` | 🟠 **Open**, CI 22/22, mergeable |
+| #12 | Graph-store threshold answered by measurement (`adr/0009`) | `ab056ce0df` | ✅ **Merged** 2026-08-10, CI 22/22 |
+| #13 | One grounded external signal on the officer summary | `95b7586395` | ✅ **Merged** 2026-08-10, CI 22/22 |
 | #14 | Correct a wrong answer from the review screen | `d6afd88135` | ✅ **Merged** 2026-08-09, CI 22/22 |
 | #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | `50c4b3f2f2` | ✅ **Merged** 2026-08-10, CI 22/22. Rebased onto `main` before merge, so its base is `main` and not #11's branch |
 | #16 | Four docstrings claiming a PII leak the code does not have | `2b5fd291ad` | ✅ **Merged** 2026-08-10, CI 22/22 |
@@ -92,14 +92,18 @@ before this PR, so the `DEBT.md` D5c it cites is on `main`; #15 was rebased onto
 #10 and #14 have both landed. What remains is rule 3, and it is the reason this
 row-by-row pass is worth reading twice:
 
-**#12 and #13 still edit the same two rows of the "Owed to the client" table as
-this PR.** Whichever lands second needs a manual resolution, and the resolution
-is not mechanical — #12 and #13 mark those rows answered *on their branches*,
-which is a different claim from answered *on `main`*. Take the version that names
-where the answer lives, and keep the ⚠️ marker until the branch it points at has
-actually merged. This PR deliberately does **not** describe #12's benchmark or
-#13's macro signal as landed.
-Its one forward citation, `db/bench/graph_traversal_benchmark.py`, arrives with #12 and does not exist on `main`.
+**#12 and #13 have merged, so rule 3 is spent too and the merge order is now
+history in full.** Both edited the same two rows of the "Owed to the client"
+table as this PR; the resolution was to take main's merged version of each row,
+because "answered on the branch" and "answered on `main`" are different claims
+and only one of them is now true.
+
+This PR held those two rows back deliberately while they were open, and it no
+longer needs to: the graph row reads **Answered** rather than "answered on PR
+#12", and `db/bench/graph_traversal_benchmark.py` is a path a reader can open
+here. Its forward-citation disclaimer is gone with it -- that sentence said the
+file "does not exist on `main`", which was true when written and false the moment
+#12 landed, which is exactly the class of staleness this pass exists to remove.
 
 ## Owed to the client
 

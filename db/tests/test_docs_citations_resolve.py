@@ -128,7 +128,7 @@ def test_a_truncated_citation_is_not_allowed():
 def test_no_document_claims_a_merged_pull_request_is_still_open():
     """The specific staleness this PR exists to remove.
 
-    PRs #8, #10, #11, #14, #15 and #16 are merged. A document saying one of them
+    PRs #8, #10, #11, #12, #13, #14, #15 and #16 are merged. A document saying one of them
     is unmerged, awaiting CI, or that its files live only on a branch is telling a
     reader to distrust `main` for no reason -- and that is how a correct document
     trains people to check nothing.
@@ -138,7 +138,7 @@ def test_no_document_claims_a_merged_pull_request_is_still_open():
     what a row USED to claim, so a retraction cue on the same line exempts it --
     the same rule the logging guard uses.
     """
-    merged = ("#8", "#10", "#11", "#14", "#15", "#16")
+    merged = ("#8", "#10", "#11", "#12", "#13", "#14", "#15", "#16")
     open_state = re.compile(
         r"\b(?:not on `main`|only on that branch|still open|not (?:yet )?merged"
         r"|awaiting (?:CI|merge)|CI not green|no CI run exists)\b",
