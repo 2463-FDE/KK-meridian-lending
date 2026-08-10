@@ -657,3 +657,63 @@ def test_a_bare_number_beside_a_topic_word_is_a_stated_limitation(monkeypatch):
     result = _summarize_with(monkeypatch, "Unemployment is 11.9 and rising.")
 
     assert "11.9" in result.summary
+
+
+# --- a percentage must belong to the signal before it is treated as a claim ---
+#
+# Reviewed on PR #13. Every unit-shaped figure in a topic-mentioning sentence was
+# treated as a claim about the signal, so an unrelated percentage in the same
+# breath -- a loan-to-income ratio -- was compared against the published rate and
+# the sentence was deleted. As the only sentence, that answered 502 for prose
+# that said nothing wrong.
+
+def test_an_unrelated_percentage_beside_the_topic_word_survives(monkeypatch):
+    """The reviewed sentence, verbatim."""
+    result = _summarize_with(
+        monkeypatch,
+        "Unemployment remains relevant, while the requested loan is 22% of annual income.",
+    )
+
+    assert result.summary == (
+        "Unemployment remains relevant, while the requested loan is 22% of annual income."
+    ), "an unrelated loan-to-income percentage was read as an unemployment claim"
+
+
+def test_a_correct_macro_figure_survives_an_unrelated_percentage(monkeypatch):
+    """The worse half of the same defect.
+
+    The sentence's macro figure was RIGHT and the sentence was still deleted,
+    because the unrelated 22 was also compared against 4.2. A guard that removes
+    accurate grounded prose is doing the opposite of its job.
+    """
+    result = _summarize_with(
+        monkeypatch,
+        "The loan is 22% of income and unemployment is 4.2%.",
+    )
+
+    assert "22%" in result.summary
+    assert "4.2%" in result.summary
+
+
+@pytest.mark.parametrize("sentence", [
+    "Unemployment stands at 11.9% nationally.",
+    "11.9% unemployment makes this risky.",
+    "The U.S. unemployment rate is 11.9%.",
+])
+def test_a_contradiction_bound_to_the_topic_is_still_removed(monkeypatch, sentence):
+    """Narrowing must not disarm the guard, in either word order.
+
+    The figure is bound to the topic by proximity, so it has to work when the
+    topic word precedes the number and when it follows it.
+    """
+    result = _summarize_with(monkeypatch, sentence + " Income is adequate.")
+
+    assert "11.9" not in result.summary
+    assert "Income is adequate" in result.summary
+
+
+def test_a_ratio_sentence_with_no_topic_word_is_untouched(monkeypatch):
+    """The control: nothing about this sentence concerns the signal."""
+    result = _summarize_with(monkeypatch, "The payment is 31% of monthly income.")
+
+    assert result.summary == "The payment is 31% of monthly income."

@@ -285,6 +285,9 @@ _FIGURE_RE = re.compile(r"\d+(?:\.\d+)?")
 # unrelated number in the same sentence (an income, a loan amount).
 _UNIT_FIGURE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|pct\b)", re.IGNORECASE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Words, for reading the few tokens either side of a figure. Keeps full stops and
+# apostrophes inside the token so "U.S." and "don't" stay whole.
+_WORD_RE = re.compile(r"[\w.']+")
 # Abbreviations whose full stop does not end a sentence. Without this the
 # splitter cut "The U.S. unemployment rate is 11.9%." into "The U.S." plus the
 # rest -- removing the false claim left the orphan "The U.S." in the summary,
@@ -325,6 +328,39 @@ def _signal_topic_words(signal) -> set[str]:
     return {w for w in words if len(w) > 2 and w not in _LABEL_STOPWORDS}
 
 
+def _macro_claims(text: str, topic: set) -> list:
+    """Unit-shaped figures in `text` that are ABOUT the signal, with their values.
+
+    A sentence can mention the signal and also carry a percentage that has
+    nothing to do with it. Treating every unit-shaped figure in such a sentence
+    as a macro claim deleted ordinary underwriting prose -- "Unemployment remains
+    relevant, while the requested loan is 22% of annual income" was dropped
+    because 22 != 4.2, and if it was the only sentence the endpoint answered 502.
+    Worse, it also dropped sentences whose macro figure was CORRECT: "the loan is
+    22% of income and unemployment is 4.2%" failed on the 22. Reviewed on PR #13.
+
+    So each figure is bound to its own local context instead of to the sentence:
+    a topic word must sit within the few words immediately BEFORE it ("the
+    unemployment rate is 11.9%") or immediately AFTER it ("11.9% unemployment").
+    That is how the claim is actually phrased in English, and it is what
+    separates it from a loan-to-income ratio in the same breath.
+
+    Bounded rather than clever on purpose: this is a backstop for a model that
+    was asked not to restate the figure at all, so it should refuse to guess
+    rather than reach for a parser. A figure with no topic word near it is not
+    treated as a macro claim -- stated as a limitation in the caller.
+    """
+    words_before, words_after = 4, 2
+    claims = []
+    for match in _UNIT_FIGURE_RE.finditer(text):
+        before = _WORD_RE.findall(text[:match.start()])[-words_before:]
+        after = _WORD_RE.findall(text[match.end():])[:words_after]
+        context = {w.strip("(),.").lower() for w in before + after}
+        if context & topic:
+            claims.append(float(match.group(1)))
+    return claims
+
+
 def _drops_a_contradicting_claim(text: str, signal) -> bool:
     """Whether `text` states a figure for the signal that is not the published one.
 
@@ -356,7 +392,9 @@ def _drops_a_contradicting_claim(text: str, signal) -> bool:
     # not to restate the figure at all; this is the backstop for when it does
     # so in the form a reader would actually read as a rate.
     published = float(signal.value)
-    claims = [float(m) for m in _UNIT_FIGURE_RE.findall(text)]
+    # Only figures bound to the signal's own topic -- see _macro_claims. A
+    # percentage elsewhere in the sentence is somebody else's number.
+    claims = _macro_claims(text, topic)
     if not claims:
         return False
 
