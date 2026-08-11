@@ -78,8 +78,12 @@ CREATE TABLE ledger_entries (
     amount       NUMERIC(14,2) NOT NULL CHECK (amount <> 0),
 
     -- Why it moved.
+    -- 'opening_balance' is the back-fill's marker and nothing else may use it:
+    -- it means "this loan's balance as it stood when the ledger began, with no
+    -- record of how it got there". See the migration plan.
     entry_type   TEXT        NOT NULL CHECK (entry_type IN
-                   ('disbursement','payment','fee_assessed','fee_waived','adjustment')),
+                   ('opening_balance','disbursement','payment',
+                    'fee_assessed','fee_waived','adjustment')),
     reason       TEXT,
 
     -- Who moved it. Null for machine-initiated entries (a scheduled late fee);
@@ -102,12 +106,34 @@ CREATE UNIQUE INDEX ledger_entries_payment_component
 
 CREATE INDEX ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
 
--- A human-directed entry must name the human.
+-- A human-DIRECTED entry must name the human. Machine-originated ones must not
+-- be forced to invent one.
+--
+-- Review fix: this first exempted only 'disbursement' and 'fee_assessed', which
+-- made actor_id/actor_role mandatory for 'payment' -- and servicing's
+-- apply-payment carries neither. It receives an amount and a payment_id, because
+-- the borrower is not "acting" on the balance in the sense this column means;
+-- the processor captured a payment and servicing is posting it. The constraint
+-- as written would have failed every real payment on insert, which is the kind
+-- of defect that only shows up once the migration is live.
+--
+-- 'payment' is exempt, and its provenance is stronger than an actor string
+-- anyway: payment_id points at the row carrying the idempotency key, the amount
+-- and the capture. 'opening_balance' is exempt because no one authored it.
 ALTER TABLE ledger_entries ADD CONSTRAINT ledger_actor_required CHECK (
-    entry_type IN ('disbursement','fee_assessed')
+    entry_type IN ('disbursement','fee_assessed','payment','opening_balance')
     OR (actor_id IS NOT NULL AND actor_role IS NOT NULL)
 );
 ```
+
+`'opening_balance'` is the back-fill's marker, and it is a distinct `entry_type`
+rather than an `is_reconstructed` boolean. Review fix again: the migration plan
+said opening entries would be "marked as reconstructed" and the schema had no
+such field, so the marking existed only in the prose describing it. A separate
+boolean would have worked; a distinct `entry_type` is better here because it
+cannot be defaulted, cannot be forgotten on insert, and every query that means
+"real money movements" is already filtering on `entry_type` — so the exclusion is
+expressed in the same vocabulary rather than as a second thing to remember.
 
 Append-only is enforced by a trigger, not by a `GRANT` — the same reasoning
 `decision_events` settled in ADR 0006, and for the same reason: every service
@@ -152,27 +178,76 @@ for every loan: balances.balance == SUM(ledger_entries.amount)
 
 run in `db/tests` against real PostgreSQL, over seeded and post-backfill data.
 
-### Maker-checker gets somewhere to live
+### Maker-checker: a proposal is not a movement
 
-With entries as rows, an unapproved money movement is simply an entry that does
-not count yet:
+> **Revised after review.** The first version of this section added
+> `approved_by`/`approved_at` columns to `ledger_entries` and had the approver
+> `UPDATE` the pending row. **That cannot work** — the append-only trigger two
+> sections up rejects every `UPDATE` on that table, so the approval path was
+> blocked by the ADR's own central guarantee. Recorded rather than quietly
+> rewritten because it is a good illustration of the failure it describes: the
+> immutability claim and the approval claim were each checked on their own and
+> never against each other.
+
+The fix is not to weaken the trigger. It is to stop putting proposals in the
+ledger at all.
+
+**A row in `ledger_entries` means money moved.** A proposed adjustment is not a
+movement — it is a request that may never become one. Those are different facts
+and they get different tables:
 
 ```sql
-ALTER TABLE ledger_entries
-    ADD COLUMN approved_by   INTEGER,
-    ADD COLUMN approved_at   TIMESTAMPTZ;
+CREATE TABLE pending_movements (
+    id            BIGSERIAL   PRIMARY KEY,
+    loan_id       INTEGER     NOT NULL REFERENCES loans(id),
+    component     TEXT        NOT NULL,
+    amount        NUMERIC(14,2) NOT NULL,
+    entry_type    TEXT        NOT NULL CHECK (entry_type IN ('adjustment','fee_waived')),
+    reason        TEXT        NOT NULL,      -- required: a proposal without one is unreviewable
+    requested_by  INTEGER     NOT NULL,
+    requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-ALTER TABLE ledger_entries ADD CONSTRAINT ledger_no_self_approval
-    CHECK (approved_by IS NULL OR approved_by <> actor_id);
+    -- Terminal state, written once. This table is NOT append-only: resolving a
+    -- proposal is the one legitimate mutation in the design, and it is confined
+    -- here precisely so the ledger's guarantee stays absolute.
+    resolution    TEXT        CHECK (resolution IN ('approved','rejected')),
+    resolved_by   INTEGER,
+    resolved_at   TIMESTAMPTZ,
+    ledger_entry_id BIGINT    REFERENCES ledger_entries(id),
+
+    CONSTRAINT no_self_approval CHECK (resolved_by IS NULL OR resolved_by <> requested_by),
+    CONSTRAINT resolution_complete CHECK (
+        (resolution IS NULL     AND resolved_by IS NULL AND resolved_at IS NULL)
+     OR (resolution IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL)
+    ),
+    -- An approval must produce exactly one ledger entry; a rejection must produce none.
+    CONSTRAINT approved_has_entry CHECK (
+        (resolution = 'approved' AND ledger_entry_id IS NOT NULL)
+     OR (resolution IS DISTINCT FROM 'approved' AND ledger_entry_id IS NULL)
+    )
+);
 ```
 
-The projection sums only approved entries. A `csr` raising an adjustment writes a
-row with `approved_at IS NULL`; the balance does not move; a *different* staff
-account approves it and the trigger folds it in. Self-approval is refused by a
-database constraint rather than by a service remembering to check — the same
-choice as the append-only trigger, for the same reason.
+A CSR raising an adjustment writes a `pending_movements` row. The balance does
+not move, because nothing was written to the ledger. A **different** staff
+account approves it, and that approval inserts the `ledger_entries` row and
+records its id here, in one transaction. A rejection resolves the proposal and
+writes no entry — and the rejected request survives as evidence, which the
+column-on-the-ledger design would have lost entirely.
 
-This is why maker-checker was blocked. There was no row to mark pending.
+Self-approval is refused by a database constraint rather than by a service
+remembering to check, the same choice as the append-only trigger and for the same
+reason.
+
+**What this buys beyond correctness:** the projection stays a plain
+`SUM(amount)` with no approval filter. Under the original design every reader
+had to remember `WHERE approved_at IS NOT NULL`, and one that forgot would
+silently count unapproved money. Here there is nothing to forget — if a row is in
+the ledger it counts, with no exceptions, which is the same reasoning that makes
+the append-only trigger worth having.
+
+This is why maker-checker was blocked before: there was nowhere to put a request
+that is not yet a fact.
 
 ## Alternatives considered
 
@@ -208,17 +283,23 @@ is not recoverable.
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
 | 2 | `ledger_entries`, triggers, back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
 | 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. D3 and D14 close |
-| 4 | `approved_by`/`approved_at`, maker-checker on adjust and waive | A test proving self-approval is refused |
+| 4 | `pending_movements`, maker-checker on adjust and waive | A test proving self-approval is refused, and one proving an approval writes exactly one ledger entry |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
 stated rather than discovered.** Historical rows have a balance but no history:
 there is no record of which past movements produced today's number, because that
-is precisely what D8 says was never kept. So the back-fill writes a single
-`disbursement`-type opening entry per loan carrying the current balance, marked
-as reconstructed. It is not a reconstruction of the past — **it is an explicit
-admission that the past is unavailable**, and it must be visibly distinguishable
-from real entries so no one later mistakes an opening balance for an audited
-movement.
+is precisely what D8 says was never kept. So the back-fill writes one
+`entry_type = 'opening_balance'` row per loan carrying the current balance. It is
+not a reconstruction of the past — **it is an explicit admission that the past is
+unavailable**, and the distinct type is what keeps that admission legible, so no
+one later mistakes an opening balance for an audited movement.
+
+*Review fix: this said the entry would be a `disbursement` "marked as
+reconstructed", and no marker existed anywhere in the schema — the distinction
+lived only in this sentence. Worse, `disbursement` is a real event type, so a
+reconstructed opening balance would have been indistinguishable from an actual
+loan disbursement by any query. `opening_balance` is now its own type in the
+`entry_type` CHECK.*
 
 ## Consequences
 
@@ -227,11 +308,22 @@ movement.
 - "Who changed this balance, when, why, and who approved it" becomes a `SELECT`.
   D8 answerable for the first time.
 - D3 closes without a lock, and D14 without a separate feature.
-- Maker-checker becomes a small change on top rather than a design problem.
+- Maker-checker has somewhere to live, and rejected proposals survive as evidence
+  rather than being discarded.
+- The projection is a plain `SUM` with no approval filter, so no reader can
+  forget one and silently count unapproved money.
 - Payment posting is idempotent by unique index, so `payment_applications` stops
   being the only thing standing between a retry and a double-post.
 
 **Costs, stated rather than discovered later.**
+
+- **Two tables instead of one.** Splitting proposals out of the ledger is what
+  keeps the append-only guarantee absolute, but it means a money movement can now
+  be described in two places, and `pending_movements` is deliberately *not*
+  append-only — resolving a proposal mutates it. That mutation is the single
+  exception in the whole design, and it is confined to a table the balance is
+  never derived from. If that exception ever needs to grow, it is a sign this
+  split was drawn in the wrong place.
 
 - `ledger_entries` grows without bound. No retention policy is proposed here, and
   under SOX these are exactly the records that must be kept — so growth is the
