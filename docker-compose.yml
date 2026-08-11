@@ -46,8 +46,8 @@ services:
       # fail closed on even if a future compose change re-publishes its port.
       # Import-time token validation treats an unset ENVIRONMENT as production
       # and fails closed, so the local stack states it explicitly (PR #18).
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,8 +102,8 @@ services:
     environment:
       # Import-time token validation treats an unset ENVIRONMENT as production
       # and fails closed, so the local stack states it explicitly (PR #18).
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
     depends_on:
       postgres:
         condition: service_healthy
@@ -127,13 +127,13 @@ services:
       # ENVIRONMENT is otherwise unset and decisioning fails closed on every request
       # (see app/config.py). Default the local compose path to dev so it boots ready
       # to use; an .env that sets ENVIRONMENT still wins.
-      ENVIRONMENT: ${ENVIRONMENT:-development}
+      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
       # Required on every POST /decisions (see routers/decisions.py) -- defense
       # in depth so a future accidental host-port re-exposure (or any other
       # container reachable on this compose network) still can't submit
       # decisions without also knowing this. Same default as origination-
       # service/gateway below so the three agree without an .env entry.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
     # No host port mapping: decision-service handles SSNs and the
     # decision-overwrite bug (see routers/decisions.py) means it must only be
     # reachable over the internal compose network, never from the host. The
@@ -161,7 +161,7 @@ services:
       # depth so a future accidental host-port re-exposure still can't submit
       # offers without also knowing this. Same default as the other services
       # so they all agree without an .env entry.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
     # No host port mapping: POST /offers persists the canonical TILA numbers
     # for an approved loan with no auth of its own -- publishing this let
     # anyone on the host bypass the gateway's staff-only /disclosure/* check
@@ -191,7 +191,7 @@ services:
       # in depth so a future accidental host-port re-exposure still can't
       # charge a card without also knowing this. Same default as the other
       # services so they all agree without an .env entry.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
     # No host port mapping: POST /payments charges a card/ACH with no auth of
     # its own -- publishing this let anyone on the host bypass the gateway's
     # ownership check and move money directly (review finding). Reachable
@@ -232,7 +232,7 @@ services:
       # /financials route (app/main.py's summarize()) -- that route requires
       # this on top of a staff X-User-Role, and every AI-summary request
       # 403'd without it. Same shared secret every other service already uses.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
     # No host port published — reachable only from other containers on the compose
     # network (gateway proxies /assistant/* to it internally). Publishing it would
     # let anyone on the host bypass the gateway's role check and trigger billed LLM
@@ -264,8 +264,8 @@ services:
       # (see app/main.py) -- must match decision-service's copy above.
       # Import-time token validation treats an unset ENVIRONMENT as production
       # and fails closed, so the local stack states it explicitly (PR #18).
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
+      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
       # Rate limit. The DEFAULT STACK SHIPS THE REAL CONTROL: 120 requests /
       # 60s per client IP, the same number services/gateway/app/config.py
       # falls back to.

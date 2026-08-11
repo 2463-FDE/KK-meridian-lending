@@ -62,19 +62,29 @@ def test_dev_environments_may_use_the_published_defaults(env, token):
     config.validate_internal_token(environment=env, token=token)
 
 
-def test_the_compose_default_is_one_of_the_known_values():
-    """If someone changes the compose default, this list must change with it.
+def test_the_historical_compose_default_stays_denied():
+    """The value compose used to inject must never become acceptable.
 
-    Otherwise the new default silently becomes an accepted production secret --
-    the exact hole this validator exists to close, reopened by a one-line edit
-    somewhere else in the repository.
+    This test previously asserted the OPPOSITE -- that
+    `dev-internal-token-change-me` appears in docker-compose.yml -- because at the
+    time compose supplied it as a fallback and the risk was someone changing that
+    fallback without updating KNOWN_DEV_TOKENS.
+
+    Review then found the fallback was itself the defect: a staging deploy that
+    forgot its .env booted on a value published here. The default is gone, so the
+    old assertion is inverted and enforced by
+    `test_compose_supplies_no_default_for_the_secret_or_the_environment`.
+
+    What remains true and worth pinning is narrower: the value shipped for years,
+    so it is in `.env` files and shell histories everywhere, and it must stay
+    denied wherever it turns up.
     """
-    compose = (pathlib.Path(__file__).resolve().parents[3] / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "dev-internal-token-change-me" in compose, (
-        "the compose default changed; add the new value to KNOWN_DEV_TOKENS in "
-        "every service's config.py, or this validator will accept it in production"
-    )
     assert "dev-internal-token-change-me" in config.KNOWN_DEV_TOKENS
+
+    with pytest.raises(config.InsecureInternalTokenError):
+        config.validate_internal_token(
+            environment="production", token="dev-internal-token-change-me"
+        )
 
 
 @pytest.mark.parametrize("service", ["kyc-service", "origination-service", "gateway"])
@@ -178,3 +188,34 @@ def test_every_service_given_the_token_also_declares_its_environment():
         "Each refuses to boot wherever .env is absent -- which is every environment "
         "except a developer's own machine."
     )
+
+
+def test_compose_supplies_no_default_for_the_secret_or_the_environment():
+    """Defaults in the base compose file undo the validation entirely.
+
+    Review finding: `${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}`
+    meant a staging or production deploy that forgot its .env booted happily on a
+    value published in this repository. The `${ENVIRONMENT:-development}` default
+    was worse and was mine: it sent every service down the DEVELOPMENT branch of
+    its own startup validation, so the check added to catch exactly this never
+    ran. The PR that introduced the validator disabled it in the same commit.
+
+    A default in the base file cannot distinguish "a developer forgot" from "an
+    operator forgot", so there is none. Dev values live in `.env`, which is
+    gitignored, and compose refuses to interpolate without both variables.
+    """
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "dev-internal-token-change-me" not in compose, (
+        "the repository-known token is back in docker-compose.yml"
+    )
+    for var in ("INTERNAL_SERVICE_TOKEN", "ENVIRONMENT"):
+        assert "${" + var + ":-" not in compose, (
+            f"docker-compose.yml supplies a default for {var} again. A fallback "
+            "committed here is not a secret, and an ENVIRONMENT fallback silently "
+            "disables the startup validation that depends on it."
+        )
+        assert "${" + var + ":?" in compose, (
+            f"{var} must be required (${{{var}:?message}}) so a missing value fails "
+            "the boot loudly instead of being quietly substituted"
+        )

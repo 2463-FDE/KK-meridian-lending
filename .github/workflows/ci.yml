@@ -84,6 +84,11 @@ jobs:
   # Dockerfiles now fall back on (see each service's Dockerfile).
   docker-build:
     runs-on: ubuntu-latest
+    env:
+      # docker-compose.yml supplies no defaults for these and refuses to
+      # interpolate without them -- a fallback in the repo is not a secret.
+      ENVIRONMENT: test
+      INTERNAL_SERVICE_TOKEN: ci-throwaway-Jd7mQ2xR9vLpTn4wCe8bYk3ZaHsUfGi5
     steps:
       - uses: actions/checkout@v4
       - name: docker compose build
@@ -155,6 +160,11 @@ jobs:
   # three other migrations with the same defect: 0009, 0011 and 0015.
   e2e:
     runs-on: ubuntu-latest
+    env:
+      # docker-compose.yml supplies no defaults for these and refuses to
+      # interpolate without them -- a fallback in the repo is not a secret.
+      ENVIRONMENT: test
+      INTERNAL_SERVICE_TOKEN: ci-throwaway-Jd7mQ2xR9vLpTn4wCe8bYk3ZaHsUfGi5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

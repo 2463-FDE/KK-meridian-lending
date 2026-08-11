@@ -75,7 +75,11 @@ servicing schema. After a charge is captured, `payment-service` calls servicing'
 ## Quick start
 
 ```bash
-cp .env.example .env     # the real .env is already in the repo so you can just run it
+cp .env.example .env     # then set INTERNAL_SERVICE_TOKEN in it -- compose
+                         # refuses to start without one, and supplies no
+                         # default, because a secret committed here is not
+                         # a secret. Generate:
+                         #   python -c "import secrets; print(secrets.token_urlsafe(32))"
 make up                  # docker compose up -d (postgres, redis, all services, frontend)
 make logs                # tail everything
 make seed                # load db/init seed data (loans, payments, decisions)
