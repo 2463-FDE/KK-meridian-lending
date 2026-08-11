@@ -9,3 +9,10 @@ PROCESSOR_API_KEY = os.getenv("PROCESSOR_API_KEY", "")
 PROCESSOR_BASE_URL = os.getenv("PROCESSOR_BASE_URL", "https://api.cardprocessor.example.com")
 SETTLEMENT_FILE = os.getenv("SETTLEMENT_FILE", "data/settlement.csv")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Shared secret proving a caller reached a money-moving route through the gateway
+# or payment-service rather than by being on the compose network. Defaults to
+# empty on purpose: main.py compares with `not TOKEN or header != TOKEN`, so an
+# unset value can never match and a deploy that forgets one fails closed. Same
+# contract as kyc/decision/disclosure/payment/origination-service.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")

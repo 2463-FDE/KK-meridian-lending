@@ -66,11 +66,16 @@ services:
       - path: .env
         required: false
     # No published host port: this service moves money (adjust-balance, charge
-    # application) with no auth of its own -- the gateway's ownership/role checks
-    # are the only thing standing between a caller and those endpoints. Publishing
-    # this port let anyone on the host bypass the gateway entirely and hit it
-    # directly (review finding). Reachable from other containers on the compose
-    # network by service name; not reachable from the host.
+    # application) -- publishing this port let anyone on the host bypass the
+    # gateway entirely and hit it directly (review finding). Reachable from other
+    # containers on the compose network by service name; not from the host.
+    environment:
+      # Required on every money-moving route now (see app/main.py::_require_internal).
+      # The network boundary above was previously the ONLY control, because none
+      # of those routes checked anything -- the same position kyc-service was in
+      # when it turned out to be reachable anyway. Same default as the other
+      # services so they agree without an .env entry.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
     depends_on:
       postgres:
         condition: service_healthy

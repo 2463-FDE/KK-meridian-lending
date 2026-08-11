@@ -74,8 +74,16 @@ roles" below.
 
 **Still open (not fixed in PR #6):** `kyc-service` is the one service that is *both*
 host-published *and* does not check `X-Internal-Token`, so `POST localhost:8003` bypasses
-the gateway entirely. `servicing-service` doesn't check the token either, but it is not
-host-published. Both are tracked for PR #8.
+the gateway entirely.
+
+`servicing-service` **now checks the token on every money-moving route** —
+`adjust-balance`, `waive-fee`, `late-fee`, `apply-payment` and the legacy `/payments`
+duplicate. It is not host-published either, but that was the *only* control it had, and
+"not published" is network topology rather than an application-level check: any container
+that could resolve `servicing-service:8002` could set a balance to zero. Its read routes
+are unchanged — they are ownership-checked at the gateway. *This paragraph previously read
+"`servicing-service` doesn't check the token either … Both are tracked for PR #8"; PR #8
+shipped card tokenization instead and closed neither.*
 
 ## Services
 
@@ -83,7 +91,7 @@ host-published. Both are tracked for PR #8.
 |---------|------|------|-----------------------|
 | `gateway` | 8000 | FastAPI + httpx + Redis | Session auth (`/auth/*`), role/ownership enforcement, reverse-proxy. Per-client-IP rate limiting (fixed window, fails open on a Redis outage). Forwards the resolved identity as `X-User-Id`/`X-User-Role`, stripping any inbound `X-User-*` the caller sent itself. See "Auth & roles" for the per-route tiers. |
 | `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (intake logs `app_id`/`applicant_id` only, never the request payload — enforced by `tests/test_intake_pii_not_logged.py`; this cell previously claimed a request-logging middleware in `logging_config.py` logged full POST bodies, which is false — no such middleware has ever existed, see `DEBT.md` D5c), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the fair-lending ZIP screen. |
-| `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge to the balance — still a single mutable column, no ledger. |
+| `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge to the balance — still a single mutable column, no ledger. No host port; every money-moving route requires `X-Internal-Token` (`adjust-balance`, `waive-fee`, `late-fee`, `apply-payment`, legacy `/payments`). Read routes stay ownership-checked at the gateway. |
 | `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR. Host-published **and** does not check `X-Internal-Token` — see the boundary note above. |
 | `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`). **Compute-only — persists nothing.** Origination is the sole writer of both `decisions` and the append-only `decision_events` audit row, written atomically after its own finality recheck (PR #6). The bureau call goes through a `BureauClient` seam that forwards an idempotency key so a retry after an ambiguous timeout recovers the original pull. Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
 | `disclosure-service` | 8005 | FastAPI + SQLAlchemy + psycopg2 | TILA/Reg-Z offer + APR + amortization (Decimal internally, float at the API boundary). `POST /offers` atomically checks decision approval and inserts (`INSERT ... SELECT ... FROM decisions WHERE outcome='approve'`) and is non-mutating on conflict (`ON CONFLICT DO NOTHING` + read-back) — a retry can never rewrite an already-disclosed loan's terms, even across a fee-rule change. `fee_pct_used` is snapshotted per offer. No host port; requires `X-Internal-Token`. |

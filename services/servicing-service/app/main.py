@@ -8,13 +8,13 @@ implementation and accept ANY authenticated caller — no role check, no maker-c
 import logging
 import os
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-from . import balance, delinquency, payments, reconciliation
+from . import balance, config, delinquency, payments, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
@@ -37,6 +37,29 @@ async def unhandled(request: Request, exc: Exception):
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "servicing"}
+
+
+def _require_internal(x_internal_token: Optional[str]) -> None:
+    """Defense in depth on every money-moving route.
+
+    servicing-service publishes no host port, so the network boundary was the
+    only thing standing between a caller and these endpoints -- and it was the
+    ONLY control, because none of them checks anything itself. That is the same
+    position kyc-service was in when it turned out to be reachable anyway,
+    first through its own published port and then through an anonymous gateway
+    relay that signed requests on the caller's behalf. Both times the topology
+    was assumed to be the guarantee, and both times it was not.
+
+    Network topology is not an application-level check. A container that can
+    resolve `servicing-service:8002` can move money on any loan: set a balance
+    to zero, waive a fee, or post a payment that never happened.
+
+    An unset config token can never match, so a deploy that forgets to set one
+    refuses every money-moving call rather than accepting every one -- the same
+    fail-closed contract the five sibling services already use.
+    """
+    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=401, detail="not authorized")
 
 
 class PaymentIn(BaseModel):
@@ -79,7 +102,9 @@ class PaymentIn(BaseModel):
 
 
 @app.post("/payments")
-def post_payment(body: PaymentIn):
+def post_payment(body: PaymentIn,
+                 x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2,
     # unrelated to the PCI/D5 fix above -- left as-is, same scope boundary
     # payment-service's own idempotency fix drew.)
@@ -94,7 +119,9 @@ class ApplyPaymentIn(BaseModel):
 
 
 @app.post("/accounts/{loan_id}/apply-payment")
-def apply_payment(loan_id: int, body: ApplyPaymentIn):
+def apply_payment(loan_id: int, body: ApplyPaymentIn,
+                  x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # This is the apply path called by payment-service AFTER it captures the charge (the
     # LSS half of the split payment flow). It still does the unlocked read-modify-write
     # (D3) straight off principal with no waterfall (D14) — preserved exactly as-is.
@@ -125,7 +152,9 @@ class AdjustIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/adjust-balance")
 def adjust_balance(loan_id: int, body: AdjustIn,
-                   x_user_role: Optional[str] = Header(None)):
+                   x_user_role: Optional[str] = Header(None),
+                   x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # ANY authenticated user. No role check, no second approver, no ledger entry. (debt D8)
     return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
 
@@ -136,13 +165,17 @@ class WaiveIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/waive-fee")
 def waive_fee(loan_id: int, body: WaiveIn,
-              x_user_role: Optional[str] = Header(None)):
+              x_user_role: Optional[str] = Header(None),
+              x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # ANY authenticated user can waive a fee. No maker-checker. (debt D8)
     return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}
 
 
 @app.post("/accounts/{loan_id}/late-fee")
-def late_fee(loan_id: int):
+def late_fee(loan_id: int,
+             x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     return {"loan_id": loan_id, "past_due": delinquency.assess_late_fee(loan_id)}
 
 

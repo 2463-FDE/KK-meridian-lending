@@ -72,7 +72,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from .logging_config import get_logger
 from . import db, processor
-from .config import SERVICING_URL
+from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .processor import ChargeDeclinedError
 from .redactor import redact_dict, redact_str
 
@@ -290,7 +290,15 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
-            url, json={"amount": float(amount), "payment_id": payment_id}, timeout=5.0
+            url, json={"amount": float(amount), "payment_id": payment_id}, timeout=5.0,
+            # servicing-service now requires this on every money-moving route.
+            # This call is the LSS half of the split payment flow and is the one
+            # legitimate caller of apply-payment that is not the gateway, so it
+            # has to present the token too or every capture stops reaching the
+            # balance -- and it would fail quietly, since the caller treats a
+            # servicing error as "captured but not yet applied" and leaves the
+            # row for the reconciler.
+            headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
         )
         resp.raise_for_status()
         db.query("UPDATE payments SET applied_at = now() WHERE id = %s", (payment_id,))
