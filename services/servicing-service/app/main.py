@@ -77,6 +77,27 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="not authorized")
 
 
+@app.get("/internal/auth-check")
+def internal_auth_check(
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+):
+    """Authenticated readiness, for callers that must not act if auth is broken.
+
+    Review round 2 (high): payment-service sends its token to apply-payment only
+    AFTER the processor has already authorized the card. If the two services are
+    deployed with different token values -- a rotation applied to one and not the
+    other -- the borrower is charged and every apply is rejected, so the money is
+    captured and the balance never moves until someone reconciles it by hand.
+
+    `/health` cannot detect that: it is deliberately open, so it answers "the
+    process is up", never "your credentials work here". This route answers the
+    second question and nothing else -- no database access, no state, so a 200
+    means exactly "the token you sent is the token I expect".
+    """
+    _require_internal(x_internal_token)
+    return {"status": "ok", "auth": "ok"}
+
+
 class PaymentIn(BaseModel):
     # ADR 0008 (Week 5 tokenization): this used to accept raw pan/cvv/ssn
     # directly and log/persist them unredacted (D5) -- the exact same gap

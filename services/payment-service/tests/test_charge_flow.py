@@ -803,3 +803,68 @@ def test_a_nonfinite_amount_is_still_reported_rather_than_crashing_the_response(
     assert "amount" in resp.text
     for e in resp.json()["detail"]:
         assert isinstance(e["loc"], list)
+
+
+# --- review round 2: never capture money we cannot credit ---------------------
+
+def test_a_charge_is_refused_when_servicing_will_not_accept_our_token(monkeypatch):
+    """Token skew must stop the charge, not strand it.
+
+    Review round 2 (high): the token reaches servicing only AFTER the processor
+    has authorized. If payment-service and servicing-service hold different
+    values -- a rotation applied to one and not the other -- the borrower is
+    charged and every apply is rejected, so the money sits captured and
+    uncredited until a human reconciles it.
+
+    An uncharged customer retries. A charged customer with no credit has to be
+    found first.
+    """
+    from app import payments as payments_mod
+
+    authorized = []
+
+    class _Db:
+        """Just enough to reach the preflight: the insert returns a payments row."""
+        def query(self, sql, params=None):
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return [{"id": 1, "loan_id": 42, "amount": 10.0}]
+            return []
+
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda: False)
+    monkeypatch.setattr(payments_mod.processor, "authorize_charge",
+                        lambda *a, **k: authorized.append(a) or "auth_x")
+
+    with pytest.raises(payments_mod.ServicingAuthUnavailable):
+        payments_mod.charge(42, "tok_x", "1111", 10.0, "preflight-key-1")
+
+    assert not authorized, (
+        "the card was authorized even though servicing had already rejected our "
+        "credentials -- that is the capture-without-credit this check prevents"
+    )
+
+
+def test_a_transient_preflight_failure_does_not_block_payments(monkeypatch):
+    """Unknown is not known-bad.
+
+    Making every servicing blip refuse payments would trade a rare accounting
+    error for a common outage, so only an explicit 401/403 blocks the charge.
+    """
+    from app import payments as payments_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(payments_mod.httpx, "get", _boom)
+    assert payments_mod._servicing_auth_ok() is True
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_the_preflight_reports_an_auth_rejection(monkeypatch, status):
+    from app import payments as payments_mod
+
+    class _Resp:
+        status_code = status
+
+    monkeypatch.setattr(payments_mod.httpx, "get", lambda *a, **k: _Resp())
+    assert payments_mod._servicing_auth_ok() is False

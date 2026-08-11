@@ -90,3 +90,44 @@ def test_the_env_example_documents_the_requirement():
     assert "secrets.token_urlsafe" in example, (
         "tell the operator how to generate one, or they will invent a weak value"
     )
+
+
+# --- review round 2: a denylist is not a policy -------------------------------
+
+@pytest.mark.parametrize("weak", ["1", "abc", "password", "hunter2", "a" * 31, "short-secret"])
+def test_a_short_or_guessable_token_refuses_to_boot(weak):
+    """A denylist can only reject the weak values someone thought of.
+
+    Review round 2: `INTERNAL_SERVICE_TOKEN=1` booted cleanly, and because these
+    routes carry no role or ownership check, a guessable token makes direct money
+    movement brute-forceable the moment the network boundary fails -- which is
+    the only scenario the token exists for.
+    """
+    with pytest.raises(config.InsecureInternalTokenError):
+        config.validate_internal_token(environment="production", token=weak)
+
+
+@pytest.mark.parametrize("padded", [
+    "ChangeMe-padded-out-to-thirty-two-plus",
+    "this-is-a-placeholder-value-really-long",
+    "correct-horse-battery-password-stapler",
+    "TODO-generate-a-real-secret-before-prod",
+])
+def test_a_long_placeholder_is_still_refused(padded):
+    """Length alone is not entropy. A sentence is not a secret, however long."""
+    assert len(padded) >= config.MIN_TOKEN_LENGTH
+    with pytest.raises(config.InsecureInternalTokenError):
+        config.validate_internal_token(environment="production", token=padded)
+
+
+def test_a_generated_secret_is_accepted():
+    """The policy must not reject the thing .env.example tells operators to use."""
+    import secrets as _secrets
+    config.validate_internal_token(environment="production", token=_secrets.token_urlsafe(32))
+
+
+def test_the_error_says_how_to_generate_one():
+    """An error that only says "no" gets worked around with a longer placeholder."""
+    with pytest.raises(config.InsecureInternalTokenError) as excinfo:
+        config.validate_internal_token(environment="production", token="1")
+    assert "token_urlsafe" in str(excinfo.value)
