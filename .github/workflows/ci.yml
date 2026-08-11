@@ -89,7 +89,7 @@ jobs:
       # not a secret. CI supplies a throwaway value and marks itself as a test
       # environment, which is what lets the services accept a weak one.
       ENVIRONMENT: test
-      INTERNAL_SERVICE_TOKEN: ci-throwaway-not-a-real-secret
+      INTERNAL_SERVICE_TOKEN: ci-throwaway-Jd7mQ2xR9vLpTn4wCe8bYk3ZaHsUfGi5
     steps:
       - uses: actions/checkout@v4
       - name: docker compose build
@@ -167,7 +167,7 @@ jobs:
       # not a secret. CI supplies a throwaway value and marks itself as a test
       # environment, which is what lets the services accept a weak one.
       ENVIRONMENT: test
-      INTERNAL_SERVICE_TOKEN: ci-throwaway-not-a-real-secret
+      INTERNAL_SERVICE_TOKEN: ci-throwaway-Jd7mQ2xR9vLpTn4wCe8bYk3ZaHsUfGi5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

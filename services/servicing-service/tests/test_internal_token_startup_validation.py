@@ -131,3 +131,56 @@ def test_the_error_says_how_to_generate_one():
     with pytest.raises(config.InsecureInternalTokenError) as excinfo:
         config.validate_internal_token(environment="production", token="1")
     assert "token_urlsafe" in str(excinfo.value)
+
+
+def test_every_service_given_the_token_also_declares_its_environment():
+    """A service that validates at startup must be told what environment it is in.
+
+    This is the bug that reached CI. `servicing-service` received
+    INTERNAL_SERVICE_TOKEN from compose but no ENVIRONMENT, and `validate_internal_token`
+    treats an unset ENVIRONMENT as production -- correctly, since a container boots
+    without one. So the service refused to start anywhere `.env` was absent.
+
+    `.env` is gitignored, so it is present on a developer's machine and never in
+    CI. The result was a change that booted locally, died in CI, and failed in a
+    way that pointed nowhere near the cause: the loan page fetches
+    `/lss/loans/{id}` before its schedule, so an unreachable servicing surfaced as
+    "Amortization schedule heading not found" two files away.
+
+    Asserted over the file for every service, not just this one, because the same
+    omission in any of them produces the same silent startup failure -- and a
+    hand-checked list is the thing that failed last time.
+    """
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    blocks, current, buf = {}, None, []
+    for line in compose.splitlines():
+        if line.startswith("  ") and not line.startswith("    ") and line.rstrip().endswith(":"):
+            if current:
+                blocks[current] = "\n".join(buf)
+            current, buf = line.strip().rstrip(":"), []
+        elif current:
+            buf.append(line)
+    if current:
+        blocks[current] = "\n".join(buf)
+
+    def _validates_at_startup(service: str) -> bool:
+        """Only services whose code actually calls the validator can be broken by
+        a missing ENVIRONMENT. Derived from the source rather than listed, so a
+        service that gains startup validation later is covered the same day --
+        a hand-maintained list is precisely what failed here."""
+        cfg = REPO_ROOT / "services" / service / "app" / "config.py"
+        return cfg.is_file() and "def validate_internal_token" in cfg.read_text(encoding="utf-8")
+
+    missing = [
+        name for name, body in blocks.items()
+        if "INTERNAL_SERVICE_TOKEN" in body
+        and "ENVIRONMENT" not in body
+        and _validates_at_startup(name)
+    ]
+    assert not missing, (
+        f"these services receive INTERNAL_SERVICE_TOKEN but no ENVIRONMENT: {missing}. "
+        "Startup validation treats an unset ENVIRONMENT as production, so each of "
+        "them refuses to boot wherever .env is absent -- which is every environment "
+        "except a developer's own machine."
+    )

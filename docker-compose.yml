@@ -70,6 +70,12 @@ services:
     # gateway entirely and hit it directly (review finding). Reachable from other
     # containers on the compose network by service name; not from the host.
     environment:
+      # Required, not optional: app/config.py validates the token at import and
+      # treats an UNSET ENVIRONMENT as production. Without this line the service
+      # only booted where a developer happened to have .env (which is gitignored,
+      # so never in CI) -- it died on startup everywhere else, and every page
+      # backed by servicing failed with no obvious cause.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       # Required on every money-moving route now (see app/main.py::_require_internal).
       # The network boundary above was previously the ONLY control, because none
       # of those routes checked anything -- the same position kyc-service was in
