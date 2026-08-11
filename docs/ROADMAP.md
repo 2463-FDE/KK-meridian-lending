@@ -35,11 +35,15 @@ origination 210, servicing 96, gateway 83, payment 138, loan-assistant 153, kyc 
 decision 40 -- **899 service tests** (817 passed, 82 skipped locally because they
 are `skipif(not DATABASE_URL)` and no local Postgres was up; CI runs those against
 a real Postgres and the run on `17dca05` was 22/22 green) -- plus **231**
-database/migration tests (19 passed, 212 DATABASE_URL-gated locally; green in CI's
-`db-migrations` job) and **12** Playwright spec files under `frontend/e2e/`
-(CI's `e2e` job green on `17dca05`; not run locally, no Docker daemon). *The
-disclosure figure previously read 166 and the spec-file count appeared as 7
-further down this file; both were off by a re-count.* The browser suite needs the
+database/migration tests and **38** Playwright tests across **12** spec files
+under `frontend/e2e/`. *Both suites were re-run against a real stack later the
+same day: `db/tests` **231 passed, 0 skipped** (it had been 19 passed / 212
+`DATABASE_URL`-gated), and all **38** browser specs passed. This paragraph
+previously reported those figures as gated or CI-only, "not run locally, no
+Docker daemon" — true when written, and worth correcting rather than leaving,
+because a skip reads as a pass and 212 of them did.* The disclosure figure
+previously read 166 and the spec-file count appeared as 7 further down this
+file; both were off by a re-count. The browser suite needs the
 documented rate-limit overlay (`docker-compose.e2e.yml`); without it later specs
 trip the shipped 120-request control and fail on unrelated assertions.
 
@@ -186,11 +190,11 @@ someone who did not write it.
 #### Critical
 
 **G-KYC — `kyc-service` is reachable around the gateway, unauthenticated.**
-- *What remains:* `docker-compose.yml:94` publishes `8003:8003`; `POST /kyc/check` takes no `X-Internal-Token`. An unauthenticated caller on the host can write a `kyc_checks` row against any `applicant_id` — fabricating CIP evidence in the record BSA/AML relies on — and can post name/DOB/SSN/address into the service.
-- *Acceptance criteria:* (1) the `kyc-service` block in `docker-compose.yml` has no `ports:` key; (2) `POST /kyc/check` returns 401 with no token and with a wrong token, and an unset `INTERNAL_SERVICE_TOKEN` never matches, so a deploy that forgets to set one fails closed; (3) the gateway and origination-service both forward the token, so intake still works end to end; (4) `test_decision_service_not_host_published.py` includes `kyc-service` in its parametrize list.
-- *Evidence that will prove it:* the extended host-port test failing on today's compose file and passing after; new 401 tests in `kyc-service/tests/`; `frontend/e2e/approved-workflow.spec.ts` still green in CI (it drives a real intake through KYC).
-- *Dependency:* none. The pattern is already implemented in four sibling services.
-- *Next action:* **Start next**, below. A fix is **🟠 open on PR #18**, CI pending at the time of writing. Per rule 1 at the foot of this file, this row stays Critical/Partial until #18 merges — "built on a branch" and "on `main`" are different claims, and only the first one is true.
+- *What remains:* **two routes to the same handler, not one.** `docker-compose.yml:94` publishes `8003:8003` and `POST /kyc/check` takes no `X-Internal-Token` — so an unauthenticated caller on the host can write a `kyc_checks` row against any `applicant_id`, fabricating CIP evidence in the record BSA/AML relies on. **And** the gateway's own `/kyc/{path}` route requires no session while stamping the trusted token itself, so the same write is reachable through port 8000 even once 8003 is gone. PR #18 closes the first and not the second.
+- *Acceptance criteria:* (1) the `kyc-service` block in `docker-compose.yml` has no `ports:` key; (2) `POST /kyc/check` returns 401 with no token and with a wrong token, and an unset `INTERNAL_SERVICE_TOKEN` never matches, so a deploy that forgets to set one fails closed; (3) the gateway and origination-service both forward the token, so intake still works end to end; (4) `test_decision_service_not_host_published.py` includes `kyc-service` in its parametrize list; (5) **the gateway's `/kyc/*` route requires a session, or the relay is removed — no frontend code calls it**; (6) **`_proxy` strips any inbound `x-internal-token` before stamping its own**, so a caller cannot substitute the header the downstream check reads.
+- *Evidence that will prove it:* the extended host-port test failing on today's compose file and passing after; new 401 tests in `kyc-service/tests/`; **an anonymous `POST localhost:8000/kyc/kyc/check` returning 401 rather than 200 — the check that was missing, and the one that found this**; a gateway test asserting the `/kyc/*` route forwards the token, which does not exist today; `frontend/e2e/approved-workflow.spec.ts` still green in CI (it drives a real intake through KYC).
+- *Dependency:* none, but it is **two concerns, not one** — a `kyc-service` change and a gateway authorization change. Bundling them is what let the second half go unnoticed.
+- *Next action:* **Start next**, below. A fix is **🟠 open on PR #18 — and it does not close this gap.** The gateway reaches the same handler; see the correction under "Start next". This row stays Critical/Partial, and the remaining work is a separate change against the gateway.
 
 #### High
 
@@ -225,38 +229,71 @@ being fixed in the next commit, the fix carries the record.
 
 ## Start next
 
-**G-KYC — close the `kyc-service` gateway bypass.** One concern.
+**G-KYC — close the unauthenticated path to the CIP handler.**
 
-It is first because it is the only Critical row, because it is a live
-unauthenticated write path into an audit table rather than a design gap, and
-because its acceptance criteria need no decision from anyone: four sibling
-services already implement the exact pattern, and the regression test that would
-have caught it already exists and simply omits this service from its parametrize
-list. Everything above it in severity is already closed; everything below it
-either needs a schema decision (G-LEDGER and everything that depends on it) or a
-product decision (G-DTI).
+It is first because it is the only Critical row, and because it is a live
+unauthenticated write path into an audit table rather than a design gap.
+Everything above it in severity is already closed; everything below it either
+needs a schema decision (G-LEDGER and everything that depends on it) or a product
+decision (G-DTI). Its acceptance criteria need no decision from anyone — four
+sibling services already implement the service-side pattern, and the regression
+test that would have caught it already exists and simply omitted this service.
 
-**Status: 🟠 built, open on PR #18 — inventory, not delivery.** That PR removes the
-host port from `docker-compose.yml`, adds the `X-Internal-Token` check to
-`POST /kyc/check`, forwards the token from both legitimate callers (the gateway's
-`/kyc/*` proxy and origination's intake), and extends the host-port regression
-test to every backend service — plus a second test that derives that list from
-`services/` on disk, so the next service added is covered without anyone
-remembering to add it. Adding it surfaced a second omission immediately:
-`loan-assistant` was missing from the list too.
+*This section previously read "close the `kyc-service` gateway bypass. **One
+concern.**" It is two: a `kyc-service` change and a gateway authorization change,
+and calling it one is precisely what let half of it ship as though it were
+whole.* The remaining work is the gateway half — require a session on `/kyc/*`
+or remove the relay, and strip the inbound `x-internal-token` in `_proxy` — and
+it belongs in its own PR, separate from #18.
 
-All eight service suites passed locally on that branch (830 passed, 82
-`DATABASE_URL`-gated skips), and each guard was mutation-checked — reverting the
-token check fails 6 of the 7 new kyc tests, dropping the forwarded header fails
-the origination test, and restoring the `ports:` mapping fails the extended
-host-port test. **Not verified locally:** the Playwright specs and the
-`DATABASE_URL`-gated tests, for want of a Docker daemon. The change touches the
-live intake path, so CI's `e2e` and `db-migrations` jobs are required evidence
-before that PR merges.
+**Status: 🟠 open on PR #18 — and PR #18 does not close this gap.**
 
-Per rule 1 at the foot of this file, none of that earns a ✅ here. When #18
-merges, the Week 4 row and the Critical entry above both need updating, and this
-paragraph is what will be stale — rule 4.
+> **Correction, made the same day this audit was written.** An adversarial review
+> and a live check against a running stack found the bypass still open. PR #18
+> removes the 8003 host port and adds the token check, but the **gateway's**
+> `/kyc/{path}` route requires no session and stamps the trusted
+> `X-Internal-Token` itself — so an anonymous caller reaches the same handler
+> through port 8000, the one port deliberately published to the host:
+>
+> ```
+> curl -X POST localhost:8000/kyc/kyc/check \
+>   -d '{"application_id":1,"applicant_id":1,"name":"Forged Owner", ... }'
+> → 200 {"check_id":92,"cip_passed":true, ... }
+> ```
+>
+> That wrote a `kyc_checks` row for a real applicant with `name_verified=t`, with
+> no session and no token; the row was deleted after verification. Root cause is
+> **gateway authorization** (`services/gateway/app/main.py`), not `kyc-service`,
+> so the remaining work is a separate change. Two related defects came with it:
+> `_proxy` keeps a client-supplied `x-internal-token` and the client's copy wins,
+> so any caller can force a 401 on every internal-token route; and the new 401
+> lands in intake's `except Exception` swallow, silently disabling CIP while
+> intake still returns 200. **CI was 22/22 green on that branch and caught none
+> of it**, because no test exercises the gateway's `/kyc/*` route at all.
+
+What PR #18 does contain: the host port removed from `docker-compose.yml`, the
+`X-Internal-Token` check on `POST /kyc/check`, the token forwarded from both
+legitimate callers (the gateway's `/kyc/*` proxy and origination's intake), and
+the host-port regression test extended to every backend service — plus a second
+test that derives that list from `services/` on disk, so the next service added
+is covered without anyone remembering to add it. Adding it surfaced a second
+omission immediately: `loan-assistant` was missing from the list too.
+
+All eight service suites passed on that branch, and each guard was
+mutation-checked — reverting the token check fails 6 of the 7 new kyc tests,
+dropping the forwarded header fails the origination test, and restoring the
+`ports:` mapping fails the extended host-port test. **Verified against a real
+stack the same day:** `db/tests` 231 passed (was 212 skipped), origination 212,
+disclosure 166, payment 138, and all 38 Playwright specs — every
+`DATABASE_URL`-gated test genuinely run. *That verification is what produced the
+correction above; an earlier version of this paragraph read "built, open on PR
+#18 — inventory, not delivery" and presented the boundary as closed, with the
+Playwright and database suites listed as "not verified locally, for want of a
+Docker daemon."*
+
+Per rule 1 at the foot of this file, none of that earns a ✅ here — and the
+correction is why rule 1 exists. A green CI run on a branch is evidence about
+what is tested, not about what is true.
 
 ## Verification baseline
 
