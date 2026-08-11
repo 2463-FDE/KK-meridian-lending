@@ -868,3 +868,99 @@ def test_the_preflight_reports_an_auth_rejection(monkeypatch, status):
 
     monkeypatch.setattr(payments_mod.httpx, "get", lambda *a, **k: _Resp())
     assert payments_mod._servicing_auth_ok() is False
+
+
+# --- review round 3: the guard must cover the retry path too ------------------
+
+def test_a_pending_retry_is_also_guarded(monkeypatch):
+    """The hole this PR was built around, reachable by the likeliest path.
+
+    Review round 3: the pending-duplicate branch called authorize_charge()
+    directly with no servicing check. A retry of a request whose authorization
+    never confirmed therefore re-charged the card while servicing was rejecting
+    our credentials -- the exact charged-but-uncredited case the preflight
+    exists to prevent, on the branch an incident actually exercises, because a
+    client retry is what lands there.
+    """
+    from app import payments as payments_mod
+
+    authorized = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return []                       # ON CONFLICT DO NOTHING -> duplicate
+            if "SELECT" in sql.upper():
+                return [{"id": 7, "loan_id": 42, "amount": 10.0,
+                         "auth_status": "pending", "applied_at": None}]
+            return []
+
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda: False)
+    monkeypatch.setattr(payments_mod.processor, "get_authorization", lambda k: None)
+    monkeypatch.setattr(payments_mod.processor, "authorize_charge",
+                        lambda *a, **k: authorized.append(a) or "auth_x")
+
+    with pytest.raises(payments_mod.ServicingAuthUnavailable):
+        payments_mod.charge(42, "tok_x", "1111", 10.0, "retry-key-1")
+
+    assert not authorized, (
+        "the retry re-authorized the card while servicing was rejecting our "
+        "credentials -- the capture-without-credit this guard exists to prevent"
+    )
+
+
+def test_a_preflight_failure_leaves_the_key_retryable(monkeypatch):
+    """An infrastructure blip must not strand the borrower permanently.
+
+    Review round 3: the row was inserted and then marked auth_status='failed'
+    even though no card was ever charged. The router returns 503 "no charge
+    made, retry later" -- but that retry hit the duplicate-FAILED branch and got
+    a permanent failure, so following the advice in the error made things worse.
+
+    The row now stays 'pending', which is a retryable state that re-runs the
+    check on the same key: the duplicate branch re-preflights and proceeds once
+    the token skew is fixed.
+    """
+    from app import payments as payments_mod
+
+    statements = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            statements.append(" ".join(sql.split()))
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return [{"id": 8, "loan_id": 42, "amount": 10.0}]
+            return []
+
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda: False)
+
+    with pytest.raises(payments_mod.ServicingAuthUnavailable):
+        payments_mod.charge(42, "tok_x", "1111", 10.0, "retryable-key-1")
+
+    failed_writes = [s for s in statements if "auth_status = 'failed'" in s]
+    assert not failed_writes, (
+        "a preflight failure marked the payment failed, burning the idempotency "
+        f"key even though no card was charged: {failed_writes}"
+    )
+
+
+def test_the_guard_covers_every_authorize_charge_call_site(monkeypatch):
+    """Derived, not listed -- a new charge path must not skip the preflight.
+
+    Two call sites exist today (first attempt, pending retry) and both are
+    covered above. This asserts the count, so a third path added later fails
+    here rather than silently charging cards without the check.
+    """
+    import inspect
+    from app import payments as payments_mod
+
+    src = inspect.getsource(payments_mod.charge)
+    authorize_calls = src.count("processor.authorize_charge(")
+    guard_calls = src.count("_require_servicing_auth()")
+
+    assert guard_calls >= authorize_calls, (
+        f"{authorize_calls} authorize_charge() call sites but only {guard_calls} "
+        "preflight guards -- every path that can charge a card must check first"
+    )

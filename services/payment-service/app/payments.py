@@ -104,6 +104,22 @@ class ServicingAuthUnavailable(Exception):
     """servicing-service will not accept our credentials, so a capture would strand money."""
 
 
+def _require_servicing_auth() -> None:
+    """Raise unless servicing will accept our credentials.
+
+    Called immediately before EVERY authorize_charge(), not once at the top of
+    the happy path. Review round 3: the pending-duplicate retry branch called
+    authorize_charge() directly, so a retry of a request whose authorization
+    never confirmed re-charged the card with no servicing check at all -- the
+    precise charged-but-uncredited case this guard exists to prevent, reachable
+    by the one path most likely to be taken during an incident.
+    """
+    if not _servicing_auth_ok():
+        raise ServicingAuthUnavailable(
+            "servicing-service rejected our internal token; refusing to charge"
+        )
+
+
 def _servicing_auth_ok() -> bool:
     """Ask servicing whether our token works, BEFORE authorizing a card.
 
@@ -191,15 +207,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # processor_token is declined here, not silently trusted. Only a
         # confirmed approval reaches _apply_via_servicing; a decline never
         # touches the loan balance at all.
-        # Preflight BEFORE authorizing: if servicing will not accept our
-        # credentials, a successful capture could never be credited, and an
-        # uncharged customer who retries is a far better outcome than a charged
-        # customer whose balance never moves (review round 2).
-        if not _servicing_auth_ok():
-            db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
-            raise ServicingAuthUnavailable(
-                "servicing-service rejected our internal token; refusing to charge"
-            )
+        _require_servicing_auth()
         try:
             auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
         except ChargeDeclinedError as exc:
@@ -269,6 +277,14 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # This retry's own processor_token since the token itself is
                 # never persisted (ADR 0008); idempotency_key is passed along
                 # so the processor also dedupes on its end.
+                # Same guard as the first attempt. Leaving it out here was the
+                # hole: this branch is the one an incident actually exercises,
+                # because it is what a client retry lands on.
+                #
+                # The row stays 'pending' when this raises -- deliberately. It is
+                # a retryable state, so the same idempotency_key can be used
+                # again once the token skew is fixed, and no card was charged.
+                _require_servicing_auth()
                 try:
                     auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
                 except ChargeDeclinedError as exc:
