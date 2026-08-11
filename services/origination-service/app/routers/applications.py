@@ -202,7 +202,7 @@ def submit_application(body: ApplicationIn):
             "ssn": payload.get("ssn"),
             "address": payload.get("address"),
             "entity_type": "llc" if is_entity else None,
-        })
+        }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
         passed = bool(resp.get("cip_passed"))
         # Map kyc-service cip_passed -> the four KycOut booleans the frontend expects.
         # CIP verifies name/dob/address/ssn that were provided; entity applicants have no

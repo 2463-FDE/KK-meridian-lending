@@ -64,18 +64,35 @@ paths below.
  prometheus (9090) + grafana (3001) scrape /metrics off all 8 backend services (W7).
 ```
 
-Only `gateway` (8000), `kyc-service` (8003) and `frontend` (3000) publish a host port in
-`docker-compose.yml`; every other backend service is reachable only by the gateway and
+Only `gateway` (8000) and `frontend` (3000) publish a host port in
+`docker-compose.yml`; every backend service is reachable only by the gateway and
 same-network callers (review finding: services used to be host-published alongside the
 gateway's own authz, which made its staff-only/ownership checks skippable by hitting the
 service directly). Defense in depth on top of that boundary is a shared `X-Internal-Token`,
-enforced by origination, decision, disclosure, payment and loan-assistant — see "Auth &
+enforced by origination, decision, disclosure, payment, kyc and loan-assistant — see "Auth &
 roles" below.
 
-**Still open (not fixed in PR #6):** `kyc-service` is the one service that is *both*
-host-published *and* does not check `X-Internal-Token`, so `POST localhost:8003` bypasses
-the gateway entirely. `servicing-service` doesn't check the token either, but it is not
-host-published. Both are tracked for PR #8.
+Both halves of the boundary are asserted rather than described.
+`services/gateway/tests/test_decision_service_not_host_published.py` reads
+`docker-compose.yml` and fails if any backend service publishes a host port — and
+derives the list of services from `services/` on disk, so a new one is covered the
+day its directory appears rather than the day someone remembers to add it.
+
+*What this paragraph used to say, kept because the delay is the finding.* It read
+"**Still open (not fixed in PR #6):** `kyc-service` is the one service that is
+*both* host-published *and* does not check `X-Internal-Token`, so
+`POST localhost:8003` bypasses the gateway entirely … tracked for PR #8." That
+was accurate, and it stayed accurate for two months: PR #8 shipped card
+tokenization instead, nothing reassigned the gap, and the regression test that
+would have caught it named four services by hand and omitted this one. A partial
+enumeration in a security test reads exactly like a complete one. The port is
+gone and the check is in place as of the Weeks 1–6 audit (2026-08-11).
+
+`servicing-service` still does not check `X-Internal-Token`. It is not
+host-published, so the network boundary holds, but it is the last money-moving
+service without the application-level fallback — tracked as `DEBT.md` D8. Left out
+of this change deliberately: it is a second concern, and adding it here would make
+this a change to two services rather than a fix to one.
 
 ## Services
 
@@ -84,7 +101,7 @@ host-published. Both are tracked for PR #8.
 | `gateway` | 8000 | FastAPI + httpx + Redis | Session auth (`/auth/*`), role/ownership enforcement, reverse-proxy. Per-client-IP rate limiting (fixed window, fails open on a Redis outage). Forwards the resolved identity as `X-User-Id`/`X-User-Role`, stripping any inbound `X-User-*` the caller sent itself. See "Auth & roles" for the per-route tiers. |
 | `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (intake logs `app_id`/`applicant_id` only, never the request payload — enforced by `tests/test_intake_pii_not_logged.py`; this cell previously claimed a request-logging middleware in `logging_config.py` logged full POST bodies, which is false — no such middleware has ever existed, see `DEBT.md` D5c), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the fair-lending ZIP screen. |
 | `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge to the balance — still a single mutable column, no ledger. |
-| `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR. Host-published **and** does not check `X-Internal-Token` — see the boundary note above. |
+| `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR (`DEBT.md` D11). No host port; `POST /kyc/check` requires `X-Internal-Token` — this cell previously read "Host-published **and** does not check `X-Internal-Token`", which was the bypass described in the boundary note above. |
 | `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`). **Compute-only — persists nothing.** Origination is the sole writer of both `decisions` and the append-only `decision_events` audit row, written atomically after its own finality recheck (PR #6). The bureau call goes through a `BureauClient` seam that forwards an idempotency key so a retry after an ambiguous timeout recovers the original pull. Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
 | `disclosure-service` | 8005 | FastAPI + SQLAlchemy + psycopg2 | TILA/Reg-Z offer + APR + amortization (Decimal internally, float at the API boundary). `POST /offers` atomically checks decision approval and inserts (`INSERT ... SELECT ... FROM decisions WHERE outcome='approve'`) and is non-mutating on conflict (`ON CONFLICT DO NOTHING` + read-back) — a retry can never rewrite an already-disclosed loan's terms, even across a fee-rule change. `fee_pct_used` is snapshotted per offer. No host port; requires `X-Internal-Token`. |
 | `payment-service` | 8006 | FastAPI + SQLAlchemy + psycopg2 | Card/ACH charge. **Idempotent** since PR #6: `idempotency_key` is required at the API boundary and backed by a partial unique index, so a retried POST no longer double-charges (`db/migrations/0007`, re-asserted by `0010`; tests in `payment-service/tests/test_charge_flow.py`), with atomic dedupe + apply-once reconciliation (`0012`/`0013`). **PCI debt closed in PR #8:** card capture is tokenized client-side (ADR 0008, supersedes ADR 0003) — the service never receives a raw PAN/CVV/SSN, only a processor token plus last4/brand, and the token itself is never persisted. After inserting the `payments` row it calls servicing's `apply-payment`. No host port; requires `X-Internal-Token`. |

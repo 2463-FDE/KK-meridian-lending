@@ -18,6 +18,8 @@ from app import db
 from app.main import app
 from fastapi.testclient import TestClient
 
+from .conftest import AUTH_HEADERS
+
 client = TestClient(app)
 
 _CANARY = {
@@ -34,7 +36,7 @@ def test_kyc_check_logs_no_applicant_pii(monkeypatch, caplog):
 
     resp = client.post("/kyc/check", json={
         "application_id": 4242, "applicant_id": 99, **_CANARY,
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     for field, value in _CANARY.items():
@@ -45,7 +47,11 @@ def test_kyc_check_still_logs_correlating_identifiers(monkeypatch, caplog):
     monkeypatch.setattr(db, "query", lambda sql, params=None: [{"id": 77}])
     caplog.set_level(logging.INFO)
 
-    client.post("/kyc/check", json={"application_id": 4242, "applicant_id": 99, **_CANARY})
+    client.post(
+        "/kyc/check",
+        json={"application_id": 4242, "applicant_id": 99, **_CANARY},
+        headers=AUTH_HEADERS,
+    )
 
     assert "application_id=4242" in caplog.text
     assert "applicant_id=99" in caplog.text
@@ -64,7 +70,7 @@ def test_kyc_check_still_returns_and_persists_the_verification_result(monkeypatc
 
     resp = client.post("/kyc/check", json={
         "application_id": 4242, "applicant_id": 99, **_CANARY,
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()

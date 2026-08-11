@@ -41,15 +41,32 @@ All seeded with password `password`:
 
 ## Health checks
 
+The gateway is the only backend port published to the host:
+
 ```bash
 curl localhost:8000/health     # gateway
-curl localhost:8001/health     # origination (LOS, intake + boarding orchestrator)
-curl localhost:8002/health     # servicing (LSS)
-curl localhost:8003/health     # kyc-service
-curl localhost:8004/health     # decision-service
-curl localhost:8005/health     # disclosure-service
-curl localhost:8006/health     # payment-service
 ```
+
+Every other backend service is on the compose network only, so reach its health
+endpoint through the container rather than the host:
+
+```bash
+docker compose exec origination-service  python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8001/health').read())"
+docker compose exec servicing-service    python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8002/health').read())"
+docker compose exec kyc-service          python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8003/health').read())"
+docker compose exec decision-service     python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8004/health').read())"
+docker compose exec disclosure-service   python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8005/health').read())"
+docker compose exec payment-service      python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8006/health').read())"
+```
+
+Or read them all at once from `docker compose ps` — each service's compose
+healthcheck already probes exactly these URLs.
+
+*This block previously listed `curl localhost:8001`–`8006` directly.* Those had
+not worked since PR #6 un-published 8001, 8002 and 8004–8006; 8003 followed when
+the `kyc-service` bypass was closed. An operator following the old version got
+`Connection refused` on six of seven lines and had no way to tell that from a
+service being genuinely down — which is the failure a runbook exists to prevent.
 
 Ports 8003–8006 are the four services extracted from the old origination monolith
 (ADR 0004). `.env` carries their base URLs as `KYC_URL` / `DECISION_URL` /

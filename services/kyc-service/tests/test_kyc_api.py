@@ -14,6 +14,8 @@ from app.kyc import run_cip
 from app.main import app
 from app.routers import kyc as kyc_router
 
+from .conftest import AUTH_HEADERS
+
 client = TestClient(app)
 
 
@@ -67,7 +69,7 @@ def test_kyc_check_individual_applicant_passes(fake_db):
         "application_id": 1, "applicant_id": 1,
         "name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
         "address": "42 Main St, Springfield",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -87,7 +89,7 @@ def test_kyc_check_entity_applicant_with_no_ssn_or_dob_still_passes(fake_db):
         "application_id": 2, "applicant_id": 2,
         "name": "Acme Holdings LLC", "dob": "", "ssn": "",
         "address": "1 Corporate Way", "entity_type": "LLC",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -100,7 +102,7 @@ def test_kyc_check_failing_applicant_missing_name_and_address(fake_db):
     resp = client.post("/kyc/check", json={
         "application_id": 3, "applicant_id": 3,
         "name": "", "dob": "1990-04-12", "ssn": "123-45-6789", "address": "",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -113,7 +115,7 @@ def test_kyc_check_persists_all_four_cip_flags(fake_db):
         "application_id": 4, "applicant_id": 4,
         "name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
         "address": "42 Main St, Springfield",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert len(fake_db.calls) == 1
     _, params = fake_db.calls[0]
@@ -133,7 +135,7 @@ def test_kyc_check_survives_db_failure_and_returns_check_id_negative_one(fake_db
         "application_id": 5, "applicant_id": 5,
         "name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
         "address": "42 Main St, Springfield",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     assert resp.json()["check_id"] == -1

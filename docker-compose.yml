@@ -90,8 +90,14 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8003:8003"
+    # No host port. This service used to publish 8003:8003 while checking no
+    # X-Internal-Token, which made it the one remaining way to reach a backend
+    # service around the gateway: POST localhost:8003/kyc/check wrote a
+    # kyc_checks row for any applicant_id, unauthenticated. Its four siblings
+    # were closed the same way in PR #6; this one was missed. Reach it through
+    # the gateway (/kyc/*) or from another service on this network.
+    environment:
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
     depends_on:
       postgres:
         condition: service_healthy

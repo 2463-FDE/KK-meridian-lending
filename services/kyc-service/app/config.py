@@ -10,3 +10,10 @@ DATABASE_URL = os.getenv(
 )
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Shared secret proving a caller reached this service through the gateway or
+# origination-service rather than straight off the host. Defaults to empty on
+# purpose: routers/kyc.py compares with `not TOKEN or header != TOKEN`, so an
+# unset value can never match and a deploy that forgets to set one fails closed.
+# Same contract as decision/disclosure/payment/origination-service.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")

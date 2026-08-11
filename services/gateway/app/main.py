@@ -292,8 +292,19 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
 
 @app.api_route("/kyc/{path:path}", methods=["GET", "POST"])
 async def kyc(path: str, request: Request, authorization: str | None = Header(None)):
-    user = auth.get_session(auth.bearer_token(authorization))
-    return await _proxy(KYC_URL, f"/{path}", request, user)
+    # Session stays optional here, same as /los/* -- an applicant can apply
+    # without an account, and intake triggers CIP on their behalf.
+    #
+    # kyc-service now requires X-Internal-Token (see its routers/kyc.py), so this
+    # proxy has to forward it or every intake through the gateway 401s. That
+    # token is what makes the check meaningful: it is held by the gateway and
+    # origination-service, never sent to a browser, so possessing it proves the
+    # request came through one of them rather than off the host directly.
+    return await _proxy(
+        KYC_URL, f"/{path}", request,
+        auth.get_session(auth.bearer_token(authorization)),
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 @app.api_route("/decision/{path:path}", methods=["GET", "POST"])

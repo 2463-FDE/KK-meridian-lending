@@ -4,10 +4,22 @@ CIP only — no sanctions / OFAC screening, no beneficial-owner (UBO) capture, n
 monitoring, no SAR path (debt D11). The kyc_checks write below mirrors how origination
 persisted the row: raw psycopg2 INSERT, only the four CIP boolean columns (there are no
 sanctions/ubo columns to persist — debt preserved).
-"""
-from fastapi import APIRouter
 
-from .. import db, kyc
+Authorization: this endpoint had none at all, and kyc-service was the one service
+that was *both* host-published (`docker-compose.yml` mapped 8003:8003) and
+tokenless — so `POST localhost:8003/kyc/check` reached the handler below with no
+authentication, and wrote a kyc_checks row for any applicant_id the caller named.
+That is CIP evidence in the record BSA/AML relies on, fabricable by anyone who
+could reach the host. PR #6 closed the identical bypass for decision, disclosure,
+payment and origination-service; kyc-service was left out of the fix *and* out of
+`gateway/tests/test_decision_service_not_host_published.py`, which is why nothing
+caught it for two months. ARCHITECTURE.md recorded it and named PR #8 as its
+owner; PR #8 shipped tokenization instead. Both halves are closed here: the host
+port is gone, and this check is the defense in depth behind it.
+"""
+from fastapi import APIRouter, Header, HTTPException
+
+from .. import config, db, kyc
 from ..logging_config import get_logger
 from ..schemas import CipCheckIn, CipCheckOut
 
@@ -16,7 +28,16 @@ router = APIRouter(prefix="/kyc", tags=["kyc"])
 
 
 @router.post("/check", response_model=CipCheckOut)
-def kyc_check(body: CipCheckIn):
+def kyc_check(
+    body: CipCheckIn,
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    # Checked before anything else runs: a rejected caller must not reach
+    # run_cip(), the INSERT, or the log line -- an unauthorized request should
+    # leave no trace of its payload anywhere.
+    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=401, detail="not authorized")
+
     payload = body.model_dump()
     # Gap C (PR #6 review): this used to log the whole CIP payload -- name, DOB,
     # SSN and address -- at INFO on every identity check. Identifiers only now.
