@@ -125,9 +125,21 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
     # session). This proxy never re-serializes any header into the
     # outbound URL -- headers stay headers (see the httpx call below,
     # `headers=headers` is separate from `params=request.query_params`).
+    # `x-internal-token` is stripped for the same reason as `x-user-*`: it is an
+    # identity claim this gateway makes, never one a client is allowed to assert.
+    # Leaving it through was not merely untidy -- it was caller-controlled. Header
+    # names arrive lowercased, so a client's `X-Internal-Token: junk` survived as
+    # the key `x-internal-token`, and the `headers.update()` below then added
+    # `X-Internal-Token` as a SECOND, differently-cased key rather than replacing
+    # it. Both went on the wire, and the downstream `Header(alias=...)` resolves
+    # through Starlette's `Headers.get`, which returns the first match -- the
+    # client's. So any caller could hand the gateway a junk token and force a 401
+    # on every internal-token route: /kyc/*, /decision/*, /disclosure/*,
+    # /payments/*, and origination's staff checks on /los/*. Fails closed, so it
+    # was availability rather than escalation, but it was a stranger's switch.
     headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "authorization")
+        if k.lower() not in ("host", "content-length", "authorization", "x-internal-token")
         and not k.lower().startswith("x-user-")
     }
     if user:
@@ -292,17 +304,35 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
 
 @app.api_route("/kyc/{path:path}", methods=["GET", "POST"])
 async def kyc(path: str, request: Request, authorization: str | None = Header(None)):
-    # Session stays optional here, same as /los/* -- an applicant can apply
-    # without an account, and intake triggers CIP on their behalf.
+    # Staff-only, same as /decision/* and /disclosure/* below, and for the same
+    # reason -- with one extra step of history worth keeping, because getting
+    # this wrong is what made the previous version of this change ineffective.
     #
-    # kyc-service now requires X-Internal-Token (see its routers/kyc.py), so this
-    # proxy has to forward it or every intake through the gateway 401s. That
-    # token is what makes the check meaningful: it is held by the gateway and
-    # origination-service, never sent to a browser, so possessing it proves the
-    # request came through one of them rather than off the host directly.
+    # The session used to be OPTIONAL here, matching /los/* on the reasoning that
+    # an applicant can apply without an account. But /los/* is origination, which
+    # gates its own sensitive routes; this proxy forwards straight to a service
+    # whose only auth is the X-Internal-Token that THIS FUNCTION ATTACHES. An
+    # anonymous caller therefore got the gateway to sign its request for it:
+    #
+    #     curl -X POST localhost:8000/kyc/kyc/check -d '{"applicant_id": 1, ...}'
+    #     -> 200, and a kyc_checks row for applicant 1 with name_verified=true
+    #
+    # That is forged CIP evidence in the record BSA/AML relies on, reachable on
+    # the one port deliberately published to the host. Removing kyc-service's own
+    # 8003 mapping did not touch it: the token check it added is satisfied by the
+    # gateway's own token, so the front door stayed open while the side door was
+    # being locked. Confirmed by an adversarial review and reproduced live.
+    #
+    # The real anonymous path to CIP is POST /los/applications, where origination
+    # derives applicant/application identity from the row it just wrote rather
+    # than from the caller's body. This route exists only for staff/ops tooling
+    # to inspect KYC directly, which is exactly what /decision/* and
+    # /disclosure/* concluded for the same shape of service.
+    user = _require_user(authorization)
+    if not auth.is_staff(user):
+        raise HTTPException(status_code=403, detail="staff only")
     return await _proxy(
-        KYC_URL, f"/{path}", request,
-        auth.get_session(auth.bearer_token(authorization)),
+        KYC_URL, f"/{path}", request, user,
         extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
     )
 

@@ -140,18 +140,31 @@ Login → unsalted-sha256 password check → opaque token in Redis (`session:<to
 TTL, no refresh/rotation, no CSRF token). The gateway resolves the session and forwards
 `X-User-Id`/`X-User-Role` downstream, stripping any inbound `X-User-*` the caller sent
 itself first (a caller used to be able to spoof `X-User-Role: admin` on an otherwise-
-anonymous route).
+anonymous route). `X-Internal-Token` is stripped from inbound requests for the same
+reason and was not: header names arrive lowercased, so a client's `X-Internal-Token`
+survived as a separate dict key from the one the gateway adds, both reached the wire, and
+the downstream `Header(alias=...)` read the client's. Any caller could hand the gateway a
+junk token and force a 401 on every internal-token route — fail-closed, so availability
+rather than escalation, but caller-controlled.
 
 The gateway enforces per-route tiers rather than a single authenticated-or-not gate:
 
 - **Anonymous-allowed**: `/los/*` (an applicant can apply/check status without an
   account) and `/assistant/policy-chat` (generic policy Q&A, no per-applicant financials).
-- **Staff-only**: `/decision/*`, `/disclosure/*` (ops/inspection path only — the real
-  decision/offer flow is origination calling those services server-to-server, never
-  through the gateway), `/assistant/applications/*/summary` (returns risk tier + internal
-  underwriting flags a borrower shouldn't see about their own application), and the
-  portfolio-wide/money-moving parts of `/lss/*`/`/payments/*` (list the whole portfolio,
-  balance adjustments, fee waivers, reconciliation).
+- **Staff-only**: `/decision/*`, `/disclosure/*`, `/kyc/*` (ops/inspection path only — the
+  real decision/offer/CIP flow is origination calling those services server-to-server,
+  never through the gateway), `/assistant/applications/*/summary` (returns risk tier +
+  internal underwriting flags a borrower shouldn't see about their own application), and
+  the portfolio-wide/money-moving parts of `/lss/*`/`/payments/*` (list the whole
+  portfolio, balance adjustments, fee waivers, reconciliation).
+
+  `/kyc/*` was **anonymous-allowed** until this was corrected, on the reasoning that an
+  applicant applies without an account. That reasoning holds for `/los/*`, which gates its
+  own sensitive routes — but `/kyc/*` forwards straight to a service whose only auth is the
+  `X-Internal-Token` *the gateway itself attaches*, so an anonymous caller got the gateway
+  to sign the request for it and could write a `kyc_checks` row for any `applicant_id`.
+  The anonymous path to CIP is `POST /los/applications`, where origination derives the
+  identity from the row it just wrote instead of trusting the caller's body.
 - **Owner-or-staff**: a specific loan's detail/schedule/payment-history/balance, and
   charging a payment — staff for any loan, a borrower only for a loan their own
   `applicant_id` owns.
