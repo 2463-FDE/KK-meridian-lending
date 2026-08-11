@@ -27,6 +27,41 @@ log = get_logger("kyc-api")
 router = APIRouter(prefix="/kyc", tags=["kyc"])
 
 
+def _require_matching_application(application_id: int, applicant_id: int) -> None:
+    """The application must exist and belong to this applicant.
+
+    Deliberately fails CLOSED on a database error. The alternative -- treating an
+    unreadable applications table as "cannot disprove the link, so allow it" --
+    would turn any transient read failure into an open door for exactly the
+    forgery this check exists to stop, and a caller who can cause read failures
+    can choose when to try.
+
+    404 rather than 403 for a mismatch: the caller is asserting a relationship
+    that does not exist, and distinguishing "no such application" from "not your
+    application" would make this an existence oracle over applicants.
+    """
+    try:
+        rows = db.query(
+            "SELECT 1 FROM applications WHERE id = %s AND applicant_id = %s LIMIT 1",
+            (application_id, applicant_id),
+        )
+    except Exception as e:  # noqa
+        log.error(
+            "could not verify application/applicant linkage application_id=%s applicant_id=%s: %s",
+            application_id, applicant_id, e,
+        )
+        raise HTTPException(status_code=503, detail="could not verify the application")
+    if not rows:
+        log.warning(
+            "refused a CIP check for an unlinked pair application_id=%s applicant_id=%s",
+            application_id, applicant_id,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="no such application for this applicant",
+        )
+
+
 @router.post("/check", response_model=CipCheckOut)
 def kyc_check(
     body: CipCheckIn,
@@ -48,6 +83,18 @@ def kyc_check(
         "POST /kyc/check application_id=%s applicant_id=%s",
         body.application_id, body.applicant_id,
     )
+    # Review finding (high): the caller used to name any applicant_id it liked
+    # and this service persisted it. Holding the internal token proved the
+    # request came from the gateway or origination, and nothing more -- so a
+    # caller who could reach a route that attaches the token could mint CIP
+    # evidence against a stranger's applicant_id.
+    #
+    # The pairing is verified against origination's own record instead of being
+    # trusted: the application must exist and must actually belong to this
+    # applicant. That makes the body a claim about existing state rather than an
+    # instruction to create it.
+    _require_matching_application(body.application_id, body.applicant_id)
+
     cip = kyc.run_cip(payload)  # CIP only — no sanctions / UBO / monitoring (debt D11)
 
     # CIP "passes" if name + address verified. Entity applicants (no dob/ssn) still pass —
@@ -57,7 +104,18 @@ def kyc_check(
 
     # persist the CIP result (still no sanctions/ubo columns to persist — debt preserved).
     # Raw psycopg2 write path, matching how origination wrote it.
-    check_id = -1
+    # Review finding (high): this used to catch every INSERT failure, log a
+    # warning, and still return 200 with check_id=-1 -- a "verified" answer with
+    # no compliance record behind it. Origination trusted that response and told
+    # the applicant they were submitted; the decision gate then blocked them
+    # later, correctly but inexplicably, because the row the gate looks for was
+    # never written. A DB permission problem, schema drift or a transient write
+    # failure therefore produced a false successful intake and a dead-end
+    # application.
+    #
+    # A persistence failure is a failed dependency, and it is reported as one.
+    # There is no longer any path that returns a CIP result which was not
+    # durably recorded, so check_id on a 200 is always a real row.
     try:
         rows = db.query(
             "INSERT INTO kyc_checks (applicant_id, name_verified, dob_verified, "
@@ -65,9 +123,26 @@ def kyc_check(
             (body.applicant_id, cip["name_verified"], cip["dob_verified"],
              cip["address_verified"], cip["ssn_verified"]),
         )
-        check_id = rows[0]["id"] if rows else -1
     except Exception as e:  # noqa
-        log.warning("could not persist kyc: %s", e)
+        log.error(
+            "could not persist kyc result application_id=%s applicant_id=%s: %s",
+            body.application_id, body.applicant_id, e,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="identity verification could not be recorded",
+        )
+    if not rows:
+        # RETURNING produced nothing: the row is not there, whatever the reason.
+        log.error(
+            "kyc insert returned no row application_id=%s applicant_id=%s",
+            body.application_id, body.applicant_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="identity verification could not be recorded",
+        )
+    check_id = rows[0]["id"]
 
     return CipCheckOut(
         check_id=check_id,

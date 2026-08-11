@@ -335,6 +335,29 @@ async def kyc(path: str, request: Request, authorization: str | None = Header(No
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="staff only")
+
+    # Review finding (high): staff-only was not enough, because this proxy
+    # attaches the trusted token and kyc-service persists whatever applicant_id
+    # the body names. So any CSR, underwriter or admin could POST /kyc/kyc/check
+    # with an invented applicant and mint durable CIP evidence against a stranger
+    # -- the same forgery the anonymous fix closed, now requiring only the
+    # weakest staff role rather than no session at all.
+    #
+    # This route exists so staff and ops can INSPECT kyc-service. Inspection is
+    # a read. The mutating endpoint has exactly one legitimate caller,
+    # origination-service, which reaches it server-to-server and derives the
+    # applicant from the row it has just written rather than from a request body.
+    #
+    # Read-only here, and kyc-service independently verifies the
+    # application/applicant linkage before inserting -- neither control relies on
+    # the other, because the token proves only where a request came from and
+    # never that its contents are true.
+    if request.method != "GET":
+        raise HTTPException(
+            status_code=405,
+            detail=("kyc-service is read-only through the gateway; CIP runs as part "
+                    "of POST /los/applications"),
+        )
     return await _proxy(
         KYC_URL, f"/{path}", request, user,
         extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},

@@ -88,7 +88,7 @@ def _kyc_raises(monkeypatch, exc):
     monkeypatch.setattr(applications_router.clients, "post", _post)
 
 
-@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("status", [401, 403, 503])
 def test_a_rejected_credential_does_not_produce_a_submitted_application(intake, monkeypatch, status):
     _kyc_raises(monkeypatch, _http_error(status))
 
@@ -102,7 +102,7 @@ def test_a_rejected_credential_does_not_produce_a_submitted_application(intake, 
     )
 
 
-@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("status", [401, 403, 503])
 def test_the_persisted_application_is_marked_not_left_ambiguous(intake, monkeypatch, status):
     """The rows are already committed when KYC is called, so failing loudly is
     not enough on its own -- the application must not look like a normal one."""
@@ -133,7 +133,14 @@ def test_a_timeout_still_takes_the_application(intake, monkeypatch):
 
 
 def test_a_kyc_5xx_still_takes_the_application(intake, monkeypatch):
-    """A server-side error is kyc-service's problem, not a credential problem."""
+    """A server-side error is kyc-service's problem, not a credential problem.
+
+    500 is deliberately NOT grouped with 503. A 503 from kyc-service is its
+    specific "I could not record this" signal, which tells us there is no
+    compliance row; a 500 tells us nothing, so the application is taken and the
+    decision gate -- which reads the database rather than trusting a status code
+    -- decides whether it may advance.
+    """
     _kyc_raises(monkeypatch, _http_error(500))
 
     result = applications_router.submit_application(applications_router.ApplicationIn(**_BODY))

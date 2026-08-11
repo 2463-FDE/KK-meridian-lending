@@ -106,8 +106,13 @@ def test_the_correct_token_still_reaches_the_handler(db):
 
     assert resp.status_code == 200
     assert resp.json()["cip_passed"] is True
-    assert len(db.calls) == 1, "the authorized call should persist exactly one row"
-    assert "INSERT INTO kyc_checks" in db.calls[0][0]
+    # Two statements now: the application/applicant linkage check, then the
+    # insert. The linkage check was added in review round 2 -- holding the token
+    # proves where a request came from, never that its body is true.
+    sql = [c[0] for c in db.calls]
+    assert any("FROM applications" in s for s in sql), "the linkage was not verified"
+    inserts = [s for s in sql if "INSERT INTO kyc_checks" in s]
+    assert len(inserts) == 1, "the authorized call should persist exactly one row"
 
 
 def test_an_unset_server_token_fails_closed(db, monkeypatch):
@@ -125,3 +130,86 @@ def test_an_unset_server_token_fails_closed(db, monkeypatch):
         assert resp.status_code == 401, headers
 
     assert db.calls == []
+
+
+# --- review round 2: the token proves origin, never that the body is true -----
+
+def test_a_persistence_failure_is_reported_not_swallowed(monkeypatch):
+    """A CIP result that was not recorded must not be returned as success.
+
+    This used to catch every INSERT failure, log a warning, and return 200 with
+    `check_id=-1`. Origination trusted that and told the applicant they were
+    submitted; the decision gate then blocked them later, correctly but
+    inexplicably, because the row it looks for was never written. A DB permission
+    problem, schema drift or a transient write failure produced a false
+    successful intake and a dead-end application.
+
+    There is now no path returning a CIP result that was not durably recorded,
+    so `check_id` on a 200 is always a real row.
+    """
+    class _FailingInsert:
+        def query(self, sql, params=None):
+            if "INSERT INTO kyc_checks" in sql:
+                raise RuntimeError("permission denied for table kyc_checks")
+            return [{"1": 1}]                      # the linkage check passes
+
+    monkeypatch.setattr(kyc_router, "db", _FailingInsert())
+
+    resp = client.post("/kyc/check", json=_BODY, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 503
+    assert "record" in resp.json()["detail"].lower()
+
+
+def test_an_insert_that_returns_no_row_is_also_a_failure(monkeypatch):
+    """RETURNING produced nothing, so the row is not there whatever the reason."""
+    class _SilentInsert:
+        def query(self, sql, params=None):
+            if "INSERT INTO kyc_checks" in sql:
+                return []
+            return [{"1": 1}]
+
+    monkeypatch.setattr(kyc_router, "db", _SilentInsert())
+
+    assert client.post("/kyc/check", json=_BODY, headers=AUTH_HEADERS).status_code == 503
+
+
+def test_an_applicant_not_linked_to_the_application_is_refused(monkeypatch):
+    """The body is a claim about existing state, not an instruction to create it.
+
+    Holding the internal token proves a request came from the gateway or
+    origination and nothing more, so a caller who reaches any route that attaches
+    the token could otherwise mint CIP evidence against a stranger's applicant_id.
+    """
+    calls = []
+
+    class _NoSuchLink:
+        def query(self, sql, params=None):
+            calls.append(sql)
+            if "FROM applications" in sql:
+                return []                          # no application/applicant pair
+            return [{"id": 1}]
+
+    monkeypatch.setattr(kyc_router, "db", _NoSuchLink())
+
+    resp = client.post("/kyc/check", json=_BODY, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 404
+    assert not any("INSERT INTO kyc_checks" in s for s in calls), (
+        "a CIP row was written for an applicant the application does not belong to"
+    )
+
+
+def test_the_linkage_check_fails_closed_on_a_database_error(monkeypatch):
+    """Treating an unreadable applications table as "cannot disprove, so allow"
+    would turn any transient read failure into an open door -- and a caller who
+    can cause read failures can choose when to try."""
+    class _UnreadableApplications:
+        def query(self, sql, params=None):
+            if "FROM applications" in sql:
+                raise RuntimeError("connection reset")
+            return [{"id": 1}]
+
+    monkeypatch.setattr(kyc_router, "db", _UnreadableApplications())
+
+    assert client.post("/kyc/check", json=_BODY, headers=AUTH_HEADERS).status_code == 503

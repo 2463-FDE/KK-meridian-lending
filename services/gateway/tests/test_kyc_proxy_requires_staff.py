@@ -132,14 +132,18 @@ def test_anonymous_get_is_refused_too(client, upstream, monkeypatch):
 
 
 def test_staff_may_still_reach_kyc_service(client, upstream, monkeypatch):
-    """The gate must not break the ops/staff path it exists to serve."""
+    """The gate must not break the ops/staff path it exists to serve.
+
+    A GET, since review round 2 made this route read-only: the write path is
+    origination's server-to-server call, not a staff request body.
+    """
     _staff_session(monkeypatch)
 
-    resp = client.post("/kyc/kyc/check", json=_CIP_BODY, headers={"Authorization": "Bearer t"})
+    resp = client.get("/kyc/kyc/status", headers={"Authorization": "Bearer t"})
 
     assert resp.status_code == 200
     assert len(upstream) == 1
-    assert upstream[0]["url"].endswith("/kyc/check")
+    assert upstream[0]["url"].endswith("/kyc/status")
     assert upstream[0]["headers"].get("X-Internal-Token") == main.INTERNAL_SERVICE_TOKEN
 
 
@@ -161,9 +165,8 @@ def test_a_client_supplied_internal_token_is_stripped(client, upstream, monkeypa
     """
     _staff_session(monkeypatch)
 
-    client.post(
-        "/kyc/kyc/check",
-        json=_CIP_BODY,
+    client.get(
+        "/kyc/kyc/status",
         headers={"Authorization": "Bearer t", "X-Internal-Token": "junk-from-client"},
     )
 
@@ -194,3 +197,53 @@ def test_the_strip_covers_every_proxied_route(client, upstream, monkeypatch):
 
     assert len(upstream) == 1
     assert "junk-from-client" not in upstream[0]["headers"].values()
+
+
+# --- review round 2: staff-only was not enough --------------------------------
+
+def test_staff_cannot_write_kyc_evidence_through_the_gateway(client, upstream, monkeypatch):
+    """A CSR must not be able to mint CIP evidence for an invented applicant.
+
+    Review finding: making the route staff-only closed the anonymous path and
+    left the write. This proxy attaches the trusted token, and kyc-service
+    persisted whatever `applicant_id` the body named -- so any CSR, underwriter
+    or admin could POST an invented applicant and create durable identity
+    evidence against a stranger. The same forgery as before, now requiring the
+    weakest staff role instead of no session at all.
+
+    The route exists so staff can INSPECT kyc-service, and inspection is a read.
+    The mutating endpoint has exactly one legitimate caller -- origination, which
+    reaches it server-to-server and derives the applicant from the row it has
+    just written rather than from a request body.
+    """
+    _staff_session(monkeypatch, role="csr")
+
+    resp = client.post("/kyc/kyc/check", json=_CIP_BODY, headers={"Authorization": "Bearer t"})
+
+    assert resp.status_code == 405
+    assert upstream == [], "a staff POST reached kyc-service and could have written evidence"
+
+
+@pytest.mark.parametrize("role", ["csr", "underwriter", "admin"])
+def test_no_staff_role_may_write(client, upstream, monkeypatch, role):
+    """Including admin: this is not about seniority, it is about the route.
+
+    An admin has every legitimate reason to read KYC and none to author a CIP
+    result by hand -- that is what the intake flow is for.
+    """
+    _staff_session(monkeypatch, role=role)
+
+    assert client.post("/kyc/kyc/check", json=_CIP_BODY,
+                       headers={"Authorization": "Bearer t"}).status_code == 405
+    assert upstream == []
+
+
+def test_staff_may_still_read(client, upstream, monkeypatch):
+    """The inspection path this route exists for must keep working."""
+    _staff_session(monkeypatch)
+
+    resp = client.get("/kyc/health", headers={"Authorization": "Bearer t"})
+
+    assert resp.status_code == 200
+    assert len(upstream) == 1
+    assert upstream[0]["method"] == "GET"

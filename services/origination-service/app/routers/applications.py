@@ -240,13 +240,29 @@ def submit_application(body: ApplicationIn):
         # run_decision refuses (see _require_persisted_kyc). The application is
         # visible for support, cannot advance, and re-submitting is safe.
         status = e.response.status_code if e.response is not None else None
-        if status in (401, 403):
+        # 503 from kyc-service means it could not RECORD the result (review
+        # finding: it used to swallow that and return 200 with check_id=-1, so an
+        # applicant was told they were verified while no compliance row existed,
+        # and the decision gate then blocked them later with no explanation).
+        #
+        # Grouped with the credential failures because the consequence is
+        # identical and knowable: there is definitively no kyc_checks row, so the
+        # application cannot advance. Marking it says that now, where the
+        # applicant and support can see it, instead of at decision time.
+        if status in (401, 403, 503):
             _mark_application_kyc_unverified(app_id, reason=f"kyc-service returned {status}")
-            log.error(
-                "kyc-service rejected our credentials (%s) app_id=%s -- intake refused; "
-                "check INTERNAL_SERVICE_TOKEN parity between origination and kyc-service",
-                status, app_id,
-            )
+            if status == 503:
+                log.error(
+                    "kyc-service could not record the CIP result app_id=%s -- intake "
+                    "refused; the application has no compliance row and cannot proceed",
+                    app_id,
+                )
+            else:
+                log.error(
+                    "kyc-service rejected our credentials (%s) app_id=%s -- intake refused; "
+                    "check INTERNAL_SERVICE_TOKEN parity between origination and kyc-service",
+                    status, app_id,
+                )
             raise HTTPException(
                 status_code=503,
                 detail=("identity verification is unavailable: this application was "

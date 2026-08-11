@@ -26,9 +26,19 @@ class _FakeDb:
 
     def query(self, sql, params=None):
         self.calls.append((sql, params))
+        # Review round 2: the handler now verifies the application/applicant
+        # linkage before inserting, so this fake has to answer two different
+        # questions. The linkage read returns a match; only the INSERT consumes
+        # an id, which keeps the check_id assertions below meaningful.
+        if "FROM applications" in sql:
+            return [{"1": 1}]
         row = {"id": self._next_id}
         self._next_id += 1
         return [row]
+
+    @property
+    def inserts(self):
+        return [(s, p) for s, p in self.calls if "INSERT INTO kyc_checks" in s]
 
 
 @pytest.fixture
@@ -117,17 +127,26 @@ def test_kyc_check_persists_all_four_cip_flags(fake_db):
         "address": "42 Main St, Springfield",
     }, headers=AUTH_HEADERS)
 
-    assert len(fake_db.calls) == 1
-    _, params = fake_db.calls[0]
+    assert len(fake_db.inserts) == 1
+    _, params = fake_db.inserts[0]
     assert params == (4, True, True, True, True)
 
 
-def test_kyc_check_survives_db_failure_and_returns_check_id_negative_one(fake_db, monkeypatch):
-    # Characterizes the current swallow-and-continue behavior: a persistence
-    # failure is logged, not raised -- the caller still gets a 200 with
-    # check_id=-1 rather than an error surfaced back to them.
+def test_kyc_check_reports_a_persistence_failure_instead_of_faking_success(fake_db, monkeypatch):
+    """Review round 2 changed this behaviour, and the test with it.
+
+    This used to characterize swallow-and-continue: a persistence failure was
+    logged, not raised, and the caller got 200 with check_id=-1. That is a
+    "verified" answer with no compliance record behind it -- and once the
+    decision gate began requiring a persisted kyc_checks row, it also produced an
+    applicant who was told they were submitted and then blocked later with no
+    explanation. The old expectation is kept here as history rather than deleted,
+    because it was deliberate behaviour and its removal is the fix.
+    """
     def _boom(sql, params=None):
-        raise RuntimeError("db unavailable")
+        if "INSERT INTO kyc_checks" in sql:
+            raise RuntimeError("db unavailable")
+        return [{"1": 1}]
 
     monkeypatch.setattr(kyc_router.db, "query", _boom)
 
@@ -137,5 +156,5 @@ def test_kyc_check_survives_db_failure_and_returns_check_id_negative_one(fake_db
         "address": "42 Main St, Springfield",
     }, headers=AUTH_HEADERS)
 
-    assert resp.status_code == 200
-    assert resp.json()["check_id"] == -1
+    assert resp.status_code == 503
+    assert "record" in resp.json()["detail"].lower()
