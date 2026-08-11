@@ -69,6 +69,17 @@ block is the current number; those are history.
 
 ### Pull requests
 
+> **Observed at audit time — `17dca05`, 2026-08-11.** Everything in this section
+> and in the test counts above is a *measurement*, not guidance: PR numbers and
+> states, the CI run id, and per-suite counts all expire the moment someone
+> merges or pushes. They are recorded so a reader can reproduce the audit, not so
+> they can be trusted six weeks from now. The durable content of this file is the
+> Weeks 1–6 matrix's acceptance criteria and the gap list; **re-derive anything in
+> this box from `gh pr list` and a CI run before relying on it.** Review of this
+> file asked for that boundary to be explicit, having found the footer and this
+> section disagreeing about how many PRs were open — which is exactly the failure
+> mode an unlabelled volatile fact produces.
+
 Verified 2026-08-11 with `gh pr list --state all`: **#1 through #17 are all
 `MERGED`.** Local `main` is level with `origin/main` at `17dca05`, and that
 commit's CI run (`31419265200`) is **22/22 green** — every job, including
@@ -1017,9 +1028,20 @@ Four rules that this file has broken before, and which later passes fixed:
    the *correct* marker once the PR lands — the defect is the stale marker
    outliving the merge, not the tick replacing it.
 
-Last full accuracy pass: **2026-08-11**, against `main` at `17dca05` with PRs #1–#17
-all merged and no PR open. The footer is the freshness marker for this file, so it
-names the base the PR table, the Weeks 1–6 matrix and the current test counts were
-actually checked against. *It previously read 2026-08-10 against `e5f9d52`,
-describing #17 as "this pass" — #17 merged at 18:28 UTC that day, so the footer
-outlived its own PR, which is rule 4 above failing on the line that states it.*
+Last full accuracy pass: **2026-08-11**, against `main` at `17dca05`, at which point
+PRs #1–#17 were all merged and no PR was open. **Two PRs opened during the pass and
+are open now: #18 and this one.** The footer is the freshness marker for this file, so
+it names the base the PR table, the Weeks 1–6 matrix and the current test counts were
+actually checked against.
+
+*This sentence read "with PRs #1–#17 all merged and no PR open" while the Pull
+requests section above said two were open. Both could not be true. Review caught it,
+and it is the worst kind of error for this file specifically: a freshness marker
+contradicting the document it certifies undermines every other claim on the page,
+including the correct ones. The cause was writing the footer against the state the
+audit ran in and the table against the state it produced — the audit's own output
+changed the thing it was reporting on.*
+
+*It previously also read 2026-08-10 against `e5f9d52`, describing #17 as "this pass" —
+#17 merged at 18:28 UTC that day, so the footer outlived its own PR, which is rule 4
+above failing on the line that states it.*
