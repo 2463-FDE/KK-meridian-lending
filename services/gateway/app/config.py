@@ -54,6 +54,20 @@ KNOWN_DEV_TOKENS = frozenset({
 })
 
 
+#: `secrets.token_urlsafe(32)` yields 43 characters; 32 is a floor that admits a
+#: hand-rolled secret while rejecting anything guessable by hand.
+MIN_TOKEN_LENGTH = 32
+
+#: Substrings that mean "someone typed a word instead of generating a secret".
+#: Matched case-insensitively and anywhere in the value, so `MyChangeMe123...`
+#: padded out to the length floor is still refused.
+PLACEHOLDER_PATTERNS = (
+    "changeme", "change-me", "change_me", "password", "passwd", "secret",
+    "placeholder", "example", "sample", "dummy", "insecure", "notasecret",
+    "todo", "fixme", "xxxx", "1234", "abcd", "test-token", "dev-token",
+)
+
+
 class InsecureInternalTokenError(RuntimeError):
     """Raised at startup when INTERNAL_SERVICE_TOKEN is unusable."""
 
@@ -70,10 +84,33 @@ def validate_internal_token(environment: str | None = None, token: str | None = 
     value = token if token is not None else INTERNAL_SERVICE_TOKEN
     if env in _DEV_ENVIRONMENTS:
         return
+    hint = ("the gateway signs every internal call it forwards, so this token is what proves a request came from inside the "
+            "estate. Generate one with: python -c \"import secrets; "
+            "print(secrets.token_urlsafe(32))\" -- or set ENVIRONMENT to one of "
+            + ", ".join(_DEV_ENVIRONMENTS) + " for local work.")
+
     if value in KNOWN_DEV_TOKENS:
         raise InsecureInternalTokenError(
             "INTERNAL_SERVICE_TOKEN is empty or set to a value published in this "
-            "repository, and ENVIRONMENT is not a development environment "
-            f"(ENVIRONMENT={env!r}). Supply a real secret, or set ENVIRONMENT to "
-            "one of " + ", ".join(_DEV_ENVIRONMENTS) + " for local work."
+            f"repository, and ENVIRONMENT is not a development environment "
+            f"(ENVIRONMENT={env!r}). " + hint
         )
+
+    # A denylist can only ever reject the weak values someone thought of, so
+    # INTERNAL_SERVICE_TOKEN=1 used to boot cleanly. Reviewed on PR #22 and
+    # applied here too: the validator is duplicated across services (no shared
+    # library in this repo) and a policy that holds in one of them and not the
+    # others is not a policy.
+    if len(value) < MIN_TOKEN_LENGTH:
+        raise InsecureInternalTokenError(
+            f"INTERNAL_SERVICE_TOKEN is {len(value)} characters; at least "
+            f"{MIN_TOKEN_LENGTH} are required outside a development environment. " + hint
+        )
+
+    lowered = value.lower()
+    for pattern in PLACEHOLDER_PATTERNS:
+        if pattern in lowered:
+            raise InsecureInternalTokenError(
+                f"INTERNAL_SERVICE_TOKEN contains the placeholder {pattern!r}, so it "
+                "is a description of a secret rather than one. " + hint
+            )
