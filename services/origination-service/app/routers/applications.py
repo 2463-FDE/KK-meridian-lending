@@ -32,6 +32,12 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 # Mirrors the staff role set the gateway already enforces for /assistant/*.
 _STAFF_ROLES = {"csr", "underwriter", "admin"}
 
+#: Explicit, durable state for an application whose identity verification could
+#: not be completed because kyc-service rejected our credentials. Terminal until
+#: the applicant re-submits; run_decision refuses it. Plain TEXT column with no
+#: CHECK constraint, so this needs no migration.
+KYC_UNVERIFIED_STATUS = "kyc_unverified"
+
 # Bug fix: applications.status used to only ever move 'submitted' -> 'funded'
 # (see accept_offer below) -- run_decision never wrote the decision outcome
 # back onto it at all. The underwriting console's status filter/KPIs
@@ -213,9 +219,101 @@ def submit_application(body: ApplicationIn):
             "address_verified": passed,
             "ssn_verified": passed and not is_entity,
         }
+    except httpx.HTTPStatusError as e:
+        # PR #18 review (high): a 401/403 from kyc-service is a CONFIGURATION
+        # failure, not the transient hiccup the fallback below exists for, and
+        # the two used to be indistinguishable. Every exception landed in one
+        # `except`, logged a warning, and returned 200 "submitted" with all four
+        # CIP booleans false -- so an unset or skewed INTERNAL_SERVICE_TOKEN
+        # silently switched identity verification off for every applicant while
+        # the flow looked entirely healthy and no kyc_checks row was written.
+        #
+        # An auth failure means we do not know who this applicant is and cannot
+        # find out. Returning success would be a lie, so intake fails -- but the
+        # applicant and application rows are already committed by
+        # intake.create_application above, and a 503 on top of a persisted row
+        # would leave an application that decisioning would happily pick up with
+        # no KYC behind it.
+        #
+        # So the row is marked, explicitly and durably, before the error is
+        # raised: `kyc_unverified` is a terminal-until-retried state that
+        # run_decision refuses (see _require_persisted_kyc). The application is
+        # visible for support, cannot advance, and re-submitting is safe.
+        status = e.response.status_code if e.response is not None else None
+        if status in (401, 403):
+            _mark_application_kyc_unverified(app_id, reason=f"kyc-service returned {status}")
+            log.error(
+                "kyc-service rejected our credentials (%s) app_id=%s -- intake refused; "
+                "check INTERNAL_SERVICE_TOKEN parity between origination and kyc-service",
+                status, app_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=("identity verification is unavailable: this application was "
+                        "recorded but not verified, and cannot proceed. Please retry."),
+            )
+        # Any other HTTP status (5xx from kyc-service, say) is a genuine
+        # service-side hiccup and keeps the original resilience: intake succeeds
+        # with CIP all-false, because a KYC outage must not block an applicant
+        # from submitting. run_decision still refuses to advance it until a KYC
+        # result exists, so "submitted" never silently becomes "decided".
+        log.warning("kyc-service returned %s for app_id=%s: %s", status, app_id, e)
     except Exception as e:  # noqa
+        # Timeouts, connection errors, malformed responses -- transient by
+        # assumption, same fallback as before.
         log.warning("kyc-service call failed: %s", e)
     return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip), "access_token": access_token}
+
+
+def _mark_application_kyc_unverified(app_id: int, reason: str) -> None:
+    """Record that this application has no usable KYC result.
+
+    Written as application status rather than a side table because every reader
+    that could advance the application already consults `status`, so a new table
+    would be one more thing each of them has to remember to check.
+    """
+    try:
+        db.query(
+            "UPDATE applications SET status = %s WHERE id = %s AND status = 'submitted'",
+            (KYC_UNVERIFIED_STATUS, app_id),
+        )
+    except Exception as e:  # noqa
+        # Best effort by necessity: if this write fails we still must not return
+        # success, and the decision gate below is keyed on the ABSENCE of a
+        # kyc_checks row rather than on this status, so it holds either way.
+        log.error("could not mark app_id=%s as %s (%s): %s",
+                  app_id, KYC_UNVERIFIED_STATUS, reason, e)
+
+
+def _require_persisted_kyc(app_id: int) -> None:
+    """Refuse to decide an application that has no persisted KYC result.
+
+    PR #18 review: closing the intake hole is not enough on its own. An
+    application that reached the database before KYC failed must not be able to
+    walk into decisioning -- and decisioning is reachable directly at
+    `POST /applications/{id}/decision`, not only through the intake response, so
+    the gate has to live here rather than in the caller.
+
+    What counts as a KYC result is a row in `kyc_checks` for this application's
+    applicant, NOT a passing one. A failed CIP is a real, recorded outcome that
+    the deny path is entitled to act on; the case being blocked is the one where
+    KYC never ran or its result was never persisted, which is indistinguishable
+    from an unverified applicant.
+    """
+    rows = db.query(
+        "SELECT 1 FROM kyc_checks k "
+        "JOIN applications a ON a.applicant_id = k.applicant_id "
+        "WHERE a.id = %s LIMIT 1",
+        (app_id,),
+    )
+    if rows:
+        return
+    log.error("refusing to decide app_id=%s -- no persisted kyc_checks row", app_id)
+    raise HTTPException(
+        status_code=409,
+        detail=("this application has no completed identity verification on record "
+                "and cannot be decided. Re-submit the application."),
+    )
 
 
 @router.get("", response_model=Page[ApplicationListItem])
@@ -399,6 +497,16 @@ def run_decision(
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]
+
+    # PR #18 review: an application that reached the database before KYC failed
+    # must not be able to walk into decisioning. Checked here rather than in the
+    # intake response because THIS route is directly reachable -- the gateway
+    # proxies /los/* anonymously by design, so a caller with an app_id can ask
+    # for a decision without ever seeing what intake returned.
+    #
+    # Before the credit pull and before the attempt lease, so a rejected
+    # application costs no bureau call and leaves no attempt row behind.
+    _require_persisted_kyc(app_id)
 
     existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
     is_staff = _is_staff(x_user_role, x_internal_token)

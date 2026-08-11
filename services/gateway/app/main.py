@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
-from . import auth, db
+from . import auth, config, db
 from .config import (
     DECISION_URL,
     DISCLOSURE_URL,
@@ -44,6 +44,10 @@ from .rate_limit import RateLimitMiddleware
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("gateway")
+
+# Fail at boot rather than per-request if the internal token is unusable
+# (PR #18 review). Import-time so an unusable deployment never serves traffic.
+config.validate_internal_token()
 
 app = FastAPI(title="Meridian Gateway (BFF)", version="2.0.0")
 

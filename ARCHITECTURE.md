@@ -90,9 +90,18 @@ gone and the check is in place as of the Weeks 1–6 audit (2026-08-11).
 
 `servicing-service` still does not check `X-Internal-Token`. It is not
 host-published, so the network boundary holds, but it is the last money-moving
-service without the application-level fallback — tracked as `DEBT.md` D8. Left out
-of this change deliberately: it is a second concern, and adding it here would make
-this a change to two services rather than a fix to one.
+service without the application-level fallback. Left out of this change
+deliberately: it is a second concern, and adding it here would make this a change
+to two services rather than a fix to one.
+
+**This gap has no `DEBT.md` number.** An earlier version of this paragraph cited
+`D8`, which is wrong: D8 is *"fee waiver / balance adjust is available to any
+authenticated user — no role check, no second approver, no ledger entry"* — about
+**who may authorize** a money movement, not about **who can reach the endpoint**.
+The two are independent; closing either leaves the other open. Citing D8 here made
+the token gap look tracked when nothing tracked it, which is the failure mode that
+let the kyc-service gap sit unowned for two months after `ARCHITECTURE.md` assigned
+it to a PR that shipped something else.
 
 ## Services
 

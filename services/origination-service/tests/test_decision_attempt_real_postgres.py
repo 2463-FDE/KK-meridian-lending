@@ -71,6 +71,13 @@ def _full_schema_sql():
             accept_token_expires_at TIMESTAMPTZ,
             accept_token_consumed_at TIMESTAMPTZ
         );
+        CREATE TABLE kyc_checks (
+            id SERIAL PRIMARY KEY,
+            applicant_id INTEGER REFERENCES applicants(id),
+            name_verified BOOLEAN, dob_verified BOOLEAN,
+            address_verified BOOLEAN, ssn_verified BOOLEAN,
+            created_at TIMESTAMPTZ DEFAULT now()
+        );
         CREATE TABLE decisions (
             app_id INTEGER PRIMARY KEY REFERENCES applications(id),
             outcome TEXT NOT NULL
@@ -221,6 +228,13 @@ def _seed_application(conn, app_id, amount=9000, term_months=24, income=40000,
         c.execute(
             "INSERT INTO applicants (id, name, ssn) VALUES (%s, %s, %s)",
             (app_id, "Jane Borrower", "123456781"),
+        )
+        # PR #18: run_decision refuses an application with no persisted KYC
+        # result. These fixtures exercise the decision-attempt lease, not
+        # identity verification, so they get a recorded result.
+        c.execute(
+            "INSERT INTO kyc_checks (applicant_id, name_verified) VALUES (%s, true)",
+            (app_id,),
         )
         c.execute(
             "INSERT INTO applications (id, applicant_id, amount, term_months, income, "

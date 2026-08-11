@@ -44,6 +44,9 @@ services:
       # Shared with decision-service/gateway below -- sent as X-Internal-Token
       # on the server-to-server call to decision-service so it has a check to
       # fail closed on even if a future compose change re-publishes its port.
+      # Import-time token validation treats an unset ENVIRONMENT as production
+      # and fails closed, so the local stack states it explicitly (PR #18).
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
     depends_on:
       postgres:
@@ -97,6 +100,9 @@ services:
     # were closed the same way in PR #6; this one was missed. Reach it through
     # the gateway (/kyc/*) or from another service on this network.
     environment:
+      # Import-time token validation treats an unset ENVIRONMENT as production
+      # and fails closed, so the local stack states it explicitly (PR #18).
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
     depends_on:
       postgres:
@@ -256,6 +262,9 @@ services:
     environment:
       # Forwarded as X-Internal-Token on the staff-ops /decision/* proxy path
       # (see app/main.py) -- must match decision-service's copy above.
+      # Import-time token validation treats an unset ENVIRONMENT as production
+      # and fails closed, so the local stack states it explicitly (PR #18).
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
       # Rate limit. The DEFAULT STACK SHIPS THE REAL CONTROL: 120 requests /
       # 60s per client IP, the same number services/gateway/app/config.py
