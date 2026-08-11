@@ -178,6 +178,113 @@ for every loan: balances.balance == SUM(ledger_entries.amount)
 
 run in `db/tests` against real PostgreSQL, over seeded and post-backfill data.
 
+### What a balance means, and which way the numbers point
+
+Left undefined, this is the part that produces two subtly different
+implementations six months apart. Decided here.
+
+**`balances.balance` is the outstanding principal**, not a total receivable. That
+is what it means today -- `apply_payment` subtracts the whole payment from it and
+`schedule.py` amortises against it -- and redefining it would silently change
+every existing read, including the borrower's own "My loan" screen. Interest is
+not carried on the balance and is not accrued as a stored figure anywhere in this
+system; the schedule computes it per period. So the `interest` component exists
+in the ledger for the waterfall to allocate against, and it does **not** project
+into `balances.balance`.
+
+**`balances.past_due` is fees owed**, and is included in this design -- see the
+decision below.
+
+**Signed deltas, one rule: the sign is the effect on what the borrower owes.**
+Negative reduces the debt, positive increases it. No entry type is exempt, so a
+reader never has to remember a per-type convention.
+
+| `entry_type` | `component` | Sign | Projects into |
+|---|---|---|---|
+| `opening_balance` | `principal` | **+** | `balance` |
+| `disbursement` | `principal` | **+** | `balance` |
+| `payment` | `principal` | **−** | `balance` |
+| `payment` | `fees` | **−** | `past_due` |
+| `payment` | `interest` | **−** | *(neither -- see above)* |
+| `fee_assessed` | `fees` | **+** | `past_due` |
+| `fee_waived` | `fees` | **−** | `past_due` |
+| `adjustment` | `principal` | ± | `balance` |
+| `adjustment` | `fees` | ± | `past_due` |
+
+A CHECK enforces the ones that are not genuinely bidirectional, so a `payment`
+that increases a balance cannot be written at all:
+
+```sql
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
+    (entry_type IN ('opening_balance','disbursement','fee_assessed') AND amount > 0)
+ OR (entry_type IN ('payment','fee_waived')                          AND amount < 0)
+ OR (entry_type = 'adjustment')            -- genuinely bidirectional
+);
+```
+
+Only `adjustment` may go either way, which is precisely why it is the entry type
+that requires an actor, a reason, and (below) a second approver.
+
+### `past_due` is in scope
+
+The open question the first draft left for the reviewer is answered: **fee
+movements go in the ledger too.**
+
+Leaving them out would put a hole in the audit trail exactly where fee waivers
+are -- and waivers are one of the two actions Week 6 named as needing a second
+approver, so the maker-checker work would have had nowhere to record half of its
+own subject matter. `waive_fee` and `assess_late_fee` are money-affecting writes
+to a mutable column with no history, which is the same defect as the balance, one
+column over.
+
+The cost is that `balances` now has **two** derived columns rather than one, and
+the parity test has to cover both:
+
+```
+for every loan:
+    balances.balance  == SUM(amount) WHERE component = 'principal'
+    balances.past_due == SUM(amount) WHERE component = 'fees'
+```
+
+### How the projection is maintained
+
+**Incrementally, by an AFTER INSERT trigger on `ledger_entries`, never by
+recompute.** A recompute-on-read would make every balance read O(entries) on a
+table that grows without bound; a periodic recompute would leave a window in
+which the projection and its ledger disagree with nothing detecting it.
+
+```sql
+CREATE FUNCTION project_ledger_entry() RETURNS trigger AS $$
+BEGIN
+    IF NEW.approved_required AND NEW.approved_at IS NULL THEN
+        RAISE EXCEPTION 'unapproved entries must not be written to the ledger';
+    END IF;
+    IF NEW.component = 'principal' THEN
+        UPDATE balances SET balance  = balance  + NEW.amount, updated_at = now()
+         WHERE loan_id = NEW.loan_id;
+    ELSIF NEW.component = 'fees' THEN
+        UPDATE balances SET past_due = past_due + NEW.amount, updated_at = now()
+         WHERE loan_id = NEW.loan_id;
+    END IF;                      -- 'interest' projects nowhere, by definition above
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+```
+
+Three things this depends on, each of which is a way to get it wrong:
+
+- **Initialisation.** The back-fill writes its `opening_balance` entry per loan
+  *through* this trigger, having first set `balances.balance` and `past_due` to
+  zero. The projection is therefore built by the same code path that maintains
+  it, rather than by a one-off script whose arithmetic could differ.
+- **Direct writes are blocked.** `balances` becomes trigger-maintained only: a
+  `BEFORE UPDATE OR DELETE` trigger on `balances` raises unless the current
+  statement is the projection function (guarded by a session-local flag the
+  function sets). Otherwise `balance.py`'s existing `UPDATE balances` statements
+  -- or a psql session -- would silently desynchronise the projection from its
+  own ledger, and the parity test would only notice afterwards.
+- **The projection is not the record.** `SUM(ledger_entries)` remains the
+  auditable truth; `balances` is a cache with a test asserting it agrees.
+
 ### Maker-checker: a proposal is not a movement
 
 > **Revised after review.** The first version of this section added
@@ -224,8 +331,60 @@ CREATE TABLE pending_movements (
     CONSTRAINT approved_has_entry CHECK (
         (resolution = 'approved' AND ledger_entry_id IS NOT NULL)
      OR (resolution IS DISTINCT FROM 'approved' AND ledger_entry_id IS NULL)
-    )
+    ),
+    -- Same component vocabulary as the ledger. Without this a proposal could
+    -- name a component the ledger cannot hold, and the mismatch would surface
+    -- only at approval time -- after a human had already reviewed and accepted it.
+    CONSTRAINT pending_component CHECK (component IN ('principal','interest','fees'))
 );
+
+-- Exactly one terminal transition. pending -> approved or pending -> rejected,
+-- and never anything afterwards: not approved -> rejected, not a second approver
+-- overwriting the first, not an amount edited after review. Without this the
+-- table is mutable in the ordinary sense and "who approved this" becomes a
+-- question about the latest writer rather than about a decision.
+CREATE FUNCTION pending_movements_single_transition() RETURNS trigger AS $$
+BEGIN
+    IF OLD.resolution IS NOT NULL THEN
+        RAISE EXCEPTION 'pending movement % is already %', OLD.id, OLD.resolution;
+    END IF;
+    IF NEW.loan_id     IS DISTINCT FROM OLD.loan_id
+    OR NEW.component   IS DISTINCT FROM OLD.component
+    OR NEW.amount      IS DISTINCT FROM OLD.amount
+    OR NEW.entry_type  IS DISTINCT FROM OLD.entry_type
+    OR NEW.requested_by IS DISTINCT FROM OLD.requested_by THEN
+        RAISE EXCEPTION 'the substance of a pending movement is immutable';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER pending_movements_one_way
+    BEFORE UPDATE ON pending_movements
+    FOR EACH ROW EXECUTE FUNCTION pending_movements_single_transition();
+
+-- The approved entry must BE the movement that was approved. A unique link, so
+-- one approval can never yield two entries and an entry cannot be attributed to
+-- a proposal it does not match.
+ALTER TABLE ledger_entries
+    ADD COLUMN pending_movement_id BIGINT UNIQUE REFERENCES pending_movements(id),
+    ADD COLUMN approved_required   BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN approved_at         TIMESTAMPTZ;
+
+-- adjustment and fee_waived are the maker-checker subjects, so they may only
+-- enter the ledger through an approved proposal.
+ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK (
+    (entry_type IN ('adjustment','fee_waived') AND pending_movement_id IS NOT NULL)
+ OR (entry_type NOT IN ('adjustment','fee_waived') AND pending_movement_id IS NULL)
+);
+```
+
+Field-for-field agreement between the proposal and the entry it produces is
+enforced in the same transaction that writes both, and asserted by a migration
+test: an approval that inserted a different loan, component, amount or type than
+the one reviewed would be a maker-checker bypass wearing the shape of an
+approval.
+
+```sql
 ```
 
 A CSR raising an adjustment writes a `pending_movements` row. The balance does
@@ -283,7 +442,8 @@ is not recoverable.
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
 | 2 | `ledger_entries`, triggers, back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
 | 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. D3 and D14 close |
-| 4 | `pending_movements`, maker-checker on adjust and waive | A test proving self-approval is refused, and one proving an approval writes exactly one ledger entry |
+| 4 | `pending_movements`, maker-checker on adjust and waive, `past_due` projection | A test proving self-approval is refused, one proving an approval writes exactly one ledger entry matching its proposal, and one proving a resolved proposal cannot be re-resolved |
+| 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
 stated rather than discovered.** Historical rows have a balance but no history:
@@ -307,7 +467,14 @@ loan disbursement by any query. `opening_balance` is now its own type in the
 
 - "Who changed this balance, when, why, and who approved it" becomes a `SELECT`.
   D8 answerable for the first time.
-- D3 closes without a lock, and D14 without a separate feature.
+- D3 closes without a lock.
+- D14 becomes **possible**, not closed. The ledger gives a payment somewhere to
+  record a fees/interest/principal split, which is the prerequisite -- but the
+  allocation algorithm (what order, what happens when a payment is short, how
+  partial periods behave) is a separate change with its own tests, and this ADR
+  neither specifies nor delivers it. An earlier draft said D14 closed "without a
+  separate feature", which overstated it: a schema that *can* hold a waterfall is
+  not a waterfall.
 - Maker-checker has somewhere to live, and rejected proposals survive as evidence
   rather than being discarded.
 - The projection is a plain `SUM` with no approval filter, so no reader can
@@ -345,18 +512,15 @@ contra account and no trial balance. It answers the servicing audit question Wee
 6 asked. It is not an accounting system of record, and calling it one later would
 be the same category of overclaim as the README's PCI-DSS banner.
 
-## Open question for the reviewer
+## Answered, previously open
 
-`past_due` is left alone by this ADR. `waive_fee` writes it, `assess_late_fee`
-writes it, and both are money-affecting actions that arguably belong in the
-ledger as `fees` component entries — at which point `past_due` becomes a second
-projection and the `balances` table has two derived columns rather than one.
+**Does `past_due` fold into the ledger?** Yes -- see "`past_due` is in scope"
+above. Leaving it out would have put a hole in the audit trail exactly where fee
+waivers are, and waivers are one of the two actions Week 6 named as needing a
+second approver. It makes step 4 larger and gives `balances` a second derived
+column, both recorded in Consequences.
 
-That is defensible and it is more change. The alternative is a ledger that covers
-`balance` movements only, leaving fee accrual on the old mutable path, which
-means the audit trail has a hole exactly where fee waivers are — and fee waivers
-are one of the two actions Week 6's brief named as needing a second approver.
-
-**Recommendation: fold `past_due` in at step 4**, when maker-checker lands, since
-waivers are the reason maker-checker exists. Flagged rather than decided, because
-it changes the size of step 4 materially.
+**What remains genuinely undecided** is nothing in this ADR's own scope. The
+allocation order for D14's waterfall is deliberately out of scope, and the
+retention policy for `ledger_entries` is a separate decision noted in
+Consequences.
