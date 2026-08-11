@@ -45,6 +45,10 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql://meridian:postgres@localhost:5432/meridian
+      # servicing-service validates INTERNAL_SERVICE_TOKEN at import time and
+      # treats an unset ENVIRONMENT as production, so CI states both explicitly.
+      ENVIRONMENT: test
+      INTERNAL_SERVICE_TOKEN: test-internal-token
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -79,6 +83,13 @@ jobs:
   # Dockerfiles now fall back on (see each service's Dockerfile).
   docker-build:
     runs-on: ubuntu-latest
+    env:
+      # compose now REFUSES to interpolate without this (docker-compose.yml uses
+      # ${INTERNAL_SERVICE_TOKEN:?...}), because a repository-known fallback is
+      # not a secret. CI supplies a throwaway value and marks itself as a test
+      # environment, which is what lets the services accept a weak one.
+      ENVIRONMENT: test
+      INTERNAL_SERVICE_TOKEN: ci-throwaway-not-a-real-secret
     steps:
       - uses: actions/checkout@v4
       - name: docker compose build
@@ -150,6 +161,13 @@ jobs:
   # three other migrations with the same defect: 0009, 0011 and 0015.
   e2e:
     runs-on: ubuntu-latest
+    env:
+      # compose now REFUSES to interpolate without this (docker-compose.yml uses
+      # ${INTERNAL_SERVICE_TOKEN:?...}), because a repository-known fallback is
+      # not a secret. CI supplies a throwaway value and marks itself as a test
+      # environment, which is what lets the services accept a weak one.
+      ENVIRONMENT: test
+      INTERNAL_SERVICE_TOKEN: ci-throwaway-not-a-real-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

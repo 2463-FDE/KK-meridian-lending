@@ -85,6 +85,21 @@ are unchanged — they are ownership-checked at the gateway. *This paragraph pre
 "`servicing-service` doesn't check the token either … Both are tracked for PR #8"; PR #8
 shipped card tokenization instead and closed neither.*
 
+**The token itself is no longer supplied by this repository.** `docker-compose.yml`
+required `INTERNAL_SERVICE_TOKEN` to be set explicitly (`${INTERNAL_SERVICE_TOKEN:?…}`)
+and every service refuses to start on an empty or repository-known value outside a
+development environment. A fallback committed here was not a secret: the failure this
+token defends against — a port re-exposed, the network boundary bypassed — is precisely
+the one where an attacker can read the default out of the repo, so the guard passed while
+protecting nothing. Comparison uses `secrets.compare_digest`, so a wrong token leaks no
+timing signal about how much of it was right.
+
+**What this does not close.** `DEBT.md` **D8** is about who may *authorize* a money
+movement — no role check, no second approver, no ledger entry — and remains fully open.
+That is a different question from who can *reach* the endpoint, which is what the token
+answers; closing either leaves the other open, and an earlier draft conflated them by
+citing D8 as if it tracked the token gap.
+
 ## Services
 
 | Service | Port | Tech | Owns / Responsibility |

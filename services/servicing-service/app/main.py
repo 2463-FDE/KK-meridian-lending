@@ -7,6 +7,7 @@ implementation and accept ANY authenticated caller — no role check, no maker-c
 """
 import logging
 import os
+import secrets
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -20,6 +21,9 @@ from .routers import loans
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("servicing")
+
+# Fail at boot rather than per-request on an unusable token (PR #22 review).
+config.validate_internal_token()
 
 app = FastAPI(title="Meridian Servicing Service (LSS)", version="2.0.0")
 app.include_router(loans.router)
@@ -58,7 +62,18 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
     refuses every money-moving call rather than accepting every one -- the same
     fail-closed contract the five sibling services already use.
     """
-    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+    expected = config.INTERNAL_SERVICE_TOKEN
+    # An unset server-side token can never match -- checked first, because
+    # compare_digest("", "") is True and would otherwise admit every caller on a
+    # deployment that forgot to configure one. Startup validation should have
+    # stopped that already; this is the second line of the same defence.
+    if not expected or not x_internal_token:
+        raise HTTPException(status_code=401, detail="not authorized")
+    # Constant-time: `!=` on str short-circuits at the first differing byte, so
+    # response timing leaks how much of the secret a guess got right, one byte at
+    # a time. compare_digest does not. The values are ASCII by construction
+    # (an env var and an HTTP header), so the str overload is safe here.
+    if not secrets.compare_digest(x_internal_token, expected):
         raise HTTPException(status_code=401, detail="not authorized")
 
 

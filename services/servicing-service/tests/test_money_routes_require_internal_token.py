@@ -130,14 +130,22 @@ def test_health_and_metrics_stay_open(monkeypatch):
 
 
 def test_every_money_route_is_guarded():
-    """Derive the list instead of trusting one.
+    """Derive the list instead of trusting one, and prove the guard RUNS.
+
+    Two failure modes, and the first version of this test only caught one.
 
     A hand-maintained list of protected routes is indistinguishable from a
-    complete one until someone re-derives it -- that is exactly how kyc-service
-    stayed unguarded for two months while a security test appeared to cover the
-    estate. This walks the app's own routes and requires every mutating one to
-    accept an X-Internal-Token header, so a route added later cannot quietly
-    skip the check.
+    complete one until someone re-derives it -- that is how kyc-service stayed
+    unguarded for two months while a security test appeared to cover the estate.
+    So the routes come from the app itself.
+
+    But inspecting the signature for an `x_internal_token` parameter proves only
+    that the header is ACCEPTED, not that anything is done with it. A route that
+    declared the parameter and never called `_require_internal` would have passed
+    the earlier version of this test while being completely open -- the precise
+    shape of "the check exists and protects nothing" that this PR's review found
+    in the configuration. So each derived route is also called with no token and
+    must actually refuse.
     """
     exempt = {
         # Read-only: ownership-checked at the gateway, no money moves.
@@ -147,7 +155,7 @@ def test_every_money_route_is_guarded():
         ("GET", "/metrics"),
     }
 
-    unguarded = []
+    declared, unguarded = [], []
     for route in main.app.routes:
         methods = getattr(route, "methods", set()) or set()
         path = getattr(route, "path", "")
@@ -158,6 +166,8 @@ def test_every_money_route_is_guarded():
         names = {p.name for p in params.header_params} if params else set()
         if "x_internal_token" not in names:
             unguarded.append(f"{sorted(methods)} {path}")
+        else:
+            declared.append(path)
 
     assert not unguarded, (
         "mutating servicing routes with no X-Internal-Token check: "
@@ -166,3 +176,68 @@ def test_every_money_route_is_guarded():
           "genuinely must be open -- add it to `exempt` above with the reason, "
           "so the decision is recorded rather than implied by its absence."
     )
+
+    # Every declared route must be represented in MONEY_ROUTES, so the behavioural
+    # cases above actually cover what the derivation found. Compared on the final
+    # path segment because the app exposes templates ("/accounts/{loan_id}/...")
+    # while the behavioural cases use concrete ids ("/accounts/1/...").
+    def _action(path):
+        return path.rstrip("/").rsplit("/", 1)[-1]
+
+    covered = {_action(p) for p, _ in MONEY_ROUTES}
+    missing = [p for p in declared if _action(p) not in covered]
+    assert not missing, (
+        f"routes declare the header but are never called without it: {missing}. "
+        "Add them to MONEY_ROUTES so the guard is proven to execute, not merely "
+        "to be present in the signature."
+    )
+
+
+def test_the_guard_actually_executes_on_every_derived_route(no_writes):
+    """Call each money route with no credential and require a real refusal.
+
+    This is the test that would have caught a declared-but-unused parameter.
+    It is separate from the signature check above because the two prove
+    different things: that one proves the estate is enumerated, this one proves
+    the enumeration is not decorative.
+    """
+    for path, body in MONEY_ROUTES:
+        resp = client.post(path, json=body)
+        assert resp.status_code == 401, f"{path} did not refuse an unauthenticated caller"
+
+
+def test_the_comparison_is_constant_time(monkeypatch):
+    """`!=` on str short-circuits at the first differing byte, so response
+    timing leaks how much of a guess was correct, one byte at a time.
+
+    Asserted structurally rather than by timing: a timing assertion on a CI
+    runner is a flake generator, and what actually matters is that the comparison
+    goes through `secrets.compare_digest` at all.
+    """
+    calls = []
+    real = main.secrets.compare_digest
+
+    def _spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(main.secrets, "compare_digest", _spy)
+    client.post("/accounts/1/late-fee", headers={"X-Internal-Token": "wrong-but-present"})
+
+    assert calls, "the token comparison did not go through secrets.compare_digest"
+
+
+def test_an_empty_header_cannot_match_an_empty_configured_token(monkeypatch):
+    """compare_digest("", "") is True.
+
+    So a deployment with no token configured would admit every caller that sent
+    an empty header -- the emptiness check has to come first, and does. Startup
+    validation should prevent this state entirely; this is the second line of
+    the same defence, and it is asserted because "unreachable" states are
+    exactly the ones that turn out to be reachable.
+    """
+    monkeypatch.setattr(main.config, "INTERNAL_SERVICE_TOKEN", "")
+
+    resp = client.post("/accounts/1/late-fee", headers={"X-Internal-Token": ""})
+
+    assert resp.status_code == 401
