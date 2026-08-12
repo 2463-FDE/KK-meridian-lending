@@ -58,40 +58,64 @@ def resume_application(idempotency_key: str, resume_token: str | None):
     consumed, so a token captured from a log cannot be replayed after the
     legitimate client has used it.
     """
-    rows = db.query(
-        "SELECT id, resume_token_hash, resume_token_expires_at, "
-        "       resume_token_consumed_at "
-        "  FROM applications WHERE idempotency_key = %s",
-        (idempotency_key,),
-    )
-    if not rows:
-        return None
-
-    row = rows[0]
-    if not decision_state.resume_token_matches(
-        row["resume_token_hash"], resume_token,
-        row["resume_token_expires_at"], row["resume_token_consumed_at"],
-    ):
-        # Identifiers only, and never the token or which check failed.
-        log.warning("refused a resume for app_id=%s -- resume token did not "
-                    "authorise it", row["id"])
+    if not resume_token:
+        # Nothing to compare. Same refusal as a wrong one -- see below.
+        rows = db.query(
+            "SELECT 1 FROM applications WHERE idempotency_key = %s", (idempotency_key,)
+        )
+        if not rows:
+            return None
         raise ResumeNotAuthorized()
 
-    app_id = row["id"]
     raw_access_token, access_token_hash = decision_state.new_access_token()
     raw_resume_token, resume_hash = decision_state.new_resume_token()
-    db.query(
-        "UPDATE applications SET access_token_hash = %s, "
+
+    # ONE statement: validate and rotate together.
+    #
+    # Review round: this used to read the row, validate in Python, then run an
+    # unconditional UPDATE ... WHERE id = %s. Two concurrent retries could both
+    # pass validation and both rotate, last write wins -- so a borrower's
+    # double-submit could end up holding an access token whose resume token had
+    # already been rotated away by its own twin, and only support could recover
+    # it. Validating and mutating in separate statements is a race by
+    # construction, however careful the validation is.
+    #
+    # The WHERE clause carries every condition resume_token_matches checked:
+    # the key, the token hash, not consumed, not expired. Postgres evaluates it
+    # while holding the row lock the UPDATE takes, so exactly one of two
+    # concurrent retries can match -- the other sees the already-rotated hash and
+    # returns no row.
+    updated = db.query(
+        "UPDATE applications SET "
+        "       access_token_hash = %s, "
         "       access_token_expires_at = now() + (%s || ' seconds')::interval, "
         "       access_token_consumed_at = NULL, "
-        # Rotated, not reused: the presented token is spent by this recovery.
         "       resume_token_hash = %s, "
         "       resume_token_expires_at = now() + (%s || ' seconds')::interval, "
         "       resume_token_consumed_at = NULL "
-        " WHERE id = %s",
+        " WHERE idempotency_key = %s "
+        "   AND resume_token_hash = %s "
+        "   AND resume_token_consumed_at IS NULL "
+        "   AND resume_token_expires_at > now() "
+        " RETURNING id",
         (access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS,
-         resume_hash, config.ACCESS_TOKEN_TTL_SECONDS, app_id),
+         resume_hash, config.ACCESS_TOKEN_TTL_SECONDS,
+         idempotency_key, decision_state.hash_access_token(resume_token)),
     )
+
+    if not updated:
+        # Zero rows is a REJECTION, never a fall-through. It means the key names
+        # nothing, or the token was wrong, expired, already consumed, or lost a
+        # race -- and the caller must not be able to tell those apart.
+        exists = db.query(
+            "SELECT 1 FROM applications WHERE idempotency_key = %s", (idempotency_key,)
+        )
+        if not exists:
+            return None
+        log.warning("refused a resume -- the compare-and-swap matched no row")
+        raise ResumeNotAuthorized()
+
+    app_id = updated[0]["id"]
     log.info("intake resumed an existing application app_id=%s", app_id)
     return app_id, raw_access_token, raw_resume_token
 

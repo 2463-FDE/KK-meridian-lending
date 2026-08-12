@@ -321,3 +321,74 @@ def test_an_unverified_application_cannot_be_decided(db):
 
     assert excinfo.value.status_code == 409
     assert "identity verification" in str(excinfo.value.detail).lower()
+
+
+def test_two_simultaneous_resumes_leave_exactly_one_winner(db):
+    """The race the compare-and-swap closes.
+
+    Validating in Python and then rotating in a separate statement lets two
+    concurrent retries both pass and both rotate -- last write wins, and the
+    loser's caller walks away holding an access token whose resume token was
+    already rotated away by its twin. A borrower double-submitting their browser
+    could end up needing support to recover.
+
+    Two real connections, fired at a barrier, because the guarantee is a WHERE
+    clause evaluated under a row lock and a single-threaded test cannot observe it.
+    """
+    import threading
+
+    from app import intake
+
+    key = f"concurrent-{uuid.uuid4()}"
+    app_id, _, resume = intake.create_application(_payload(key))
+
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+
+    def _resume():
+        try:
+            barrier.wait(timeout=10)
+            results.append(intake.resume_application(key, resume))
+        except intake.ResumeNotAuthorized:
+            errors.append("refused")
+        except Exception as e:                              # pragma: no cover
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=_resume) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+
+    winners = [r for r in results if r]
+    assert len(winners) == 1, (
+        f"{len(winners)} of two concurrent resumes succeeded -- both rotated the "
+        f"token and the loser's caller holds a dead credential"
+    )
+    assert errors == ["refused"], f"the loser failed in the wrong way: {errors}"
+
+    # The winner's access token is the one on the row, so it still works.
+    _, winner_access, winner_resume = winners[0]
+    row = _row(db, app_id)
+    from app import decision_state
+    assert row["access_token_hash"] == decision_state.hash_access_token(winner_access), (
+        "the surviving row does not authenticate the token the winner was given"
+    )
+    assert row["resume_token_hash"] == decision_state.hash_access_token(winner_resume)
+
+
+def test_the_rotation_is_a_single_statement(db):
+    """Derived, because "validate then update" is the shape of the defect and it
+    reads as correct. A future refactor that splits them again fails here."""
+    import inspect
+
+    from app import intake
+
+    src = inspect.getsource(intake.resume_application)
+    assert "UPDATE applications SET" in src and "AND resume_token_hash = %s" in src, (
+        "the rotation no longer validates the token inside the UPDATE's WHERE "
+        "clause, so validation and mutation are two statements again"
+    )
+    assert "resume_token_expires_at > now()" in src, (
+        "expiry is not checked inside the compare-and-swap"
+    )
