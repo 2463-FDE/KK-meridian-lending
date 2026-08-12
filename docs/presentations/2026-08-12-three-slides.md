@@ -151,6 +151,13 @@ Every claim above, with its file and its landed/open status. Anything marked
 **open** is a draft on a pull request and is **not on `main`** — it is cited as
 proposed work, not as something the system does.
 
+Rows citing a `PR #NN` resolve through
+[`evidence-manifest.md`](evidence-manifest.md), which maps each one to a file
+that exists in this repository. A bare PR number is not durable evidence: it can
+be renumbered or reopened, and a reader offline cannot check it at all.
+`db/tests/test_presentation_claims_resolve.py` enforces both — the manifest must
+cover every PR the deck cites, and a merged row's artifact must exist.
+
 ### Slide 1 — self-approval control gap
 
 | Claim | Evidence | Status |
@@ -167,6 +174,7 @@ proposed work, not as something the system does.
 |---|---|---|
 | Columns dropped from existing databases | `db/migrations/0031_drop_payments_pan_cvv.sql` | **landed** |
 | Fresh installs never create them | `db/init/001_schema.sql` | **landed** |
+| Fresh **and** migrated agree — neither has a card column | `db/tests/test_no_card_data_on_either_schema_path.py` | **landed** |
 | Recorded as fixed | `docs/DEBT.md` D5b / D13 | **landed** |
 | README claims held to the schema | `db/tests/test_readme_schema_claims.py` | **merged** — PR #23 |
 | Logs, backups, caches | — | **not evidenced** — see the slide |

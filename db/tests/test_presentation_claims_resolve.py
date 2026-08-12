@@ -12,6 +12,7 @@ and here the audience is the client.
 """
 import pathlib
 import re
+import subprocess
 
 import pytest
 
@@ -83,3 +84,107 @@ def test_the_servicing_float_boundary_is_on_the_slide_not_only_in_the_notes():
         "the servicing float boundary appears only in the notes, so it is absent "
         "from what the room and any later reader actually see"
     )
+
+
+# --- PR-backed claims ---------------------------------------------------------
+#
+# The resolver above only validated backticked repository paths, so `PR #22`,
+# `PR #23` and `PR #24` passed through unchecked. A wrong number, a deleted PR
+# or one that quietly reopened would still have gone green -- and those PRs are
+# what back the internal-token and Decimal-boundary claims on the slides.
+#
+# A pull request is not durable evidence: it can be renumbered or reopened, and
+# a reader offline cannot check it at all. So each one is resolved through
+# docs/presentations/evidence-manifest.md to something that survives the PR.
+
+MANIFEST = DOCS / "evidence-manifest.md" if (DOCS := DECK.parent) else None
+
+
+def _manifest_rows():
+    rows = {}
+    for line in MANIFEST.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\|\s*#(\d+)\s*\|\s*(\w+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$", line)
+        if m:
+            number, status, artifact, commit = m.groups()
+            path = re.search(r"`([^`]+)`", artifact)
+            rows[int(number)] = {
+                "status": status.lower(),
+                "artifact": path.group(1) if path else None,
+                "commit": (re.search(r"`([0-9a-f]{7,40})`", commit) or [None, None])[1],
+            }
+    return rows
+
+
+def _cited_prs():
+    return sorted(set(int(n) for n in re.findall(r"PR #(\d+)", DECK.read_text(encoding="utf-8"))))
+
+
+def test_the_manifest_exists():
+    assert MANIFEST.is_file(), (
+        "the deck cites pull requests but there is no evidence manifest to "
+        "resolve them against"
+    )
+
+
+@pytest.mark.parametrize("pr", _cited_prs())
+def test_every_cited_pr_is_in_the_manifest(pr):
+    assert pr in _manifest_rows(), (
+        f"the deck cites PR #{pr}, which is not in evidence-manifest.md. An "
+        f"audience cannot verify a bare PR number, and it stops resolving the "
+        f"moment the PR is archived or renumbered."
+    )
+
+
+@pytest.mark.parametrize("pr", _cited_prs())
+def test_a_merged_pr_names_an_artifact_that_exists(pr):
+    row = _manifest_rows().get(pr) or {}
+    if row.get("status") != "merged":
+        return
+    artifact = row.get("artifact")
+    assert artifact, f"PR #{pr} is listed merged with no durable artifact"
+    assert (REPO / artifact).exists(), (
+        f"PR #{pr} cites {artifact}, which does not exist on this branch -- so "
+        f"the claim it backs cannot be checked by anyone reading the deck."
+    )
+
+
+@pytest.mark.parametrize("pr", _cited_prs())
+def test_an_open_pr_is_labelled_open_in_the_deck(pr):
+    """An open PR has no landed artifact, so the deck must say so."""
+    row = _manifest_rows().get(pr) or {}
+    if row.get("status") != "open":
+        return
+    context = " ".join(_line_context(f"PR #{pr}"))
+    assert any(m in context for m in OPEN_MARKERS), (
+        f"PR #{pr} has not landed, but the deck presents its claim without an "
+        f"open marker. That is the overclaim this test exists to catch."
+    )
+
+
+@pytest.mark.parametrize("pr", _cited_prs())
+def test_a_recorded_merge_commit_resolves(pr):
+    """Checked when the object is present.
+
+    CI checks out with limited history, so this assertion is skipped -- with a
+    reason -- on a shallow clone rather than passing silently. The artifact
+    assertion above never skips, so no row is ever accepted on no evidence.
+    """
+    row = _manifest_rows().get(pr) or {}
+    commit = row.get("commit")
+    if not commit:
+        return
+    if subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                      cwd=REPO, capture_output=True, text=True).stdout.strip() == "true":
+        pytest.skip("shallow clone -- merge commits are not in this checkout")
+    found = subprocess.run(["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                           cwd=REPO, capture_output=True)
+    assert found.returncode == 0, (
+        f"PR #{pr} records merge commit {commit}, which is not in this repository"
+    )
+
+
+def test_the_pr_checks_are_not_vacuous():
+    """A parametrized test over an empty list passes and proves nothing."""
+    assert len(_cited_prs()) >= 3, f"found almost no PR citations: {_cited_prs()}"
+    merged = [p for p, r in _manifest_rows().items() if r["status"] == "merged"]
+    assert merged, "the manifest lists no merged PR, so the artifact check never ran"
