@@ -327,11 +327,43 @@ Three things this depends on, each of which is a way to get it wrong:
   zero. The projection is therefore built by the same code path that maintains
   it, rather than by a one-off script whose arithmetic could differ.
 - **Direct writes are blocked.** `balances` becomes trigger-maintained only: a
-  `BEFORE UPDATE OR DELETE` trigger on `balances` raises unless the current
-  statement is the projection function (guarded by a session-local flag the
-  function sets). Otherwise `balance.py`'s existing `UPDATE balances` statements
-  -- or a psql session -- would silently desynchronise the projection from its
-  own ledger, and the parity test would only notice afterwards.
+  `BEFORE UPDATE OR DELETE` trigger on `balances` raises unless the projection
+  function is the one writing. Otherwise `balance.py`'s existing `UPDATE
+  balances` statements -- or a psql session -- would silently desynchronise the
+  projection from its own ledger, and the parity test would only notice
+  afterwards.
+
+  **How the guard knows.** A session-local setting, set by the projection
+  function around its own writes and cleared immediately after:
+
+  ```sql
+  -- inside project_ledger_entry(), around the UPDATEs shown above
+  PERFORM set_config('meridian.projecting', 'on', true);   -- true = transaction-local
+  ...                                                       -- the UPDATE balances
+  PERFORM set_config('meridian.projecting', 'off', true);
+
+  -- and the guard itself
+  CREATE FUNCTION balances_are_trigger_maintained() RETURNS trigger AS $$
+  BEGIN
+      IF current_setting('meridian.projecting', true) IS DISTINCT FROM 'on' THEN
+          RAISE EXCEPTION 'balances is maintained by the ledger projection; '
+                          'write a ledger entry instead';
+      END IF;
+      RETURN NEW;
+  END $$ LANGUAGE plpgsql;
+  ```
+
+  Stated because an earlier revision described this flag in prose while the
+  function body shown above never set it -- so an implementer copying that body
+  verbatim would have had every ledger insert fail the moment the guard went
+  live. `set_config(..., true)` is transaction-local, so the flag cannot leak to
+  a later statement on a pooled connection, which is the way this kind of guard
+  usually fails open.
+
+  It is a guard against accident, not a privilege boundary: anyone who can run
+  `set_config` can bypass it. That is the same honest limit as the append-only
+  trigger and for the same reason -- every service connects as the schema-owning
+  role, so a `REVOKE` from the owner does not stick (ADR 0002, ADR 0006).
 - **The projection is not the record.** `SUM(ledger_entries)` remains the
   auditable truth; `balances` is a cache with a test asserting it agrees.
 
@@ -422,8 +454,15 @@ ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK
 );
 ```
 
-The cycle is closed here, once both tables exist, together with the commit-time
-rule that replaces the impossible CHECK:
+The cycle is closed here, once both tables exist — **in step 4, not step 2**,
+together with the commit-time rule that replaces the impossible CHECK.
+
+That split is what lets the ledger ship without maker-checker. `ledger_entries`
+carries `pending_movement_id` from step 2, because the projection trigger reads
+it and a trigger cannot reference a column added later; the column is nullable
+and unconstrained until the table it points at exists. Nothing about the ledger
+depends on that FK, so a reviewer can approve steps 1 to 3 and defer everything
+below:
 
 ```sql
 ALTER TABLE ledger_entries
@@ -609,9 +648,9 @@ is not recoverable.
 | Step | What lands | Gate before the next step |
 |---|---|---|
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
-| 2 | `ledger_entries`, then `pending_movements`, then the `ALTER` that adds the FK closing the cycle, then the triggers, then the back-fill from `payments` + current `balances` — the same order as the DDL above, which is the only order that runs | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
+| 2 | `ledger_entries` (including the nullable `pending_movement_id` column, which the projection trigger reads and so cannot be added later), then the triggers, then the back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
 | 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes.** D14 becomes possible, not closed |
-| 4 | `pending_movements` + `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
+| 4 | `pending_movements`, the `ALTER` that adds the FK closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
