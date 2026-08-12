@@ -60,8 +60,8 @@ TIMEOUT_SECONDS = 20.0
 # identifiers (name, email, phone, address) are deliberately excluded — a risk
 # summary doesn't need them, and they have no business reaching a third-party API.
 # income/employment_years are required here: the system prompt instructs the model
-# to judge risk_tier from loan-to-income and employment length, so those facts must
-# actually reach it — without them the model was inventing a risk chip from data it
+# to describe risk_tier from the loan amount, income and employment length, so
+# those facts must actually reach it — without them the model was inventing a risk chip from data it
 # never saw (Codex review on PR #2).
 #
 # The rule used to say DEBT-to-income. Nothing in this payload carries the
@@ -84,13 +84,16 @@ produce a concise, factual summary in the exact JSON schema provided.
 Rules:
 - NEVER include SSN, full card numbers, or CVV in your output.
 - Use only the data provided — do not invent information.
-- risk_tier: judge from LOAN-TO-INCOME (amount / annual income) and employment
-  length, both of which are in the data you are given. 'low' if loan-to-income
-  < 0.25 and employment > 2yr; 'high' if loan-to-income > 0.5 or employment < 6mo;
-  'decline' if income cannot plausibly service the loan; else 'medium'.
-  Do NOT reason about debt-to-income: you are not given the applicant's existing
-  debt obligations, and a DTI inferred from income alone is a fabricated number.
-- flags: list specific concerns (e.g. "Employment < 1 year", "Loan-to-income ratio > 4x").
+- risk_tier: DESCRIPTIVE ONLY. Summarise what the figures show relative to each
+  other -- a large loan against a modest income, or short employment -- and do not
+  apply any numeric cutoff. There is no published threshold for this field, so any
+  number you applied would be your own, presented to staff as though it were
+  policy.
+- Do NOT reason about debt-to-income. You are not given the applicant's existing
+  debt obligations, and a ratio inferred from income alone is a fabricated number.
+- flags: list specific concerns in plain language, describing what the data shows
+  (e.g. "Employment under one year", "Loan amount is large relative to stated
+  income"). Do not state a numeric threshold as though one were published.
   Empty list if none.
 """.strip()
 

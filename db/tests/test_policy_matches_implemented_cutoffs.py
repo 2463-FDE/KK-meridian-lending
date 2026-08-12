@@ -218,3 +218,30 @@ def test_the_adr_records_the_resolution():
         "adr/0007 does not record which way the gap was closed, so a future reader "
         "cannot tell an amended policy from an unfixed one"
     )
+
+
+def test_the_prompt_states_no_numeric_threshold_that_policy_does_not_publish():
+    """A threshold in the prompt is a staff-facing rule with no rule behind it.
+
+    The first fix for this PR swapped an unapproved DTI cutoff for an unapproved
+    LOAN-TO-INCOME one -- 0.25 low, 0.5 high -- which is the same defect moved from
+    the policy document into the runtime prompt. Staff on the underwriting screen
+    see a risk chip that looks policy-backed and is prompt-only, and in manual
+    review that can sway an approve or deny with nothing auditable behind it.
+
+    So: any numeric threshold the prompt applies must also appear in the published
+    policy. Today the policy publishes the model-score bands and nothing else, so
+    the prompt may state no cutoffs at all.
+    """
+    src = (REPO / "services" / "loan-assistant" / "app" / "llm_client.py").read_text(encoding="utf-8")
+    system = src[src.index("_SYSTEM = "):src.index("class _LLMOutput")]
+    policy = _policy()
+
+    # Any ratio- or percentage-shaped cutoff in a rule line.
+    numbers = set(re.findall(r"[<>]\s*([0-9]+(?:\.[0-9]+)?)\s*%?", system))
+    unpublished = [n for n in numbers if n not in policy]
+    assert not unpublished, (
+        f"the summary prompt applies thresholds {sorted(unpublished)} that the "
+        f"published policy does not contain. Either publish and approve them, or "
+        f"make the field descriptive."
+    )
