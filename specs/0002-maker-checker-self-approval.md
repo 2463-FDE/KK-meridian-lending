@@ -87,6 +87,56 @@ leave the application to do it, which is exactly the signal an audit is looking
 for. An admin self-approval exception would make the bypass indistinguishable
 from ordinary work.
 
+## 3a. Identity — where `requested_by` and `resolved_by` come from
+
+**The whole control reduces to one question: are these two the same person?** If
+identity can be asserted by the caller, "a different approver" means "a different
+string in a header", and maker-checker becomes a naming convention.
+
+### The rule
+
+- **REQ-ID-1** — `requested_by`, `resolved_by` and the role used for the authority
+  check SHALL be taken **only** from the authenticated server-side principal — the
+  session the gateway resolved — and never from a value supplied by the client.
+- **REQ-ID-2** — The gateway SHALL strip every inbound `X-User-*` header before
+  proxying and re-stamp them from the resolved session. *(This already holds:
+  `services/gateway/app/main.py::_proxy` filters `x-user-` and sets `X-User-Id` /
+  `X-User-Role` from `user`.)*
+- **REQ-ID-3** — Servicing SHALL trust `X-User-Id` / `X-User-Role` **only** when
+  the request also carries a valid `X-Internal-Token`. Without it those headers
+  are anonymous client input. The token proves the request came through the
+  gateway; the headers carry what the gateway resolved. **Neither is sufficient
+  alone**, and treating the headers as trusted because they are "internal" is the
+  assumption this requirement exists to forbid.
+- **REQ-ID-4** — IF the principal cannot be resolved — no session, unknown user id,
+  a role outside `_STAFF_ROLES` — THEN both proposing and resolving SHALL fail
+  closed with `401`, and no `pending_movements` row SHALL be written and no
+  resolution recorded.
+- **REQ-ID-5** — The self-approval check SHALL compare **resolved principals**,
+  not header values. Two requests carrying different `X-User-Id` headers but
+  resolving to the same account are the same person.
+- **REQ-ID-6** — The proposal's `requested_by` SHALL be written from the principal
+  at creation time and SHALL be immutable thereafter. A caller SHALL NOT be able
+  to set, supply or amend it.
+
+### Why REQ-ID-3 is the one that gets skipped
+
+Servicing's money routes take `x_user_role` as a header today and never read it.
+The tempting implementation is to start reading it — and that is a bypass, not a
+fix: any caller holding the internal token could then set `X-User-Role: admin` and
+approve. The token is a *service* credential shared by every backend, not a *user*
+credential, so it authenticates the caller as "a service on this network" and says
+nothing about which human is acting.
+
+That is why the identity must be the gateway-resolved session and the token must
+be checked as well. One without the other is:
+
+| Missing | Consequence |
+|---|---|
+| Token not checked | Anyone on the network sets `X-User-Id` to any staff account and approves |
+| Headers not stripped at the gateway | A browser client supplies its own `X-User-Id`, and the gateway forwards it |
+| Role read without the token | The role header becomes a privilege escalation primitive |
+
 ## 4. Acceptance criteria
 
 ### 4.1 EARS
@@ -109,6 +159,16 @@ from ordinary work.
   refuse any direct write to `balances` from `adjust_balance` or `waive_fee`.
 - **AC-8** — WHERE two approvers resolve the same proposal concurrently, THE
   SYSTEM SHALL apply exactly one resolution and exactly one ledger entry.
+- **AC-9** — IF a request supplies `X-User-Id` or `X-User-Role` without a valid
+  `X-Internal-Token`, THEN THE SYSTEM SHALL ignore those headers and refuse the
+  action.
+- **AC-10** — IF the authenticated principal cannot be resolved, THEN THE SYSTEM
+  SHALL refuse both proposal and resolution and SHALL write nothing.
+- **AC-11** — WHEN a proposal is created, THE SYSTEM SHALL set `requested_by` from
+  the resolved principal and SHALL ignore any requester supplied in the body.
+- **AC-12** — THE SYSTEM SHALL retain the audit fields of a resolved proposal
+  immutably; `requested_by`, `resolved_by`, `resolved_at` and the linked ledger
+  entry SHALL NOT be updatable after resolution.
 
 ### 4.2 Gherkin
 
@@ -142,6 +202,38 @@ Scenario: a large movement needs an admin
   Then the resolution is refused for insufficient authority
   When an admin "carol" approves it
   Then exactly one ledger entry exists for that proposal
+
+Scenario: a spoofed requester header is ignored
+  Given an unauthenticated client can reach servicing directly on the network
+  When it posts an adjustment with header "X-User-Id: 7" and no internal token
+  Then the request is refused
+  And no pending movement is created
+
+Scenario: a spoofed role header does not grant approval authority
+  Given a CSR "alice" is authenticated through the gateway
+  And a proposal of -5000.00 exists that requires an admin
+  When "alice" sends the approval with header "X-User-Role: admin"
+  Then the role is taken from her resolved session, not the header
+  And the resolution is refused for insufficient authority
+
+Scenario: identity that cannot be resolved fails closed
+  Given a request carries a valid internal token
+  And "X-User-Id" names a user that does not exist
+  When it attempts to approve a proposal
+  Then the resolution is refused
+  And the proposal remains unresolved
+  And no ledger entry is written
+
+Scenario: the same principal cannot propose and approve under two identities
+  Given "alice" raised a proposal
+  When a request resolving to "alice" approves it, whatever headers it carries
+  Then the resolution is refused as self-approval
+
+Scenario: audit evidence cannot be amended after resolution
+  Given a proposal has been approved by "bob"
+  When any caller attempts to change requested_by, resolved_by or resolved_at
+  Then the change is refused
+  And the original values remain
 
 Scenario: two approvers race
   Given a CSR "alice" has raised an adjustment of -250.00 on loan 4471

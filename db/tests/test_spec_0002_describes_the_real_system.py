@@ -96,3 +96,70 @@ def test_the_spec_states_its_own_limit():
     assert "REVOKE" in text, (
         "the spec does not explain why privilege-based enforcement is unavailable"
     )
+
+
+# --- the identity trust boundary --------------------------------------------
+
+
+@pytest.mark.parametrize("requirement", ["REQ-ID-1", "REQ-ID-2", "REQ-ID-3",
+                                         "REQ-ID-4", "REQ-ID-5", "REQ-ID-6"])
+def test_the_identity_requirements_are_all_present(requirement):
+    """The whole control reduces to "are these two the same person?".
+
+    If identity can be asserted by the caller, "a different approver" means "a
+    different string in a header" and maker-checker is a naming convention.
+    """
+    assert requirement in SPEC.read_text(encoding="utf-8"), (
+        f"{requirement} is missing -- the spec does not pin down where "
+        f"requested_by and resolved_by come from"
+    )
+
+
+def test_the_spec_forbids_trusting_client_supplied_identity():
+    text = SPEC.read_text(encoding="utf-8")
+    assert "never from a value supplied by the client" in text
+    assert "X-User-" in text, "the spec does not name the headers in question"
+
+
+def test_the_gateway_really_does_strip_inbound_identity_headers():
+    """REQ-ID-2 claims this already holds. Hold it to the code.
+
+    If the gateway stopped stripping, a browser client could supply its own
+    X-User-Id and the spec's central assumption would be false while still
+    reading as satisfied.
+    """
+    src = (REPO / "services" / "gateway" / "app" / "main.py").read_text(encoding="utf-8")
+    assert 'startswith("x-user-")' in src, (
+        "the gateway no longer strips inbound X-User-* headers, so spec 0002 "
+        "REQ-ID-2 describes something that is not true"
+    )
+    assert 'headers["X-User-Id"]' in src, (
+        "the gateway no longer stamps X-User-Id from the resolved session"
+    )
+
+
+def test_the_spec_covers_the_adversarial_cases():
+    """Spoofing, unresolved identity, self-approval, authority, concurrency and
+    immutable evidence -- the cases a happy-path spec omits."""
+    text = SPEC.read_text(encoding="utf-8").lower()
+    for case, why in [
+        ("spoofed requester", "a forged requester header"),
+        ("spoofed role", "a forged role header"),
+        ("cannot be resolved", "identity that does not resolve"),
+        ("self-approval", "the requester approving their own proposal"),
+        ("insufficient authority", "an approver below the threshold"),
+        ("race", "two approvers at once"),
+        ("cannot be amended", "audit evidence being edited after the fact"),
+    ]:
+        assert case in text, f"no acceptance case for {why}"
+
+
+def test_the_service_credential_is_not_treated_as_a_user_credential():
+    """The bypass this spec has to forbid: reading the role header because the
+    request carried the internal token. That token is shared by every backend --
+    it authenticates a service, not a human."""
+    text = SPEC.read_text(encoding="utf-8")
+    assert "service* credential" in text or "service credential" in text or            "not a *user* credential" in text or "not a user credential" in text, (
+        "the spec does not distinguish the shared service token from a user "
+        "credential, which is the escalation path an implementer would take"
+    )
