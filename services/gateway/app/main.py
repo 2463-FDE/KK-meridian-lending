@@ -258,10 +258,15 @@ _ACCOUNT_READ_ACTIONS = ("balance",)
 @app.api_route("/lss/{path:path}", methods=["GET", "POST"])
 async def lss(path: str, request: Request, authorization: str | None = Header(None)):
     user = _require_user(authorization)
+    # servicing-service now requires X-Internal-Token on its money-moving routes
+    # (see its main.py::_require_internal), so every proxy call below forwards it
+    # or a real staff session gets 401'd. Bound once rather than repeated at each
+    # `_proxy(...)` -- there are five of them in this function alone.
+    svc = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
 
     if path == "loans" and request.method == "GET":
         if auth.is_staff(user):
-            return await _proxy(SERVICING_URL, f"/{path}", request, user)
+            return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
         if user.get("applicant_id"):
             return JSONResponse(content=_borrower_loans(user["applicant_id"]))
         raise HTTPException(status_code=403, detail="forbidden")
@@ -270,7 +275,7 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
     if loan_match and request.method == "GET":
         loan_id = loan_match.group(1)
         if auth.is_staff(user) or auth.owns_loan(user, loan_id):
-            return await _proxy(SERVICING_URL, f"/{path}", request, user)
+            return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
         raise HTTPException(status_code=403, detail="forbidden")
 
     account_match = _ACCOUNT_ACTION_RE.match(path)
@@ -278,19 +283,19 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
         loan_id, action = account_match.group(1), account_match.group(2)
         if action in _ACCOUNT_READ_ACTIONS:
             if auth.is_staff(user) or auth.owns_loan(user, loan_id):
-                return await _proxy(SERVICING_URL, f"/{path}", request, user)
+                return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
             raise HTTPException(status_code=403, detail="forbidden")
         # adjust-balance / waive-fee / late-fee -- CSR/admin only. Underwriter is
         # staff but has no business moving money; is_staff() alone let an
         # underwriter POST straight to these routes even though the servicing UI
         # never shows them the button.
         if auth.can_move_money(user):
-            return await _proxy(SERVICING_URL, f"/{path}", request, user)
+            return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
         raise HTTPException(status_code=403, detail="csr/admin only")
 
     if path == "reconciliation/peek":
         if auth.is_staff(user):
-            return await _proxy(SERVICING_URL, f"/{path}", request, user)
+            return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
         raise HTTPException(status_code=403, detail="staff only")
 
     # Unrecognized /lss sub-path (including the legacy servicing-service /payments

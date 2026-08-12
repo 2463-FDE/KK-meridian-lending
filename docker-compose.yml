@@ -44,10 +44,13 @@ services:
       # Shared with decision-service/gateway below -- sent as X-Internal-Token
       # on the server-to-server call to decision-service so it has a check to
       # fail closed on even if a future compose change re-publishes its port.
-      # Import-time token validation treats an unset ENVIRONMENT as production
-      # and fails closed, so the local stack states it explicitly (PR #18).
-      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Read by this service's startup token validation, which treats an unset
+      # ENVIRONMENT as production and fails closed (PR #18). Declared here
+      # because compose passes a host variable through only to services that
+      # name it, and `env_file: .env` is required:false -- see
+      # db/tests/test_compose_declares_every_env_var_services_read.py.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,11 +72,24 @@ services:
       - path: .env
         required: false
     # No published host port: this service moves money (adjust-balance, charge
-    # application) with no auth of its own -- the gateway's ownership/role checks
-    # are the only thing standing between a caller and those endpoints. Publishing
-    # this port let anyone on the host bypass the gateway entirely and hit it
-    # directly (review finding). Reachable from other containers on the compose
-    # network by service name; not reachable from the host.
+    # application) -- publishing this port let anyone on the host bypass the
+    # gateway entirely and hit it directly (review finding). Reachable from other
+    # containers on the compose network by service name; not from the host.
+    environment:
+      # Required, and deliberately NOT defaulted. validate_internal_token skips
+      # every strength and known-token check when ENVIRONMENT is development/
+      # dev/test/local, so a base file that defaulted to development would hand
+      # any production-like deploy money routes guarded by whatever string was
+      # typed -- including a short or repository-known one. That is the exact
+      # case this service's token exists to prevent, so the default is gone and
+      # local work opts in explicitly via `make bootstrap`.
+      ENVIRONMENT: ${ENVIRONMENT:?required -- run `make bootstrap` for local development; never defaults to development, because that would skip token validation}
+      # Required on every money-moving route now (see app/main.py::_require_internal).
+      # The network boundary above was previously the ONLY control, because none
+      # of those routes checked anything -- the same position kyc-service was in
+      # when it turned out to be reachable anyway. Same default as the other
+      # services so they agree without an .env entry.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,11 +115,21 @@ services:
     # kyc_checks row for any applicant_id, unauthenticated. Its four siblings
     # were closed the same way in PR #6; this one was missed. Reach it through
     # the gateway (/kyc/*) or from another service on this network.
+    #
+    # Restored during the merge with PR #22: taking that branch's compose wholesale
+    # would have re-published the port, so the fix and the merge are both recorded
+    # here. A conflict resolution that quietly reopens a closed hole is the worst
+    # kind, because the PR that closed it still shows green.
     environment:
-      # Import-time token validation treats an unset ENVIRONMENT as production
-      # and fails closed, so the local stack states it explicitly (PR #18).
-      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
+      # Required on POST /kyc/check, which writes the CIP compliance record and
+      # was reachable with no credential at all before PR #18.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Read by this service's startup token validation, which treats an unset
+      # ENVIRONMENT as production and fails closed (PR #18). Declared here
+      # because compose passes a host variable through only to services that
+      # name it, and `env_file: .env` is required:false -- see
+      # db/tests/test_compose_declares_every_env_var_services_read.py.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
     depends_on:
       postgres:
         condition: service_healthy
@@ -127,13 +153,13 @@ services:
       # ENVIRONMENT is otherwise unset and decisioning fails closed on every request
       # (see app/config.py). Default the local compose path to dev so it boots ready
       # to use; an .env that sets ENVIRONMENT still wins.
-      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
+      ENVIRONMENT: ${ENVIRONMENT:?required -- run `make bootstrap` for local development; never defaults to development, because that would skip token validation}
       # Required on every POST /decisions (see routers/decisions.py) -- defense
       # in depth so a future accidental host-port re-exposure (or any other
       # container reachable on this compose network) still can't submit
       # decisions without also knowing this. Same default as origination-
       # service/gateway below so the three agree without an .env entry.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
     # No host port mapping: decision-service handles SSNs and the
     # decision-overwrite bug (see routers/decisions.py) means it must only be
     # reachable over the internal compose network, never from the host. The
@@ -161,7 +187,7 @@ services:
       # depth so a future accidental host-port re-exposure still can't submit
       # offers without also knowing this. Same default as the other services
       # so they all agree without an .env entry.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
     # No host port mapping: POST /offers persists the canonical TILA numbers
     # for an approved loan with no auth of its own -- publishing this let
     # anyone on the host bypass the gateway's staff-only /disclosure/* check
@@ -191,7 +217,17 @@ services:
       # in depth so a future accidental host-port re-exposure still can't
       # charge a card without also knowing this. Same default as the other
       # services so they all agree without an .env entry.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Review finding: this was missing. `env_file: .env` is `required: false`,
+      # so on a clean checkout -- CI, or anyone who has not run the bootstrap --
+      # payment-service started with ENVIRONMENT unset. config.py reads it to
+      # decide ALLOW_PAYMENT_STUB, so the deterministic test processor refused
+      # every authorization and payments failed with no configuration error to
+      # point at.
+      #
+      # It was invisible locally for the same reason twice before on this branch:
+      # a developer's own .env supplied the variable that CI does not have.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
     # No host port mapping: POST /payments charges a card/ACH with no auth of
     # its own -- publishing this let anyone on the host bypass the gateway's
     # ownership check and move money directly (review finding). Reachable
@@ -232,7 +268,7 @@ services:
       # /financials route (app/main.py's summarize()) -- that route requires
       # this on top of a staff X-User-Role, and every AI-summary request
       # 403'd without it. Same shared secret every other service already uses.
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
     # No host port published — reachable only from other containers on the compose
     # network (gateway proxies /assistant/* to it internally). Publishing it would
     # let anyone on the host bypass the gateway's role check and trigger billed LLM
@@ -262,10 +298,13 @@ services:
     environment:
       # Forwarded as X-Internal-Token on the staff-ops /decision/* proxy path
       # (see app/main.py) -- must match decision-service's copy above.
-      # Import-time token validation treats an unset ENVIRONMENT as production
-      # and fails closed, so the local stack states it explicitly (PR #18).
-      ENVIRONMENT: ${ENVIRONMENT:?required -- see .env.example (gitignored); dev values belong there, never here}
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?required -- see .env.example (gitignored); dev values belong there, never here}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Read by this service's startup token validation, which treats an unset
+      # ENVIRONMENT as production and fails closed (PR #18). Declared here
+      # because compose passes a host variable through only to services that
+      # name it, and `env_file: .env` is required:false -- see
+      # db/tests/test_compose_declares_every_env_var_services_read.py.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
       # Rate limit. The DEFAULT STACK SHIPS THE REAL CONTROL: 120 requests /
       # 60s per client IP, the same number services/gateway/app/config.py
       # falls back to.

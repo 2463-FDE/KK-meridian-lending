@@ -1,12 +1,24 @@
-.PHONY: up up-e2e down logs build seed ps test fmt
+.PHONY: bootstrap up up-e2e down logs build seed ps test fmt
 
-up:
+# One-time local setup. docker-compose.yml supplies NO default for
+# INTERNAL_SERVICE_TOKEN or ENVIRONMENT -- a fallback committed to this
+# repository is not a secret, and an ENVIRONMENT default of "development" would
+# silently skip the token-strength checks on the money-moving routes. So the
+# base file requires both, and this target is the documented way a developer
+# supplies them.
+#
+# Writes only to .env, which is gitignored. The generated token never leaves
+# this machine and must never be committed.
+bootstrap:
+	python scripts/bootstrap_env.py
+
+up: bootstrap
 	docker compose up -d --build
 
 # The browser suite only. Same stack, with the gateway rate limit raised so a
 # dozen journeys from one source IP do not trip the shipped 120/60s control --
 # see docker-compose.e2e.yml. `make up` deliberately does NOT include it.
-up-e2e:
+up-e2e: bootstrap
 	docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
 
 build:

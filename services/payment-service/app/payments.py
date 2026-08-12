@@ -72,7 +72,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from .logging_config import get_logger
 from . import db, processor
-from .config import SERVICING_URL
+from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .processor import ChargeDeclinedError
 from .redactor import redact_dict, redact_str
 
@@ -98,6 +98,101 @@ class IdempotencyKeyConflict(Exception):
 def _to_cents(amount) -> float:
     d = amount if isinstance(amount, Decimal) else Decimal(str(amount))
     return float(d.quantize(_CENTS, rounding=ROUND_HALF_UP))
+
+
+class ServicingAuthUnavailable(Exception):
+    """servicing-service will not accept our credentials, so a capture would strand money."""
+
+
+def _require_servicing_auth(loan_id: int | None = None) -> None:
+    """Raise unless servicing can accept AND PERSIST an apply for this loan.
+
+    Called immediately before EVERY authorize_charge(), not once at the top of
+    the happy path. Review round 3: the pending-duplicate retry branch called
+    authorize_charge() directly, so a retry of a request whose authorization
+    never confirmed re-charged the card with no servicing check at all -- the
+    precise charged-but-uncredited case this guard exists to prevent, reachable
+    by the one path most likely to be taken during an incident.
+    """
+    if not _servicing_auth_ok(loan_id):
+        raise ServicingAuthUnavailable(
+            "servicing-service rejected our internal token; refusing to charge"
+        )
+
+
+def _servicing_auth_ok(loan_id: int | None = None) -> bool:
+    """Confirm servicing will accept our credentials, BEFORE authorizing a card.
+
+    **Fails closed.** True is returned only for an explicit 200 carrying the
+    expected body. A timeout, DNS failure, TLS error, connection reset, 5xx or an
+    unrecognised body all mean the same thing for this decision: we cannot
+    confirm the system that credits the borrower is reachable, so we do not take
+    their money.
+
+    Review round 4 corrected this, and the earlier version was mine to defend.
+    It returned True on any exception, reasoning that "unknown is not known-bad"
+    and that refusing payments on every servicing blip trades a rare accounting
+    error for a common outage. That argument is wrong here, for two reasons.
+
+    First, it contradicts what this guard is for. The preflight exists because a
+    capture that cannot be credited is the worst outcome in the system; letting
+    an unreachable servicing through means the guard only caught an explicit
+    401 -- the narrow case -- while the broad case, servicing simply being down,
+    sailed past it.
+
+    Second, "the reconciler will fix it" is not an answer a borrower accepts.
+    payment-service does have a durable drain for captured-but-unapplied rows,
+    and it does work -- but it only works once servicing comes back, and until
+    then real money has left a real card while the balance has not moved. An
+    uncharged customer retries in a minute; a charged customer with no credit
+    files a complaint.
+
+    The cost is stated rather than hidden: card capture is now unavailable
+    whenever servicing is unavailable. That coupling is deliberate and is
+    recorded in ARCHITECTURE.md -- for money movement, accounting correctness
+    beats availability. The timeout is kept short so an outage fails fast rather
+    than hanging the request, and replaying an already-captured payment does not
+    reach this check at all, because it authorizes nothing.
+    """
+    try:
+        resp = httpx.get(
+            f"{SERVICING_URL}/internal/auth-check",
+            # Review round 8: the loan being charged. Servicing probes THAT
+            # loan's balance row, so a 200 means the row this payment will
+            # credit is writable -- not merely that some row somewhere was.
+            params={"loan_id": loan_id} if loan_id is not None else None,
+            headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+            timeout=2.0,
+        )
+    except Exception as e:  # noqa
+        log.error(
+            "servicing auth preflight did not complete (%s) -- refusing to charge, "
+            "because a capture could not be credited while servicing is unreachable",
+            type(e).__name__,
+        )
+        return False
+    if resp.status_code != 200:
+        log.error(
+            "servicing auth preflight returned %s -- refusing to charge. If this is "
+            "401/403, check INTERNAL_SERVICE_TOKEN parity between payment-service "
+            "and servicing-service",
+            resp.status_code,
+        )
+        return False
+    try:
+        body = resp.json()
+    except Exception:  # noqa
+        log.error("servicing auth preflight returned a 200 that was not JSON -- refusing to charge")
+        return False
+    # A 200 from something that is not servicing's auth-check -- a proxy error
+    # page, a misrouted health endpoint -- must not be read as authorization.
+    if body.get("auth") != "ok":
+        log.error(
+            "servicing auth preflight returned 200 without auth=ok (%r) -- refusing to charge",
+            body,
+        )
+        return False
+    return True
 
 
 def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempotency_key: str,
@@ -149,6 +244,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # processor_token is declined here, not silently trusted. Only a
         # confirmed approval reaches _apply_via_servicing; a decline never
         # touches the loan balance at all.
+        _require_servicing_auth(row["loan_id"])
         try:
             auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
         except ChargeDeclinedError as exc:
@@ -218,6 +314,14 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # This retry's own processor_token since the token itself is
                 # never persisted (ADR 0008); idempotency_key is passed along
                 # so the processor also dedupes on its end.
+                # Same guard as the first attempt. Leaving it out here was the
+                # hole: this branch is the one an incident actually exercises,
+                # because it is what a client retry lands on.
+                #
+                # The row stays 'pending' when this raises -- deliberately. It is
+                # a retryable state, so the same idempotency_key can be used
+                # again once the token skew is fixed, and no card was charged.
+                _require_servicing_auth(row["loan_id"])
                 try:
                     auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
                 except ChargeDeclinedError as exc:
@@ -290,8 +394,35 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
-            url, json={"amount": float(amount), "payment_id": payment_id}, timeout=5.0
+            url, json={"amount": float(amount), "payment_id": payment_id}, timeout=5.0,
+            # servicing-service now requires this on every money-moving route.
+            # This call is the LSS half of the split payment flow and is the one
+            # legitimate caller of apply-payment that is not the gateway, so it
+            # has to present the token too or every capture stops reaching the
+            # balance -- and it would fail quietly, since the caller treats a
+            # servicing error as "captured but not yet applied" and leaves the
+            # row for the reconciler.
+            headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
         )
+        # getattr, not attribute access: this branch must only fire when we
+        # POSITIVELY know the answer was an auth rejection. Anything that does
+        # not report a status falls through to raise_for_status() and the
+        # existing pending/reconcile path, which is the conservative direction --
+        # a capture wrongly treated as transient is retried, whereas one wrongly
+        # treated as permanent is abandoned.
+        if getattr(resp, "status_code", None) in (401, 403):
+            # Distinct from a transient failure: the money is captured and this
+            # will never succeed on retry until the tokens agree, so it is logged
+            # as the operator-actionable event it is rather than folded into the
+            # generic pending path where the reconciler would retry it forever.
+            log.error(
+                "servicing REJECTED OUR CREDENTIALS applying a captured payment "
+                "(%s) loan_id=%s payment_id=%s -- the card was charged and the "
+                "balance cannot be credited until INTERNAL_SERVICE_TOKEN matches "
+                "between payment-service and servicing-service",
+                resp.status_code, loan_id, payment_id,
+            )
+            return False
         resp.raise_for_status()
         db.query("UPDATE payments SET applied_at = now() WHERE id = %s", (payment_id,))
         log.info(
