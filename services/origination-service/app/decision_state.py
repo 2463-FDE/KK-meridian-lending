@@ -103,8 +103,12 @@ def recheck_finality_locked(cur, app_id: int) -> tuple[bool, dict | None]:
     if status == KYC_UNVERIFIED_STATUS:
         raise HTTPException(
             status_code=409,
-            detail=("this application has no completed identity verification on "
-                    "record and cannot be decided. Re-submit the application."),
+            # Same wording as the gate's own refusal, and for the same reason:
+            # "re-submit" costs the applicant a second application and a second
+            # hard credit pull, and since the gate now clears this mark the
+            # moment identity evidence exists, retrying is the fix.
+            detail=("identity verification has not completed for this application "
+                    "yet, so it cannot be decided. Please try again shortly."),
         )
 
     funded = status == "funded"

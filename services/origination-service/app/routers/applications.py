@@ -308,6 +308,45 @@ def _mark_application_kyc_unverified(app_id: int, reason: str) -> None:
                   app_id, KYC_UNVERIFIED_STATUS, reason, e)
 
 
+def _clear_kyc_unverified_marker(app_id: int) -> None:
+    """Withdraw the `kyc_unverified` mark once identity evidence exists.
+
+    Review round 8 (high): the mark was set in one place and cleared in none.
+    Intake writes it when kyc-service answers 401/403/503, and
+    `decision_state.recheck_finality_locked` refuses to decide anything carrying
+    it. So the recheck added last round could obtain a passing CIP row, satisfy
+    this gate, and still be refused inside the lock a moment later by a status
+    describing an outage that was over -- an application that is verified and
+    permanently undecidable at the same time, needing manual database surgery.
+
+    My own live check missed it because I simulated the outage by stopping
+    kyc-service, which is a connection error and takes the transient branch that
+    never marks anything. Only the 503 branch sets the mark, and that is the
+    branch I did not exercise.
+
+    The mark means "we have no identity evidence for this application". Once we
+    do, it is false, and a false status is not a safe one to leave lying around:
+    everything that could advance the application reads `status`.
+
+    Guarded to that one value, so this can never move an application out of
+    `funded`, `denied` or a manual review. Idempotent: a no-op when the mark is
+    not there, which is the usual case.
+    """
+    try:
+        db.query(
+            "UPDATE applications SET status = 'submitted' "
+            "WHERE id = %s AND status = %s",
+            (app_id, KYC_UNVERIFIED_STATUS),
+        )
+    except Exception as e:  # noqa
+        # Not fatal: the gate has already established that CIP passed, and the
+        # worst case is the application stays marked and is refused, which is the
+        # behaviour before this function existed. Refusing to decide because the
+        # cleanup failed would trade a stuck application for a 500.
+        log.warning("could not clear %s on app_id=%s (%s)",
+                    KYC_UNVERIFIED_STATUS, app_id, type(e).__name__)
+
+
 def _kyc_rows_for(app_id: int):
     """The CIP verdicts recorded for this application, best first."""
     return db.query(
@@ -426,6 +465,7 @@ def _require_persisted_kyc(app_id: int) -> None:
         (app_id,),
     )
     if rows and rows[0]["cip_passed"] is True:
+        _clear_kyc_unverified_marker(app_id)
         return
 
     if not rows:

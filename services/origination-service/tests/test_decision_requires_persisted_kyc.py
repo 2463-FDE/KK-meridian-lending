@@ -516,3 +516,111 @@ def test_a_recheck_that_also_fails_still_refuses(monkeypatch):
     # pull for a problem that clears itself.
     assert "re-submit" not in detail
     assert "try again" in detail
+
+
+# --- review round 8: recovery must clear the mark it set ---------------------
+
+
+def test_a_passing_recheck_clears_the_kyc_unverified_mark(monkeypatch):
+    """The half of recovery that was missing.
+
+    Intake marks an application `kyc_unverified` when kyc-service answers
+    401/403/503, and decision_state.recheck_finality_locked refuses to decide
+    anything carrying that status. Nothing ever cleared it. So last round's
+    recheck could obtain a passing CIP row, satisfy this gate, and still be
+    refused inside the lock a moment later by a status describing an outage that
+    was already over -- verified and permanently undecidable at once, needing
+    manual database surgery to resolve.
+
+    The mark means "we have no identity evidence for this application". Once we
+    have some, it is false, and every path that could advance the application
+    reads `status`.
+    """
+    updates = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            flat = " ".join(sql.split())
+            if flat.startswith("UPDATE applications"):
+                updates.append((flat, params))
+                return []
+            if "FROM kyc_checks" in flat:
+                return [{"cip_passed": True}]
+            return []
+
+    monkeypatch.setattr(applications_router, "db", _Db())
+
+    applications_router._require_persisted_kyc(8484)          # must not raise
+
+    assert updates, "a passing CIP left the kyc_unverified mark in place"
+    flat, params = updates[0]
+    assert "status = 'submitted'" in flat
+    assert applications_router.KYC_UNVERIFIED_STATUS in params, (
+        "the update is not guarded to kyc_unverified, so it could move an "
+        "application out of funded, denied or a manual review"
+    )
+
+
+def test_the_mark_is_not_cleared_when_cip_did_not_pass(monkeypatch):
+    """Recovery is evidence-driven. No passing evidence, no withdrawal."""
+    updates = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            flat = " ".join(sql.split())
+            if flat.startswith("UPDATE applications"):
+                updates.append(flat)
+                return []
+            if "FROM kyc_checks" in flat:
+                return [{"cip_passed": False}]
+            return []
+
+    monkeypatch.setattr(applications_router, "db", _Db())
+
+    with pytest.raises(HTTPException):
+        applications_router._require_persisted_kyc(8484)
+
+    assert not updates, "a failing CIP withdrew the kyc_unverified mark"
+
+
+def test_a_503_at_intake_still_reaches_a_decision_once_kyc_recovers(monkeypatch):
+    """The regression test for the whole path, end to end through both halves.
+
+    503 at intake -> the application is marked kyc_unverified and no CIP row
+    exists. Then kyc-service recovers: the gate rechecks, gets a passing row,
+    withdraws the mark, and the locked finality check no longer refuses it.
+
+    Written as the sequence rather than as two unit tests because the defect was
+    exactly that the two halves disagreed: each was correct alone.
+    """
+    state = {"status": "kyc_unverified", "kyc": []}
+
+    class _Db:
+        def query(self, sql, params=None):
+            flat = " ".join(sql.split())
+            if flat.startswith("UPDATE applications"):
+                if params[-1] == applications_router.KYC_UNVERIFIED_STATUS:
+                    state["status"] = "submitted"
+                return []
+            if "FROM kyc_checks" in flat:
+                return state["kyc"]
+            if "JOIN applicants" in flat:
+                return [{"applicant_id": 5, "name": "Jane", "dob": "1990-01-01",
+                         "ssn": "123456782", "address": "1 Elm St", "is_entity": False}]
+            return []
+
+    def _kyc_recovered(base_url, path, payload, headers=None):
+        state["kyc"] = [{"cip_passed": True}]         # the row kyc-service persists
+        return {"cip_passed": True}
+
+    monkeypatch.setattr(applications_router, "db", _Db())
+    monkeypatch.setattr(applications_router.clients, "post", _kyc_recovered)
+
+    applications_router._require_persisted_kyc(8484)
+
+    assert state["status"] == "submitted", (
+        "the application is still marked kyc_unverified after a successful "
+        "recheck, so recheck_finality_locked will refuse it inside the lock"
+    )
+    # And the locked check agrees, on the status this left behind.
+    assert state["status"] != applications_router.KYC_UNVERIFIED_STATUS
