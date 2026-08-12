@@ -308,6 +308,57 @@ def _mark_application_kyc_unverified(app_id: int, reason: str) -> None:
                   app_id, KYC_UNVERIFIED_STATUS, reason, e)
 
 
+def _kyc_rows_for(app_id: int):
+    """The CIP verdicts recorded for this application, best first."""
+    return db.query(
+        "SELECT cip_passed FROM kyc_checks WHERE application_id = %s "
+        "ORDER BY cip_passed DESC NULLS LAST, id DESC LIMIT 1",
+        (app_id,),
+    )
+
+
+def _attempt_kyc_recheck(app_id: int) -> None:
+    """Run CIP once for an application that has no result, and swallow failure.
+
+    Only for the MISSING case. A recorded failure is an answer, and re-running it
+    would just ask the same question again with the same data.
+
+    Failure here is deliberately silent: the caller re-reads the table and
+    refuses on its own if this did not produce a row, so an exception would only
+    replace a clear 409 about identity verification with a 500 about something
+    the applicant cannot act on. What must not happen is this succeeding quietly
+    while the row is still missing -- and it cannot, because nothing downstream
+    trusts this function's return; the gate trusts the table.
+    """
+    rows = db.query(
+        "SELECT a.applicant_id, p.name, p.dob, p.ssn, p.address, p.is_entity "
+        "FROM applications a JOIN applicants p ON p.id = a.applicant_id "
+        "WHERE a.id = %s",
+        (app_id,),
+    )
+    if not rows:
+        return
+    r = rows[0]
+    try:
+        clients.post(clients.KYC_URL, "/kyc/check", {
+            "application_id": app_id,
+            "applicant_id": r["applicant_id"],
+            "name": r["name"],
+            # str() because these arrive as date/typed values off the row, and
+            # kyc-service verifies presence, not format.
+            "dob": str(r["dob"]) if r["dob"] else None,
+            "ssn": r["ssn"],
+            "address": r["address"],
+            "entity_type": "llc" if r["is_entity"] else None,
+        }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+        log.info("kyc recheck completed at decision time app_id=%s", app_id)
+    except Exception as e:  # noqa
+        # The type, never the message: a kyc-service error string can carry the
+        # payload that produced it, and that payload is identity data.
+        log.warning("kyc recheck failed at decision time app_id=%s (%s)",
+                    app_id, type(e).__name__)
+
+
 def _require_persisted_kyc(app_id: int) -> None:
     """Refuse to decide an application that has no persisted KYC result.
 
@@ -352,6 +403,20 @@ def _require_persisted_kyc(app_id: int) -> None:
     is the correct direction: we cannot show CIP ran for that application, so we
     do not underwrite on it.
     """
+    if not _kyc_rows_for(app_id):
+        # Review round 7 (high): a KYC outage at intake time left a permanent
+        # dead end. A timeout, a connection error or a non-503 5xx all take the
+        # application -- deliberately, so an applicant is not turned away by our
+        # outage -- but no kyc_checks row is written, and this gate then refuses
+        # the application forever. The applicant sees "submitted", nothing
+        # retries, and the only exits were a resubmission or a manual fix.
+        #
+        # The outage is over by now, most likely: intake and decision are
+        # separate requests, usually minutes apart. So try once here before
+        # refusing. Recovery belongs at the gate because the gate is what knows
+        # the row is missing.
+        _attempt_kyc_recheck(app_id)
+
     rows = db.query(
         "SELECT cip_passed FROM kyc_checks WHERE application_id = %s "
         # A passing row wins over a non-passing one for the same application:
@@ -365,8 +430,13 @@ def _require_persisted_kyc(app_id: int) -> None:
 
     if not rows:
         log.error("refusing to decide app_id=%s -- no persisted kyc_checks row", app_id)
-        detail = ("this application has no completed identity verification on record "
-                  "and cannot be decided. Re-submit the application.")
+        # "Re-submit" was the only advice that worked before the recheck above
+        # existed. It no longer is, and it is the expensive one: a resubmission
+        # is a second application, a second hard credit pull, and a support
+        # ticket to reconcile the two. Retrying is now the cheap fix and usually
+        # the working one, so it is what the message says.
+        detail = ("identity verification has not completed for this application "
+                  "yet, so it cannot be decided. Please try again shortly.")
     else:
         # Deliberately not logged with the factors that failed: which identity
         # element did not verify is exactly the kind of detail the logging rules

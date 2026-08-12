@@ -406,3 +406,113 @@ def test_a_later_passing_check_settles_an_earlier_failure(monkeypatch):
         "the gate does not prefer a passing check, so an earlier failure would "
         "block an application its own re-run has since cleared"
     )
+
+
+# --- review round 7: a KYC outage must not be a permanent dead end ------------
+
+
+def test_a_missing_kyc_result_is_rechecked_before_the_gate_refuses(monkeypatch):
+    """The dead end, closed.
+
+    A timeout, a connection error or a non-503 5xx at intake all take the
+    application -- on purpose, so our outage does not turn an applicant away --
+    but write no kyc_checks row. The gate then refused that application forever:
+    the applicant saw "submitted", nothing retried, and the only ways out were a
+    resubmission or someone fixing it by hand.
+
+    The outage is almost certainly over by the time anyone asks for a decision,
+    since that is a separate request minutes later. So the gate tries once before
+    refusing, and recovery lives at the gate because the gate is what knows the
+    row is missing.
+    """
+    reads = {"n": 0}
+    posted = []
+
+    class _Db:
+        queries = []
+
+        def query(self, sql, params=None):
+            flat = " ".join(sql.split())
+            if "FROM kyc_checks" in flat:
+                reads["n"] += 1
+                # Missing on the first look; present once the recheck has run.
+                return [{"cip_passed": True}] if posted else []
+            if "JOIN applicants" in flat:
+                return [{"applicant_id": 5, "name": "Jane", "dob": "1990-01-01",
+                         "ssn": "123456782", "address": "1 Elm St", "is_entity": False}]
+            return []
+
+    def _fake_post(base_url, path, payload, headers=None):
+        posted.append((path, payload, headers))
+        return {"cip_passed": True}
+
+    monkeypatch.setattr(applications_router, "db", _Db())
+    monkeypatch.setattr(applications_router.clients, "post", _fake_post)
+
+    applications_router._require_persisted_kyc(8484)          # must not raise
+
+    assert posted, "the gate refused without ever retrying the check"
+    path, payload, headers = posted[0]
+    assert path == "/kyc/check"
+    assert payload["application_id"] == 8484, "the recheck was not scoped to this application"
+    assert headers["X-Internal-Token"], "the recheck ran without the internal token"
+    assert reads["n"] >= 2, "the gate did not re-read the table after rechecking"
+
+
+def test_a_recorded_failure_is_not_rechecked(monkeypatch):
+    """A failure is an answer. Asking the same question again with the same data
+    just gets it again -- and would let a genuine CIP failure be retried on every
+    decision attempt, which is a way of pretending it might change."""
+    posted = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            if "FROM kyc_checks" in " ".join(sql.split()):
+                return [{"cip_passed": False}]
+            return []
+
+    monkeypatch.setattr(applications_router, "db", _Db())
+    monkeypatch.setattr(applications_router.clients, "post",
+                        lambda *a, **kw: posted.append(a))
+
+    with pytest.raises(HTTPException) as excinfo:
+        applications_router._require_persisted_kyc(8484)
+
+    assert excinfo.value.status_code == 409
+    assert not posted, "a recorded CIP failure was re-run instead of being honoured"
+
+
+def test_a_recheck_that_also_fails_still_refuses(monkeypatch):
+    """Self-healing must not become fail-open.
+
+    If kyc-service is still down, the gate has to refuse exactly as before. The
+    recheck swallows its own exception so the applicant gets a 409 about identity
+    verification rather than a 500 about our internals -- so the test that it
+    still refuses is the one that matters.
+    """
+    class _Db:
+        def query(self, sql, params=None):
+            flat = " ".join(sql.split())
+            if "JOIN applicants" in flat:
+                return [{"applicant_id": 5, "name": "Jane", "dob": None,
+                         "ssn": "123456782", "address": "1 Elm St", "is_entity": False}]
+            return []                                  # kyc_checks stays empty
+
+    def _still_down(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(applications_router, "db", _Db())
+    monkeypatch.setattr(applications_router.clients, "post", _still_down)
+
+    with pytest.raises(HTTPException) as excinfo:
+        applications_router._require_persisted_kyc(8484)
+
+    assert excinfo.value.status_code == 409
+    detail = str(excinfo.value.detail).lower()
+    assert "identity verification has not completed" in detail
+    # The advice has to match what actually works. Before the recheck existed,
+    # re-submitting was the only way out; now a retry is, and a resubmission is
+    # the expensive wrong answer -- a second application and a second hard credit
+    # pull for a problem that clears itself.
+    assert "re-submit" not in detail
+    assert "try again" in detail
