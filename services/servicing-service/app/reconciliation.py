@@ -42,7 +42,10 @@ exit code, a `reconciliation_runs` row, and Prometheus gauges on the existing
 being fixed for.
 """
 import csv
+import hashlib
+import io
 import json
+import pathlib
 import logging
 import os
 from decimal import Decimal
@@ -187,37 +190,76 @@ def settlement_total() -> float:
     return float(total)
 
 
-def _ledger_by_loan() -> dict[int, Decimal]:
-    """Captured money per loan, as we recorded it.
+def _ledger_by_loan(window=(None, None)) -> dict[int, Decimal]:
+    """Captured money per loan, as we recorded it, WITHIN THE SAME WINDOW.
+
+    The window is the whole point. An earlier version summed every captured
+    payment ever and compared it against one day's settlement file, so every loan
+    with any history looked like a break -- a control that reports a mismatch for
+    almost every loan reports nothing at all, because nobody can read it. That
+    was not a subtle bug: it produced 183 breaks on seeded data and I read the
+    number as a real finding.
+
+    Bounds are inclusive on both ends and interpreted as calendar dates against
+    `payments.created_at`, which is when we recorded the charge. A settlement file
+    is produced from the processor's own view of the same period.
 
     Only `auth_status = 'captured'`. A 'pending' row is an authorization that
     never confirmed and a 'failed' row never took money, so counting either would
     manufacture a break against a settlement file that is correct.
     """
-    rows = db.query(
-        "SELECT loan_id, COALESCE(SUM(amount), 0) AS total FROM payments "
-        "WHERE auth_status = 'captured' AND loan_id IS NOT NULL "
-        "GROUP BY loan_id"
-    )
+    since, until = window
+    sql = ("SELECT loan_id, COALESCE(SUM(amount), 0) AS total FROM payments "
+           "WHERE auth_status = 'captured' AND loan_id IS NOT NULL")
+    params: list = []
+    if since:
+        sql += " AND created_at >= %s::date"
+        params.append(since)
+    if until:
+        sql += " AND created_at < (%s::date + INTERVAL '1 day')"
+        params.append(until)
+    sql += " GROUP BY loan_id"
+    rows = db.query(sql, tuple(params))
     return {int(r["loan_id"]): Decimal(str(r["total"])).quantize(CENT) for r in rows}
 
 
-def _settlement_by_loan() -> dict[int, Decimal]:
-    """Settled money per loan, as the processor reports it.
+def _settlement_by_loan(path=None):
+    """Settled money per loan, plus the window and identity of the file itself.
+
+    Returns (totals, window, identity). The window is the min and max
+    `settlement_date` the file actually contains -- so a daily file yields one
+    day and a back-filled file yields the range it covers, without either being
+    configured. The identity is what makes a run reproducible: which file, how
+    many rows, and a digest, because "reconciliation passed" is worthless if
+    nobody can say what it read.
 
     A refund line subtracts, so this is net settled -- the same sign convention
     `_ledger_by_loan` produces, or the comparison would be meaningless.
     """
+    path = path or SETTLEMENT_FILE
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    raw = pathlib.Path(path).read_bytes()
     totals: dict[int, Decimal] = {}
-    if not os.path.exists(SETTLEMENT_FILE):
-        raise FileNotFoundError(SETTLEMENT_FILE)
-    with open(SETTLEMENT_FILE) as f:
-        for row in csv.DictReader(f):
-            loan_id = int(row["loan_id"])
-            amount = Decimal(row["amount"])
-            signed = amount if row["type"] == "capture" else -amount
-            totals[loan_id] = (totals.get(loan_id, Decimal("0")) + signed).quantize(CENT)
-    return totals
+    dates: list[str] = []
+    rows_read = 0
+    for row in csv.DictReader(io.StringIO(raw.decode("utf-8"))):
+        rows_read += 1
+        loan_id = int(row["loan_id"])
+        amount = Decimal(row["amount"])
+        signed = amount if row["type"] == "capture" else -amount
+        totals[loan_id] = (totals.get(loan_id, Decimal("0")) + signed).quantize(CENT)
+        if row.get("settlement_date"):
+            dates.append(row["settlement_date"])
+
+    window = (min(dates), max(dates)) if dates else (None, None)
+    identity = {
+        "file": os.path.basename(path),
+        "rows": rows_read,
+        "sha256": hashlib.sha256(raw).hexdigest()[:16],
+    }
+    return totals, window, identity
 
 
 def compare() -> dict:
@@ -228,8 +270,8 @@ def compare() -> dict:
     and an outer comparison is the only way to see it. An inner join over our own
     payments would be a control that cannot detect the thing it exists for.
     """
-    ledger = _ledger_by_loan()
-    settlement = _settlement_by_loan()
+    settlement, window, identity = _settlement_by_loan()
+    ledger = _ledger_by_loan(window)
 
     breaks = []
     for loan_id in sorted(set(ledger) | set(settlement)):
@@ -254,6 +296,11 @@ def compare() -> dict:
         "breaks": breaks,
         "threshold": BREAK_THRESHOLD,
         "within_threshold": break_value <= BREAK_THRESHOLD,
+        # Recorded with the run: a result is only interpretable next to the
+        # period it covers and the file it read.
+        "window_start": window[0],
+        "window_end": window[1],
+        "source": identity,
     }
 
 
@@ -268,6 +315,21 @@ def run_and_record() -> dict:
     cannot run must not look like one that ran and found nothing.
     """
     run_id = _start_run()
+    if run_id is None:
+        # FAIL CLOSED. Without a start record there is nowhere to write the
+        # result, so a run that proceeded could compare cleanly and report "ok"
+        # with no durable evidence that it ever happened -- and "when did this
+        # last agree?" would answer with a run that left no trace. A control
+        # whose output is not recorded is not a control; it is a log line.
+        #
+        # This is the same failure D7 describes, reached from the other side: the
+        # first version could not tell "never ran" from "ran and was fine", and a
+        # silent start-record failure would have reintroduced exactly that.
+        log.error("reconciliation refused to run: its start record could not be "
+                  "written, so no result could be durably recorded")
+        return {"outcome": "error", "error_code": "RunRecordUnavailable",
+                "run_id": None}
+
     try:
         result = compare()
     except Exception as e:  # noqa
@@ -277,14 +339,22 @@ def run_and_record() -> dict:
         return {"outcome": "error", "error_code": code, "run_id": run_id}
 
     outcome = "ok" if result["within_threshold"] else "breach"
-    _finish_run(
+    recorded = _finish_run(
         run_id,
         outcome=outcome,
         loans_compared=result["loans_compared"],
         breaks_found=result["breaks_found"],
         break_value=result["break_value"],
         breaks=result["breaks"][:MAX_RECORDED_BREAKS],
+        window=(result["window_start"], result["window_end"]),
+        source=result["source"],
     )
+    if not recorded:
+        # The comparison succeeded and its result is not durable. Same rule as a
+        # missing start record: never report ok without evidence.
+        log.error("reconciliation completed but its result could not be recorded")
+        return {**result, "outcome": "error", "error_code": "RunRecordUnavailable",
+                "run_id": run_id}
 
     # No gauge writes here. This runs in its own process, so anything set in its
     # registry dies with it -- the durable record IS the metric, and the API
@@ -324,20 +394,32 @@ def _start_run() -> int | None:
 
 
 def _finish_run(run_id, *, outcome, loans_compared=0, breaks_found=0,
-                break_value=Decimal("0.00"), breaks=(), error_code=None) -> None:
+                break_value=Decimal("0.00"), breaks=(), error_code=None,
+                window=(None, None), source=None) -> bool:
+    """Record the result. Returns whether it was durably written.
+
+    The caller turns a False into a non-zero exit: a run whose RESULT could not
+    be recorded is in the same position as one whose start could not be, and
+    reporting success for it would be the defect this module exists to remove.
+    """
     if run_id is None:
-        return
+        return False
     try:
         db.query(
             "UPDATE reconciliation_runs SET finished_at = now(), outcome = %s, "
             "loans_compared = %s, breaks_found = %s, break_value = %s, "
-            "breaks = %s::jsonb, error_code = %s WHERE id = %s",
+            "breaks = %s::jsonb, error_code = %s, "
+            "window_start = %s::date, window_end = %s::date, source = %s::jsonb "
+            "WHERE id = %s",
             (outcome, loans_compared, breaks_found, break_value,
-             json.dumps(list(breaks)), error_code, run_id),
+             json.dumps(list(breaks)), error_code,
+             window[0], window[1], json.dumps(source or {}), run_id),
         )
+        return True
     except Exception as e:  # noqa
         log.error("could not record the result of reconciliation run %s (%s)",
                   run_id, type(e).__name__)
+        return False
 
 
 def last_successful_run():

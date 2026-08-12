@@ -100,6 +100,22 @@ is running and finding nothing.
 Tune with `RECONCILIATION_BREAK_THRESHOLD` (default `0`). An unparseable or
 negative value falls back to `0` rather than to permissive.
 
+**Both sides are scoped to the same window.** The period comes from the settlement
+file's own `settlement_date` values -- a daily file yields one day, a back-filled
+file yields the range it covers -- and the ledger side is filtered to the same
+dates on `payments.created_at`. Without that, one day's settlement is compared
+against every payment ever recorded and almost every loan looks like a break; a
+control that flags nearly everything reports nothing, because nobody can read it.
+
+The window and the file's identity (name, row count, sha256 prefix) are recorded
+on the run, so a result can be attributed to a period and a file. "0 breaks" over
+an unknown window from an unknown file is not evidence.
+
+**The job fails closed when it cannot leave evidence.** If the run record cannot
+be written -- at the start or at the end -- it exits non-zero and never reports
+`ok`. A control whose output is not recorded is a log line, and "when did this
+last agree?" must not be answerable by a run that left no trace.
+
 **What it reports.** Every run writes a `reconciliation_runs` row -- counts, signed
 per-loan totals, the threshold it was judged against, and on failure the exception
 TYPE only. `GET /reconciliation/peek` returns the two totals plus

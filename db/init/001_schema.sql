@@ -369,6 +369,11 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
     break_value     NUMERIC(14,2) NOT NULL DEFAULT 0,
     threshold_value NUMERIC(14,2) NOT NULL DEFAULT 0,
     breaks          JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    -- The period covered and the file read (db/migrations/0034). A result is not
+    -- interpretable without them.
+    window_start    DATE,
+    window_end      DATE,
+    source          JSONB       NOT NULL DEFAULT '{}'::jsonb,
     error_code      TEXT
 );
 

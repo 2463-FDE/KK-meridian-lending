@@ -47,6 +47,17 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
     -- systemic break would otherwise put every loan in one row.
     breaks          JSONB       NOT NULL DEFAULT '[]'::jsonb,
 
+    -- The period this run covered, and which file it read. A result is not
+    -- interpretable without them: "0 breaks" over an unknown window, from an
+    -- unknown file, is not evidence of anything. Taken from the settlement
+    -- file's own settlement_date values rather than configured, so a daily file
+    -- and a back-filled one are both described correctly without a flag.
+    window_start    DATE,
+    window_end      DATE,
+    -- {"file": "settlement.csv", "rows": 12, "sha256": "..."} -- identity, not
+    -- contents. A digest makes a re-run of the same file recognisable.
+    source          JSONB       NOT NULL DEFAULT '{}'::jsonb,
+
     -- Exception TYPE only on an error, never the message: a psycopg2 error string
     -- can carry the statement and its parameters.
     error_code      TEXT
