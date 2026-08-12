@@ -131,9 +131,51 @@ orchestrates the LOS flow and calls them over HTTP.
   container-runtime and deployment-platform logging were not available in this
   repository and were not tested, so confirm those before shipping logs to a
   third-party aggregator. See `docs/DEBT.md` D5a.
-- **Secrets are in the repo.** `.env` is committed and the services' `config.py` hardcode
-  fallbacks — including Experian/core-banking keys in `decision-service` and the processor
-  key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)
+- **Provider keys have no rotation procedure.** `.env` is untracked and the hardcoded
+  fallbacks are gone from all seven services, so this bullet no longer describes secrets
+  sitting in the repository — it used to say `.env` is committed, which stopped being true
+  and stayed on the page. The bureau, core-banking and processor keys are still supplied
+  by environment alone with no rotation runbook and no expiry, which is the part that
+  remains open. See `docs/ROADMAP.md` for why the historical values were placeholders
+  rather than live credentials.
+
+## Rotating `INTERNAL_SERVICE_TOKEN`
+
+The shared secret every service checks on internal calls. Read this before rotating,
+because the current design **cannot** rotate without a brief outage window and pretending
+otherwise is how a rotation turns into an incident.
+
+**Why there is a window.** Each service compares the caller's `X-Internal-Token` against
+its own single configured value with `secrets.compare_digest`. There is no
+accept-old-and-new period. So between the first restarted service and the last, a caller
+holding one value talks to a service expecting the other and gets a 401. Money-moving
+routes fail closed during that gap, which is the correct direction and still an outage.
+
+**Procedure.**
+
+1. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"`. At least 32
+   characters and no placeholder words, or startup validation refuses it outside a
+   development `ENVIRONMENT`.
+2. Put it in the deployment's secret store and in your local gitignored `.env`. Never in
+   this repository — a value committed here is not a secret, which is exactly the failure
+   the token defends against.
+3. Restart **all** services together rather than rolling. Rolling makes the window longer,
+   not shorter, because every pair that disagrees fails for the whole roll.
+4. Quiesce first if you can pick the moment: no in-flight card authorization means no
+   payment can be captured against a servicing call that 401s mid-flight.
+5. Verify after: `POST /kyc/check` with the OLD token returns 401, with the new one 200;
+   an intake through `/los/applications` completes; a servicing money route 401s without a
+   token. All three, because each covers a different service's copy of the value.
+
+**If a zero-downtime rotation is ever required**, the change is to accept a list of valid
+tokens rather than one — old and new both valid for the length of the rollout, then the
+old one dropped. That is a code change to every service's `config.py` and its comparison,
+not a runbook step, and it is not implemented today. Stated so nobody plans a
+zero-downtime rotation against a system that cannot do one.
+
+**If the token is believed compromised**, rotate immediately and accept the window: the
+alternative is leaving a value that authorises money movement in an attacker's hands for
+the length of a code change.
 
 ## Tests
 
