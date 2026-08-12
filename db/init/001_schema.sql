@@ -91,6 +91,11 @@ CREATE INDEX IF NOT EXISTS idx_applications_applicant ON applications(applicant_
 CREATE TABLE IF NOT EXISTS kyc_checks (
     id              SERIAL PRIMARY KEY,
     applicant_id    INTEGER REFERENCES applicants(id),
+    -- Which application this CIP result was run for (db/migrations/0032).
+    -- Without it the only answerable question was "has this APPLICANT ever been
+    -- verified?", which passes a repeat applicant whose current application's
+    -- KYC never ran. Nullable: rows predating 0032 genuinely do not know.
+    application_id  INTEGER REFERENCES applications(id),
     name_verified   BOOLEAN,
     dob_verified    BOOLEAN,
     address_verified BOOLEAN,
@@ -355,3 +360,5 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
+
+CREATE INDEX IF NOT EXISTS idx_kyc_checks_application_id ON kyc_checks(application_id);

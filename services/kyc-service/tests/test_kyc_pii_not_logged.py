@@ -62,8 +62,11 @@ def test_kyc_check_still_returns_and_persists_the_verification_result(monkeypatc
     captured = {}
 
     def _fake_query(sql, params=None):
-        captured["sql"] = sql
-        captured["params"] = params
+        # The handler now verifies the application/applicant linkage before
+        # inserting, so only the INSERT is the audit record under test.
+        if "INSERT INTO kyc_checks" in sql:
+            captured["sql"] = sql
+            captured["params"] = params
         return [{"id": 77}]
 
     monkeypatch.setattr(db, "query", _fake_query)
@@ -77,6 +80,8 @@ def test_kyc_check_still_returns_and_persists_the_verification_result(monkeypatc
     assert body["check_id"] == 77
     assert body["application_id"] == 4242
     assert "INSERT INTO kyc_checks" in captured["sql"]
-    # Only the applicant id and four booleans are persisted -- no identity data.
+    # Only identifiers and the four booleans are persisted -- no identity data.
+    # applicant_id, then application_id (db/migrations/0032), then the booleans.
     assert captured["params"][0] == 99
-    assert all(isinstance(p, bool) for p in captured["params"][1:])
+    assert captured["params"][1] == 4242
+    assert all(isinstance(p, bool) for p in captured["params"][2:])

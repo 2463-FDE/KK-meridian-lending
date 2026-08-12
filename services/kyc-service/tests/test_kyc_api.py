@@ -129,7 +129,11 @@ def test_kyc_check_persists_all_four_cip_flags(fake_db):
 
     assert len(fake_db.inserts) == 1
     _, params = fake_db.inserts[0]
-    assert params == (4, True, True, True, True)
+    # (applicant_id, application_id, then the four CIP booleans). application_id
+    # was added by db/migrations/0032 so the decision gate can ask "was THIS
+    # application verified" rather than "has this applicant ever been verified",
+    # which a repeat applicant's old row used to satisfy.
+    assert params == (4, 4, True, True, True, True)
 
 
 def test_kyc_check_reports_a_persistence_failure_instead_of_faking_success(fake_db, monkeypatch):

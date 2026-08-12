@@ -74,6 +74,7 @@ def _full_schema_sql():
         CREATE TABLE kyc_checks (
             id SERIAL PRIMARY KEY,
             applicant_id INTEGER REFERENCES applicants(id),
+                application_id INTEGER REFERENCES applications(id),
             name_verified BOOLEAN, dob_verified BOOLEAN,
             address_verified BOOLEAN, ssn_verified BOOLEAN,
             created_at TIMESTAMPTZ DEFAULT now()
@@ -229,19 +230,20 @@ def _seed_application(conn, app_id, amount=9000, term_months=24, income=40000,
             "INSERT INTO applicants (id, name, ssn) VALUES (%s, %s, %s)",
             (app_id, "Jane Borrower", "123456781"),
         )
-        # PR #18: run_decision refuses an application with no persisted KYC
-        # result. These fixtures exercise the decision-attempt lease, not
-        # identity verification, so they get a recorded result.
-        c.execute(
-            "INSERT INTO kyc_checks (applicant_id, name_verified) VALUES (%s, true)",
-            (app_id,),
-        )
         c.execute(
             "INSERT INTO applications (id, applicant_id, amount, term_months, income, "
             "access_token_hash, access_token_expires_at, status) "
             "VALUES (%s, %s, %s, %s, %s, %s, now() + interval '1 hour', %s)",
             (app_id, app_id, amount, term_months, income,
              decision_state.hash_access_token(access_token), status),
+        )
+        # PR #18: run_decision refuses an application with no persisted KYC
+        # result. These fixtures exercise the decision-attempt lease, not
+        # identity verification, so they get a recorded result.
+        c.execute(
+            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified) "
+            "VALUES (%s, %s, true)",
+            (app_id, app_id),
         )
     conn.commit()
 

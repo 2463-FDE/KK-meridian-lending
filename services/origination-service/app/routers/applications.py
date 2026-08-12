@@ -310,16 +310,27 @@ def _require_persisted_kyc(app_id: int) -> None:
     `POST /applications/{id}/decision`, not only through the intake response, so
     the gate has to live here rather than in the caller.
 
-    What counts as a KYC result is a row in `kyc_checks` for this application's
-    applicant, NOT a passing one. A failed CIP is a real, recorded outcome that
-    the deny path is entitled to act on; the case being blocked is the one where
-    KYC never ran or its result was never persisted, which is indistinguishable
-    from an unverified applicant.
+    What counts as a KYC result is a row in `kyc_checks` for THIS APPLICATION,
+    not a passing one. A failed CIP is a real, recorded outcome the deny path is
+    entitled to act on; the case blocked is the one where KYC never ran or its
+    result was never persisted, which is indistinguishable from an unverified
+    applicant.
+
+    Review finding: this used to key on the applicant, joining through
+    `applications`, because `kyc_checks` had no `application_id`. That made the
+    gate answer "has this APPLICANT ever been verified?" -- so a repeat applicant
+    with an old check passed it even when this application's KYC call failed or
+    never ran, and the logs recorded a block that had not happened. The evidence a
+    regulator would ask for is the CIP result for this application, and the schema
+    could not express it. `db/migrations/0032` adds the column; this now reads it.
+
+    Historical rows may carry a NULL `application_id` where the link was never
+    recorded and could not be inferred. Those do not satisfy this gate, and that
+    is the correct direction: we cannot show CIP ran for that application, so we
+    do not underwrite on it.
     """
     rows = db.query(
-        "SELECT 1 FROM kyc_checks k "
-        "JOIN applications a ON a.applicant_id = k.applicant_id "
-        "WHERE a.id = %s LIMIT 1",
+        "SELECT 1 FROM kyc_checks WHERE application_id = %s LIMIT 1",
         (app_id,),
     )
     if rows:

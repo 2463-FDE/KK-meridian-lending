@@ -123,11 +123,25 @@ def test_a_recorded_but_FAILED_cip_is_still_decidable(monkeypatch):
     )
 
 
-def test_the_gate_keys_on_the_applications_applicant(monkeypatch):
-    """kyc_checks has no application_id, so the join must go through applicants.
+def test_the_gate_keys_on_the_application_not_the_applicant(monkeypatch):
+    """This test asserted the OPPOSITE, and the thing it asserted was the bug.
 
-    Recorded because the obvious query -- `WHERE application_id = %s` -- would
-    silently return nothing for every application and block the entire product.
+    It used to require the gate query to `JOIN applications` on
+    `a.applicant_id = k.applicant_id`, with a docstring explaining that
+    `kyc_checks` has no `application_id` "so the join must go through
+    applicants" -- and warning that the obvious `WHERE application_id = %s`
+    would return nothing and block the entire product.
+
+    That was true of the schema at the time and it was the wrong conclusion. The
+    schema could not express "was THIS application verified", so the gate asked a
+    weaker question instead, and a repeat applicant's old CIP row satisfied it.
+    Noticing a schema limitation and reasoning around it is how the limitation
+    becomes a compliance gap: the evidence a regulator asks for is the result for
+    this application, and it did not exist.
+
+    `db/migrations/0032` adds the column. The gate now asks the real question,
+    and the old expectation is inverted rather than deleted so the reasoning that
+    produced it stays visible.
     """
     db = _Db(kyc_rows=[{"1": 1}])
     monkeypatch.setattr(applications_router, "db", db)
@@ -140,4 +154,76 @@ def test_the_gate_keys_on_the_applications_applicant(monkeypatch):
         _run(db)
 
     gate = next(q for q in db.queries if "FROM kyc_checks" in q)
-    assert "JOIN applications" in gate and "a.applicant_id = k.applicant_id" in gate
+    assert "application_id = %s" in gate
+    assert "a.applicant_id = k.applicant_id" not in gate
+
+
+# --- review round 3: the gate must be about THIS application ------------------
+
+def test_a_repeat_applicants_old_kyc_does_not_cover_a_new_application(monkeypatch):
+    """The bypass: an old CIP row must not vouch for a later application.
+
+    `kyc_checks` had no `application_id`, so the gate asked "has this APPLICANT
+    ever been verified?" -- and a repeat applicant with an old check passed it
+    even when the current application's KYC call failed or never ran. The
+    application reached underwriting on evidence belonging to a different
+    application, while the logs recorded a block that had not happened. That is
+    the compliance gap: the evidence a regulator asks for is the CIP result for
+    THIS application, and the schema could not express it.
+
+    `db/migrations/0032` adds the column and this asserts the gate reads it: a
+    row exists for the applicant's OLD application and none for the new one, so
+    the new one is refused.
+    """
+    queried = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            flat = " ".join(sql.split())
+            queried.append((flat, params))
+            if "FROM kyc_checks" in flat:
+                # The applicant HAS a CIP row -- for application 8000, not 8484.
+                return [] if params == (8484,) else [{"1": 1}]
+            if "FROM applications a LEFT JOIN applicants" in flat:
+                return [{
+                    "id": 8484, "applicant_id": 4242, "amount": 9000, "term_months": 24,
+                    "income": 100000, "status": "submitted", "name": "Jane",
+                    "ssn": "123456782", "access_token_hash": None,
+                    "access_token_expires_at": None, "access_token_used_at": None,
+                }]
+            return []
+
+    db = _Db()
+    monkeypatch.setattr(applications_router, "db", db)
+
+    def _must_not_run(*a, **kw):                                   # pragma: no cover
+        raise AssertionError("decisioning began for an application with no CIP row")
+
+    monkeypatch.setattr(applications_router.decision_state, "start_decision_attempt", _must_not_run)
+    monkeypatch.setattr(applications_router.clients, "post", _must_not_run)
+
+    with pytest.raises(HTTPException) as excinfo:
+        _run(db)
+
+    assert excinfo.value.status_code == 409
+
+    gate = next(sql for sql, _ in queried if "FROM kyc_checks" in sql)
+    assert "application_id" in gate, (
+        "the gate still keys on the applicant, so any prior CIP row satisfies it"
+    )
+    assert "JOIN applications" not in gate, (
+        "joining through applicants is what made an old check vouch for a new "
+        "application"
+    )
+
+
+def test_the_two_copies_of_the_status_constant_agree():
+    """`decision_state` duplicates KYC_UNVERIFIED_STATUS to avoid an import cycle.
+
+    Two spellings of the same state would mean the locked finality check and the
+    intake marker disagree silently, and the gate would pass an application that
+    intake had flagged.
+    """
+    from app import decision_state
+
+    assert decision_state.KYC_UNVERIFIED_STATUS == applications_router.KYC_UNVERIFIED_STATUS

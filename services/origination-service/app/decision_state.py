@@ -70,6 +70,13 @@ def sanitize_failure_detail(failure_code: str) -> str:
     return _FAILURE_DETAIL[failure_code][:MAX_FAILURE_DETAIL_LEN]
 
 
+#: Mirrors routers/applications.KYC_UNVERIFIED_STATUS. Duplicated rather than
+#: imported because routers/applications imports this module, and importing back
+#: would be a cycle. Asserted equal by
+#: tests/test_decision_requires_persisted_kyc.py so the two cannot drift.
+KYC_UNVERIFIED_STATUS = "kyc_unverified"
+
+
 def recheck_finality_locked(cur, app_id: int) -> tuple[bool, dict | None]:
     """Must be called with `cur` already holding this app_id's row lock
     (SELECT ... FOR UPDATE issued by the caller's own transaction, or
@@ -81,7 +88,26 @@ def recheck_finality_locked(cur, app_id: int) -> tuple[bool, dict | None]:
     rows = cur.fetchall()
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
-    funded = rows[0]["status"] == "funded"
+    status = rows[0]["status"]
+
+    # PR #18 review: an application marked kyc_unverified must not be able to
+    # reach a decision, and the check belongs HERE rather than only at the top of
+    # run_decision -- inside the lock, on the same authoritative read as funded
+    # and manual-review finality.
+    #
+    # The unlocked pre-check can go stale: intake can mark the application
+    # kyc_unverified while a decision attempt is already in flight, and without
+    # this the attempt would persist a decision for an application whose identity
+    # evidence had since been withdrawn. Status and evidence would then disagree,
+    # with the decision row being the one anybody downstream reads.
+    if status == KYC_UNVERIFIED_STATUS:
+        raise HTTPException(
+            status_code=409,
+            detail=("this application has no completed identity verification on "
+                    "record and cannot be decided. Re-submit the application."),
+        )
+
+    funded = status == "funded"
     cur.execute(
         "SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
         "FROM manual_reviews WHERE app_id = %s",

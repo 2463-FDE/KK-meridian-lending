@@ -118,9 +118,11 @@ def kyc_check(
     # durably recorded, so check_id on a 200 is always a real row.
     try:
         rows = db.query(
-            "INSERT INTO kyc_checks (applicant_id, name_verified, dob_verified, "
-            "address_verified, ssn_verified) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (body.applicant_id, cip["name_verified"], cip["dob_verified"],
+            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified, "
+            "dob_verified, address_verified, ssn_verified) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (body.applicant_id, body.application_id,
+             cip["name_verified"], cip["dob_verified"],
              cip["address_verified"], cip["ssn_verified"]),
         )
     except Exception as e:  # noqa

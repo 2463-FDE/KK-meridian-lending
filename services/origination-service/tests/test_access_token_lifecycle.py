@@ -65,6 +65,7 @@ def real_db(monkeypatch):
             CREATE TABLE kyc_checks (
                 id SERIAL PRIMARY KEY,
                 applicant_id INTEGER REFERENCES applicants(id),
+                application_id INTEGER REFERENCES applications(id),
                 name_verified BOOLEAN, dob_verified BOOLEAN,
                 address_verified BOOLEAN, ssn_verified BOOLEAN,
                 created_at TIMESTAMPTZ DEFAULT now()
@@ -134,16 +135,20 @@ def _seed(conn, app_id, raw=_RAW, expires="now() + interval '1 hour'", consumed=
         c.execute(f"SET search_path TO {SCHEMA}")
         c.execute("INSERT INTO applicants (id, name, ssn) VALUES (%s, %s, %s)",
                   (app_id, "Jane Borrower", "123456782"))
-        # The decision gate refuses an application with no persisted KYC
-        # result (PR #18), so these token-lifecycle fixtures need one --
-        # they are about the access token, not about identity verification.
-        c.execute("INSERT INTO kyc_checks (applicant_id, name_verified) VALUES (%s, true)",
-                  (app_id,))
         c.execute(
             f"INSERT INTO applications (id, applicant_id, amount, term_months, income, "
             f"access_token_hash, access_token_expires_at, access_token_consumed_at) "
             f"VALUES (%s, %s, 9000, 24, 100000, %s, {expires}, %s)",
             (app_id, app_id, decision_state.hash_access_token(raw) if raw else None, consumed),
+        )
+        # The decision gate refuses an application with no persisted KYC result
+        # for THAT application (PR #18 + db/migrations/0032). These fixtures are
+        # about the access token, not identity verification, so each seeds one --
+        # after the applications row exists, since application_id is a real FK.
+        c.execute(
+            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified) "
+            "VALUES (%s, %s, true)",
+            (app_id, app_id),
         )
     conn.commit()
 
