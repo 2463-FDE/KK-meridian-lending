@@ -1,0 +1,215 @@
+-- 0035 -- ADR 0010 step 2: the append-only ledger and its projection.
+--
+-- Schema only. This migration does NOT move any writer onto the ledger -- that
+-- is step 3 (PR E) -- and does NOT enable the guard that stops direct writes to
+-- `balances` -- that is step 5. After this runs, the system behaves exactly as
+-- it did before, plus a ledger that agrees with it.
+--
+-- That is deliberate and it is the whole point of expand/contract on a money
+-- table: the schema lands and can be reverted with nothing depending on it, and
+-- the parity test proves the back-fill was right BEFORE any behaviour changes.
+--
+-- Invariants this migration is responsible for (ADR 0010's binding list):
+--   1. entries are immutable                       -- ledger_entries_immutable
+--   2. an entry is a signed delta, never a total   -- amount is signed; CHECK <> 0
+--   3. balances is written by the projection alone -- trigger here, guard in step 5
+--   4. the sign is keyed to what the borrower owes -- ledger_sign_matches_type
+--   5. a human-directed entry names the human      -- ledger_actor_required
+--   7. one entry per (payment_id, component)       -- ledger_entries_payment_component
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS ledger_entries (
+    id           BIGSERIAL   PRIMARY KEY,
+    loan_id      INTEGER     NOT NULL REFERENCES loans(id),
+
+    -- What moved. A signed delta, never a total: an entry says "this much
+    -- changed", so two concurrent entries compose instead of racing. This is
+    -- what closes D3, and it is why `amount` may be negative.
+    component    TEXT        NOT NULL CHECK (component IN ('principal','interest','fees')),
+    amount       NUMERIC(14,2) NOT NULL CHECK (amount <> 0),
+
+    -- Why it moved. 'opening_balance' is the back-fill's marker and nothing else
+    -- may use it: it means "this loan's balance as it stood when the ledger
+    -- began, with no record of how it got there". A distinct type rather than a
+    -- boolean, because it cannot be defaulted, cannot be forgotten on insert,
+    -- and every query that means "real money movements" already filters on
+    -- entry_type.
+    entry_type   TEXT        NOT NULL CHECK (entry_type IN
+                   ('opening_balance','disbursement','payment',
+                    'fee_assessed','fee_waived','adjustment')),
+    reason       TEXT,
+
+    -- Who moved it.
+    actor_id     INTEGER,
+    actor_role   TEXT,
+
+    -- Provenance. payment_id makes an apply idempotent by construction.
+    payment_id   INTEGER     REFERENCES payments(id),
+
+    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Invariant 7: exactly one entry per payment/component pair. NOT per payment --
+-- a waterfall (D14) splits one payment across components by definition, so a
+-- single-row rule would forbid the thing the ledger is being built to allow.
+-- Idempotency comes from the pair being unique, not from the payment appearing
+-- once.
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_payment_component
+    ON ledger_entries (payment_id, component) WHERE payment_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
+
+-- Invariant 4: the sign is keyed to the effect on what the borrower owes.
+-- A payment reduces; a fee assessment increases; only an adjustment may go
+-- either way, which is exactly why it is the type that needs an approver.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_sign_matches_type;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
+       (entry_type = 'payment'         AND amount < 0)
+    OR (entry_type = 'fee_waived'      AND amount < 0)
+    OR (entry_type = 'fee_assessed'    AND amount > 0)
+    OR (entry_type = 'disbursement'    AND amount > 0)
+    OR (entry_type = 'opening_balance' AND amount > 0)
+    OR (entry_type = 'adjustment')
+);
+
+-- Invariant 5: a human-directed entry names the human.
+-- 'payment' is exempt: servicing's apply-payment receives an amount and a
+-- payment_id and no actor, because the borrower is not "acting" on the balance
+-- in the sense this column means. Requiring one here would fail every real
+-- payment on insert. Its provenance is stronger than an actor string anyway --
+-- payment_id points at the row carrying the idempotency key and the capture.
+-- 'opening_balance' is exempt because no one authored it.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_actor_required;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_actor_required CHECK (
+    entry_type IN ('disbursement','fee_assessed','payment','opening_balance')
+    OR (actor_id IS NOT NULL AND actor_role IS NOT NULL)
+);
+
+-- Invariant 1: append-only. A trigger rather than a REVOKE, for the reason
+-- ADR 0002/0006 already established for decision_events: every service connects
+-- as the schema-owning role, so a revoke from the owner does not stick.
+CREATE OR REPLACE FUNCTION ledger_entries_are_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'ledger_entries is append-only (attempted % on id %)',
+                    TG_OP, COALESCE(OLD.id, NEW.id);
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_immutable ON ledger_entries;
+CREATE TRIGGER ledger_entries_immutable
+    BEFORE UPDATE OR DELETE ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_entries_are_immutable();
+
+-- Invariant 3: `balances` is a projection. This trigger is what maintains it.
+--
+-- The session flag is how the back-fill below, and step 4's delta pass, write
+-- entries WITHOUT applying them -- because `balances` already holds those
+-- amounts. Transaction-local (the `true`), so it cannot leak to a later
+-- statement on a pooled connection, which is how this kind of guard usually
+-- fails open.
+CREATE OR REPLACE FUNCTION project_ledger_entry() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('meridian.suppress_projection', true) = 'on' THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM set_config('meridian.projecting', 'on', true);
+    IF NEW.component = 'principal' THEN
+        UPDATE balances SET balance  = balance  + NEW.amount, updated_at = now()
+         WHERE loan_id = NEW.loan_id;
+    ELSIF NEW.component = 'fees' THEN
+        UPDATE balances SET past_due = past_due + NEW.amount, updated_at = now()
+         WHERE loan_id = NEW.loan_id;
+    END IF;   -- 'interest' projects nowhere: it is owed within a payment, not a
+              -- separate balance the borrower carries. See ADR 0010.
+    PERFORM set_config('meridian.projecting', 'off', true);
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_project ON ledger_entries;
+CREATE TRIGGER ledger_entries_project
+    AFTER INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION project_ledger_entry();
+
+-- The write-guard function ships now and the TRIGGER IS NOT CREATED. Step 5
+-- enables it, once every writer has been converted (step 3) and verified. Having
+-- the function present makes that step one statement, and makes reverting it one
+-- statement too.
+CREATE OR REPLACE FUNCTION balances_are_trigger_maintained() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('meridian.projecting', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'balances is maintained by the ledger projection; '
+                        'write a ledger entry instead';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION balances_are_trigger_maintained() IS
+    'ADR 0010 step 5. Not attached to a trigger yet -- every writer must be '
+    'converted first, or the guard turns working code into exceptions. Enable '
+    'with: CREATE TRIGGER balances_guard BEFORE UPDATE OR DELETE ON balances '
+    'FOR EACH ROW EXECUTE FUNCTION balances_are_trigger_maintained();';
+
+-- --------------------------------------------------------------------------
+-- Back-fill: one opening_balance entry per loan, equal to that loan's current
+-- balance, WITH THE PROJECTION SUPPRESSED.
+--
+-- Not "zero the balance and reproject". That needs a pause to be safe -- a live
+-- payment landing on a zeroed balance is lost -- and this system does not pause.
+-- `balances` already holds the number; the entry records it.
+--
+-- Idempotent: a loan that already has an opening_balance entry is skipped, so a
+-- re-run cannot double it. That also makes this safe to run again after an
+-- interrupted migration, and it is why `opening_balance` is a distinct type --
+-- it is the marker that says which loans are already initialised.
+-- --------------------------------------------------------------------------
+DO $$
+DECLARE
+    seeded   INTEGER;
+    skipped  INTEGER;
+    zero_bal INTEGER;
+BEGIN
+    PERFORM set_config('meridian.suppress_projection', 'on', true);
+
+    INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+    SELECT b.loan_id, 'principal', b.balance, 'opening_balance',
+           'balance as it stood when the ledger began (db/migrations/0035)'
+      FROM balances b
+     WHERE b.balance <> 0
+       AND NOT EXISTS (SELECT 1 FROM ledger_entries le
+                        WHERE le.loan_id = b.loan_id
+                          AND le.entry_type = 'opening_balance'
+                          AND le.component = 'principal');
+    GET DIAGNOSTICS seeded = ROW_COUNT;
+
+    INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+    SELECT b.loan_id, 'fees', b.past_due, 'opening_balance',
+           'past_due as it stood when the ledger began (db/migrations/0035)'
+      FROM balances b
+     WHERE COALESCE(b.past_due, 0) <> 0
+       AND NOT EXISTS (SELECT 1 FROM ledger_entries le
+                        WHERE le.loan_id = b.loan_id
+                          AND le.entry_type = 'opening_balance'
+                          AND le.component = 'fees');
+
+    SELECT count(*) INTO skipped  FROM balances b
+     WHERE EXISTS (SELECT 1 FROM ledger_entries le
+                    WHERE le.loan_id = b.loan_id AND le.entry_type = 'opening_balance');
+    SELECT count(*) INTO zero_bal FROM balances WHERE balance = 0;
+
+    PERFORM set_config('meridian.suppress_projection', 'off', true);
+
+    -- A migration that silently seeds nothing looks identical to one that seeded
+    -- everything, so both counts are reported.
+    RAISE NOTICE '0035: opened % principal entry(ies); % loan(s) now have an '
+                 'opening balance; % loan(s) at zero were skipped (an entry of '
+                 'amount 0 is not a movement and the CHECK forbids it)',
+                 seeded, skipped, zero_bal;
+END $$;
+
+COMMENT ON TABLE ledger_entries IS
+    'ADR 0010: append-only record of every balance movement. balances is a '
+    'projection of this table, maintained by project_ledger_entry(). '
+    'SUM(amount) per loan and component is the auditable truth.';
+
+COMMIT;

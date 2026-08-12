@@ -45,7 +45,7 @@ MIGRATIONS_DIR = REPO_ROOT / "db" / "migrations"
 # comparison, and 003 depends on rows 002 seeds.
 INIT_SCHEMA_FILES = (
     "001_schema.sql", "004_decision_events.sql",
-    "005_manual_reviews.sql", "006_decision_attempts.sql",
+    "005_manual_reviews.sql", "006_decision_attempts.sql", "007_ledger_opening_balances.sql",
 )
 
 SCHEMAS = {

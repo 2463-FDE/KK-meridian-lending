@@ -71,7 +71,7 @@ def _build_fresh_init(conn):
     and 003 depends on rows 002 seeds that this test has no need for)."""
     for filename in (
         "001_schema.sql", "004_decision_events.sql", "005_manual_reviews.sql",
-        "006_decision_attempts.sql",
+        "006_decision_attempts.sql", "007_ledger_opening_balances.sql",
     ):
         _run_sql_file(conn, FRESH_SCHEMA, INIT_DIR / filename)
 
