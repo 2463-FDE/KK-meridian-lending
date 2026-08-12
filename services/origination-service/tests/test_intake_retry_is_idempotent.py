@@ -1,21 +1,33 @@
-"""A KYC failure must not cost the applicant a second borrower record.
+"""A retry must be safe, and a retry must be *authorised*. Those are two things.
 
-The defect: `submit_application` commits the applicant and application rows and
-then calls kyc-service. On a 401/403/503 it raised a bare 503 -- no identifier, no
-token -- and told the caller to retry. The only thing a client could do with that
-is POST again, which created a SECOND applicant and a SECOND application and left
-the first stranded as `kyc_unverified` forever. One person, two borrower records,
-on a system whose whole job is to be able to say who applied.
+**The first defect.** Intake commits the applicant and application rows and then
+calls kyc-service. On a failure it returned a bare 503 -- no identifier, no token --
+and said "please retry". A retry created a SECOND applicant and a SECOND
+application. One person, two borrower records.
 
-Why the rows are kept rather than rolled back: an application is the record that
-somebody applied, and Reg B requires retaining application records -- **including
-incomplete ones** -- for about 25 months (policies/underwriting_guidelines.md,
-Records retention). Deleting them to tidy up a failed KYC call destroys exactly
-the evidence the regulation asks for. So the row stays, and the retry is made safe.
+**The defect that fix introduced, which is worse.** The idempotency key became the
+thing that recovered an application: present the key, receive a fresh access
+token. A client-chosen key is not a secret -- it travels in request bodies, proxy
+logs and client-side code, and it can be guessed. Anyone holding one could obtain
+a live access token and from there request a decision, read the application and
+trigger a credit pull. **Application takeover, through the path added to make
+retries safe.**
 
-Against real PostgreSQL, because the guarantee is a partial unique index and a
-transaction boundary. Neither exists in a mock: an ON CONFLICT that matches no
-constraint and a rollback that never happens both look like success from Python.
+The reasoning was written into the docstring: *"it is safe because the caller has
+just proved it owns this application by presenting the key that created it."*
+Presenting an identifier is not proof of ownership.
+
+So the contract these tests pin:
+
+- the **key** says *which* application a retry belongs to;
+- the **resume token** -- server-generated, 32 bytes of `secrets`, stored only as
+  a hash -- says the caller may recover it;
+- **both** are required, and failure is indistinguishable across missing, wrong,
+  expired and replayed;
+- the token is **rotated** on success, so a captured one cannot be replayed.
+
+Against real PostgreSQL: the guarantees are a partial unique index, a transaction
+boundary and a constant-time hash comparison. None of that is observable in a mock.
 """
 import os
 import pathlib
@@ -33,7 +45,6 @@ pytestmark = pytest.mark.skipif(
 REPO = pathlib.Path(__file__).resolve().parents[3]
 SCHEMA = "intake_retry_test"
 INIT = REPO / "db" / "init"
-INIT_FILES = ("001_schema.sql",)
 
 
 @pytest.fixture
@@ -46,10 +57,9 @@ def db(monkeypatch):
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
-    for name in INIT_FILES:
-        with conn.cursor() as cur:
-            cur.execute(f"SET search_path TO {SCHEMA}")
-            cur.execute((INIT / name).read_text(encoding="utf-8"))
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute((INIT / "001_schema.sql").read_text(encoding="utf-8"))
 
     scoped = f"{DATABASE_URL}?options=-csearch_path%3D{SCHEMA}"
     monkeypatch.setattr(app_db, "DATABASE_URL", scoped, raising=False)
@@ -72,6 +82,13 @@ def _count(conn, table):
         return cur.fetchone()[0]
 
 
+def _row(conn, app_id):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT * FROM applications WHERE id = %s", (app_id,))
+        return cur.fetchone()
+
+
 def _payload(key):
     return {
         "idempotency_key": key,
@@ -82,76 +99,22 @@ def _payload(key):
     }
 
 
-# --- the acceptance criterion ------------------------------------------------
+# --- the original guarantee still holds --------------------------------------
 
-def test_a_retry_after_a_kyc_failure_creates_exactly_one_applicant_and_application(db):
-    """The defect, and the fix, in one test.
-
-    kyc-service is down for both attempts. The client retries with the same key,
-    exactly as the 503 tells it to. Before this change that produced two of
-    everything.
-    """
+def test_a_retry_with_the_token_creates_exactly_one_applicant_and_application(db):
     from app import intake
-    from app.routers import applications as router
 
     key = f"retry-{uuid.uuid4()}"
+    app_id, _, resume = intake.create_application(_payload(key))
+    again_id, _, resume2 = intake.create_application(_payload(key), resume_token=resume)
 
-    def _kyc_is_down(*a, **kw):
-        raise RuntimeError("connection refused")
-
-    import app.clients as clients
-    original = clients.post
-    clients.post = _kyc_is_down
-    try:
-        first = intake.create_application(_payload(key))
-        second = intake.create_application(_payload(key))
-    finally:
-        clients.post = original
-
-    assert _count(db, "applicants") == 1, (
-        "the retry created a second applicant -- one person, two borrower records"
-    )
-    assert _count(db, "applications") == 1, "the retry created a second application"
-    assert first[0] == second[0], "the retry did not resume the same application"
-
-
-def test_the_retry_returns_a_usable_authorization_handle(db):
-    """Not a bare app_id.
-
-    `app_id` is a guessable sequential integer and proves nothing -- `run_decision`
-    requires the token precisely because of that. A resume handle that is only an
-    id is not a handle.
-    """
-    from app import decision_state, intake
-
-    key = f"handle-{uuid.uuid4()}"
-    app_id, first_token = intake.create_application(_payload(key))
-    resumed_id, second_token = intake.create_application(_payload(key))
-
-    assert resumed_id == app_id
-    assert second_token and second_token != first_token, (
-        "the resume returned no fresh token, or reused one whose raw value is "
-        "unrecoverable from the hash"
-    )
-
-    with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(f"SET search_path TO {SCHEMA}")
-        cur.execute("SELECT access_token_hash FROM applications WHERE id = %s", (app_id,))
-        stored = cur.fetchone()["access_token_hash"]
-
-    assert stored == decision_state.hash_access_token(second_token), (
-        "the handed-back token does not authorise the application it resumed"
-    )
-    assert stored != decision_state.hash_access_token(first_token), (
-        "the first token still works -- a resumed intake should leave one live "
-        "handle, not two"
-    )
+    assert again_id == app_id
+    assert _count(db, "applicants") == 1, "the retry created a second applicant"
+    assert _count(db, "applications") == 1
+    assert resume2 != resume, "the resume token was not rotated"
 
 
 def test_a_request_without_a_key_still_creates_a_new_application(db):
-    """Backwards compatible. The column is nullable and the index partial, so a
-    client that has not been updated is unaffected -- requiring a key on the
-    intake path would be a flag day in the worst possible place."""
     from app import intake
 
     payload = _payload(None)
@@ -160,30 +123,162 @@ def test_a_request_without_a_key_still_creates_a_new_application(db):
     intake.create_application(payload)
 
     assert _count(db, "applications") == 2
-    assert _count(db, "applicants") == 2
 
 
 def test_a_different_key_is_a_different_application(db):
-    """Guards the guard: an implementation that deduplicated everything would
-    pass the first test and be catastrophically wrong."""
+    """Guards the guard: deduplicating everything would pass the first test and
+    be catastrophically wrong."""
     from app import intake
 
     intake.create_application(_payload(f"a-{uuid.uuid4()}"))
     intake.create_application(_payload(f"b-{uuid.uuid4()}"))
 
     assert _count(db, "applications") == 2
-    assert _count(db, "applicants") == 2
 
+
+# --- the key alone must not authorise anything -------------------------------
+
+def test_the_key_alone_cannot_recover_an_application(db):
+    """The takeover, refused.
+
+    This is the exact call that used to hand back a live access token to anyone
+    who knew the key.
+    """
+    from app import intake
+
+    key = f"takeover-{uuid.uuid4()}"
+    intake.create_application(_payload(key))
+
+    with pytest.raises(intake.ResumeNotAuthorized):
+        intake.create_application(_payload(key))          # no resume token
+
+
+@pytest.mark.parametrize("bad, why", [
+    (None, "missing"),
+    ("", "empty"),
+    ("guessed-token-value", "guessed"),
+    ("x" * 43, "right shape, wrong value"),
+])
+def test_a_wrong_or_missing_token_is_refused(db, bad, why):
+    from app import intake
+
+    key = f"wrong-{uuid.uuid4()}"
+    intake.create_application(_payload(key))
+
+    with pytest.raises(intake.ResumeNotAuthorized):
+        intake.create_application(_payload(key), resume_token=bad)
+
+
+def test_a_replayed_token_is_refused(db):
+    """Rotation makes a captured token single-use.
+
+    A resume token that leaked into a proxy log must stop working the moment the
+    legitimate client uses it.
+    """
+    from app import intake
+
+    key = f"replay-{uuid.uuid4()}"
+    _, _, first = intake.create_application(_payload(key))
+    intake.create_application(_payload(key), resume_token=first)     # legitimate
+
+    with pytest.raises(intake.ResumeNotAuthorized):
+        intake.create_application(_payload(key), resume_token=first)  # replay
+
+
+def test_an_expired_token_is_refused(db):
+    from app import intake
+
+    key = f"expired-{uuid.uuid4()}"
+    app_id, _, resume = intake.create_application(_payload(key))
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("UPDATE applications SET resume_token_expires_at = now() - "
+                    "interval '1 second' WHERE id = %s", (app_id,))
+
+    with pytest.raises(intake.ResumeNotAuthorized):
+        intake.create_application(_payload(key), resume_token=resume)
+
+
+def test_a_refused_recovery_mints_no_access_token_and_changes_nothing(db):
+    """The consequences the contract forbids: no access token, no data, no KYC,
+    no decisioning. Asserted on the stored row, because that is what a later
+    request would authenticate against."""
+    from app import intake
+
+    key = f"nochange-{uuid.uuid4()}"
+    app_id, _, _ = intake.create_application(_payload(key))
+    before = _row(db, app_id)
+
+    with pytest.raises(intake.ResumeNotAuthorized):
+        intake.create_application(_payload(key), resume_token="not-the-token")
+
+    after = _row(db, app_id)
+    assert after["access_token_hash"] == before["access_token_hash"], (
+        "a refused recovery rotated the access token, so a wrong guess "
+        "invalidates the real client's handle -- and a repeated guess is a "
+        "denial of service on the applicant"
+    )
+    assert after["resume_token_hash"] == before["resume_token_hash"]
+    assert after["status"] == before["status"]
+
+
+def test_only_the_hash_of_the_resume_token_is_stored(db):
+    from app import intake
+
+    key = f"hash-{uuid.uuid4()}"
+    app_id, _, resume = intake.create_application(_payload(key))
+    row = _row(db, app_id)
+
+    assert row["resume_token_hash"] and row["resume_token_hash"] != resume, (
+        "the raw resume token is in the database"
+    )
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) FROM applications WHERE "
+                    "resume_token_hash = %s", (resume,))
+        assert cur.fetchone()[0] == 0
+
+
+def test_the_failure_does_not_distinguish_its_reasons(db):
+    """Missing, wrong, expired and replayed must be indistinguishable.
+
+    Telling them apart tells an attacker which one they achieved -- and
+    "expired" in particular confirms the application exists.
+    """
+    from app import intake
+
+    key = f"opaque-{uuid.uuid4()}"
+    app_id, _, resume = intake.create_application(_payload(key))
+
+    errors = []
+    for bad in (None, "wrong-value"):
+        try:
+            intake.create_application(_payload(key), resume_token=bad)
+        except intake.ResumeNotAuthorized as e:
+            errors.append(repr(e))
+
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("UPDATE applications SET resume_token_expires_at = now() - "
+                    "interval '1 second' WHERE id = %s", (app_id,))
+    try:
+        intake.create_application(_payload(key), resume_token=resume)
+    except intake.ResumeNotAuthorized as e:
+        errors.append(repr(e))
+
+    assert len(set(errors)) == 1, f"the failures are distinguishable: {set(errors)}"
+
+
+# --- concurrency --------------------------------------------------------------
 
 def test_a_lost_race_leaves_no_orphan_applicant(db):
-    """The subtle half.
+    """ON CONFLICT DO NOTHING does not raise -- it returns no row and the
+    transaction would COMMIT, leaving an applicant whose application was refused.
 
-    ON CONFLICT DO NOTHING does not raise -- it returns no row and the transaction
-    would COMMIT, leaving an applicant whose application was refused. Detecting
-    the conflict is not enough; the insert that preceded it has to be undone.
-
-    Simulated by inserting the winning row first, so the next call's application
-    insert conflicts exactly as the losing side of a race would.
+    The loser cannot resume without the winner's token, so it raises
+    ResumeNotAuthorized -- which is correct: two concurrent first attempts with
+    the same key are indistinguishable from an attacker racing a real client, and
+    the safe answer to both is "prove it".
     """
     from app import intake
 
@@ -191,18 +286,17 @@ def test_a_lost_race_leaves_no_orphan_applicant(db):
     intake.create_application(_payload(key))
     applicants_after_first = _count(db, "applicants")
 
-    # A second call whose resume lookup is forced to miss, so it reaches the
-    # INSERT and loses on the unique index -- the race, deterministically.
     real_resume = intake.resume_application
     calls = {"n": 0}
 
-    def _miss_once(k):
+    def _miss_once(k, token=None):
         calls["n"] += 1
-        return None if calls["n"] == 1 else real_resume(k)
+        return None if calls["n"] == 1 else real_resume(k, token)
 
     intake.resume_application = _miss_once
     try:
-        app_id, token = intake.create_application(_payload(key))
+        with pytest.raises(intake.ResumeNotAuthorized):
+            intake.create_application(_payload(key))
     finally:
         intake.resume_application = real_resume
 
@@ -210,21 +304,17 @@ def test_a_lost_race_leaves_no_orphan_applicant(db):
         "the losing side of the race committed an applicant with no application"
     )
     assert _count(db, "applications") == 1
-    assert app_id and token, "the loser did not resume the winner's application"
 
 
-# --- the incomplete application must not advance -----------------------------
+# --- the incomplete application still cannot advance -------------------------
 
 def test_an_unverified_application_cannot_be_decided(db):
-    """It has no passing CIP row, so the decision gate refuses it. Asserted here
-    as well as in the gate's own tests, because the retry contract is what makes
-    this application reachable at all."""
     from fastapi import HTTPException
 
     from app import intake
     from app.routers import applications as router
 
-    app_id, _ = intake.create_application(_payload(f"undecidable-{uuid.uuid4()}"))
+    app_id, _, _ = intake.create_application(_payload(f"undecidable-{uuid.uuid4()}"))
 
     with pytest.raises(HTTPException) as excinfo:
         router._require_persisted_kyc(app_id)

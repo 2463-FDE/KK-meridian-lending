@@ -313,6 +313,46 @@ def new_access_token() -> tuple[str, str]:
     return raw, hash_access_token(raw)
 
 
+def new_resume_token() -> tuple[str, str]:
+    """Mint a resume token. Returns (raw, hash).
+
+    Separate from the access token because it authorises a different thing: the
+    access token proves the borrower may act on a COMPLETE application; the resume
+    token proves a caller may recover an INCOMPLETE one. Conflating them is how
+    the idempotency key became a credential -- the key identified the application
+    and the system then handed out an access token to whoever named it.
+
+    Same shape as new_access_token: 32 bytes of `secrets`, stored as a sha256
+    hash, raw value returned exactly once.
+    """
+    raw = secrets.token_urlsafe(32)
+    return raw, hash_access_token(raw)
+
+
+def resume_token_matches(stored_hash: str | None, raw_token: str | None,
+                         expires_at=None, consumed_at=None) -> bool:
+    """Constant-time comparison, plus expiry and single-use.
+
+    Returns False for every failure mode rather than distinguishing them, because
+    the caller must answer identically to a wrong token, a missing one, an expired
+    one and a replayed one -- telling them apart tells an attacker which of those
+    they achieved.
+    """
+    import datetime
+
+    if not stored_hash or not raw_token:
+        return False
+    if consumed_at is not None:
+        return False
+    if expires_at is not None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if getattr(expires_at, "tzinfo", None) is None:
+            expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+        if expires_at <= now:
+            return False
+    return secrets.compare_digest(stored_hash, hash_access_token(raw_token))
+
+
 def access_token_matches(stored_hash: str | None, raw_token: str | None) -> bool:
     """Constant-time hash comparison. Never `==` on the raw value."""
     if not stored_hash or not raw_token:

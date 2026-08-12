@@ -178,12 +178,30 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
 
 
 @router.post("", response_model=ApplicationCreated)
-def submit_application(body: ApplicationIn):
+def submit_application(
+    body: ApplicationIn,
+    x_resume_token: str | None = Header(default=None, alias="X-Resume-Token"),
+):
     payload = body.model_dump()
     # creates applicant+application rows; intake logs app_id/applicant_id only
     # (tests/test_intake_pii_not_logged.py). This comment used to claim full-PII
     # logging here — it was stale, see DEBT.md D5c.
-    app_id, access_token = intake.create_application(payload)
+    # The resume token travels as a HEADER, never in the body or a query string:
+    # it is a credential, and the accept-token audit already established that a
+    # credential in a URL leaks into access logs, browser history and Referer.
+    try:
+        app_id, access_token, resume_token = intake.create_application(
+            payload, resume_token=x_resume_token
+        )
+    except intake.ResumeNotAuthorized:
+        # Deliberately indistinguishable from "no such application". Saying
+        # "wrong token" confirms the idempotency key names a real application,
+        # which is the one thing an attacker holding a guessed key wants to learn.
+        # Same status, same body, for missing, wrong, expired and replayed.
+        raise HTTPException(
+            status_code=401,
+            detail="could not authorize this retry",
+        )
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:
@@ -289,7 +307,13 @@ def submit_application(body: ApplicationIn):
                                 "decision with the access_token below once it is."),
                     "app_id": app_id,
                     "access_token": access_token,
-                    "resume": "POST /applications with the same idempotency_key",
+                    # BOTH are required to come back. The key says which
+                    # application; this token authorises the caller to recover it.
+                    # 0036 handed out an access token for the key alone, which
+                    # made a non-secret identifier into a credential.
+                    "resume_token": resume_token,
+                    "resume": ("POST /applications with the same idempotency_key "
+                               "and this value in the X-Resume-Token header"),
                 },
             )
         # Any other HTTP status (5xx from kyc-service, say) is a genuine
@@ -302,7 +326,8 @@ def submit_application(body: ApplicationIn):
         # Timeouts, connection errors, malformed responses -- transient by
         # assumption, same fallback as before.
         log.warning("kyc-service call failed: %s", e)
-    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip), "access_token": access_token}
+    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip),
+            "access_token": access_token, "resume_token": resume_token}
 
 
 def _mark_application_kyc_unverified(app_id: int, reason: str) -> None:

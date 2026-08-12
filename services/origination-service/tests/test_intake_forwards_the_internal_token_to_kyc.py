@@ -57,7 +57,7 @@ def recording_clients(monkeypatch):
     # intake and the applicant_id lookup are not what this test is about.
     monkeypatch.setattr(
         applications_router.intake, "create_application",
-        lambda payload: (8484, "raw-submission-token"),
+        lambda payload, resume_token=None: (8484, "raw-submission-token", "resume-tok"),
     )
     monkeypatch.setattr(
         applications_router.db, "query",

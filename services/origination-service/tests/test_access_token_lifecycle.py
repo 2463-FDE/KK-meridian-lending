@@ -61,7 +61,10 @@ def real_db(monkeypatch):
                 accept_token_hash TEXT,
                 accept_token_expires_at TIMESTAMPTZ,
                 accept_token_consumed_at TIMESTAMPTZ,
-                idempotency_key TEXT
+                idempotency_key TEXT,
+                resume_token_hash TEXT,
+                resume_token_expires_at TIMESTAMPTZ,
+                resume_token_consumed_at TIMESTAMPTZ
             );
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
@@ -266,7 +269,7 @@ def test_plaintext_token_is_never_stored_in_the_database(real_db, monkeypatch):
         c.execute("INSERT INTO applicants (id, name) VALUES (900, 'Seed')")
     real_db.commit()
 
-    app_id, raw = intake.create_application({
+    app_id, raw, _resume = intake.create_application({
         "name": "Jane Borrower", "ssn": "123456782", "dob": "1990-01-01",
         "email": "j@example.com", "phone": "5551234567", "address": "1 Main St",
         "amount": 9000, "term_months": 24, "income": 100000,

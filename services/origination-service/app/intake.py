@@ -20,39 +20,83 @@ class _LostIdempotencyRace(Exception):
     """
 
 
-def resume_application(idempotency_key: str):
-    """The application this key already created, with a fresh access token.
+class ResumeNotAuthorized(Exception):
+    """The key named an application and the caller could not prove it may recover it.
 
-    Returns (app_id, raw_access_token) or None if the key is unused.
+    One exception for every failure -- missing token, wrong token, expired,
+    already consumed. The caller must answer identically to all of them: telling
+    them apart tells an attacker which one they achieved, and "expired" in
+    particular confirms the application exists.
+    """
 
-    A fresh token rather than the original: only the sha256 hash is persisted, so
-    the raw value from the first attempt is genuinely unrecoverable -- it existed
-    in that response body and nowhere else. Re-issuing is the only way to hand the
-    caller a usable handle, and it is safe because the caller has just proved it
-    owns this application by presenting the key that created it.
 
-    Rotating also invalidates the first token, which is the right direction: an
-    intake that failed and was resumed should leave one live handle, not two.
+def resume_application(idempotency_key: str, resume_token: str | None):
+    """Recover an incomplete application. Requires the KEY and the TOKEN.
+
+    Returns (app_id, raw_access_token, raw_resume_token), or None if the key names
+    no application -- which is the ordinary first-attempt case and means "create
+    one".
+
+    Raises ResumeNotAuthorized if the key names an application and the token does
+    not authorise it.
+
+    **Why both.** 0036 let the key alone mint a fresh access token, on the
+    reasoning -- written into the docstring -- that presenting the key proved
+    ownership. It does not. A client-chosen key is not a secret: it travels in
+    request bodies, proxy logs and client-side code, and it can be guessed.
+    Anyone holding one could obtain a live access token and from there request a
+    decision, read the application and trigger a credit pull. That is application
+    takeover, through the path added to make retries safe.
+
+    So the key IDENTIFIES and the token AUTHORISES:
+
+    - the key says which application a retry belongs to;
+    - the resume token, server-generated and 32 bytes of `secrets`, says the
+      caller is the one that started it.
+
+    The resume token is rotated on every successful recovery and the old one
+    consumed, so a token captured from a log cannot be replayed after the
+    legitimate client has used it.
     """
     rows = db.query(
-        "SELECT id FROM applications WHERE idempotency_key = %s", (idempotency_key,)
+        "SELECT id, resume_token_hash, resume_token_expires_at, "
+        "       resume_token_consumed_at "
+        "  FROM applications WHERE idempotency_key = %s",
+        (idempotency_key,),
     )
     if not rows:
         return None
-    app_id = rows[0]["id"]
+
+    row = rows[0]
+    if not decision_state.resume_token_matches(
+        row["resume_token_hash"], resume_token,
+        row["resume_token_expires_at"], row["resume_token_consumed_at"],
+    ):
+        # Identifiers only, and never the token or which check failed.
+        log.warning("refused a resume for app_id=%s -- resume token did not "
+                    "authorise it", row["id"])
+        raise ResumeNotAuthorized()
+
+    app_id = row["id"]
     raw_access_token, access_token_hash = decision_state.new_access_token()
+    raw_resume_token, resume_hash = decision_state.new_resume_token()
     db.query(
         "UPDATE applications SET access_token_hash = %s, "
         "       access_token_expires_at = now() + (%s || ' seconds')::interval, "
-        "       access_token_consumed_at = NULL "
+        "       access_token_consumed_at = NULL, "
+        # Rotated, not reused: the presented token is spent by this recovery.
+        "       resume_token_hash = %s, "
+        "       resume_token_expires_at = now() + (%s || ' seconds')::interval, "
+        "       resume_token_consumed_at = NULL "
         " WHERE id = %s",
-        (access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS, app_id),
+        (access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS,
+         resume_hash, config.ACCESS_TOKEN_TTL_SECONDS, app_id),
     )
     log.info("intake resumed an existing application app_id=%s", app_id)
-    return app_id, raw_access_token
+    return app_id, raw_access_token, raw_resume_token
 
 
-def create_application(payload: dict) -> tuple[int, str]:
+def create_application(payload: dict, resume_token: str | None = None):
     """Insert applicant + application.
 
     Returns (app_id, raw_access_token). The token is minted here, at
@@ -74,11 +118,12 @@ def create_application(payload: dict) -> tuple[int, str]:
     # as much as a duplicate application -- deduplicating only the application
     # would still leave an orphan applicant row per retry.
     if idempotency_key:
-        existing = resume_application(idempotency_key)
+        existing = resume_application(idempotency_key, resume_token)
         if existing:
             return existing
 
     raw_access_token, access_token_hash = decision_state.new_access_token()
+    raw_resume_token, resume_hash = decision_state.new_resume_token()
 
 
     # Both inserts in ONE transaction. Two concurrent retries with the same key
@@ -102,9 +147,11 @@ def create_application(payload: dict) -> tuple[int, str]:
             cur.execute(
                 "INSERT INTO applications (applicant_id, amount, term_months, purpose, income, "
                 "employer, job_title, employment_years, access_token_hash, "
-                "access_token_expires_at, idempotency_key) "
+                "access_token_expires_at, idempotency_key, resume_token_hash, "
+                "resume_token_expires_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                "        now() + (%s || ' seconds')::interval, %s) "
+                "        now() + (%s || ' seconds')::interval, %s, %s, "
+                "        now() + (%s || ' seconds')::interval) "
                 "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL "
                 "DO NOTHING RETURNING id",
                 (
@@ -113,6 +160,7 @@ def create_application(payload: dict) -> tuple[int, str]:
                     payload.get("employer"), payload.get("job_title"),
                     payload.get("employment_years"),
                     access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS, idempotency_key,
+                    resume_hash, config.ACCESS_TOKEN_TTL_SECONDS,
                 ),
             )
             inserted = cur.fetchall()
@@ -128,19 +176,25 @@ def create_application(payload: dict) -> tuple[int, str]:
                 raise _LostIdempotencyRace(idempotency_key)
 
     except _LostIdempotencyRace:
-        # The other request won and its application is committed. Resume it --
-        # our own applicant insert was rolled back with the transaction, so the
-        # retry leaves exactly one person and one application on record.
-        existing = resume_application(idempotency_key)
+        # The other request won and its application is committed. Our own
+        # applicant insert was rolled back with the transaction, so the retry
+        # leaves exactly one person and one application on record.
+        #
+        # The loser cannot resume without the winner's resume token, and it does
+        # not have one -- the winner's response carried it. Surfacing that as
+        # ResumeNotAuthorized is correct: two concurrent first attempts with the
+        # same key are indistinguishable from an attacker racing a real client,
+        # and the safe answer to both is "prove it".
+        existing = resume_application(idempotency_key, resume_token)
         if existing:
             return existing
-        raise
+        raise ResumeNotAuthorized()
 
     app_id = inserted[0]["id"]
     # Gap C: identifiers only. The intake payload carries SSN, DOB, address,
     # phone and email -- none of it belongs in an application log.
     log.info("application intake persisted app_id=%s applicant_id=%s", app_id, applicant_id)
-    return app_id, raw_access_token
+    return app_id, raw_access_token, raw_resume_token
 
 
 def board_to_servicing(app_id: int, applicant_name: str, principal: float,

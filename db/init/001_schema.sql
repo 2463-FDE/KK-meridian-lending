@@ -82,7 +82,13 @@ CREATE TABLE IF NOT EXISTS applications (
     -- to leave the caller with a 503 and no identifier -- and a retry created a
     -- second applicant and a second application. A retry with the same key
     -- resumes this one instead.
-    idempotency_key TEXT
+    idempotency_key TEXT,
+    -- Recovery of an INCOMPLETE application needs the key AND this token
+    -- (db/migrations/0037). The key identifies which application; the token
+    -- authorises the caller. Only the sha256 hash is stored.
+    resume_token_hash        TEXT,
+    resume_token_expires_at  TIMESTAMPTZ,
+    resume_token_consumed_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_applications_accept_token_hash

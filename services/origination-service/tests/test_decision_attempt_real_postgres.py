@@ -70,7 +70,10 @@ def _full_schema_sql():
             accept_token_hash TEXT,
             accept_token_expires_at TIMESTAMPTZ,
             accept_token_consumed_at TIMESTAMPTZ,
-            idempotency_key TEXT
+            idempotency_key TEXT,
+                resume_token_hash TEXT,
+                resume_token_expires_at TIMESTAMPTZ,
+                resume_token_consumed_at TIMESTAMPTZ
         );
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;

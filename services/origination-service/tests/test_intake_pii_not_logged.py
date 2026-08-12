@@ -97,7 +97,7 @@ def fake_db(monkeypatch):
 def test_intake_logs_no_applicant_pii(fake_db, caplog):
     caplog.set_level(logging.DEBUG)
 
-    app_id, raw_token = intake.create_application(dict(_CANARY, amount=9000,
+    app_id, raw_token, _resume = intake.create_application(dict(_CANARY, amount=9000,
                                                        term_months=24, income=100000))
 
     assert app_id == 8484
@@ -141,7 +141,7 @@ def test_intake_persists_only_the_token_hash_not_the_raw_value(fake_db):
     """Gap B cross-check at the same boundary."""
     from app import decision_state
 
-    _, raw = intake.create_application(dict(_CANARY, amount=9000, term_months=24, income=100000))
+    _, raw, _resume = intake.create_application(dict(_CANARY, amount=9000, term_months=24, income=100000))
 
     params = [str(p) for p in fake_db.application_params]
     assert raw not in params, "the raw submission token must never be persisted"

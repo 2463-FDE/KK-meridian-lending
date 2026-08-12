@@ -81,6 +81,10 @@ class KycOut(BaseModel):
 
 
 class ApplicationCreated(BaseModel):
+    # Returned once, like access_token, and only the hash is stored. Required
+    # ALONGSIDE the idempotency key to recover an incomplete application: the key
+    # identifies which one, this authorises the caller. See db/migrations/0037.
+    resume_token: Optional[str] = None
     app_id: int
     status: str
     kyc: KycOut

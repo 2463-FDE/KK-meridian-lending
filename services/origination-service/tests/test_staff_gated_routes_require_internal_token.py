@@ -153,7 +153,8 @@ def test_application_submission_stays_anonymous():
     """Regression guard: POST on the SAME path is the borrower's own
     submission (frontend/app/apply/page.tsx) and must NOT be gated by the
     GET fix -- proven by reaching intake, not by a 403."""
-    with patch.object(intake, "create_application", return_value=(4242, "tok")) as create:
+    with patch.object(intake, "create_application",
+                      return_value=(4242, "tok", "resume-tok")) as create:
         resp = client.post("/applications", json={
             "name": "Jane Borrower", "amount": 9000, "term_months": 24,
             "income": 40000, "purpose": "test",
