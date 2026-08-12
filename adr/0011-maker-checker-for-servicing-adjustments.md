@@ -26,10 +26,11 @@ What must hold for an implementation to be this decision.
    `fee_waived` proposal targets the `fees` component and nothing else, refused
    at insert rather than at approval — an approver should never be asked to sign
    off a request that cannot be executed.
-9. **Approval state is single-sourced.** `pending_movements.resolution` is the
-   fact; `ledger_entries.approved_required` / `approved_at` are set by the
-   resolving function from that row and never by a caller. Two writable copies of
-   "was this approved" is how the two come to disagree about the same movement.
+9. **Approval state is single-sourced, with no second copy.**
+   `pending_movements.resolution` is the fact and the only place it is stored. The
+   ledger entry carries `pending_movement_id` and nothing else about approval, so
+   there is no denormalised copy that can drift — `approved_at` is the proposal's
+   `resolved_at`, one join away, and a join is cheaper than two answers.
 
 ## Why this is a separate ADR
 
@@ -167,13 +168,17 @@ ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK
 );
 ```
 
-**All three approval columns are added here, not in ADR 0010's migration** —
-`pending_movement_id`, `approved_required` and `approved_at`. A column belongs in
-the migration that can enforce its invariant, and none of them can be enforced
-without `pending_movements`: in a ledger-only schema `approved_required` is a
-boolean the inserting statement sets for itself, and `approved_at` is a timestamp
-nothing can check. Next to the proposal they are both derivable from a resolution
-a second person made, which is the difference between a record and a claim.
+**One column is added here, and none in ADR 0010's migration** —
+`pending_movement_id`. A column belongs in the migration that can enforce its
+invariant, and this one cannot be enforced without `pending_movements` to point
+at: the foreign key, the `UNIQUE` constraint and the validation trigger all need
+the table to exist.
+
+`approved_required` and `approved_at` exist in **neither** ADR. They would have
+been a second, writable answer to "was this approved" sitting beside the
+proposal's own resolution, and the only thing they buy is an avoided join.
+`approved_required` is derivable from `entry_type` and `approved_at` is
+`pending_movements.resolved_at`.
 
 Adding it here makes the two tables reference each other, which is a genuine
 cycle: an entry points at the proposal that authorised it, and the proposal
@@ -185,15 +190,19 @@ that replaces the impossible CHECK:
 > the executable version lands in the migration PR where it can be tested.
 
 ```sql
--- All three approval columns arrive here, with the table that gives them meaning.
--- ADR 0010 deliberately ships none of them: in a ledger-only schema
--- `approved_required` is a boolean the inserting statement sets for itself, which
--- enforces nothing, and approval state on the entry alongside a resolution on the
--- proposal is two models for one fact.
+-- ONE column, not three. An earlier version of this ADR added
+-- `approved_required` and `approved_at` alongside it, and then claimed
+-- `pending_movements.resolution` was the single source of truth for approval --
+-- which cannot both be true. They are gone: the proposal is the record, the entry
+-- points at it, and any reader wanting approval metadata joins one row.
+--
+-- Nothing was lost with them. `approved_required` is derivable from entry_type
+-- (an 'adjustment' or 'fee_waived' requires a proposal; nothing else does) and
+-- `approved_at` is `pending_movements.resolved_at`. Keeping denormalised copies
+-- would have bought one avoided join and cost the thing this ADR is for: a
+-- second, writable answer to "was this approved".
 ALTER TABLE ledger_entries
-    ADD COLUMN pending_movement_id BIGINT UNIQUE,
-    ADD COLUMN approved_required   BOOLEAN NOT NULL DEFAULT false,
-    ADD COLUMN approved_at         TIMESTAMPTZ;
+    ADD COLUMN pending_movement_id BIGINT UNIQUE;
 
 ALTER TABLE ledger_entries
     ADD CONSTRAINT ledger_entries_pending_movement_fk

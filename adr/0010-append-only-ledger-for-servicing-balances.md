@@ -43,6 +43,25 @@ approvable content.
 3. **`balances` is a projection, not a record.** It is written by the projection
    trigger and by nothing else, enforced by a guard trigger. `SUM(ledger_entries)`
    is the auditable truth.
+
+   "Nothing else" is a claim about four call sites, so they are named — the
+   invariant is useless if an implementer converts three of them:
+
+   | Writer | Column | Becomes |
+   |---|---|---|
+   | `balance.py::apply_payment` | `balance` | a `payment` entry |
+   | `balance.py::apply_payment_once` | `balance` | a `payment` entry (the idempotent path; same entry, guarded by the unique index) |
+   | `balance.py::adjust_balance` | `balance` | an `adjustment` entry, via ADR 0011 |
+   | `balance.py::waive_fee` | `past_due` | a `fee_waived` entry, via ADR 0011 |
+   | **`delinquency.py::assess_late_fee`** | `past_due` | a `fee_assessed` entry |
+
+   The last one is the one to miss: it lives outside the balance module, so a
+   conversion that works through `balance.py` and stops leaves late fees writing
+   `past_due` directly — and step 5's write-guard then makes every late-fee
+   assessment raise, in a nightly job, after the guard is on. The step-3 gate
+   enumerates writers **from source** (`grep 'UPDATE balances'` across
+   `services/`) rather than from this table, because a table is a list and lists
+   go stale.
 4. **The sign of an entry is keyed to what the borrower owes**, per the component
    table below: `balance` for `principal`, `past_due` for `fees`, and `interest`
    projects nowhere.
@@ -480,7 +499,7 @@ is not recoverable.
 |---|---|---|
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
 | 2 | `ledger_entries` (no approval columns — see ADR 0011), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
-| 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes** |
+| 3 | Writes move to the ledger; `balances` written only by the trigger. **All five writers**, including `delinquency.assess_late_fee` outside the balance module | Step 1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns only the projection trigger's own statement |
 | 4 | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
@@ -609,11 +628,59 @@ difference is where this goes wrong.
   the second destination is derived from the first, so writing both is writing
   the same number twice by two rules that can disagree.
 
-What makes the pause unnecessary is that step 4 is atomic per write, not per
-system. Every payment either wrote the old way or the new way; none wrote half.
-A pod mid-deploy is writing one or the other correctly, and `balances` is right
-under both — the old path writes it directly, the new path writes it through the
-projection.
+### The mixed-deploy race, and the gate that closes it
+
+"Step 4 is atomic per write" is true and it is not sufficient, which an earlier
+version of this section missed. During the deploy both versions run, and they do
+not compose:
+
+- the **old** path reads `balances`, subtracts in the application, and writes an
+  **absolute** value back — `UPDATE balances SET balance = %s`
+  (`balance.py::apply_payment_once`);
+- the **new** path writes a ledger entry, and the projection trigger applies a
+  **relative** change — `SET balance = balance + NEW.amount`.
+
+Interleave them and the old pod's write, computed from a read taken before the
+new pod's entry landed, overwrites it. The ledger keeps both entries, `balances`
+loses one payment, and the delta pass cannot repair it: the ledger is right, so
+nothing looks missing. **Silently wrong customer balances**, which is the exact
+failure this whole ADR exists to remove.
+
+**The gate: step 3a — make the old path's write relative before any ledger entry
+is ever written.**
+
+```sql
+-- Illustrative and non-runnable.
+-- The old path, converted from "compute and set" to "let the database subtract".
+UPDATE balances
+   SET balance = balance - %s, updated_at = now()
+ WHERE loan_id = %s;
+```
+
+That single change makes the two paths **commutative**: both are now deltas
+applied by Postgres under its own row lock, so any interleaving of old and new
+pods produces the same balance. It ships and fully deploys *before* step 4 —
+which is why it is a numbered gate and not a note.
+
+| Gate | Before | Check |
+|---|---|---|
+| **3a** | step 4 (any ledger write) | every `balances` write in `servicing-service` is relative (`balance = balance ± …`) or is a frozen route. Enumerated from source, not listed here — see the writer inventory below |
+| **3b** | step 4 | 3a is deployed to **every** pod. A single old pod still doing read-modify-write reintroduces the race by itself |
+
+Three alternatives were considered and rejected. A **version fence** (new pods
+refuse to write until all old ones are gone) needs coordination this system has
+nowhere to keep. A **per-loan advisory lock** across both code paths means the
+old path taking a lock it has no other reason to take, shipped in the same
+release that is being replaced. **Pausing payment applies** works and costs the
+most: refused payments, retries, and late fees assessed on payments we declined.
+The atomic decrement costs one statement.
+
+**It also partly fixes D3 on its own**, and that is worth naming rather than
+discovering: the lost update *is* the read-modify-write, so making it relative
+removes the interleaving D3 describes. It does not make the ledger unnecessary —
+D3's fix has to survive `adjust_balance`, which genuinely sets an absolute value,
+and the audit trail is the other half of why the ledger exists. But step 3a is
+the cheapest real improvement in this plan, and it can land first.
 
 ### The delta pass, and why the back-fill alone is not enough
 
