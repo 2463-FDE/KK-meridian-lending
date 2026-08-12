@@ -339,3 +339,103 @@ def test_direct_writes_to_balances_still_work_at_this_step(db):
     loan = _a_loan(db)
     _exec(db, "UPDATE balances SET balance = balance WHERE loan_id = %s", (loan,))
     db.commit()
+
+
+# --- the projection must actually project -----------------------------------
+
+
+def _orphan_loan(conn):
+    """A loan with no `balances` row -- the shape that exposed the defect."""
+    rows = _exec(conn, "INSERT INTO loans (app_id, principal, apr, term_months, status) "
+                       "VALUES (NULL, 1000, 10, 12, 'active') RETURNING id")
+    return rows[0]["id"]
+
+
+def test_an_entry_for_a_loan_with_no_balance_row_is_rejected(db):
+    """The defect: the UPDATE matched zero rows and the INSERT still succeeded.
+
+    The ledger recorded that money moved and no balance moved with it -- the
+    projection claiming to be maintained while it is not. `balances` is derived,
+    so the divergence is invisible until a parity run, and the entry is immutable
+    so it cannot be corrected afterwards.
+    """
+    loan = _orphan_loan(db)
+    db.commit()
+
+    with pytest.raises(psycopg2.errors.RaiseException) as excinfo:
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
+                  "VALUES (%s, 'principal', -50.00, 'payment')", (loan,))
+    assert "expected exactly 1" in str(excinfo.value)
+    db.rollback()
+
+
+def test_a_rejected_entry_leaves_no_orphan(db):
+    """Raising must roll the INSERT back with it. An entry that could not be
+    projected is a permanent, uncorrectable record of a movement that never
+    reached the borrower's balance."""
+    loan = _orphan_loan(db)
+    db.commit()
+
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
+                  "VALUES (%s, 'principal', -50.00, 'payment')", (loan,))
+    db.rollback()
+
+    remaining = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = %s",
+                      (loan,))[0]["n"]
+    assert remaining == 0, "a ledger entry survived a failed projection"
+
+
+def test_a_fees_entry_for_a_loan_with_no_balance_row_is_also_rejected(db):
+    """Both projected components, not just principal -- the fees branch has its
+    own UPDATE and would have had its own silent no-op."""
+    loan = _orphan_loan(db)
+    db.commit()
+
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
+                  "VALUES (%s, 'fees', 25.00, 'fee_assessed')", (loan,))
+    db.rollback()
+
+
+def test_a_normal_entry_updates_exactly_one_balance(db):
+    """Guards the guard: a check that rejected everything would satisfy the three
+    tests above and break the system."""
+    loan = _a_loan(db)
+    before = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
+
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
+              "VALUES (%s, 'principal', -5.00, 'payment')", (loan,))
+    db.commit()
+
+    after = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
+    assert after == before - 5
+
+    touched = _exec(db, "SELECT count(*) AS n FROM balances WHERE loan_id = %s", (loan,))[0]["n"]
+    assert touched == 1, "more than one balance row exists for this loan"
+
+
+def test_an_interest_entry_is_still_accepted(db):
+    """`interest` projects nowhere by design, so the row-count check must not
+    reject it -- the ELSE branch exists precisely so a correct no-op is not
+    mistaken for a failed projection."""
+    loan = _a_loan(db)
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
+              "VALUES (%s, 'interest', 7.50, 'fee_assessed')", (loan,))
+    db.commit()
+
+
+def test_fresh_init_and_the_migration_enforce_it_identically(db):
+    """Both schema paths carry the same function body.
+
+    A guard present in one and absent in the other is worse than absent from
+    both: whether money silently fails to move would depend on how the database
+    was built.
+    """
+    init = (REPO / "db" / "init" / "001_schema.sql").read_text(encoding="utf-8")
+    mig = MIGRATION.read_text(encoding="utf-8")
+    for src, name in ((init, "db/init/001_schema.sql"), (mig, MIGRATION.name)):
+        assert "GET DIAGNOSTICS projected = ROW_COUNT" in src, (
+            f"{name} does not check how many balance rows the projection updated"
+        )
+        assert "expected exactly 1" in src, f"{name} has no row-count assertion"

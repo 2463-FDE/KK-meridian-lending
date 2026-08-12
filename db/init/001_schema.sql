@@ -455,20 +455,48 @@ CREATE TRIGGER ledger_entries_immutable
 -- statement on a pooled connection, which is how this kind of guard usually
 -- fails open.
 CREATE OR REPLACE FUNCTION project_ledger_entry() RETURNS trigger AS $$
+DECLARE
+    projected INTEGER;
 BEGIN
     IF current_setting('meridian.suppress_projection', true) = 'on' THEN
         RETURN NEW;
     END IF;
 
     PERFORM set_config('meridian.projecting', 'on', true);
+
     IF NEW.component = 'principal' THEN
         UPDATE balances SET balance  = balance  + NEW.amount, updated_at = now()
          WHERE loan_id = NEW.loan_id;
+        GET DIAGNOSTICS projected = ROW_COUNT;
     ELSIF NEW.component = 'fees' THEN
         UPDATE balances SET past_due = past_due + NEW.amount, updated_at = now()
          WHERE loan_id = NEW.loan_id;
-    END IF;   -- 'interest' projects nowhere: it is owed within a payment, not a
-              -- separate balance the borrower carries. See ADR 0010.
+        GET DIAGNOSTICS projected = ROW_COUNT;
+    ELSE
+        -- 'interest' projects nowhere: it is owed within a payment, not a
+        -- separate balance the borrower carries. See ADR 0010. Nothing was
+        -- updated and nothing should have been, so the check below is skipped.
+        projected := 1;
+    END IF;
+
+    -- Exactly one row, or the entry does not exist.
+    --
+    -- Without this the UPDATE silently matches zero rows when a loan has no
+    -- `balances` row, and the insert still succeeds: the ledger records that
+    -- money moved and no balance moves with it. That is the projection claiming
+    -- to be maintained while it is not, which is the one failure this design
+    -- cannot tolerate -- `balances` is derived, so a divergence is invisible
+    -- until a parity run, and the entry is immutable so it cannot be corrected
+    -- afterwards.
+    --
+    -- Raising rolls back the INSERT with it. An entry that could not be
+    -- projected must not be retained: it would be a permanent, uncorrectable
+    -- record of a movement that never reached the borrower's balance.
+    IF projected <> 1 THEN
+        RAISE EXCEPTION 'ledger entry for loan % projected onto % balance rows '
+                        '(expected exactly 1)', NEW.loan_id, projected;
+    END IF;
+
     PERFORM set_config('meridian.projecting', 'off', true);
     RETURN NEW;
 END $$ LANGUAGE plpgsql;
