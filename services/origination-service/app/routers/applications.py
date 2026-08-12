@@ -316,16 +316,46 @@ def submit_application(
                                "and this value in the X-Resume-Token header"),
                 },
             )
-        # Any other HTTP status (5xx from kyc-service, say) is a genuine
-        # service-side hiccup and keeps the original resilience: intake succeeds
-        # with CIP all-false, because a KYC outage must not block an applicant
-        # from submitting. run_decision still refuses to advance it until a KYC
-        # result exists, so "submitted" never silently becomes "decided".
+        # Any other status -- a 5xx, or the 422 an OLD kyc-service returns for
+        # the identity-free payload this version sends. Both leave no CIP row,
+        # and the check after this block turns that into a resumable failure
+        # rather than a "submitted" the applicant cannot advance.
         log.warning("kyc-service returned %s for app_id=%s: %s", status, app_id, e)
     except Exception as e:  # noqa
         # Timeouts, connection errors, malformed responses -- transient by
         # assumption, same fallback as before.
         log.warning("kyc-service call failed: %s", e)
+    # The authoritative check: did a CIP row actually land for THIS application?
+    #
+    # Enumerating statuses is how the rolling-deploy hole got in. An old
+    # kyc-service answers the identity-free payload with 422, which is neither
+    # 401/403/503 nor a connection error, so it fell through to "submitted" with
+    # every CIP flag false -- an application nobody could advance, reported as
+    # accepted. The same is true of a 5xx, and of a 200 whose INSERT silently did
+    # nothing.
+    #
+    # So this asks the database instead of the exception type. Any outcome that
+    # leaves no row is the same outcome to the applicant, and it is resumable.
+    if not _kyc_rows_for(app_id):
+        _mark_application_kyc_unverified(app_id, reason="no CIP row persisted")
+        log.error("no kyc_checks row after intake app_id=%s -- refusing to report "
+                  "this application as submitted", app_id)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "identity_verification_unavailable",
+                "message": ("This application was recorded but not verified, and "
+                            "cannot proceed until identity verification completes. "
+                            "Retry with the same idempotency_key and the resume "
+                            "token below."),
+                "app_id": app_id,
+                "access_token": access_token,
+                "resume_token": resume_token,
+                "resume": ("POST /applications with the same idempotency_key "
+                           "and this value in the X-Resume-Token header"),
+            },
+        )
+
     return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip),
             "access_token": access_token, "resume_token": resume_token}
 

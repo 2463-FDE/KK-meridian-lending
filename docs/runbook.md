@@ -139,6 +139,36 @@ orchestrates the LOS flow and calls them over HTTP.
   remains open. See `docs/ROADMAP.md` for why the historical values were placeholders
   rather than live credentials.
 
+## Deployment order: kyc-service first
+
+**kyc-service, then origination-service, then the frontend.** Not alphabetical, not
+all at once.
+
+Origination sends kyc-service only `application_id` and `applicant_id` -- the CIP
+verdict is computed from the applicant row kyc-service reads for itself, so the
+identity fields are redundant and sending them would put a second copy of the
+applicant's SSN on the wire (review round 9).
+
+An **old** kyc-service still requires `name`, `dob`, `ssn` and `address` as
+strings and answers **422** to the identity-free payload. So deploying origination
+first breaks every intake until kyc-service catches up.
+
+It breaks *safely*: intake verifies a `kyc_checks` row landed for the application
+and, when none did, returns the resumable 503 with the app id, access token and
+resume token. The borrower retries with the same idempotency key and recovers the
+same application -- no duplicate applicant, no application stuck at "submitted"
+that nobody can advance. But every intake fails for the length of the window,
+which is why the order matters rather than merely being tidy.
+
+**Do not "fix" this by sending the identity fields again.** That undoes a
+deliberate change and puts an SSN back on a wire that does not need it. The order
+is the fix.
+
+New kyc-service accepts **both** payload shapes -- its identity fields are
+optional and ignored -- so old origination talking to new kyc-service works
+throughout. Only the reverse combination is degraded, and only until the second
+deploy lands.
+
 ## Rotating `INTERNAL_SERVICE_TOKEN`
 
 The shared secret every service checks on internal calls. Read this before rotating,

@@ -74,8 +74,18 @@ export class ApiError extends Error {
   // that still returns a plain string detail behaves exactly as before;
   // `code` is simply undefined for those.
   code?: string;
-  constructor(status: number, detail: string, code?: string) {
+  /**
+   * The raw `detail` when it is an object.
+   *
+   * `detail` above is flattened to the human message, which is right for
+   * display and lossy for everything else -- the resumable-intake failure
+   * carries `app_id`, `access_token` and `resume_token` in that object, and the
+   * client needs the token to retry rather than start a second application.
+   */
+  data?: Record<string, unknown>;
+  constructor(status: number, detail: string, code?: string, data?: Record<string, unknown>) {
     super(detail || `Request failed (${status})`);
+    this.data = data;
     this.status = status;
     this.detail = detail;
     this.code = code;
@@ -100,8 +110,10 @@ async function parse(res: Response) {
   if (!res.ok) {
     let detail: string;
     let code: string | undefined;
+    let structured: Record<string, unknown> | undefined;
     if (data && typeof data === "object" && "detail" in data) {
       const d = (data as { detail: unknown }).detail;
+      if (d && typeof d === "object") structured = d as Record<string, unknown>;
       if (d && typeof d === "object" && "message" in d) {
         // Structured {"code", "message"} detail -- see ApiError.code above.
         detail = String((d as { message: unknown }).message);
@@ -114,7 +126,7 @@ async function parse(res: Response) {
     } else {
       detail = `Request failed (${res.status})`;
     }
-    throw new ApiError(res.status, detail, code);
+    throw new ApiError(res.status, detail, code, structured);
   }
   return data;
 }
@@ -125,6 +137,63 @@ export async function apiGet(path: string, extraHeaders?: Record<string, string>
     headers: { ...authHeaders(), ...extraHeaders },
   });
   return parse(res);
+}
+
+
+// ---- intake retry credentials (browser-only sessionStorage) ---------------
+//
+// A borrower whose KYC call fails is told to retry. Without a stable key that
+// retry creates a SECOND applicant and a SECOND application -- one person, two
+// borrower records. The key says WHICH draft is being retried; the resume token,
+// issued by the server, authorises recovering it. Both are needed
+// (db/migrations/0036, 0037).
+//
+// sessionStorage, not localStorage and not a URL:
+//   - a URL leaks into access logs, browser history and Referer, which is the
+//     finding the accept-token audit already produced on this codebase;
+//   - sessionStorage is scoped to the tab and cleared when it closes, which
+//     matches the lifetime of a draft application.
+//
+// Neither value is PII and neither is ever logged.
+const INTAKE_KEY = "meridian.intake.idempotency_key";
+const INTAKE_RESUME = "meridian.intake.resume_token";
+
+/** The key for the CURRENT draft, minted once and reused for every retry. */
+export function intakeIdempotencyKey(): string {
+  if (typeof window === "undefined") return "";
+  let key = window.sessionStorage.getItem(INTAKE_KEY);
+  if (!key) {
+    // crypto.randomUUID is the browser CSPRNG. A predictable key would let a
+    // guess collide with somebody else's draft.
+    key = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : String(Date.now()) + Math.random().toString(36).slice(2);
+    window.sessionStorage.setItem(INTAKE_KEY, key);
+  }
+  return key;
+}
+
+export function intakeResumeToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.sessionStorage.getItem(INTAKE_RESUME);
+}
+
+export function rememberIntakeResumeToken(token: string | null | undefined) {
+  if (typeof window === "undefined" || !token) return;
+  window.sessionStorage.setItem(INTAKE_RESUME, token);
+}
+
+/**
+ * Clear both after the application completes.
+ *
+ * Leaving them would make the NEXT application in the same tab resume the
+ * previous one -- the borrower would fill in a new form and be handed back their
+ * old application.
+ */
+export function clearIntakeRetryCredentials() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(INTAKE_KEY);
+  window.sessionStorage.removeItem(INTAKE_RESUME);
 }
 
 export async function apiPost(path: string, body?: unknown, extraHeaders?: Record<string, string>) {

@@ -61,10 +61,19 @@ class _RecordingDb:
     def __init__(self):
         self.statements = []
 
+    #: Whether kyc-service is deemed to have persisted a CIP row for this
+    #: application. Intake now VERIFIES that rather than inferring it from the
+    #: exception type -- an old kyc-service answers the identity-free payload
+    #: with 422, which is neither a credential failure nor a connection error,
+    #: and used to fall through to "submitted" with no row behind it.
+    kyc_row_persisted = True
+
     def query(self, sql, params=None):
         self.statements.append((" ".join(sql.split()), params))
         if "SELECT applicant_id FROM applications" in sql:
             return [{"applicant_id": 4242}]
+        if "FROM kyc_checks" in sql:
+            return [{"cip_passed": True}] if self.kyc_row_persisted else []
         return []
 
     def status_updates(self):

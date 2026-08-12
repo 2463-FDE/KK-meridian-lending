@@ -4,7 +4,15 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
-import { apiGet, apiPost, ApiError } from "../../lib/api";
+import {
+  apiGet,
+  apiPost,
+  ApiError,
+  clearIntakeRetryCredentials,
+  intakeIdempotencyKey,
+  intakeResumeToken,
+  rememberIntakeResumeToken,
+} from "../../lib/api";
 import { usd, pct, paymentPlanText } from "../../lib/format";
 
 const STEPS: Step[] = [
@@ -78,6 +86,9 @@ interface Kyc {
 }
 
 interface AppResult {
+  /** Server-issued, required with the idempotency key to recover this
+   * application if intake failed. Never logged, never in a URL. */
+  resume_token?: string;
   app_id: string | number;
   status?: string;
   kyc?: Kyc;
@@ -133,7 +144,16 @@ interface Disclosure {
 
 function errMsg(err: unknown, fallback: string): string {
   if (err && typeof err === "object" && "detail" in err) {
-    return String((err as { detail: unknown }).detail) || fallback;
+    const detail = (err as { detail: unknown }).detail;
+    // A structured detail carries the borrower-facing text in `message`. The
+    // resumable-intake failure returns an object (app_id, tokens, message), and
+    // String()-ing it rendered "[object Object]" into the alert -- the borrower
+    // saw nothing usable at the exact moment they need to know they can retry.
+    if (detail && typeof detail === "object") {
+      const message = (detail as { message?: unknown }).message;
+      return typeof message === "string" && message ? message : fallback;
+    }
+    return String(detail) || fallback;
   }
   if (err instanceof Error) return err.message;
   return fallback;
@@ -354,6 +374,12 @@ export default function ApplyPage() {
     setReturnFocusStep(editOriginStep);
   }
 
+  /** The resume token as a header -- never a query string, never a body field. */
+  function resumeHeader(): Record<string, string> {
+    const token = intakeResumeToken();
+    return token ? { "X-Resume-Token": token } : {};
+  }
+
   async function submitApplication() {
     // Snapshot FIRST, synchronously, and build the request body from the
     // snapshot rather than from `form`. Reading `form` field by field across
@@ -365,6 +391,9 @@ export default function ApplyPage() {
     setApiError(null);
     try {
       const res = (await apiPost("/los/applications", {
+        // Stable across retries of THIS draft. Without it a retry after a KYC
+        // failure creates a second applicant and a second application.
+        idempotency_key: intakeIdempotencyKey(),
         name: sent.name,
         dob: sent.dob,
         ssn: sent.ssn,
@@ -379,7 +408,10 @@ export default function ApplyPage() {
         amount: sent.amount,
         term_months: parseInt(sent.term_months, 10),
         purpose: sent.purpose,
-      })) as AppResult;
+      }, resumeHeader())) as AppResult;
+      // Keep the server's resume token: it is what authorises recovering this
+      // application if the next attempt fails. The key alone cannot.
+      rememberIntakeResumeToken(res.resume_token);
       setApp(res);
       setStep(5);
     } catch (err) {
@@ -392,6 +424,13 @@ export default function ApplyPage() {
       // retry path work; the success path never reaches this branch, so the
       // in-flight race the snapshot closes stays closed.
       setSubmitted(null);
+      // A resumable failure (identity verification unavailable) carries the
+      // handle needed to retry THIS application rather than start a new one.
+      // Preserving it here is what makes the retry idempotent -- the key names
+      // the draft, this authorises recovering it.
+      const structured = (err as ApiError | undefined)?.data;
+      const token = structured?.resume_token;
+      if (typeof token === "string" && token) rememberIntakeResumeToken(token);
       setApiError(errMsg(err, "Could not submit your application."));
     } finally {
       setBusy(false);
@@ -531,6 +570,11 @@ export default function ApplyPage() {
         { "X-Offer-Accept-Token": decision?.accept_token || "" },
       )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
+      // The draft is now a loan. Clearing the retry credentials stops the NEXT
+      // application in this tab resuming this one -- a borrower would otherwise
+      // fill in a new form and be handed back the application they just
+      // finished.
+      clearIntakeRetryCredentials();
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));
     } finally {
