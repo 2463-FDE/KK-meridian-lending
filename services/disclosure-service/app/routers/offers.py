@@ -29,6 +29,27 @@ log = get_logger("offers")
 #: binary floating point, and this is the check that decides whether a
 #: signed disclosure is internally consistent.
 HALF_CENT = Decimal("0.005")
+
+
+def _dec(value):
+    """A stored money value as an exact Decimal, whatever the driver handed us.
+
+    The ORM read path is the awkward one. `models.py` maps money with
+    `asdecimal=False` -- a deliberate choice, so a storage-layer fix did not
+    ripple Decimal typing through every caller -- which means SQLAlchemy returns
+    these columns as float no matter what the column type is. psycopg2 returns
+    Decimal for the same columns.
+
+    Decimal(str(x)) recovers the shortest decimal representation, which for a
+    value stored as NUMERIC(14,2) is the exact cent amount. So this is lossless
+    for money that came from the database, and it is where the exactness starts
+    on this path -- not before it. The float lives for one attribute access
+    (D1's remaining boundary, and the reason `asdecimal=False` is worth
+    revisiting separately).
+    """
+    if value is None:
+        return None
+    return value if isinstance(value, Decimal) else Decimal(str(value))
 router = APIRouter(tags=["offers"])
 
 # The five amounts that make a row a TILA disclosure. A row missing any of them
@@ -545,10 +566,14 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
 
     # Rebuild the display schedule from the persisted offer (Offer ORM only). Recover the
     # principal/term from the stored disclosure box and reuse the stored APR as the schedule
-    # rate — the same shortcut the LOS read path takes. Float math throughout (D1).
-    monthly_payment = float(offer.monthly_payment)
-    total_of_payments = float(offer.total_of_payments)
-    amount_financed = float(offer.amount_financed)
+    # rate — the same shortcut the LOS read path takes.
+    #
+    # D1: Decimal from here on. These come off the ORM as float (asdecimal=False),
+    # so `_dec` is where exactness begins on this path -- see its docstring for
+    # why that is lossless and where the remaining boundary is.
+    monthly_payment = _dec(offer.monthly_payment)
+    total_of_payments = _dec(offer.total_of_payments)
+    amount_financed = _dec(offer.amount_financed)
     # W4 review fix: use the fee rule actually snapshotted on THIS row, not
     # whatever ORIGINATION_FEE_PCT happens to be right now -- reading the live
     # constant here instead of the stored snapshot was exactly the drift this
@@ -611,9 +636,14 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     # so every borrower viewing an auto-generated offer got the inferred one.
     # Review finding on PR #10.
     if offer.principal is not None:
-        principal = float(offer.principal)
+        principal = _dec(offer.principal)
     else:
-        principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
+        # Decimal division and quantize, not round() on a float: this recovered
+        # principal is what the whole redisplayed schedule is built on.
+        principal = (
+            (amount_financed / (Decimal("1") - _dec(fee_pct))).quantize(Decimal("0.01"))
+            if amount_financed else Decimal("0.00")
+        )
     # Review fix: this used to build the schedule at `offer.apr`. The APR and
     # the note rate are not interchangeable once a prepaid fee exists -- the APR
     # is solved against the amount financed, the payments run on the full
@@ -629,11 +659,14 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     # test_stored_note_rate_is_preferred_over_recovery (normal rows never reach
     # the recovery) and test_a_legacy_offer_without_a_stored_note_rate_recovers.
     if offer.note_rate_pct is not None:
-        note_rate = float(offer.note_rate_pct)
+        note_rate = _dec(offer.note_rate_pct)
     elif term_months and monthly_payment:
-        note_rate = apr.note_rate_from_payment(principal, monthly_payment, term_months)
+        # Legacy recovery only, and it returns a float by contract -- an inference
+        # from an already-rounded payment, so there is no exactness to preserve.
+        note_rate = _dec(apr.note_rate_from_payment(
+            float(principal), float(monthly_payment), term_months))
     else:
-        note_rate = 0.0
+        note_rate = Decimal("0")
     if schedule_is_stored and term_months:
         # Expanded from the STORED contract, not re-solved. Regenerating and
         # then patching the final row back left every regular row -- and the
@@ -642,7 +675,7 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         # to make impossible. Review finding on PR #10.
         rows = schedule.amortization_from_contract(
             principal, note_rate, term_months,
-            regular_payment=monthly_payment, final_payment=offer.final_payment,
+            regular_payment=monthly_payment, final_payment=_dec(offer.final_payment),
         )
         # D1: the residue is compared in Decimal against half a cent exactly.
         # `abs(residue) >= 0.005` on a binary float compares against a value that

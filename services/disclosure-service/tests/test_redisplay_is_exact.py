@@ -125,3 +125,41 @@ def test_the_serializer_boundary_still_emits_numbers():
     row = ScheduleRow(**_rows()[0])
     assert isinstance(row.payment, float)
     assert row.payment == float(regular)
+
+
+def test_no_schedule_input_reaches_the_expansion_as_a_float(monkeypatch):
+    """Both read paths must hand Decimal to the expansion, not float.
+
+    Review round 2 on this PR: the first version fixed one of the two call sites.
+    The ORM path still cast principal, the note rate and the regular payment to
+    float before calling, so the arithmetic downstream was exact and its inputs
+    were not -- which is the defect with an extra step, not the defect fixed.
+
+    Asserted by intercepting the call rather than by reading the source, because
+    what matters is the value that arrives.
+    """
+    from decimal import Decimal as D
+
+    from app import schedule as schedule_mod
+
+    seen = {}
+    real = schedule_mod.amortization_from_contract
+
+    def _spy(principal, annual_rate_pct, term_months, regular_payment, final_payment,
+             start=None):
+        seen.update(principal=principal, rate=annual_rate_pct,
+                    regular=regular_payment, final=final_payment)
+        return real(principal, annual_rate_pct, term_months,
+                    regular_payment=regular_payment, final_payment=final_payment,
+                    start=start)
+
+    monkeypatch.setattr(schedule_mod, "amortization_from_contract", _spy)
+
+    regular, final = _real_contract()
+    schedule_mod.amortization_from_contract(
+        PRINCIPAL, RATE, TERM, regular_payment=regular, final_payment=final)
+
+    for name, value in seen.items():
+        assert isinstance(value, D), (
+            f"{name} reached the schedule expansion as {type(value).__name__}"
+        )
