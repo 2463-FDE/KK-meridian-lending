@@ -51,8 +51,8 @@ approvable content.
    |---|---|---|
    | `balance.py::apply_payment` | `balance` | a `payment` entry |
    | `balance.py::apply_payment_once` | `balance` | a `payment` entry (the idempotent path; same entry, guarded by the unique index) |
-   | `balance.py::adjust_balance` | `balance` | an `adjustment` entry, via ADR 0011 |
-   | `balance.py::waive_fee` | `past_due` | a `fee_waived` entry, via ADR 0011 |
+   | `balance.py::adjust_balance` | `balance` | an `adjustment` entry — **requires ADR 0011** (see the interim rule below) |
+   | `balance.py::waive_fee` | `past_due` | a `fee_waived` entry — **requires ADR 0011** (see the interim rule below) |
    | **`delinquency.py::assess_late_fee`** | `past_due` | a `fee_assessed` entry |
 
    The last one is the one to miss: it lives outside the balance module, so a
@@ -62,6 +62,26 @@ approvable content.
    enumerates writers **from source** (`grep 'UPDATE balances'` across
    `services/`) rather than from this table, because a table is a list and lists
    go stale.
+   **The interim rule for `adjust_balance` and `waive_fee`, stated once because
+   three places disagreed about it.** Earlier revisions said all five writers move
+   in step 3, that these two arrive "via ADR 0011", and that maker-checker is
+   optional. Those cannot all be true. The rule:
+
+   > **ADR 0011 is REQUIRED before the write-guard is enabled.** Until it lands,
+   > `adjust_balance` and `waive_fee` keep writing `balances` directly and are
+   > frozen during the cutover window (gate F1). Step 5 does not run until 0011
+   > has converted them.
+
+   So maker-checker is not optional *to this plan* even though it is a separate
+   decision: the ledger can ship and run without it (steps 1–3 close D3), and the
+   guard cannot be turned on without it. That is the honest shape — the ledger
+   does not depend on maker-checker, and the *contract* attached to it does.
+
+   The alternative — let these two write `adjustment` entries directly, with an
+   actor and a reason and no approver — was rejected. It would put unapproved
+   staff money movements into an append-only table that cannot be corrected,
+   which is a worse permanent record than the mutable column they write today.
+
 4. **The sign of an entry is keyed to what the borrower owes**, per the component
    table below: `balance` for `principal`, `past_due` for `fees`, and `interest`
    projects nowhere.
@@ -76,12 +96,54 @@ approvable content.
    `interest` row and one `fees` row for the same payment — which is what makes
    the D14 waterfall expressible — and a retry cannot duplicate any of them.
 
+   **This invariant needs a `payment_id` to hold, and one write path has none.**
+   `balance.py::apply_payment()` takes `(loan_id, amount)`, and
+   `payments.py::charge()` — the legacy `POST /payments` on servicing —
+   `INSERT`s the payment without `RETURNING id` and then calls it. An entry from
+   that path would carry `payment_id = NULL`, and **NULLs do not collide in a
+   unique index**, so a retried charge would post the balance twice with nothing
+   stopping it. The index would look like protection and provide none.
+
+   **The rule: that path is converted, not excluded.** Step 3 changes its
+   `INSERT` to `INSERT ... RETURNING id` and passes the real id into
+   `apply_payment_once()`, which is the idempotent writer the modern path already
+   uses. `apply_payment()` is then deleted rather than left beside it — a
+   non-idempotent writer kept "for the legacy route" is how the route stays
+   legacy.
+
+   Freezing the route was the alternative and it is worse: `POST /payments` on
+   servicing is a duplicate of payment-service's own endpoint (D2), so freezing
+   it leaves a live money route that cannot be reconciled. Excluding it from the
+   invariant is worse still — an invariant with a documented exception on the one
+   path that lacks the key is not an invariant.
+
    Stated this way because "exactly one entry per payment" is the version that
    contradicts both the index and D14: a waterfall splits one payment across
    components by definition, so a single-row rule would forbid the thing the
    ledger is being built to allow. Idempotency is unaffected — the retry
    protection comes from the pair being unique, not from the payment appearing
    once.
+
+## Every invariant, its step, and how it will be checked
+
+An invariant with no step never lands, and one with no check is a sentence. This
+is the table a reviewer should hold the implementation to, and each check is
+mechanical rather than a judgement.
+
+| # | Invariant | Lands in | Machine-checkable acceptance criterion |
+|---|---|---|---|
+| 1 | Entries are immutable | step 2 | `UPDATE` and `DELETE` on `ledger_entries` both raise, asserted against real Postgres |
+| 2 | A signed delta, never a total | step 2 | `amount <> 0` CHECK; two entries inserted in one statement both apply, so the balance moves by their sum |
+| 3 | `balances` written only by the projection | steps 3 + 5 | `grep 'UPDATE balances'` across `services/` returns only the projection's own statement; with the guard on, a direct `UPDATE` raises |
+| 4 | The sign is keyed to what the borrower owes | step 2 | a `payment` with a positive amount, and a `fee_assessed` with a negative one, are both refused by CHECK |
+| 5 | A human-directed entry names the human | step 2 | an `adjustment` or `fee_waived` with a NULL `actor_id` is refused; a `payment` without one is accepted |
+| 6 | Per-loan parity, excluding `interest` | step 2 gate, re-run after step 4's delta pass | for every loan: `balances.balance = SUM(principal)` and `past_due = SUM(fees)`; reported per loan, never as one total |
+| 7 | One entry per `(payment_id, component)` | step 2 (index), step 3 (the id) | the same `payment_id` twice for one component raises `UniqueViolation`; and **no ledger-writing path may pass a NULL `payment_id` for a `payment` entry** — the check that catches the legacy route |
+
+The last cell is the one that matters most, because it is the invariant that
+looks satisfied by the index alone. A test asserting only that duplicates are
+rejected would pass on a system where every `payment` entry has a NULL id and
+nothing is deduplicated at all.
 
 ## What this closes
 
@@ -499,7 +561,7 @@ is not recoverable.
 |---|---|---|
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
 | 2 | `ledger_entries` (no approval columns — see ADR 0011), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
-| 3 | Writes move to the ledger; `balances` written only by the trigger. **All five writers**, including `delinquency.assess_late_fee` outside the balance module | Step 1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns only the projection trigger's own statement |
+| 3 | Writes move to the ledger; `balances` written only by the trigger. **All five writers**, including `delinquency.assess_late_fee` outside the balance module, and the legacy `POST /payments` path converted to `INSERT ... RETURNING id` + `apply_payment_once()` so its entries carry a real `payment_id` | Step 1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns only the projection trigger's own statement |
 | 4 | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
@@ -530,13 +592,23 @@ stops is compliant with this ADR. Concretely, it must have all four of:
 2. `ledger_entries` with the sign convention, the `entry_type` set, and the
    actor constraint as specified — the three things every later reader depends
    on and none of which can be changed later without rewriting rows;
-3. the projection trigger as the **only** writer of `balances`, with the
-   write-guard enabled;
+3. the projection trigger as the **only** writer of `balances` — every writer
+   converted, including the legacy `POST /payments` path and
+   `delinquency.assess_late_fee`;
 4. per-loan parity green, `interest` excluded.
 
-**Everything else is optional to this ADR.** `pending_movements`, the approval
-function, `past_due` maker-checker, the waterfall: all of it can be declined,
-deferred, or decided differently without contradicting anything decided here.
+**The write-guard is NOT in the minimum slice.** It is step 5, and step 5 requires
+ADR 0011, because `adjust_balance` and `waive_fee` cannot be converted without an
+approval path and cannot keep writing directly once the guard is on. A system that
+stops at step 3 is compliant with this ADR: the ledger is authoritative, D3 is
+closed, and `balances` still has one unguarded door that the freeze and the parity
+check cover.
+
+**Everything else is optional to this ADR, with one dependency.** The approval
+function, `past_due` maker-checker and the waterfall can be declined, deferred or
+decided differently without contradicting anything here. The single exception is
+the one above: **enabling the write-guard requires ADR 0011.** Optional to the
+decision, required for the last step of the rollout.
 
 **Step 2 ships no maker-checker columns at all.** Not
 `pending_movement_id`, not `approved_required`, not `approved_at`. Every one of
@@ -615,7 +687,16 @@ difference is where this goes wrong.
 | 4 | Deploy `balance.py` writing ledger entries instead of `balances`, then run the **delta pass** | The projection trigger now maintains `balances`; the old path is gone in the same deploy that adds the new one. The delta pass closes the gap the back-fill could not — see below |
 | 5 | Enable the write-guard | Last, because until step 4 is everywhere, a straggler pod still writing `balances` directly would start erroring |
 
-**Writes are not paused and not dual-written.** Both were considered:
+**Writes are not paused and not dual-written — conditional on gate 3a.** That
+condition is load-bearing and was missing from an earlier revision, which claimed
+the cutover was safe on the strength of "step 4 is atomic per write". It is not
+safe without 3a: until every pod writes `balances` relatively, an old pod's
+absolute write can overwrite a new pod's projection, and the ledger keeps both
+entries while the balance loses one. **If 3a is not fully deployed, pause payment
+applies for the cutover window** — the pause is the fallback, not the plan, and
+saying so is the difference between a plan and an assumption.
+
+Both alternatives were considered:
 
 - *Pausing* means refusing payments during the cutover. On a servicing system
   that is a queue of retries, angry borrowers, and late fees assessed on
