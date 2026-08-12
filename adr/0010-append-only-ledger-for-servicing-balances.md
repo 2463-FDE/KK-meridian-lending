@@ -315,14 +315,10 @@ Three things this depends on, each of which is a way to get it wrong:
 
 ### Maker-checker: a proposal is not a movement
 
-> **Revised after review.** The first version of this section added
-> `approved_by`/`approved_at` columns to `ledger_entries` and had the approver
-> `UPDATE` the pending row. **That cannot work** — the append-only trigger two
-> sections up rejects every `UPDATE` on that table, so the approval path was
-> blocked by the ADR's own central guarantee. Recorded rather than quietly
-> rewritten because it is a good illustration of the failure it describes: the
-> immutability claim and the approval claim were each checked on their own and
-> never against each other.
+> **Revised after review.** An earlier version put `approved_by`/`approved_at` on
+> `ledger_entries` and had the approver `UPDATE` that row — which the append-only
+> trigger forbids. The immutability claim and the approval claim were each checked
+> alone and never against each other.
 
 The fix is not to weaken the trigger. It is to stop putting proposals in the
 ledger at all.
@@ -355,11 +351,14 @@ CREATE TABLE pending_movements (
         (resolution IS NULL     AND resolved_by IS NULL AND resolved_at IS NULL)
      OR (resolution IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL)
     ),
-    -- An approval must produce exactly one ledger entry; a rejection must produce none.
-    CONSTRAINT approved_has_entry CHECK (
-        (resolution = 'approved' AND ledger_entry_id IS NOT NULL)
-     OR (resolution IS DISTINCT FROM 'approved' AND ledger_entry_id IS NULL)
-    ),
+    -- "an approval produces exactly one ledger entry, a rejection produces none"
+    -- is NOT a CHECK. It cannot be: the entry is inserted after the row is marked
+    -- approved, so an immediate CHECK fails mid-transaction on a state that is
+    -- legitimately transient. It is enforced at COMMIT instead -- see the
+    -- deferred constraint trigger below.
+    --
+    -- PostgreSQL CHECK constraints cannot be DEFERRABLE, which is exactly why
+    -- this is a constraint trigger rather than a deferred CHECK.
     -- Same component vocabulary as the ledger. Without this a proposal could
     -- name a component the ledger cannot hold, and the mismatch would surface
     -- only at approval time -- after a human had already reviewed and accepted it.
@@ -401,12 +400,33 @@ ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK
 );
 ```
 
-The cycle is closed here, once both tables exist:
+The cycle is closed here, once both tables exist, together with the commit-time
+rule that replaces the impossible CHECK:
 
 ```sql
 ALTER TABLE ledger_entries
     ADD CONSTRAINT ledger_entries_pending_movement_fk
     FOREIGN KEY (pending_movement_id) REFERENCES pending_movements(id);
+
+-- Approval implies exactly one entry; rejection implies none. Checked at COMMIT,
+-- because the resolving transaction is legitimately mid-state between marking the
+-- movement approved and linking the entry it just inserted.
+CREATE FUNCTION pending_movement_resolution_is_complete() RETURNS trigger AS $$
+BEGIN
+    IF NEW.resolution = 'approved' AND NEW.ledger_entry_id IS NULL THEN
+        RAISE EXCEPTION 'approved movement % has no ledger entry', NEW.id;
+    END IF;
+    IF NEW.resolution IS DISTINCT FROM 'approved' AND NEW.ledger_entry_id IS NOT NULL THEN
+        RAISE EXCEPTION 'movement % is %, so it must have no ledger entry',
+                        NEW.id, COALESCE(NEW.resolution, 'pending');
+    END IF;
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER pending_movements_resolution_complete
+    AFTER INSERT OR UPDATE ON pending_movements
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION pending_movement_resolution_is_complete();
 ```
 
 Field-for-field agreement between the proposal and the entry it produces is
@@ -423,6 +443,21 @@ wearing the shape of an approval.
 -- An earlier draft left this block empty and described the behaviour in prose,
 -- which is how a maker-checker control ends up existing only in the paragraph
 -- that claims it.
+-- The order inside one transaction, stated explicitly because the previous
+-- version deadlocked on itself: the entry was inserted BEFORE the row was marked
+-- approved, while the validation trigger required it to be approved already and
+-- the table constraint required an approved row to already carry its
+-- ledger_entry_id. Each waited on the other, so every approval would have failed.
+--
+--   1. mark the movement approved            (resolved_by / resolved_at set,
+--                                             ledger_entry_id still NULL)
+--   2. insert the ledger entry               (the trigger now sees 'approved')
+--   3. write ledger_entry_id back
+--   4. COMMIT -> the deferred trigger checks approval-implies-entry
+--
+-- Step 1 before step 2 is what makes the validation trigger satisfiable, and the
+-- approval-implies-entry rule is deferred to commit so step 1 is allowed to be
+-- briefly incomplete. Nothing outside this transaction ever observes that state.
 CREATE FUNCTION resolve_pending_movement(
     p_movement_id BIGINT,
     p_resolver    INTEGER,
@@ -462,6 +497,13 @@ BEGIN
         RETURN NULL;                      -- a rejection writes no ledger entry
     END IF;
 
+    -- STEP 1: mark approved first, so the validation trigger on the insert below
+    -- can see an approved proposal with a distinct approver.
+    UPDATE pending_movements
+       SET resolution = 'approved', resolved_by = p_resolver, resolved_at = now()
+     WHERE id = m.id
+    RETURNING * INTO m;
+
     -- The entry is built FROM the locked proposal row, never from caller input,
     -- so loan, component, amount and entry_type cannot differ from what was
     -- reviewed. That is the difference between an approval and a bypass wearing
@@ -480,10 +522,9 @@ BEGIN
            m.id, true, now()
     RETURNING id INTO new_entry;
 
-    UPDATE pending_movements
-       SET resolution = 'approved', resolved_by = p_resolver,
-           resolved_at = now(), ledger_entry_id = new_entry
-     WHERE id = m.id;
+    -- STEP 3: link the entry back. The approval-implies-entry rule is checked at
+    -- COMMIT, so the window between step 1 and here is legal and invisible.
+    UPDATE pending_movements SET ledger_entry_id = new_entry WHERE id = m.id;
 
     RETURN new_entry;
 END $$ LANGUAGE plpgsql;
@@ -604,7 +645,7 @@ is not recoverable.
 | Step | What lands | Gate before the next step |
 |---|---|---|
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
-| 2 | `pending_movements` first, then `ledger_entries` (it carries the FK), then the triggers, then the back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
+| 2 | Both tables (see the DDL: `ledger_entries` first, then `pending_movements`, then the FK that closes the cycle), then the triggers, then the back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
 | 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes.** D14 becomes possible, not closed |
 | 4 | `pending_movements` + `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
