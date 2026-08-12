@@ -28,6 +28,33 @@ the approval workflow can still approve this ADR; a reviewer who disagrees that
 `pending_movements` should be a separate table cannot, because that is a ledger
 decision.
 
+## Required invariants
+
+What must hold for an implementation to be this decision. Everything after this
+section is the reasoning behind them; a reviewer who reads only this list has the
+approvable content.
+
+1. **A ledger entry is immutable.** `UPDATE` and `DELETE` on `ledger_entries` are
+   refused by a trigger, the same mechanism `decision_events` uses and for the
+   same reason — every service connects as the schema owner, so a `REVOKE` does
+   not stick.
+2. **An entry is a signed delta, never a total.** Two concurrent entries compose;
+   they cannot lose each other's write. This is what closes D3.
+3. **`balances` is a projection, not a record.** It is written by the projection
+   trigger and by nothing else, enforced by a guard trigger. `SUM(ledger_entries)`
+   is the auditable truth.
+4. **The sign of an entry is keyed to what the borrower owes**, per the component
+   table below: `balance` for `principal`, `past_due` for `fees`, and `interest`
+   projects nowhere.
+5. **Every entry that a human directed carries that human.** `actor_id` and
+   `actor_role` are required except for machine-originated types, enforced by a
+   CHECK rather than by convention.
+6. **Parity holds per loan, not in aggregate**: `balances.balance` equals the sum
+   of that loan's `principal` entries, and `past_due` the sum of its `fees`
+   entries, with `interest` excluded from both.
+7. **An applied payment produces exactly one entry.** `payment_id` is unique on
+   the ledger, so a retried apply cannot post twice.
+
 ## What this closes
 
 One statement, referred to rather than repeated:
@@ -55,6 +82,10 @@ had nowhere to be decided for five weeks, and the Weeks 1–6 audit lists them a
 than on effort. This is that decision.
 
 Today `balances` is one mutable row per loan:
+
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested. See
+> Appendix A.
 
 ```sql
 CREATE TABLE IF NOT EXISTS balances (
@@ -103,6 +134,10 @@ because there is one number and it has no components.
 ## Decision
 
 **Record money movements as immutable rows. Derive the balance from them.**
+
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested. See
+> Appendix A.
 
 ```sql
 -- Full runnable DDL is in Appendix A; the excerpts below are the shape of the
@@ -265,6 +300,10 @@ reader never has to remember a per-type convention.
 A CHECK enforces the ones that are not genuinely bidirectional, so a `payment`
 that increases a balance cannot be written at all:
 
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested. See
+> Appendix A.
+
 ```sql
 ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
     (entry_type IN ('opening_balance','disbursement','fee_assessed') AND amount > 0)
@@ -278,10 +317,16 @@ that requires an actor, a reason, and (below) a second approver.
 
 **Who the actor is, in one rule:** `ledger_entries.actor_id` is whoever *authorised* the movement. For an `adjustment` or `fee_waived` that is the **approver**, not the requester -- the ledger answers "who allowed this money to move". The requester is preserved rather than discarded, by the linkage ADR 0011 adds: `pending_movements.requested_by` holds it, and the entry's `pending_movement_id` is UNIQUE, so both people are recoverable from either direction. Recorded here because it decides what `actor_id` MEANS on this table, which is a ledger question and has to be answered before anything writes to it. Machine-originated entries (`payment`, `fee_assessed`, `disbursement`, `opening_balance`) have no actor, and the CHECK exempts exactly those.
 
-### `past_due` is in scope
+### `past_due` is in scope, and it ships in steps 1-3
 
-The open question the first draft left for the reviewer is answered: **fee
-movements go in the ledger too.**
+**Fee movements go in the ledger, and the `past_due` projection lands with the
+ledger — not with maker-checker.** Step 4 previously listed a "`past_due`
+projection" as well, which read as though fees waited on the approval workflow.
+They do not, and the ordering matters in the direction that is easy to get wrong:
+`waive_fee` is one of the two actions maker-checker exists to govern, so the fees
+component has to be recorded *before* anything approves a waiver. A maker-checker
+step that had to introduce its own projection would be approving movements the
+ledger could not yet represent.
 
 Leaving them out would put a hole in the audit trail exactly where fee waivers
 are -- and waivers are one of the two actions Week 6 named as needing a second
@@ -305,6 +350,10 @@ for every loan:
 recompute.** A recompute-on-read would make every balance read O(entries) on a
 table that grows without bound; a periodic recompute would leave a window in
 which the projection and its ledger disagree with nothing detecting it.
+
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested. See
+> Appendix A.
 
 ```sql
 CREATE FUNCTION project_ledger_entry() RETURNS trigger AS $$
@@ -427,7 +476,7 @@ is not recoverable.
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
 | 2 | `ledger_entries` (with `approved_required` / `approved_at`, which the projection trigger reads), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
 | 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes** |
-| 4 | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
+| 4 | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
@@ -545,6 +594,10 @@ decision costs, and it has to be paid rather than argued away.
 It is payable exactly, because the movements are already recorded. Servicing's
 idempotency guard writes one `payment_applications` row per applied payment, so
 after step 4 completes:
+
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested. See
+> Appendix A.
 
 ```sql
 -- Every payment applied after its loan's opening entry that has no ledger entry.
@@ -725,10 +778,12 @@ What this document is responsible for, and what a later reader should hold it to
 
 - **the decision** — an append-only ledger with a trigger-maintained projection,
   and why the alternatives were rejected;
-- **the invariants** — signed deltas keyed to the effect on what the borrower
-  owes; `balances.balance` is principal; one terminal transition per proposal;
-  no self-approval; the ledger actor is the approver; an entry matches its
-  proposal field-for-field;
+- **the invariants** — the seven listed under *Required invariants* above:
+  immutability, signed deltas, the projection, the sign convention, the actor
+  requirement, per-loan parity and one entry per applied payment. The approval
+  invariants — one terminal transition, no self-approval, the actor is the
+  approver, an entry matches its proposal — belong to ADR 0011 and are listed
+  there;
 - **the sequencing** — which step can land before which, and what gate each one
   has to pass;
 - **the costs** — two derived columns, unbounded growth, a projection that can

@@ -5,6 +5,24 @@
 - **Bears on:** `DEBT.md` D8 (any authenticated user can adjust a balance or
   waive a fee, with no second approver and no record of who asked)
 
+## Required invariants
+
+What must hold for an implementation to be this decision.
+
+1. **A proposal is not a movement.** Writing a `pending_movements` row moves no
+   money; only the approval writes a ledger entry.
+2. **Exactly one terminal transition per proposal**, ever. A resolved proposal
+   cannot be re-resolved, and its substance cannot change after it is raised.
+3. **No self-approval.** The requester may not be the approver, enforced at the
+   database and inside the resolving function.
+4. **An approval produces exactly one ledger entry; a rejection produces none.**
+   Checked at COMMIT, because the resolving transaction is legitimately mid-state.
+5. **The entry matches the proposal field-for-field** — loan, component, amount,
+   type — so an approval cannot authorise different terms than the ones reviewed.
+6. **The ledger actor is the approver**, overwritten by trigger rather than
+   trusted from the caller. The requester survives on the proposal.
+7. **A rejected proposal is retained.** It is the evidence D8 says is missing.
+
 ## Why this is a separate ADR
 
 ADR 0010 makes servicing balances a projection of an append-only ledger. That is
@@ -51,6 +69,9 @@ ledger at all.
 **A row in `ledger_entries` means money moved.** A proposed adjustment is not a
 movement — it is a request that may never become one. Those are different facts
 and they get different tables:
+
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested.
 
 ```sql
 CREATE TABLE pending_movements (
@@ -138,6 +159,9 @@ points back at the entry it produced. Split the ordinary way — create the colu
 and the table, then add the foreign key — together with the commit-time rule
 that replaces the impossible CHECK:
 
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested.
+
 ```sql
 ALTER TABLE ledger_entries
     ADD COLUMN pending_movement_id BIGINT UNIQUE;
@@ -174,6 +198,9 @@ down, which rejects any entry that disagrees with the proposal it names — and
 asserted by a migration test: an approval that inserted a different loan,
 component, amount or type than the one reviewed would be a maker-checker bypass
 wearing the shape of an approval.
+
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested.
 
 ```sql
 -- Signature only. The body belongs in the migration that creates it (step 4),
@@ -238,6 +265,9 @@ the schema-owning role, so a revoke from the owner does not stick.
 proposal it names, and rejects any mismatch, so a direct `INSERT` can only succeed
 by reproducing exactly what an approver already authorised:
 
+> *Illustrative and non-runnable.* Shape of the decision, not the migration —
+> the executable version lands in the migration PR where it can be tested.
+
 ```sql
 -- Signature only; the body lands with step 4's migration.
 CREATE FUNCTION ledger_entry_matches_its_proposal() RETURNS trigger;
@@ -286,6 +316,38 @@ the append-only trigger worth having.
 
 This is why maker-checker was blocked before: there was nowhere to put a request
 that is not yet a fact.
+
+## Limitations
+
+**A direct `INSERT` into `ledger_entries` is possible.** This is the boundary of
+the guarantee and it belongs here rather than buried in the mechanism section,
+because it changes what "maker-checker" means in this system.
+
+The obvious enforcement — `REVOKE INSERT` from the application role and
+`GRANT EXECUTE` on the approval function — does not hold here: every service
+connects as the schema-owning role, so a revoke from the owner does not stick
+(ADR 0002, ADR 0006). The same constraint that makes the append-only trigger
+necessary makes privilege-based enforcement unavailable.
+
+So the honest claim is narrower than "the function is the only path":
+
+- a direct `INSERT` **cannot** produce an `adjustment` or `fee_waived` entry that
+  no approver authorised, because the validation trigger rejects an entry whose
+  proposal is missing, unapproved, self-approved, or disagrees on loan,
+  component, amount or type;
+- it **cannot** misattribute the actor, because the trigger overwrites
+  `actor_id` with the proposal's approver rather than trusting the caller;
+- it **can** be issued by anything holding a database connection, reproducing
+  exactly what an approver already authorised — which is a replay of an
+  authorised movement, not a forgery of an unauthorised one, and the `UNIQUE`
+  constraint on `pending_movement_id` stops the same proposal being replayed
+  twice.
+
+**What that leaves open:** anyone with direct database access can move money
+within the shape of something already approved. Maker-checker is a control on the
+application's staff paths, not a defence against a compromised database
+credential. Treating it as the latter would be the same overclaim this ADR
+corrects elsewhere.
 
 ## Consequences
 
