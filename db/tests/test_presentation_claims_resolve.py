@@ -138,7 +138,14 @@ def test_every_cited_pr_is_in_the_manifest(pr):
 @pytest.mark.parametrize("pr", _cited_prs())
 def test_a_merged_pr_names_an_artifact_that_exists(pr):
     row = _manifest_rows().get(pr) or {}
-    if row.get("status") != "merged":
+    # An unrecognised status must not slip past as "not merged, nothing to do".
+    # test_every_manifest_status_is_recognised owns that failure; this asserts
+    # the vocabulary here too, so tightening one check cannot quietly loosen
+    # this one.
+    assert row.get("status") in MANIFEST_STATUSES, (
+        f"PR #{pr} has an unrecognised status {row.get('status')!r}"
+    )
+    if row["status"] != "merged":
         return
     artifact = row.get("artifact")
     assert artifact, f"PR #{pr} is listed merged with no durable artifact"
@@ -152,7 +159,10 @@ def test_a_merged_pr_names_an_artifact_that_exists(pr):
 def test_an_open_pr_is_labelled_open_in_the_deck(pr):
     """An open PR has no landed artifact, so the deck must say so."""
     row = _manifest_rows().get(pr) or {}
-    if row.get("status") != "open":
+    assert row.get("status") in MANIFEST_STATUSES, (
+        f"PR #{pr} has an unrecognised status {row.get('status')!r}"
+    )
+    if row["status"] != "open":
         return
     context = " ".join(_line_context(f"PR #{pr}"))
     assert any(m in context for m in OPEN_MARKERS), (
@@ -188,3 +198,89 @@ def test_the_pr_checks_are_not_vacuous():
     assert len(_cited_prs()) >= 3, f"found almost no PR citations: {_cited_prs()}"
     merged = [p for p, r in _manifest_rows().items() if r["status"] == "merged"]
     assert merged, "the manifest lists no merged PR, so the artifact check never ran"
+
+# --- manifest status validation ----------------------------------------------
+#
+# The two checks above each return early when the status is not the one they
+# handle. That is fine for the two statuses that exist and silently wrong for
+# any other: a row typed `landed`, `merge` or `closed` matched neither branch,
+# so it was never checked for an artifact AND never required an open label. The
+# manifest could carry a status nothing understood and the suite stayed green --
+# an unrecognised value read as "checked" when it meant "skipped".
+#
+# So the vocabulary is closed. Exactly two statuses are legal, and anything else
+# is an explicit failure rather than a quiet pass.
+
+MANIFEST_STATUSES = ("merged", "open")
+
+
+def _status_problem(pr, row):
+    """Return a human-readable problem with this row, or None if it is sound.
+
+    Pure and row-shaped on purpose: a synthetic row can be passed straight in,
+    so the rejection of an unsupported status is provable without writing a
+    broken manifest to disk and hoping the parser sees it the same way.
+    """
+    status = (row or {}).get("status")
+    if status not in MANIFEST_STATUSES:
+        return (
+            f"PR #{pr} has status {status!r}, which is not one of "
+            f"{list(MANIFEST_STATUSES)}. An unrecognised status is skipped by "
+            f"every other check, so the row would be accepted on no evidence."
+        )
+    if status == "merged" and not (row or {}).get("artifact"):
+        return (
+            f"PR #{pr} is listed merged with no durable artifact. A merged row "
+            f"is the one thing a reader can verify offline; without a file it "
+            f"is a bare PR number again."
+        )
+    return None
+
+
+@pytest.mark.parametrize("pr", sorted(_manifest_rows()))
+def test_every_manifest_status_is_recognised(pr):
+    problem = _status_problem(pr, _manifest_rows()[pr])
+    assert problem is None, problem
+
+
+@pytest.mark.parametrize("status", ["landed", "merge", "closed", "verified",
+                                    "specified", "draft", "", "MERGED?"])
+def test_an_unsupported_status_is_rejected(status):
+    """The regression proof for the finding.
+
+    Each of these previously produced a green run: neither the artifact check
+    nor the open-label check claimed the row, so nothing looked at it. `landed`
+    and `merge` are the realistic typos -- both are words this deck legitimately
+    uses elsewhere, which is exactly why one would be easy to write here.
+    """
+    problem = _status_problem(99, {"status": status, "artifact": "docs/DEBT.md"})
+    assert problem is not None, (
+        f"status {status!r} was accepted; an unrecognised status is skipped by "
+        f"every other check, so the row passes on no evidence"
+    )
+    assert "not one of" in problem
+
+
+def test_a_merged_row_without_an_artifact_is_rejected():
+    problem = _status_problem(99, {"status": "merged", "artifact": None})
+    assert problem is not None and "no durable artifact" in problem
+
+
+def test_a_well_formed_row_is_accepted():
+    """Guard the guard: if _status_problem returned a string unconditionally,
+    every rejection test above would pass while the manifest was unusable."""
+    assert _status_problem(99, {"status": "merged", "artifact": "docs/DEBT.md"}) is None
+    assert _status_problem(99, {"status": "open", "artifact": None}) is None
+
+
+def test_the_manifest_actually_uses_both_statuses():
+    """Both branches of the vocabulary are exercised by real rows.
+
+    If every row were `merged`, the open-label check would never run against
+    anything and would be dead code reported as coverage.
+    """
+    statuses = {r["status"] for r in _manifest_rows().values()}
+    assert statuses == set(MANIFEST_STATUSES), (
+        f"the manifest uses {sorted(statuses)}; both {list(MANIFEST_STATUSES)} "
+        f"should appear or one of the checks is never exercised"
+    )

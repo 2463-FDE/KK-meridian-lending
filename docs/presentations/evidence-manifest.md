@@ -22,9 +22,18 @@ reference in the deck appears here with a resolvable artifact.
 
 ## How each column is checked
 
-**Status** must agree with how the deck labels the claim. A PR listed `open`
-here has to be labelled as open on the slide too — that is the rule that stopped
-`specs/0002` being presented as though it had landed.
+**Status** is a closed vocabulary: exactly `merged` or `open`. Anything else is
+an explicit failure, not a skip.
+
+That is not pedantry. The artifact check handled `merged` and the label check
+handled `open`, and each returned early otherwise — so a row typed `landed`,
+`merge` or `closed` matched neither branch, was never checked for an artifact,
+was never required to carry an open label, and passed green. An unrecognised
+value read as "checked" when it meant "skipped", and `landed` is a realistic
+typo precisely because the deck uses that word elsewhere.
+
+A PR listed `open` must also be labelled open on the slide — that is the rule
+that stopped `specs/0002` being presented as though it had landed.
 
 **Durable artifact** must exist on this branch for every `merged` row. This is
 the column that does the real work: it is what a reader can open, and it stays
