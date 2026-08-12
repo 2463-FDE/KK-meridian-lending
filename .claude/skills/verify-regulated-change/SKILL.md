@@ -56,9 +56,25 @@ you do not consider part of "the change":
 repository, not the file you edited — the number, the field name, the rule:
 
 ```bash
-git diff main...HEAD --stat                 # what you touched
+# What you touched -- resolved from the PR's OWN base, not assumed to be main.
+# `main...HEAD` is wrong twice over: a PR based on a release branch compares
+# against the wrong tree entirely, and a local `main` that has not been fetched
+# is stale, which INFLATES the inventory with other people's merged work and
+# buries yours.
+base_ref=$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null || echo main)
+git fetch origin "$base_ref"
+merge_base=$(git merge-base "origin/$base_ref" HEAD)
+git diff "$merge_base"..HEAD --stat
+
+# Then sweep the whole repository for the SUBJECT of the claim -- the number, the
+# field name, the rule -- not just the files above. The surfaces that bite are
+# the ones you did not edit.
 grep -rniE "dti|43%|debt.to.income" --include="*.py" --include="*.ts"      --include="*.tsx" --include="*.md" --include="*.sql" .
 ```
+
+`origin/main` is the documented fallback when `gh` is unavailable or the branch
+has no PR yet -- and it is a fallback, not the default, because using it on a PR
+based on anything else produces an inventory of the wrong change.
 
 Then write the inventory down before judging any of it:
 

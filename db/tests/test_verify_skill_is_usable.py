@@ -117,3 +117,50 @@ def test_the_repo_specific_trap_is_recorded():
     text = _text()
     assert "REVOKE" in text
     assert "schema-owning role" in text or "schema owner" in text
+
+
+# --- the diff command must resolve the PR's own base -------------------------
+
+
+def test_the_skill_does_not_tell_you_to_diff_against_bare_main():
+    """`main...HEAD` is wrong twice over.
+
+    A PR based on a release branch compares against the wrong tree entirely; and
+    a local `main` that has not been fetched is stale, which INFLATES the claim
+    inventory with other people's merged work and buries the change under review.
+    Both failures produce an inventory that looks thorough.
+    """
+    text = _text()
+    bad = [l for l in text.splitlines()
+           if "git diff" in l and "main...HEAD" in l and not l.lstrip().startswith("#")]
+    assert not bad, f"the skill still recommends a bare main diff: {bad}"
+
+
+def test_it_resolves_the_pr_base_and_the_merge_base():
+    text = _text()
+    assert "baseRefName" in text, (
+        "the skill does not resolve the PR's own base, so it assumes every PR "
+        "targets main"
+    )
+    assert "git merge-base" in text, (
+        "the skill diffs against a branch tip rather than the merge base, so "
+        "commits merged into the base after branching appear as this change"
+    )
+    assert "git fetch origin" in text, (
+        "the skill does not fetch the base, so a stale local ref decides the "
+        "size of the inventory"
+    )
+
+
+def test_the_origin_main_fallback_is_documented_as_a_fallback():
+    """A fallback presented as the default is the original defect with an
+    explanation attached."""
+    text = _text()
+    assert "fallback" in text.lower(), "no fallback is described"
+    lower = text.lower()
+    i = lower.index("fallback")
+    window = lower[max(0, i - 400):i + 400]
+    assert "gh" in window or "unavailable" in window, (
+        "the fallback does not say WHEN it applies, so a reader will treat it as "
+        "the normal path"
+    )
