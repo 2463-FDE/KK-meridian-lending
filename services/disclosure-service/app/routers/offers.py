@@ -1,9 +1,17 @@
 """Offer / Truth-in-Lending disclosure generation (disclosure-service).
 
-Write path (POST /offers) builds the offer + amortization schedule with float math and
-persists an offers row via raw psycopg2 (matches the LOS write path). Read path
+Write path (POST /offers) builds the offer + amortization schedule and persists an
+offers row via raw psycopg2 (matches the LOS write path). Read path
 (GET /applications/{id}/offer) goes through SQLAlchemy.
+
+Money is Decimal from the database read to the serializer boundary (D1). The
+`Disclosure` and `ScheduleRow` models declare their fields as float, so that is
+where the single conversion happens and the wire format is unchanged; what used
+to happen was a cast to binary float on the way IN, before the Decimal
+arithmetic that was supposed to keep the cents exact.
 """
+from decimal import Decimal
+
 import psycopg2.errors
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
@@ -15,6 +23,12 @@ from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferIn, OfferResponse, ScheduleRow
 
 log = get_logger("offers")
+
+#: Half a cent, exactly. The threshold for "this disclosure does not
+#: amortize" -- expressed as a Decimal because 0.005 is not 0.005 in
+#: binary floating point, and this is the check that decides whether a
+#: signed disclosure is internally consistent.
+HALF_CENT = Decimal("0.005")
 router = APIRouter(tags=["offers"])
 
 # The five amounts that make a row a TILA disclosure. A row missing any of them
@@ -455,10 +469,13 @@ def create_offer(
     if all(row.get(f) is not None for f in ("principal", "term_months",
                                             "monthly_payment", "final_payment",
                                             "note_rate_pct")):
+        # D1: no float() on the way in. These columns are NUMERIC, psycopg2
+        # hands them back as Decimal, and casting to binary float here threw the
+        # exactness away before the Decimal arithmetic inside could preserve it.
         rows = schedule.amortization_from_contract(
-            float(row["principal"]), float(row["note_rate_pct"]), int(row["term_months"]),
-            regular_payment=float(row["monthly_payment"]),
-            final_payment=float(row["final_payment"]),
+            row["principal"], row["note_rate_pct"], int(row["term_months"]),
+            regular_payment=row["monthly_payment"],
+            final_payment=row["final_payment"],
         )
     else:
         # An offer returned without stored terms -- a legacy row this call did
@@ -625,16 +642,21 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         # to make impossible. Review finding on PR #10.
         rows = schedule.amortization_from_contract(
             principal, note_rate, term_months,
-            regular_payment=monthly_payment, final_payment=float(offer.final_payment),
+            regular_payment=monthly_payment, final_payment=offer.final_payment,
         )
-        residue = rows[-1]["balance"] if rows else 0.0
-        if abs(residue) >= 0.005:
+        # D1: the residue is compared in Decimal against half a cent exactly.
+        # `abs(residue) >= 0.005` on a binary float compares against a value that
+        # is not 0.005, so a schedule sitting exactly on the boundary could be
+        # judged either way depending on representation -- on the check whose
+        # whole job is to notice a disclosure that does not amortize.
+        residue = rows[-1]["balance"] if rows else Decimal("0")
+        if abs(residue) >= HALF_CENT:
             # The stored amounts do not amortize the stored principal. That is a
             # real inconsistency in a signed disclosure, so it is logged rather
             # than smoothed away; the rows still show what was actually agreed.
             log.error(
                 "stored contract does not amortize to zero offer_id=%s "
-                "application_id=%s residue=%.2f schedule_version=%s",
+                "application_id=%s residue=%s schedule_version=%s",
                 offer.id, application_id, residue, offer.schedule_version,
             )
         schedule_source, schedule_note = "contract", None
