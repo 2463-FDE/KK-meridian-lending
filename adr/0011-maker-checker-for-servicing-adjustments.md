@@ -22,7 +22,11 @@ What must hold for an implementation to be this decision.
 6. **The ledger actor is the approver**, overwritten by trigger rather than
    trusted from the caller. The requester survives on the proposal.
 7. **A rejected proposal is retained.** It is the evidence D8 says is missing.
-8. **Approval state is single-sourced.** `pending_movements.resolution` is the
+8. **A proposal must describe a movement the ledger can represent.** A
+   `fee_waived` proposal targets the `fees` component and nothing else, refused
+   at insert rather than at approval — an approver should never be asked to sign
+   off a request that cannot be executed.
+9. **Approval state is single-sourced.** `pending_movements.resolution` is the
    fact; `ledger_entries.approved_required` / `approved_at` are set by the
    resolving function from that row and never by a caller. Two writable copies of
    "was this approved" is how the two come to disagree about the same movement.
@@ -112,7 +116,20 @@ CREATE TABLE pending_movements (
     -- Same component vocabulary as the ledger. Without this a proposal could
     -- name a component the ledger cannot hold, and the mismatch would surface
     -- only at approval time -- after a human had already reviewed and accepted it.
-    CONSTRAINT pending_component CHECK (component IN ('principal','interest','fees'))
+    CONSTRAINT pending_component CHECK (component IN ('principal','interest','fees')),
+
+    -- A fee waiver moves fees. ADR 0010 fixes `fee_waived` to the `fees`
+    -- component, so a proposal naming any other one describes a movement the
+    -- ledger cannot represent -- and it would fail at the ledger insert, AFTER a
+    -- second person had approved it. Refusing it here means the approver never
+    -- sees an incoherent request in their queue.
+    --
+    -- `adjustment` is deliberately left open to all three: adjusting principal,
+    -- accrued interest or fees are all real corrections, and which one is being
+    -- adjusted is the substance of the request.
+    CONSTRAINT pending_fee_waiver_is_fees CHECK (
+        entry_type <> 'fee_waived' OR component = 'fees'
+    )
 );
 
 -- Exactly one terminal transition. pending -> approved or pending -> rejected,

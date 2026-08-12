@@ -531,6 +531,33 @@ the inserting statement sets for itself, which enforces nothing; the same column
 next to `pending_movements` is checkable against a resolution a second person
 made.
 
+## What is binding, and what is illustration
+
+Every SQL block here is labelled *illustrative and non-runnable*, and a label is
+easy to read past. So, explicitly:
+
+**Binding.** An implementation that does not do these is not this decision:
+
+1. the seven *Required invariants* above;
+2. the `entry_type` set and the sign convention in the component table — later
+   readers depend on both, and neither can be changed afterwards without
+   rewriting rows;
+3. the unique index on `(payment_id, component)`;
+4. `balances` written only by the projection trigger, with the write-guard
+   enabled;
+5. immutability enforced by a trigger, not by convention or privilege;
+6. the migration step order and the gates on each step, including the freeze
+   gates F1-F3;
+7. per-loan parity excluding `interest`, asserted after the delta pass.
+
+**Illustration.** Column types and lengths, index names, constraint names, the
+exact text of an exception, the shape of the DO-block, and anything in a function
+body. The migration PR is free to differ, and where the SQL here and a migration
+disagree on any of those, **the migration is right** — it is the one that runs.
+
+If an implementer finds the two disagreeing on something in the binding list,
+that is a defect in this document and it should be fixed here first.
+
 ## Non-goals, and the PRs that are required
 
 Not in this ADR, and not in whatever PR implements its first step:
@@ -605,29 +632,65 @@ after step 4 completes:
 > Appendix A.
 
 ```sql
--- Every payment applied after its loan's opening entry that has no ledger entry.
+-- Every payment applied after its loan's opening entry with no PRINCIPAL entry.
+-- Component-qualified deliberately -- see the scope note below.
 SELECT pa.*
   FROM payment_applications pa
   JOIN ledger_entries oe ON oe.loan_id = pa.loan_id
                         AND oe.entry_type = 'opening_balance'
  WHERE pa.applied_at > oe.occurred_at
-   AND NOT EXISTS (SELECT 1 FROM ledger_entries le WHERE le.payment_id = pa.payment_id);
+   AND NOT EXISTS (
+         SELECT 1 FROM ledger_entries le
+          WHERE le.payment_id = pa.payment_id
+            AND le.component = 'principal');
 ```
 
 Those get `payment` entries written **with the projection suppressed**, for the
-same reason the opening entries were: `balances` already reflects them. The
-delta pass is idempotent by that `NOT EXISTS`, so it can be run repeatedly and
-run again if it is interrupted.
+same reason the opening entries were: `balances` already reflects them. The delta
+pass is idempotent by that `NOT EXISTS`, so it can be run repeatedly and run
+again if it is interrupted.
+
+**Scope, because the unqualified version of this query is wrong.** An earlier
+form matched on `le.payment_id = pa.payment_id` alone, which contradicts
+invariant 7: with one row per component, a payment that already has its
+`principal` entry would be skipped while its `fees` entry was still missing, and
+the balance would be quietly short. The `component = 'principal'` clause is what
+makes the check agree with the index.
+
+And the pass can only ever reconstruct principal. `payment_applications` stores
+one `amount` per payment with no component breakdown — the split does not exist
+in that table because the waterfall does not exist yet (D14, step 5). So:
+
+- **the delta pass is for pre-waterfall, principal-only payments, and that is
+  all it is for.** It runs during cutover, when `apply_payment_once` writes
+  principal alone, and it is correct for exactly that window;
+- **after the waterfall lands it must not be reused as-is.** A payment split
+  across components cannot be rebuilt from a single stored amount by any query.
+  Once D14 ships, the ledger is the only place the split exists, which is
+  precisely why the waterfall comes after the cutover rather than during it.
 
 Parity is asserted **after** the delta pass. Asserting it before is asserting
 something the design says will be false.
 
-Two things this does not cover, stated rather than discovered: adjustments and
-fee waivers made through `adjust-balance` / `waive-fee` during the window leave
-no `payment_applications` row, so they are invisible to the query above. Both are
-staff actions on a specific loan and both are rare. **Freeze them for the
-duration** — a CSR waiting an hour is a different order of problem from a
-borrower's balance being wrong — and the delta pass covers everything else.
+Two things this does not cover: adjustments and fee waivers made through
+`adjust-balance` / `waive-fee` during the window leave no `payment_applications`
+row, so they are invisible to the query above. Both are staff actions on a
+specific loan and both are rare.
+
+**They are frozen for the duration, and that freeze is a gate rather than a
+note.** Prose asking an operator to remember something during a cutover is not a
+control -- the delta pass would knowingly miss those movements, and the balance
+would be wrong with nothing failing:
+
+| Gate | Before | Check |
+|---|---|---|
+| **F1** | step 2 (back-fill) | `adjust-balance` and `waive-fee` return 503 for the duration of the cutover, from a flag the deploy sets — not from an operator's memory |
+| **F2** | step 5 (enable the write-guard) | zero `balances` rows have `updated_at` inside the cutover window without a matching ledger entry. This is the assertion that the freeze actually held; if it fails, a staff write got through and has to be reconstructed by hand before the guard goes on |
+| **F3** | releasing the freeze | F2 green, and per-loan parity green after the delta pass |
+
+F2 is the one that matters. A freeze nobody verified is indistinguishable from a
+freeze that leaked, and the leak is silent: the projection and the ledger simply
+disagree by one adjustment nobody remembers making.
 
 ### Locks
 
@@ -670,7 +733,9 @@ Where it fails decides what to do, which is why step 3 exists before step 4:
   the back-fill, which would write a second `opening_balance` on top of history
   that is already there and double every loan that has one. It resumes from the
   last entry instead, with the same delta query, whose `NOT EXISTS` makes it the
-  right tool for both jobs. The `opening_balance` entry is the marker that says
+  right tool for both jobs -- subject to the same principal-only scope: a revert
+  after D14 has shipped cannot be repaired by this query, and the rollback plan
+  for that world is ADR 0011's and D14's own, not this one's. The `opening_balance` entry is the marker that says
   which loans have already been initialised, which is a second reason it is its
   own `entry_type` rather than a flag.
 
