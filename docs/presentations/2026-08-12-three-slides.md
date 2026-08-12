@@ -10,12 +10,15 @@ Speaker notes are the point; the bullets are what goes on screen.
 
 **Self-approval on money movements — found, specified, not yet built**
 
-- `adjust-balance` and `waive-fee` accept a staff role header **and never read it**
+- The servicing HTTP routes `POST /accounts/{loan_id}/adjust-balance` and
+  `POST /accounts/{loan_id}/waive-fee` accept a staff role header **and never read
+  it**
 - One account can zero a borrower's balance alone. No second person, no record of
   who or why
-- `DEBT.md` **D8**, open since the vendor delivery
-- Written up as `specs/0002` **before** implementation: role matrix, EARS +
-  Gherkin criteria, failure behaviour, out-of-scope
+- `docs/DEBT.md` **D8**, open since the vendor delivery
+- Written up as `specs/0002` **before** implementation — **draft in PR #28, not
+  yet on `main`**: role matrix, EARS + Gherkin criteria, failure behaviour,
+  out-of-scope
 - Status: **Not started** — a spec is not a control
 
 ### Notes
@@ -33,7 +36,9 @@ token. That is genuinely useful and it answers a different question: **who can
 reach the endpoint**, not **who may authorise the movement**. Conflating those two
 is how a hardening PR gets mistaken for a control.
 
-So I wrote the spec first, and the part I would defend hardest is section 9: a
+So I wrote the spec first — it is a draft on PR #28 and not on `main`, which is
+why the status line says Not started — and the part I would defend hardest is
+section 9: a
 direct database `INSERT` bypasses the whole thing, because every service connects
 as the schema-owning role and a `REVOKE` from the owner does not stick. That means
 maker-checker here is a control on the application's staff paths and **not** a
@@ -98,9 +103,13 @@ is the overclaim this project has already had to correct three times.
 - Disclosure **generates**, servicing **bills**, the borrower **re-reads** — all
   three must produce the same schedule
 - Parity asserted against the same literal file, not against each other
+- **A checked-in oracle artifact, produced independently of the production
+  implementation** — not an external authority
 - Money is `Decimal` to the serializer boundary (**D1**) — compared **exactly**,
   no tolerance
 - Vectors now parsed with `parse_float=Decimal`: stricter, not weaker
+- **Boundary:** `servicing-service`'s sibling schedule function still returns
+  floats — exactness holds on the disclosure side, not yet on servicing
 
 ### Notes
 
@@ -110,8 +119,14 @@ contract, and nothing forcing them to agree.
 
 Comparing the services *to each other* is the trap — it passes when all three are
 wrong the same way, which is exactly what happens when a shared helper changes.
-The golden file is an independent third party: fixed vectors with known first and
-final rows, and each service is compared to **the file**.
+
+The golden file is a **checked-in oracle artifact, produced independently of the
+production implementation**: the vectors were computed and reviewed as expected
+Model B output and committed at `db/golden/model_b_schedule_vectors.json`, and
+each service is compared to **the file** rather than to another service. It is
+deliberately *not* an external authority — nobody outside this repository
+certified it, and calling it a third party would overstate what it is. What it
+gives is a fixed reference that does not move when the code does.
 
 The exactness matters more than it sounds. **12 CFR 1026.18** requires the
 disclosed figures to be the terms of the legal obligation, so a redisplay on a
@@ -127,3 +142,41 @@ One honest limitation: `servicing-service` has a sibling schedule function that
 still returns floats. It bills from stored amounts, so no cent is currently at
 risk, but the parity guarantee is exact on the disclosure side and not yet on the
 servicing side. That is named in the PR rather than left for someone to find.
+
+---
+
+## Evidence links
+
+Every claim above, with its file and its landed/open status. Anything marked
+**open** is a draft on a pull request and is **not on `main`** — it is cited as
+proposed work, not as something the system does.
+
+### Slide 1 — self-approval control gap
+
+| Claim | Evidence | Status |
+|---|---|---|
+| The two routes accept a role header and never read it | `services/servicing-service/app/main.py` — `adjust_balance`, `waive_fee` | **landed** on `main` |
+| The gap is tracked | `docs/DEBT.md` D8 | **landed**, still **Open** |
+| Both routes now require the internal token | PR #22 | **merged** |
+| The specification | `specs/0002-maker-checker-self-approval.md` | **open — PR #28** |
+| The control itself | — | **not started** |
+
+### Slide 2 — PAN/CVV
+
+| Claim | Evidence | Status |
+|---|---|---|
+| Columns dropped from existing databases | `db/migrations/0031_drop_payments_pan_cvv.sql` | **landed** |
+| Fresh installs never create them | `db/init/001_schema.sql` | **landed** |
+| Recorded as fixed | `docs/DEBT.md` D5b / D13 | **landed** |
+| README claims held to the schema | `db/tests/test_readme_schema_claims.py` | **merged** — PR #23 |
+| Logs, backups, caches | — | **not evidenced** — see the slide |
+
+### Slide 3 — golden vectors and parity
+
+| Claim | Evidence | Status |
+|---|---|---|
+| The oracle artifact | `db/golden/model_b_schedule_vectors.json` | **landed** |
+| Disclosure-side parity | `services/disclosure-service/tests/test_golden_schedule_parity.py` | **landed** |
+| Servicing-side parity | `services/servicing-service/tests/test_golden_schedule_parity.py` | **landed** |
+| Decimal to the serializer boundary | PR #24, `docs/DEBT.md` D1 | **merged** |
+| Servicing's sibling function still float | `services/servicing-service/app/schedule.py` | **open gap**, not tracked as its own `D` number |
