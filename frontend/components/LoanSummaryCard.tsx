@@ -99,7 +99,7 @@ export default function LoanSummaryCard({
           <p className="hint" style={{ margin: 0 }}>
             {summary
               ? REGENERATE_HINT
-              : "Generate a risk-tiered, plain-English summary of this application."}
+              : "Generate a plain-English summary of this application."}
           </p>
         </div>
         <button onClick={generate} disabled={busy} title={summary ? REGENERATE_HINT : undefined}>

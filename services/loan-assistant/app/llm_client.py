@@ -518,21 +518,57 @@ def _strip_contradicting_macro_claims(summary: str, flags: list, signal):
 # no published rule authorises it to do. So these match an adjective-plus-risk
 # construction or a named tier/grade/rating, not the word "risk".
 _RISK_LABEL_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
-    # An adjective placing the application on a scale, next to "risk".
+    # The scale words, used once below and kept in one place so a phrasing
+    # added to one pattern is not silently missing from another.
+    #
+    # Review round 3 found five real misses here, all of them ordinary English
+    # the first version simply did not anticipate: "The application risk is
+    # high", "Decline is recommended", "This borrower is a poor credit risk",
+    # "The overall risk appears moderate", "Approval is not recommended". The
+    # lesson is not that these five needed adding -- it is that a hand-listed
+    # set of sentence shapes reads as complete while missing the next one. So
+    # the direction is now covered both ways round rather than by enumerating
+    # sentences: adjective-then-risk AND risk-then-adjective, active AND
+    # passive recommendation.
+
+    # "high risk", "poor credit risk", "very low risk"
     r"\b(?:very\s+)?(?:low|medium|moderate|high|elevated|severe|substantial"
-    r"|significant|minimal|poor|excellent|good|bad|strong|weak)[\s-]+risk\b",
+    r"|significant|minimal|poor|excellent|good|bad|strong|weak|acceptable"
+    r"|unacceptable)\s+(?:credit\s+|repayment\s+|default\s+|overall\s+)?risk\b",
+
+    # The same thing hyphenated: "high-risk borrower"
+    r"\b(?:very\s+)?(?:low|medium|moderate|high|elevated|severe|substantial"
+    r"|significant|minimal|poor|excellent|good|bad|strong|weak)-risk\b",
+
+    # Reversed and copular: "the application risk is high", "overall risk
+    # appears moderate", "risk remains elevated". This is the shape the first
+    # version missed entirely -- the adjective moved to the other side of the
+    # verb and every pattern stopped matching.
+    r"\brisk\b[^.!?]{0,40}?\b(?:is|are|was|were|seems?|appears?|remains?|looks?"
+    r"|rated|assessed|considered)\b[^.!?]{0,20}?\b(?:very\s+)?(?:low|medium"
+    r"|moderate|high|elevated|severe|substantial|significant|minimal|poor"
+    r"|excellent|good|bad|strong|weak|acceptable|unacceptable)\b",
+
     # A named scale, whatever value it carries.
     r"\brisk[\s-]+(?:tier|grade|rating|category|classification|score|level"
     r"|band|profile)\b",
+
     # "Tier: B", "Grade = 3", "Rating: high".
     r"\b(?:tier|grade|rating|band)\s*[:=]\s*(?:[A-D]\b|[1-5]\b|low|medium"
     r"|moderate|high|decline)\b",
+
     # The model narrating that it is classifying.
     r"\b(?:classif|categoris|categoriz)\w*\s+(?:this\s+|the\s+)?"
     r"(?:applicant|application|borrower|loan)\b",
-    # A decision recommendation, which is a classification with one bit.
-    r"\brecommend(?:ed|s)?\s+(?:to\s+)?(?:decline|deny|reject|approve)\b",
-    r"\b(?:should|must)\s+be\s+(?:declined|denied|rejected|approved)\b",
+
+    # A decision recommendation is a classification with one bit. Active...
+    r"\brecommend(?:ed|s|ing)?\s+(?:to\s+|that\s+)?(?:this\s+|the\s+)?"
+    r"(?:\w+\s+){0,2}?(?:be\s+)?(?:declin|deny|denie|reject|approv)\w*",
+    # ...and passive: "decline is recommended", "approval is not recommended".
+    r"\b(?:declin|deny|denial|denie|reject|approv)\w*\b[^.!?]{0,30}?"
+    r"\b(?:is|are|was|were)\s+(?:not\s+)?recommend\w*",
+    r"\b(?:should|must|ought\s+to)\s+(?:not\s+)?be\s+"
+    r"(?:declined|denied|rejected|approved)\b",
 ))
 
 

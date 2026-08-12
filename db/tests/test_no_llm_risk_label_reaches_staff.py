@@ -100,3 +100,34 @@ def test_adverse_action_reasons_do_not_come_from_the_summary():
                     f"{path.name} appears to source an adverse-action reason from "
                     f"a summary: {line.strip()[:80]}"
                 )
+
+def test_no_staff_screen_describes_the_summary_as_risk_tiered():
+    """The copy around the button is a claim too.
+
+    The test above catches a screen RENDERING a label field. It does not catch a
+    screen that TELLS the underwriter the feature produces one -- and
+    LoanSummaryCard invited staff to "Generate a risk-tiered, plain-English
+    summary" for the whole time the tier was being removed from the contract,
+    the schema, the prompt and the card. Staff read that as an authorised tiered
+    assessment, which is exactly the claim no published rule supports.
+
+    A guard that watches the data path and ignores the words beside it leaves
+    the user with the same false impression and a green suite.
+    """
+    offenders = []
+    for path in list(FRONTEND.rglob("*.tsx")) + list(FRONTEND.rglob("*.ts")):
+        if "node_modules" in path.parts or ".next" in path.parts:
+            continue
+        for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("//") or stripped.startswith("*"):
+                continue  # a comment explaining the removal is not user-visible
+            if not re.search(r"""["'`]""", line):
+                continue  # only string literals reach the screen
+            if re.search(r"risk[\s-]?tier(ed)?|risk[\s-]grade|risk[\s-]rating", line, re.I):
+                offenders.append(f"{path.name}:{n}: {stripped[:70]}")
+    assert not offenders, (
+        "a staff screen describes the summary as risk-tiered, which tells the "
+        "underwriter the system assigns a tier it has no approved rule for: "
+        + "; ".join(offenders)
+    )

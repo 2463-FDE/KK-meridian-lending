@@ -39,6 +39,17 @@ CLASSIFICATIONS = [
     "Recommend to decline.",
     "This application should be denied.",
     "The borrower presents significant risk.",
+    # Review round 3. Every one of these reached the staff payload under the
+    # first version of the guard, which matched adjective-then-risk and active
+    # recommendations only. The adjective moving to the other side of the verb
+    # was enough to defeat it.
+    "The application risk is high.",
+    "The overall risk appears moderate.",
+    "This borrower is a poor credit risk.",
+    "Decline is recommended.",
+    "Approval is not recommended.",
+    "Credit risk is unacceptable.",
+    "The loan should not be approved.",
 ]
 
 # Descriptive, grounded observations. These are the whole point of the summary
@@ -51,6 +62,8 @@ DESCRIPTIVE = [
     "The applicant reports six years at the same employer.",
     "Stated income is $71,000 against a $24,000 request.",
     "There is a risk the stated employer could not be verified.",
+    "The applicant asked about refinancing risk disclosures.",
+    "Payment history shows no late payments.",
 ]
 
 
