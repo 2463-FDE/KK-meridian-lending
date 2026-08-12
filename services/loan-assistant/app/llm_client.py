@@ -220,8 +220,22 @@ def _build_prompt(app_data: dict, signal=None) -> str:
             "invent any other external figures." + chr(10) + chr(10)
         )
     return (
-        "Summarize this loan application as JSON with fields: loan_amount, "
-        "term_months, purpose, risk_tier, summary, flags.\n\n"
+        # Derived from the response contract, never typed out again.
+        #
+        # This line is where the last revision failed: `risk_tier` was removed
+        # from `_LLMOutput`, the API schema, the fixtures and the frontend, and
+        # survived here as a literal. The prompt then asked for a field the
+        # contract had dropped -- and because `_LLMOutput` ignores unknown keys,
+        # a tier the model produced was discarded in silence. Nothing was
+        # published, but the model was still being told to form the judgment,
+        # which colours the prose and flags staff actually read.
+        #
+        # A hand-written copy of a list that lives somewhere else is the defect
+        # shape this repository keeps hitting. Generating the sentence from
+        # `_LLMOutput` makes the prompt and the contract the same statement, so
+        # removing a field from the contract removes it from the prompt.
+        f"Summarize this loan application as JSON with fields: "
+        f"{', '.join(_LLMOutput.model_fields)}.\n\n"
         f"Application data:\n{json.dumps(safe, indent=2)}\n\n"
         f"{context}"
         "Respond with only the JSON object — no markdown fences, no extra text."
