@@ -10,7 +10,7 @@
 
 **It approves one thing: servicing balances become a projection of an
 append-only ledger.** That is the decision under review, and it is
-implementable on its own — steps 1 to 3 of the migration plan close D3 without
+implementable on its own — PR-1 to PR-3 of the migration plan close D3 without
 any maker-checker work existing.
 
 **Maker-checker is described here but not approved here.** It appears because it
@@ -21,12 +21,26 @@ ledger decisions, and they are the ones that need approving now — if the ledge
 shipped without them, retrofitting maker-checker would mean migrating the money
 table a second time.
 
-So what the maker-checker section below commits to is the **requirements** step 4
+So what the maker-checker section below commits to is the **requirements** PR-4
 must satisfy and the schema the ledger has to expose for it. The design itself
 gets its own PR, its own tests, and its own review. A reviewer who disagrees with
 the approval workflow can still approve this ADR; a reviewer who disagrees that
 `pending_movements` should be a separate table cannot, because that is a ledger
 decision.
+
+## Two sequences, two label spaces
+
+These are different things and an earlier revision numbered both 1-5, which made
+"step 3" ambiguous between "the third PR" and "the third deploy action".
+
+- **PR-1 … PR-5** — the **implementation sequence**: what lands, in which pull
+  request, and the gate each must pass before the next is written.
+- **R1 … R5** — the **production rollout**: the order operations performs on a
+  live system, once the code exists. R1 does not correspond to PR-1.
+- **G1 … G5** — **gates**: conditions checked between rollout actions. G1 and G2
+  make the mixed-deploy safe; G3 to G5 are the cutover freeze.
+
+Nothing reuses a label across the three.
 
 ## Required invariants
 
@@ -44,7 +58,7 @@ approvable content.
    trigger and by nothing else, enforced by a guard trigger. `SUM(ledger_entries)`
    is the auditable truth.
 
-   "Nothing else" is a claim about four call sites, so they are named — the
+   "Nothing else" is a claim about FIVE call sites, so all five are named — the
    invariant is useless if an implementer converts three of them:
 
    | Writer | Column | Becomes |
@@ -57,23 +71,23 @@ approvable content.
 
    The last one is the one to miss: it lives outside the balance module, so a
    conversion that works through `balance.py` and stops leaves late fees writing
-   `past_due` directly — and step 5's write-guard then makes every late-fee
+   `past_due` directly — and PR-5's write-guard then makes every late-fee
    assessment raise, in a nightly job, after the guard is on. The step-3 gate
    enumerates writers **from source** (`grep 'UPDATE balances'` across
    `services/`) rather than from this table, because a table is a list and lists
    go stale.
    **The interim rule for `adjust_balance` and `waive_fee`, stated once because
    three places disagreed about it.** Earlier revisions said all five writers move
-   in step 3, that these two arrive "via ADR 0011", and that maker-checker is
+   in PR-3, that these two arrive "via ADR 0011", and that maker-checker is
    optional. Those cannot all be true. The rule:
 
    > **ADR 0011 is REQUIRED before the write-guard is enabled.** Until it lands,
    > `adjust_balance` and `waive_fee` keep writing `balances` directly and are
-   > frozen during the cutover window (gate F1). Step 5 does not run until 0011
+   > frozen during the cutover window (gate G3). PR-5 does not run until 0011
    > has converted them.
 
    So maker-checker is not optional *to this plan* even though it is a separate
-   decision: the ledger can ship and run without it (steps 1–3 close D3), and the
+   decision: the ledger can ship and run without it (PR-1 to PR-3 close D3), and the
    guard cannot be turned on without it. That is the honest shape — the ledger
    does not depend on maker-checker, and the *contract* attached to it does.
 
@@ -104,7 +118,7 @@ approvable content.
    unique index**, so a retried charge would post the balance twice with nothing
    stopping it. The index would look like protection and provide none.
 
-   **The rule: that path is converted, not excluded.** Step 3 changes its
+   **The rule: that path is converted, not excluded.** PR-3 changes its
    `INSERT` to `INSERT ... RETURNING id` and passes the real id into
    `apply_payment_once()`, which is the idempotent writer the modern path already
    uses. `apply_payment()` is then deleted rather than left beside it — a
@@ -132,13 +146,13 @@ mechanical rather than a judgement.
 
 | # | Invariant | Lands in | Machine-checkable acceptance criterion |
 |---|---|---|---|
-| 1 | Entries are immutable | step 2 | `UPDATE` and `DELETE` on `ledger_entries` both raise, asserted against real Postgres |
-| 2 | A signed delta, never a total | step 2 | `amount <> 0` CHECK; two entries inserted in one statement both apply, so the balance moves by their sum |
-| 3 | `balances` written only by the projection | steps 3 + 5 | `grep 'UPDATE balances'` across `services/` returns only the projection's own statement; with the guard on, a direct `UPDATE` raises |
-| 4 | The sign is keyed to what the borrower owes | step 2 | a `payment` with a positive amount, and a `fee_assessed` with a negative one, are both refused by CHECK |
-| 5 | A human-directed entry names the human | step 2 | an `adjustment` or `fee_waived` with a NULL `actor_id` is refused; a `payment` without one is accepted |
-| 6 | Per-loan parity, excluding `interest` | step 2 gate, re-run after step 4's delta pass | for every loan: `balances.balance = SUM(principal)` and `past_due = SUM(fees)`; reported per loan, never as one total |
-| 7 | One entry per `(payment_id, component)` | step 2 (index), step 3 (the id) | the same `payment_id` twice for one component raises `UniqueViolation`; and **no ledger-writing path may pass a NULL `payment_id` for a `payment` entry** — the check that catches the legacy route |
+| **PR-1** | Entries are immutable | PR-2 | `UPDATE` and `DELETE` on `ledger_entries` both raise, asserted against real Postgres |
+| **PR-2** | A signed delta, never a total | PR-2 | `amount <> 0` CHECK; two entries inserted in one statement both apply, so the balance moves by their sum |
+| **PR-3** | `balances` written only by the projection | steps 3 + 5 | `grep 'UPDATE balances'` across `services/` returns only the projection's own statement; with the guard on, a direct `UPDATE` raises |
+| **PR-4** | The sign is keyed to what the borrower owes | PR-2 | a `payment` with a positive amount, and a `fee_assessed` with a negative one, are both refused by CHECK |
+| **PR-5** | A human-directed entry names the human | PR-2 | an `adjustment` or `fee_waived` with a NULL `actor_id` is refused; a `payment` without one is accepted |
+| 6 | Per-loan parity, excluding `interest` | PR-2 gate, re-run after PR-4's delta pass | for every loan: `balances.balance = SUM(principal)` and `past_due = SUM(fees)`; reported per loan, never as one total |
+| 7 | One entry per `(payment_id, component)` | PR-2 (index), PR-3 (the id) | the same `payment_id` twice for one component raises `UniqueViolation`; and **no ledger-writing path may pass a NULL `payment_id` for a `payment` entry** — the check that catches the legacy route |
 
 The last cell is the one that matters most, because it is the invariant that
 looks satisfied by the index alone. A test asserting only that duplicates are
@@ -151,7 +165,7 @@ One statement, referred to rather than repeated:
 
 | Debt | This ADR | Why |
 |---|---|---|
-| **D3** — lost update on `balances` | **Closes** at step 3 | The read-modify-write disappears; entries are appended and the projection is the trigger's job |
+| **D3** — lost update on `balances` | **Closes** at PR-3 | The read-modify-write disappears; entries are appended and the projection is the trigger's job |
 | **D8** — no maker-checker, no audit of who moved money | **Makes answerable**, closes in ADR 0011 | The ledger is where a proposal can point once approved; the workflow is a separate decision |
 | **D14** — no payment waterfall | **Enables, does not close** | A payment can write one row per component, which is the prerequisite. The allocation algorithm — order, short payments, partial periods — is its own change with its own tests |
 
@@ -274,7 +288,7 @@ CREATE TABLE ledger_entries (
     -- No approval columns. approved_required, approved_at and
     -- pending_movement_id all belong to ADR 0011, which ships them with the
     -- pending_movements table that gives them meaning. A ledger-only migration
-    -- has nothing to approve: in steps 1 to 3 every entry is machine-originated
+    -- has nothing to approve: in PR-1 to PR-3 every entry is machine-originated
     -- or a direct staff write, and the concept of an entry awaiting approval
     -- does not exist yet.
     --
@@ -409,13 +423,13 @@ that requires an actor, a reason, and (below) a second approver.
 
 **Who the actor is, in one rule:** `ledger_entries.actor_id` is whoever *authorised* the movement. For an `adjustment` or `fee_waived` that is the **approver**, not the requester -- the ledger answers "who allowed this money to move". The requester is preserved rather than discarded, by the linkage ADR 0011 adds: `pending_movements.requested_by` holds it, and the entry's `pending_movement_id` is UNIQUE, so both people are recoverable from either direction. Recorded here because it decides what `actor_id` MEANS on this table, which is a ledger question and has to be answered before anything writes to it. Machine-originated entries (`payment`, `fee_assessed`, `disbursement`, `opening_balance`) have no actor, and the CHECK exempts exactly those.
 
-### `past_due` is in scope, and it ships in steps 1-3
+### `past_due` is in scope, and it ships in PR-1 to PR-3
 
 **Fee movements go in the ledger, and the `past_due` projection lands with the
-ledger — steps 1 to 3, not with maker-checker.** The ordering matters in the
+ledger — PR-1 to PR-3, not with maker-checker.** The ordering matters in the
 direction that is easy to get wrong: `waive_fee` is one of the two actions
 maker-checker governs, so the fees component has to exist *before* anything
-approves a waiver, or step 4 would be approving movements the ledger cannot
+approves a waiver, or PR-4 would be approving movements the ledger cannot
 represent.
 
 Leaving them out would put a hole in the audit trail exactly where fee waivers
@@ -557,13 +571,13 @@ Expand and contract, the same shape as the PAN/CVV removal (`0029` → `0031`),
 which is in this repository specifically because a big-bang drop on a money table
 is not recoverable.
 
-| Step | What lands | Gate before the next step |
+| PR | What lands | Gate before the next PR |
 |---|---|---|
-| 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
-| 2 | `ledger_entries` (no approval columns — see ADR 0011), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
-| 3 | Writes move to the ledger; `balances` written only by the trigger. **All five writers**, including `delinquency.assess_late_fee` outside the balance module, and the legacy `POST /payments` path converted to `INSERT ... RETURNING id` + `apply_payment_once()` so its entries carry a real `payment_id` | Step 1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns only the projection trigger's own statement |
-| 4 | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
-| 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
+| **PR-1** | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
+| **PR-2** | `ledger_entries` (no approval columns — see ADR 0011), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
+| **PR-3** | Writes move to the ledger; `balances` written only by the trigger. **All five writers**, including `delinquency.assess_late_fee` outside the balance module, and the legacy `POST /payments` path converted to `INSERT ... RETURNING id` + `apply_payment_once()` so its entries carry a real `payment_id` | PR-1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns only the projection trigger's own statement |
+| **PR-4** | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
+| **PR-5** | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
 stated rather than discovered.** Historical rows have a balance but no history:
@@ -583,7 +597,7 @@ query that asks.
 
 A reader should not have to infer where the first required boundary sits, so:
 
-**Steps 1 to 3 are the whole obligation.** An implementation that lands those and
+**PR-1 to PR-3 are the whole obligation.** An implementation that lands those and
 stops is compliant with this ADR. Concretely, it must have all four of:
 
 1. a **failing** test for the lost update against today's code, landed before
@@ -597,10 +611,10 @@ stops is compliant with this ADR. Concretely, it must have all four of:
    `delinquency.assess_late_fee`;
 4. per-loan parity green, `interest` excluded.
 
-**The write-guard is NOT in the minimum slice.** It is step 5, and step 5 requires
+**The write-guard is NOT in the minimum slice.** It is PR-5, and PR-5 requires
 ADR 0011, because `adjust_balance` and `waive_fee` cannot be converted without an
 approval path and cannot keep writing directly once the guard is on. A system that
-stops at step 3 is compliant with this ADR: the ledger is authoritative, D3 is
+stops at PR-3 is compliant with this ADR: the ledger is authoritative, D3 is
 closed, and `balances` still has one unguarded door that the freeze and the parity
 check cover.
 
@@ -610,7 +624,7 @@ decided differently without contradicting anything here. The single exception is
 the one above: **enabling the write-guard requires ADR 0011.** Optional to the
 decision, required for the last step of the rollout.
 
-**Step 2 ships no maker-checker columns at all.** Not
+**PR-2 ships no maker-checker columns at all.** Not
 `pending_movement_id`, not `approved_required`, not `approved_at`. Every one of
 them exists to serve an approval workflow this ADR does not decide, and ADR 0011
 adds all three together with the table that gives them meaning and the trigger
@@ -638,7 +652,7 @@ easy to read past. So, explicitly:
    enabled;
 5. immutability enforced by a trigger, not by convention or privilege;
 6. the migration step order and the gates on each step, including the freeze
-   gates F1-F3;
+   gates G3-G5;
 7. per-loan parity excluding `interest`, asserted after the delta pass.
 
 **Illustration.** Column types and lengths, index names, constraint names, the
@@ -653,13 +667,13 @@ that is a defect in this document and it should be fixed here first.
 
 Not in this ADR, and not in whatever PR implements its first step:
 
-| # | Follow-up PR | Why it is separate | Gate |
+| PR | Concern | Why it is separate | Gate |
 |---|---|---|---|
-| 1 | The failing lost-update test against today's code | It has to fail before anything is built, or the fix is unfalsifiable | The failure is the correctly-paired race, not a wrong repro |
-| 2 | Ledger schema + projection trigger migration | Runnable DDL belongs where it executes and can be tested | Parity per loan, seeded and back-filled, with `interest` excluded (it projects nowhere) |
-| 3 | Write-path conversion — `balances` written only by the trigger | Independently revertible; this is the step that touches live money | PR 1's test now passes. **D3 closes** |
-| 4 | Maker-checker: `pending_movements`, `resolve_pending_movement()`, adjust and waive | Its own design decision (see above), reviewable on its own merits | Every numbered requirement above, each failing when removed |
-| 5 | Payment waterfall | The allocation algorithm is unrelated to how balances are stored | Allocation tests: order, short payments, partial periods |
+| **PR-1** | The failing lost-update test against today's code | It has to fail before anything is built, or the fix is unfalsifiable | The failure is the correctly-paired race, not a wrong repro |
+| **PR-2** | Ledger schema + projection trigger migration | Runnable DDL belongs where it executes and can be tested | Parity per loan, seeded and back-filled, with `interest` excluded (it projects nowhere) |
+| **PR-3** | Write-path conversion — `balances` written only by the trigger | Independently revertible; this is the step that touches live money | PR-1's test now passes. **D3 closes** |
+| **PR-4** | Maker-checker: `pending_movements`, `resolve_pending_movement()`, adjust and waive | Its own design decision (see above), reviewable on its own merits | Every numbered requirement above, each failing when removed |
+| **PR-5** | Payment waterfall | The allocation algorithm is unrelated to how balances are stored | Allocation tests: order, short payments, partial periods |
 
 Explicitly **not** goals of any of the above:
 
@@ -679,20 +693,20 @@ difference is where this goes wrong.
 
 ### The cutover, in order
 
-| # | Action | Why this order |
+| Action | What is done | Why this order |
 |---|---|---|
-| 1 | Deploy the schema: tables, projection trigger, and the `balances` write-guard **disabled** | The guard is a separate `ALTER TABLE ... ENABLE TRIGGER`, so schema and enforcement land in different deploys and either can be reverted alone |
-| 2 | Back-fill `opening_balance` entries, with writes still going to `balances` directly | Nothing reads the ledger yet, so a wrong back-fill is a table to truncate, not an incident |
-| 3 | Run parity in report-only mode over every loan | Fails here cost nothing — see below |
-| 4 | Deploy `balance.py` writing ledger entries instead of `balances`, then run the **delta pass** | The projection trigger now maintains `balances`; the old path is gone in the same deploy that adds the new one. The delta pass closes the gap the back-fill could not — see below |
-| 5 | Enable the write-guard | Last, because until step 4 is everywhere, a straggler pod still writing `balances` directly would start erroring |
+| **R1** | Deploy the schema: tables, projection trigger, and the `balances` write-guard **disabled** | The guard is a separate `ALTER TABLE ... ENABLE TRIGGER`, so schema and enforcement land in different deploys and either can be reverted alone |
+| **R2** | Back-fill `opening_balance` entries, with writes still going to `balances` directly | Nothing reads the ledger yet, so a wrong back-fill is a table to truncate, not an incident |
+| **R3** | Run parity in report-only mode over every loan | Fails here cost nothing — see below |
+| **R4** | Deploy `balance.py` writing ledger entries instead of `balances`, then run the **delta pass** | The projection trigger now maintains `balances`; the old path is gone in the same deploy that adds the new one. The delta pass closes the gap the back-fill could not — see below |
+| **R5** | Enable the write-guard | Last, because until PR-4 is everywhere, a straggler pod still writing `balances` directly would start erroring |
 
-**Writes are not paused and not dual-written — conditional on gate 3a.** That
+**Writes are not paused and not dual-written — conditional on gate G1.** That
 condition is load-bearing and was missing from an earlier revision, which claimed
-the cutover was safe on the strength of "step 4 is atomic per write". It is not
-safe without 3a: until every pod writes `balances` relatively, an old pod's
+the cutover was safe on the strength of "PR-4 is atomic per write". It is not
+safe without G1: until every pod writes `balances` relatively, an old pod's
 absolute write can overwrite a new pod's projection, and the ledger keeps both
-entries while the balance loses one. **If 3a is not fully deployed, pause payment
+entries while the balance loses one. **If G1 is not fully deployed, pause payment
 applies for the cutover window** — the pause is the fallback, not the plan, and
 saying so is the difference between a plan and an assumption.
 
@@ -711,7 +725,7 @@ Both alternatives were considered:
 
 ### The mixed-deploy race, and the gate that closes it
 
-"Step 4 is atomic per write" is true and it is not sufficient, which an earlier
+"PR-4 is atomic per write" is true and it is not sufficient, which an earlier
 version of this section missed. During the deploy both versions run, and they do
 not compose:
 
@@ -727,7 +741,7 @@ loses one payment, and the delta pass cannot repair it: the ledger is right, so
 nothing looks missing. **Silently wrong customer balances**, which is the exact
 failure this whole ADR exists to remove.
 
-**The gate: step 3a — make the old path's write relative before any ledger entry
+**The gate: gate G1 — make the old path's write relative before any ledger entry
 is ever written.**
 
 ```sql
@@ -740,13 +754,13 @@ UPDATE balances
 
 That single change makes the two paths **commutative**: both are now deltas
 applied by Postgres under its own row lock, so any interleaving of old and new
-pods produces the same balance. It ships and fully deploys *before* step 4 —
+pods produces the same balance. It ships and fully deploys *before* PR-4 —
 which is why it is a numbered gate and not a note.
 
 | Gate | Before | Check |
 |---|---|---|
-| **3a** | step 4 (any ledger write) | every `balances` write in `servicing-service` is relative (`balance = balance ± …`) or is a frozen route. Enumerated from source, not listed here — see the writer inventory below |
-| **3b** | step 4 | 3a is deployed to **every** pod. A single old pod still doing read-modify-write reintroduces the race by itself |
+| **G1** | PR-4 (any ledger write) | every `balances` write in `servicing-service` is relative (`balance = balance ± …`) or is a frozen route. Enumerated from source, not listed here — see the writer inventory below |
+| **G2** | PR-4 | G1 is deployed to **every** pod. A single old pod still doing read-modify-write reintroduces the race by itself |
 
 Three alternatives were considered and rejected. A **version fence** (new pods
 refuse to write until all old ones are gone) needs coordination this system has
@@ -760,12 +774,12 @@ The atomic decrement costs one statement.
 discovering: the lost update *is* the read-modify-write, so making it relative
 removes the interleaving D3 describes. It does not make the ledger unnecessary —
 D3's fix has to survive `adjust_balance`, which genuinely sets an absolute value,
-and the audit trail is the other half of why the ledger exists. But step 3a is
+and the audit trail is the other half of why the ledger exists. But gate G1 is
 the cheapest real improvement in this plan, and it can land first.
 
 ### The delta pass, and why the back-fill alone is not enough
 
-Between the back-fill and the last pod finishing step 4, live payments move
+Between the back-fill and the last pod finishing PR-4, live payments move
 `balances` directly and write **no** ledger entry. The ledger is therefore behind
 by exactly those payments, and no amount of care in the back-fill fixes it,
 because they had not happened yet when it ran. This is the part the "no pause"
@@ -773,7 +787,7 @@ decision costs, and it has to be paid rather than argued away.
 
 It is payable exactly, because the movements are already recorded. Servicing's
 idempotency guard writes one `payment_applications` row per applied payment, so
-after step 4 completes:
+after PR-4 completes:
 
 > *Illustrative and non-runnable.* Shape of the decision, not the migration —
 > the executable version lands in the migration PR where it can be tested. See
@@ -807,7 +821,7 @@ makes the check agree with the index.
 
 And the pass can only ever reconstruct principal. `payment_applications` stores
 one `amount` per payment with no component breakdown — the split does not exist
-in that table because the waterfall does not exist yet (D14, step 5). So:
+in that table because the waterfall does not exist yet (D14, PR-5). So:
 
 - **the delta pass is for pre-waterfall, principal-only payments, and that is
   all it is for.** It runs during cutover, when `apply_payment_once` writes
@@ -832,17 +846,17 @@ would be wrong with nothing failing:
 
 | Gate | Before | Check |
 |---|---|---|
-| **F1** | step 2 (back-fill) | `adjust-balance` and `waive-fee` return 503 for the duration of the cutover, from a flag the deploy sets — not from an operator's memory |
-| **F2** | step 5 (enable the write-guard) | zero `balances` rows have `updated_at` inside the cutover window without a matching ledger entry. This is the assertion that the freeze actually held; if it fails, a staff write got through and has to be reconstructed by hand before the guard goes on |
-| **F3** | releasing the freeze | F2 green, and per-loan parity green after the delta pass |
+| **G3** | PR-2 (back-fill) | `adjust-balance` and `waive-fee` return 503 for the duration of the cutover, from a flag the deploy sets — not from an operator's memory |
+| **G4** | PR-5 (enable the write-guard) | zero `balances` rows have `updated_at` inside the cutover window without a matching ledger entry. This is the assertion that the freeze actually held; if it fails, a staff write got through and has to be reconstructed by hand before the guard goes on |
+| **G5** | releasing the freeze | G4 green, and per-loan parity green after the delta pass |
 
-F2 is the one that matters. A freeze nobody verified is indistinguishable from a
+G4 is the one that matters. A freeze nobody verified is indistinguishable from a
 freeze that leaked, and the leak is silent: the projection and the ledger simply
 disagree by one adjustment nobody remembers making.
 
 ### Locks
 
-Step 5 is the one to watch. The guard is a `BEFORE UPDATE OR DELETE` row trigger
+PR-5 is the one to watch. The guard is a `BEFORE UPDATE OR DELETE` row trigger
 on `balances`, so it takes no table lock at write time — but installing it does:
 `CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE`, which waits for in-flight writes to
 that table and blocks new ones while it waits. That is a short wait on a healthy
@@ -857,13 +871,13 @@ the same row `apply_payment_once` locks today. No new contention shape.
 
 ### If parity fails
 
-Where it fails decides what to do, which is why step 3 exists before step 4:
+Where it fails decides what to do, which is why PR-3 exists before PR-4:
 
-- **After the back-fill (step 3), before the write-path switch.** Nothing reads
+- **After the back-fill (PR-3), before the write-path switch.** Nothing reads
   the ledger yet. Truncate `ledger_entries`, fix the back-fill, run it again.
   There is no rollback because there was no cutover. **This is the step whose job
   is to catch the back-fill being wrong, and it is free.**
-- **After the write-path switch (step 4 or 5).** Do NOT reconcile by writing to
+- **After the write-path switch (PR-4 or 5).** Do NOT reconcile by writing to
   `balances`: that is the thing under suspicion, and correcting the projection by
   hand destroys the evidence of how it diverged. Disable the write-guard, revert
   `balance.py` to the direct-write path, and leave the ledger in place accruing
@@ -939,7 +953,7 @@ will chase a phantom mismatch on every loan that has ever accrued interest.
   `apply_payment_once`, whose `payment_applications` guard becomes redundant —
   redundant is not harmful, but leaving two idempotency mechanisms where one is
   authoritative is its own confusion, and it should be removed deliberately in
-  step 3 rather than left.
+  PR-3 rather than left.
 - The back-fill's opening entries are not real history and never will be.
 
 **Explicitly not claimed.** This is not a general-ledger or double-entry
@@ -953,7 +967,7 @@ be the same category of overclaim as the README's PCI-DSS banner.
 **Does `past_due` fold into the ledger?** Yes -- see "`past_due` is in scope"
 above. Leaving it out would have put a hole in the audit trail exactly where fee
 waivers are, and waivers are one of the two actions Week 6 named as needing a
-second approver. It makes step 4 larger and gives `balances` a second derived
+second approver. It makes PR-4 larger and gives `balances` a second derived
 column, both recorded in Consequences.
 
 **What remains genuinely undecided** is nothing in this ADR's own scope. The
