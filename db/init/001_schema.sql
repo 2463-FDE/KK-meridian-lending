@@ -355,3 +355,22 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
+
+-- D7: one row per reconciliation run (db/migrations/0034). Counts and totals
+-- only -- no card data, no applicant identifiers, no processor references. A
+-- control that leaves no trace is indistinguishable from one that never ran.
+CREATE TABLE IF NOT EXISTS reconciliation_runs (
+    id              BIGSERIAL   PRIMARY KEY,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ,
+    outcome         TEXT        NOT NULL CHECK (outcome IN ('ok','breach','error')),
+    loans_compared  INTEGER     NOT NULL DEFAULT 0,
+    breaks_found    INTEGER     NOT NULL DEFAULT 0,
+    break_value     NUMERIC(14,2) NOT NULL DEFAULT 0,
+    threshold_value NUMERIC(14,2) NOT NULL DEFAULT 0,
+    breaks          JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    error_code      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_outcome_time
+    ON reconciliation_runs (outcome, started_at DESC);

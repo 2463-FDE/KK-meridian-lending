@@ -73,6 +73,59 @@ orchestrates the LOS flow and calls them over HTTP.
 - **Look at the portfolio:** `GET /lss/loans?limit=25&offset=0&status=current` (requires auth).
 - **Reconciliation eyeball:** `GET /lss/reconciliation/peek` (ledger vs settlement totals).
 
+## Reconciliation (D7)
+
+Compares captured payments against the processor's settlement file, per loan, and
+fails when they disagree.
+
+```bash
+# One run, from the servicing container. Exit code is the contract.
+docker compose exec servicing-service python -m app.reconcile_job
+#   0  clean          -- ran, everything within threshold
+#   1  breach         -- ran, breaks exceeded the threshold   (a money finding)
+#   2  could not run  -- settlement file missing, database down (a control finding)
+```
+
+**Schedule it as a separate process, not inside the API.** An in-process scheduler
+dies with its web worker and nothing reports that it stopped, which is the failure
+D7 already had: a control that silently is not running looks exactly like one that
+is running and finding nothing.
+
+```cron
+# Daily, after the processor's settlement file lands. Cron mails on any non-zero
+# exit, so a breach and a broken control both get noticed.
+30 6 * * *  docker compose -f /srv/meridian/docker-compose.yml exec -T servicing-service python -m app.reconcile_job
+```
+
+Tune with `RECONCILIATION_BREAK_THRESHOLD` (default `0`). An unparseable or
+negative value falls back to `0` rather than to permissive.
+
+**What it reports.** Every run writes a `reconciliation_runs` row -- counts, signed
+per-loan totals, the threshold it was judged against, and on failure the exception
+TYPE only. `GET /reconciliation/peek` returns the two totals plus
+`last_successful_run` and `recent_failures`, so "when did this last agree?" has an
+answer. Prometheus gauges on the existing `/metrics`:
+
+- `servicing_reconciliation_breaks`
+- `servicing_reconciliation_break_value`
+- `servicing_reconciliation_last_run_ok`
+- `servicing_reconciliation_last_success_timestamp` -- the one to alert on. A run
+  that stops happening produces no failures at all, so staleness is the signal.
+
+**What it does NOT do, and do not plan around otherwise.**
+
+- **No alerting integration.** There is no pager, no incident tool and no
+  alertmanager in this build. What exists is a contract those things consume: the
+  exit code, the table, the gauges. Calling it alerting would be the overclaim this
+  work exists to remove.
+- **No per-transaction matching.** The settlement file identifies a capture by the
+  processor's `processor_ref`; `payments.authorization_id` is a different
+  identifier from our own authorization call, and no payment row carries a `PR-`
+  reference. So a break is detected but **not attributed** -- "loan 4471 disagrees
+  by 99.99", not which capture caused it. Fixing that means persisting
+  `processor_ref` at capture time in payment-service, and it is the next piece of
+  work here.
+
 ## Known operational pain (unresolved)
 
 - **Payment retries — FIXED, keep watching.** The processor occasionally times out and
