@@ -60,7 +60,7 @@ TIMEOUT_SECONDS = 20.0
 # identifiers (name, email, phone, address) are deliberately excluded — a risk
 # summary doesn't need them, and they have no business reaching a third-party API.
 # income/employment_years are required here: the system prompt instructs the model
-# to describe risk_tier from the loan amount, income and employment length, so
+# to ground its prose in the loan amount, income and employment length, so
 # those facts must actually reach it — without them the model was inventing a risk chip from data it
 # never saw (Codex review on PR #2).
 #
@@ -73,7 +73,7 @@ TIMEOUT_SECONDS = 20.0
 _PROMPT_ALLOWED_FIELDS = (
     "amount", "term_months", "purpose", "income", "employer", "job_title", "employment_years",
 )
-# risk_tier/flags require these two to be present and non-null — see
+# flags require these two to be present and non-null — see
 # _has_risk_grounding_data() below.
 _RISK_GROUNDING_FIELDS = ("income", "employment_years")
 
@@ -84,11 +84,12 @@ produce a concise, factual summary in the exact JSON schema provided.
 Rules:
 - NEVER include SSN, full card numbers, or CVV in your output.
 - Use only the data provided — do not invent information.
-- risk_tier: DESCRIPTIVE ONLY. Summarise what the figures show relative to each
-  other -- a large loan against a modest income, or short employment -- and do not
-  apply any numeric cutoff. There is no published threshold for this field, so any
-  number you applied would be your own, presented to staff as though it were
-  policy.
+- Do NOT output a risk rating, tier, grade, score or category of any kind. There
+  is no published rule that maps these facts to one, so any label you produced
+  would be your own judgement shown to staff as though it were policy -- and in a
+  manual review it could sway an approve or deny with nothing auditable behind it.
+  The deterministic decision outcome and model score already exist and come from
+  decision-service; your job is prose, not classification.
 - Do NOT reason about debt-to-income. You are not given the applicant's existing
   debt obligations, and a ratio inferred from income alone is a fabricated number.
 - flags: list specific concerns in plain language, describing what the data shows
@@ -105,7 +106,6 @@ class _LLMOutput(BaseModel):
     loan_amount: float = Field(description="Requested loan amount in USD")
     term_months: int = Field(description="Loan term in months")
     purpose: str = Field(description="Stated purpose of the loan")
-    risk_tier: Literal["low", "medium", "high", "decline"]
     summary: str = Field(description="2-3 sentence plain-English summary. No PAN, CVV, or SSN.")
     flags: list[str] = Field(default_factory=list)
 
@@ -123,7 +123,7 @@ class LLMResponseError(Exception):
 
 
 class LLMInsufficientDataError(Exception):
-    """Raised when the source application is missing the data risk_tier depends on
+    """Raised when the source application is missing the data the summary depends on
     (income, employment_years — both nullable columns). Fails loudly instead of
     letting the model invent a risk chip from data it never saw."""
 
@@ -514,7 +514,7 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         raise LLMInsufficientDataError(
             f"app_id={app_data.get('id', 'unknown')} is missing "
             f"{_missing_risk_grounding_fields(app_data)} — refusing to let the "
-            "model assign a risk_tier it has no data to support."
+            "model describe risk from data it never saw."
         )
 
     # One grounded external signal (app/macro.py). Fetched before the cost

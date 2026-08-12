@@ -26,9 +26,18 @@ class LoanSummary(BaseModel):
     loan_amount: float = Field(description="Requested loan amount in USD")
     term_months: int = Field(description="Loan term in months")
     purpose: str = Field(description="Stated purpose of the loan")
-    risk_tier: Literal["low", "medium", "high", "decline"] = Field(
-        description="Officer-facing risk tier based on income, amount, and employment"
-    )
+    # risk_tier is GONE, not defaulted.
+    #
+    # It required the model to pick one of low/medium/high/decline, so removing
+    # the numeric thresholds from the prompt did not remove the problem -- the
+    # contract still forced a classification boundary to be invented, and staff
+    # saw the result as a coloured chip that looked policy-backed. There is no
+    # published rule mapping an application to a tier, and until Lending Ops
+    # approves one there is nothing for the model to apply.
+    #
+    # What staff should read instead already exists and is deterministic: the
+    # decision outcome and model score from decision-service. Reg B adverse-action
+    # reasons come from those drivers and never from this summary.
     summary: str = Field(
         description="2-3 sentence plain-English summary for the loan officer. No PAN, CVV, or SSN."
     )
