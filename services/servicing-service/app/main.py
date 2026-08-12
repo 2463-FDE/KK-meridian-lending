@@ -84,10 +84,17 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
 # table the money path never touches.
 _PREFLIGHT_WRITE_TABLES = ("payment_applications", "balances")
 
+# And the columns of `balances` the probe must write, for the same reason: the
+# real apply sets `balance`, and a probe that set only `updated_at` proved
+# nothing about a column-level grant, trigger or constraint on `balance`. Also
+# asserted against `apply_payment_once`'s source.
+_PREFLIGHT_BALANCE_COLUMNS = ("balance", "updated_at")
+
 
 @app.get("/internal/auth-check")
 def internal_auth_check(
     x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+    loan_id: Optional[int] = None,
 ):
     """Can this service accept AND PERSIST an apply-payment right now?
 
@@ -139,6 +146,20 @@ def internal_auth_check(
         # touches a third table fails the test rather than silently escaping the
         # probe.
         with db.transaction() as cur:
+            if loan_id is not None:
+                # Existence is proven by a plain read, separately from
+                # writability, because the locking probe below uses SKIP LOCKED
+                # and therefore cannot tell "no such row" from "someone else has
+                # it". Conflating the two would make a busy loan look missing.
+                #
+                # A missing row is not a nuance: apply_payment_once UPDATEs
+                # `WHERE loan_id = %s`, so with no row the update matches nothing,
+                # raises nothing, and the payment is recorded as applied while the
+                # borrower is credited nothing. Verified live -- before this check
+                # the preflight answered 200 for a loan_id that does not exist.
+                cur.execute("SELECT 1 FROM balances WHERE loan_id = %s", (loan_id,))
+                if not cur.fetchall():
+                    raise LookupError(f"no balances row for loan_id={loan_id}")
             # Same statement shape as the real apply, including ON CONFLICT, so
             # the unique index is exercised too. The sentinel is negative and
             # random: `payments.id` is a positive SERIAL, so it cannot collide
@@ -152,18 +173,32 @@ def internal_auth_check(
                 (sentinel, sentinel, 0),
             )
             cur.fetchall()
-            # A real row, so row-level triggers and the numeric column are
-            # exercised, but SKIP LOCKED so this never waits behind an
-            # apply-payment that is mid-flight on the same loan. This runs
-            # before every card authorization; it must not become the reason
-            # payments are slow, and it must never be the reason one blocks.
-            # No row available to lock degrades to a zero-row UPDATE, which
-            # still requires the write privilege and still fails inside a
-            # read-only transaction.
+            # Review round 8: this wrote `updated_at` only. The real apply writes
+            # `balance` -- so a column-level grant, a trigger attached to
+            # `balance`, or a constraint on it could fail while the probe passed,
+            # and the capture went ahead against an apply that could not land.
+            # Probing the same TABLE as the money path is not the same as probing
+            # the same WRITE; the column list is part of the statement.
+            #
+            # `SET balance = balance` is a no-op in value and a real write in
+            # every way Postgres checks: privileges, triggers, constraints, and
+            # the read-only transaction test all apply to the column named here.
+            # `_PREFLIGHT_BALANCE_COLUMNS` is asserted against
+            # `apply_payment_once`'s own UPDATE, so this cannot drift from it.
+            #
+            # The loan being charged when the caller names one, because a probe
+            # of some other loan's row does not prove this loan's row exists.
+            # SKIP LOCKED so it never waits behind an apply-payment mid-flight on
+            # that same loan: this runs before every card authorization and must
+            # not be the reason a payment is slow, or the reason one blocks. No
+            # lockable row degrades to a zero-row UPDATE, which still requires
+            # the write privilege and still fails in a read-only transaction.
             cur.execute(
-                "UPDATE balances SET updated_at = updated_at WHERE loan_id = "
-                "(SELECT loan_id FROM balances ORDER BY loan_id LIMIT 1 "
-                "FOR UPDATE SKIP LOCKED)"
+                "UPDATE balances SET balance = balance, updated_at = now() "
+                "WHERE loan_id = (SELECT loan_id FROM balances "
+                "WHERE (%s::int IS NULL OR loan_id = %s) "
+                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED)",
+                (loan_id, loan_id),
             )
             # Never committed. Both writes exist only long enough to prove the
             # path works, so this leaves no data to clean up.

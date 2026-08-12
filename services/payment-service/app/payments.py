@@ -104,8 +104,8 @@ class ServicingAuthUnavailable(Exception):
     """servicing-service will not accept our credentials, so a capture would strand money."""
 
 
-def _require_servicing_auth() -> None:
-    """Raise unless servicing will accept our credentials.
+def _require_servicing_auth(loan_id: int | None = None) -> None:
+    """Raise unless servicing can accept AND PERSIST an apply for this loan.
 
     Called immediately before EVERY authorize_charge(), not once at the top of
     the happy path. Review round 3: the pending-duplicate retry branch called
@@ -114,13 +114,13 @@ def _require_servicing_auth() -> None:
     precise charged-but-uncredited case this guard exists to prevent, reachable
     by the one path most likely to be taken during an incident.
     """
-    if not _servicing_auth_ok():
+    if not _servicing_auth_ok(loan_id):
         raise ServicingAuthUnavailable(
             "servicing-service rejected our internal token; refusing to charge"
         )
 
 
-def _servicing_auth_ok() -> bool:
+def _servicing_auth_ok(loan_id: int | None = None) -> bool:
     """Confirm servicing will accept our credentials, BEFORE authorizing a card.
 
     **Fails closed.** True is returned only for an explicit 200 carrying the
@@ -157,6 +157,10 @@ def _servicing_auth_ok() -> bool:
     try:
         resp = httpx.get(
             f"{SERVICING_URL}/internal/auth-check",
+            # Review round 8: the loan being charged. Servicing probes THAT
+            # loan's balance row, so a 200 means the row this payment will
+            # credit is writable -- not merely that some row somewhere was.
+            params={"loan_id": loan_id} if loan_id is not None else None,
             headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
             timeout=2.0,
         )
@@ -240,7 +244,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # processor_token is declined here, not silently trusted. Only a
         # confirmed approval reaches _apply_via_servicing; a decline never
         # touches the loan balance at all.
-        _require_servicing_auth()
+        _require_servicing_auth(row["loan_id"])
         try:
             auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
         except ChargeDeclinedError as exc:
@@ -317,7 +321,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # The row stays 'pending' when this raises -- deliberately. It is
                 # a retryable state, so the same idempotency_key can be used
                 # again once the token skew is fixed, and no card was charged.
-                _require_servicing_auth()
+                _require_servicing_auth(row["loan_id"])
                 try:
                     auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
                 except ChargeDeclinedError as exc:

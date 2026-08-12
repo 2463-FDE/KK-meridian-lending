@@ -535,3 +535,133 @@ def test_the_preflight_never_waits_on_a_live_apply(monkeypatch):
         "the preflight takes a row lock without SKIP LOCKED, so a live "
         "apply-payment on that loan makes every card authorization wait"
     )
+
+
+# --- review round 8: the same COLUMNS, not merely the same table -------------
+
+
+def test_the_balances_probe_writes_the_columns_the_real_apply_writes(monkeypatch):
+    """Derived from apply_payment_once's UPDATE, not from a list I maintain.
+
+    Round 7 moved the probe onto the real tables and stopped there: the balances
+    write was `SET updated_at = updated_at`, while the money path writes
+    `balance`. A column-level grant, a trigger attached to `balance`, or a
+    constraint on it fails for the apply and not for the probe -- so the card is
+    captured against a credit that cannot land. Probing the same TABLE is not
+    probing the same WRITE; the column list is part of the statement.
+
+    Same shape of defect as rounds 5, 6 and 7, one level finer each time, which
+    is why the expectation is derived rather than written down.
+    """
+    import inspect
+    import re
+
+    from app import balance
+
+    src = inspect.getsource(balance.apply_payment_once)
+    real = re.search(r"UPDATE balances SET (.*?) WHERE", src, re.S)
+    assert real, "could not read the balances UPDATE out of apply_payment_once"
+    real_columns = {c.split("=")[0].strip() for c in real.group(1).split(",")}
+
+    assert real_columns == set(main._PREFLIGHT_BALANCE_COLUMNS), (
+        f"apply_payment_once writes balances columns {sorted(real_columns)} but "
+        f"the preflight declares {sorted(main._PREFLIGHT_BALANCE_COLUMNS)}"
+    )
+
+    probe = next(s for s in _preflight_statements(monkeypatch)
+                 if s.startswith("UPDATE balances SET"))
+    probe_columns = {c.split("=")[0].strip()
+                     for c in re.search(r"SET (.*?) WHERE", probe).group(1).split(",")}
+    assert probe_columns == real_columns, (
+        f"the preflight writes {sorted(probe_columns)} while the real apply "
+        f"writes {sorted(real_columns)} -- a failure confined to a column the "
+        f"probe skips still lets the card be captured"
+    )
+
+
+def test_the_probe_targets_the_loan_being_charged(monkeypatch):
+    """A probe of some other loan's row does not prove this loan's row is writable."""
+    from contextlib import contextmanager
+
+    calls = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            return []
+
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                def execute(self, sql, params=None):
+                    calls.append((" ".join(sql.split()), params))
+                # The loan exists here -- the missing-row case has its own test
+                # below, and this one is about which loan the probe targets.
+                def fetchall(self):
+                    return [{"x": 1}]
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _Db())
+
+    resp = client.get("/internal/auth-check?loan_id=4242",
+                      headers={"X-Internal-Token": TOKEN})
+    assert resp.status_code == 200
+
+    upd = next(p for s, p in calls if s.startswith("UPDATE balances SET"))
+    assert 4242 in upd, (
+        f"the balances probe ignored the loan it was given ({upd}), so it can "
+        f"pass on another loan's row while this one is missing or unwritable"
+    )
+
+
+def test_the_probe_still_works_with_no_loan_named(monkeypatch):
+    """Backwards compatible: an older payment-service sends no loan_id.
+
+    It must degrade to probing some row rather than probing nothing -- a
+    preflight that silently stopped writing would be the failure this endpoint
+    exists to prevent, reintroduced by a deploy ordering.
+    """
+    stmts = _preflight_statements(monkeypatch)
+    assert any(s.startswith("UPDATE balances SET") for s in stmts)
+    assert any(s.startswith("INSERT INTO payment_applications") for s in stmts)
+
+
+def test_the_preflight_refuses_a_loan_with_no_balance_row(monkeypatch):
+    """A named loan with no balances row must not greenlight a capture.
+
+    Found by running the fix from the round-8 review against the live stack: the
+    probe answered 200 for a loan_id that does not exist, because the targeted
+    UPDATE simply matched zero rows. The comment above it claimed the probe
+    proved "the row this payment will credit is writable" -- it did not, and a
+    comment that overstates the code is the same defect as a test that proves a
+    proxy.
+
+    It matters because apply_payment_once UPDATEs `WHERE loan_id = %s`. With no
+    row the update matches nothing, raises nothing, and the payment is recorded
+    as applied while the borrower is credited nothing -- charged money, no credit,
+    and no error anywhere to notice it by.
+    """
+    from contextlib import contextmanager
+
+    class _NoSuchLoanDb:
+        def query(self, sql, params=None):
+            return []
+
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                def execute(self, sql, params=None):
+                    self.last = sql
+                def fetchall(self):
+                    # The existence read finds nothing; anything else succeeds.
+                    return [] if "SELECT 1 FROM balances" in self.last else [{"x": 1}]
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _NoSuchLoanDb())
+
+    resp = client.get("/internal/auth-check?loan_id=99999999",
+                      headers={"X-Internal-Token": TOKEN})
+
+    assert resp.status_code == 503, (
+        "the preflight approved a capture for a loan with no balance row, which "
+        "apply-payment would silently fail to credit"
+    )

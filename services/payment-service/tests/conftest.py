@@ -35,7 +35,9 @@ def servicing_reachable(monkeypatch, request):
     """
     if request.node.get_closest_marker("real_servicing_preflight"):
         return
-    monkeypatch.setattr("app.payments._servicing_auth_ok", lambda: True)
+    # *a: the guard takes the loan being charged now (round 8), and a stub
+    # with a fixed arity would fail on the argument rather than on behaviour.
+    monkeypatch.setattr("app.payments._servicing_auth_ok", lambda *a: True)
 
 
 def pytest_configure(config):

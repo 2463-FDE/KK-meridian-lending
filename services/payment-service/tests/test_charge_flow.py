@@ -831,7 +831,7 @@ def test_a_charge_is_refused_when_servicing_will_not_accept_our_token(monkeypatc
             return []
 
     monkeypatch.setattr(payments_mod, "db", _Db())
-    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda: False)
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
     monkeypatch.setattr(payments_mod.processor, "authorize_charge",
                         lambda *a, **k: authorized.append(a) or "auth_x")
 
@@ -946,7 +946,7 @@ def test_a_pending_retry_is_also_guarded(monkeypatch):
             return []
 
     monkeypatch.setattr(payments_mod, "db", _Db())
-    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda: False)
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
     monkeypatch.setattr(payments_mod.processor, "get_authorization", lambda k: None)
     monkeypatch.setattr(payments_mod.processor, "authorize_charge",
                         lambda *a, **k: authorized.append(a) or "auth_x")
@@ -984,7 +984,7 @@ def test_a_preflight_failure_leaves_the_key_retryable(monkeypatch):
             return []
 
     monkeypatch.setattr(payments_mod, "db", _Db())
-    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda: False)
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
 
     with pytest.raises(payments_mod.ServicingAuthUnavailable):
         payments_mod.charge(42, "tok_x", "1111", 10.0, "retryable-key-1")
@@ -1004,11 +1004,17 @@ def test_the_guard_covers_every_authorize_charge_call_site(monkeypatch):
     here rather than silently charging cards without the check.
     """
     import inspect
+    import re
+
     from app import payments as payments_mod
 
     src = inspect.getsource(payments_mod.charge)
     authorize_calls = src.count("processor.authorize_charge(")
-    guard_calls = src.count("_require_servicing_auth()")
+    # Match the call however it is written. This counted `_require_servicing_auth()`
+    # as a literal, so passing the guard an argument -- the loan being charged,
+    # added in round 8 -- silently dropped the count to zero. A derived check that
+    # depends on an exact spelling is a hand-maintained list wearing a regex.
+    guard_calls = len(re.findall(r"_require_servicing_auth\(", src))
 
     assert guard_calls >= authorize_calls, (
         f"{authorize_calls} authorize_charge() call sites but only {guard_calls} "

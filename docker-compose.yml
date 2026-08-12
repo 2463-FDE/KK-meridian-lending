@@ -193,6 +193,16 @@ services:
       # charge a card without also knowing this. Same default as the other
       # services so they all agree without an .env entry.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Review finding: this was missing. `env_file: .env` is `required: false`,
+      # so on a clean checkout -- CI, or anyone who has not run the bootstrap --
+      # payment-service started with ENVIRONMENT unset. config.py reads it to
+      # decide ALLOW_PAYMENT_STUB, so the deterministic test processor refused
+      # every authorization and payments failed with no configuration error to
+      # point at.
+      #
+      # It was invisible locally for the same reason twice before on this branch:
+      # a developer's own .env supplied the variable that CI does not have.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
     # No host port mapping: POST /payments charges a card/ACH with no auth of
     # its own -- publishing this let anyone on the host bypass the gateway's
     # ownership check and move money directly (review finding). Reachable
