@@ -95,14 +95,9 @@ because there is one number and it has no components.
 -- an approval produced. That is a genuine cycle, so neither can be created with
 -- both foreign keys already in place.
 --
--- An earlier draft claimed "pending_movements is created first" and then showed
--- ledger_entries first anyway -- a comment contradicting the SQL beneath it,
--- which is worse than either order, because a reader trusts the comment and
--- copies the block. Resolved the way a cycle is normally resolved: create both
--- tables, then add the second foreign key with an ALTER.
---
--- Full runnable DDL is in Appendix A. The excerpts below are the shape of the
--- decision, not the migration file.
+-- Resolved the way a cycle normally is: create both tables, then add the second
+-- foreign key with an ALTER. Full runnable DDL is in Appendix A; the excerpts
+-- below are the shape of the decision, not the migration file.
 CREATE TABLE ledger_entries (
     id           BIGSERIAL   PRIMARY KEY,
     loan_id      INTEGER     NOT NULL REFERENCES loans(id),
@@ -156,17 +151,13 @@ CREATE INDEX ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
 -- A human-DIRECTED entry must name the human. Machine-originated ones must not
 -- be forced to invent one.
 --
--- Review fix: this first exempted only 'disbursement' and 'fee_assessed', which
--- made actor_id/actor_role mandatory for 'payment' -- and servicing's
--- apply-payment carries neither. It receives an amount and a payment_id, because
--- the borrower is not "acting" on the balance in the sense this column means;
--- the processor captured a payment and servicing is posting it. The constraint
--- as written would have failed every real payment on insert, which is the kind
--- of defect that only shows up once the migration is live.
---
--- 'payment' is exempt, and its provenance is stronger than an actor string
--- anyway: payment_id points at the row carrying the idempotency key, the amount
--- and the capture. 'opening_balance' is exempt because no one authored it.
+-- 'payment' is exempt: servicing's apply-payment receives an amount and a
+-- payment_id and no actor, because the borrower is not "acting" on the balance
+-- in the sense this column means -- the processor captured a payment and
+-- servicing is posting it. Requiring an actor here would fail every real payment
+-- on insert. Its provenance is stronger than an actor string anyway: payment_id
+-- points at the row carrying the idempotency key, the amount and the capture.
+-- 'opening_balance' is exempt because no one authored it.
 ALTER TABLE ledger_entries ADD CONSTRAINT ledger_actor_required CHECK (
     entry_type IN ('disbursement','fee_assessed','payment','opening_balance')
     OR (actor_id IS NOT NULL AND actor_role IS NOT NULL)
@@ -174,10 +165,8 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_actor_required CHECK (
 ```
 
 `'opening_balance'` is the back-fill's marker, and it is a distinct `entry_type`
-rather than an `is_reconstructed` boolean. Review fix again: the migration plan
-said opening entries would be "marked as reconstructed" and the schema had no
-such field, so the marking existed only in the prose describing it. A separate
-boolean would have worked; a distinct `entry_type` is better here because it
+rather than an `is_reconstructed` boolean. A separate boolean would have worked;
+a distinct `entry_type` is better here because it
 cannot be defaulted, cannot be forgotten on insert, and every query that means
 "real money movements" is already filtering on `entry_type` — so the exclusion is
 expressed in the same vocabulary rather than as a second thing to remember.
@@ -353,12 +342,9 @@ Three things this depends on, each of which is a way to get it wrong:
   END $$ LANGUAGE plpgsql;
   ```
 
-  Stated because an earlier revision described this flag in prose while the
-  function body shown above never set it -- so an implementer copying that body
-  verbatim would have had every ledger insert fail the moment the guard went
-  live. `set_config(..., true)` is transaction-local, so the flag cannot leak to
-  a later statement on a pooled connection, which is the way this kind of guard
-  usually fails open.
+  `set_config(..., true)` is transaction-local, so the flag cannot leak to a
+  later statement on a pooled connection -- the way this kind of guard usually
+  fails open.
 
   It is a guard against accident, not a privilege boundary: anyone who can run
   `set_config` can bypass it. That is the same honest limit as the append-only
@@ -367,14 +353,297 @@ Three things this depends on, each of which is a way to get it wrong:
 - **The projection is not the record.** `SUM(ledger_entries)` remains the
   auditable truth; `balances` is a cache with a test asserting it agrees.
 
-### Maker-checker: a proposal is not a movement
+### Maker-checker needs somewhere to put a proposal
 
-> **Revised after review.** An earlier version put `approved_by`/`approved_at` on
-> `ledger_entries` and had the approver `UPDATE` that row — which the append-only
-> trigger forbids. The immutability claim and the approval claim were each checked
-> alone and never against each other.
+The ledger's shape is decided partly by a feature this ADR does **not** approve.
+Two things follow from it and are decided here, because retrofitting either one
+means migrating the money table a second time:
 
-The fix is not to weaken the trigger. It is to stop putting proposals in the
+- proposals live in their own table, **not** as `approved_by`/`approved_at`
+  columns on `ledger_entries` -- an approver updating a ledger row is exactly
+  what the append-only trigger forbids, and a rejected proposal has to survive
+  as evidence, which a column on an entry that was never written cannot do;
+- `entry_type` distinguishes human-authorised movements (`adjustment`,
+  `fee_waived`) from machine-originated ones (`payment`, `fee_assessed`,
+  `disbursement`, `opening_balance`), because only the first kind needs an
+  approver and the constraint that says so has to be able to tell them apart.
+
+Everything else -- the approval function, its guarantees, the validation trigger,
+the actor rule -- is **Appendix B**, which is a requirements list for a later ADR
+and not a design approved by this one.
+
+## Alternatives considered
+
+**Pure event sourcing — no `balances` table, `SUM` on every read.** Rejected, and
+it is the closer call. It is the cleaner model and removes the projection as a
+thing that can drift. But every read path in `servicing-service` and the frontend
+currently reads `balances.balance`, so this converts a contained schema addition
+into a change touching every consumer, and it makes balance reads O(entries) on
+the hot path with no cache to fall back to. The projection keeps the blast radius
+small and keeps `SUM` available as the auditable truth; a parity test buys the
+property that pure event sourcing gets structurally. If the projection ever does
+drift in a way the test catches in CI, revisit this — that would be evidence the
+trade was wrong, and it is the specific trigger to reopen this decision.
+
+**`SELECT … FOR UPDATE` on `balances`, and stop there.** Closes D3 only. Leaves
+D8 open and D14 impossible, and leaves maker-checker with nowhere to live. It is strictly
+less work, and it is the right answer only if the ledger is never built — in
+which case D8 stays permanently unanswerable, which Week 6 already rejected.
+
+**An `audit_log` table alongside the mutable balance.** Rejected: two sources of
+truth that can disagree, and the disagreement is undetectable because neither is
+derived from the other. It also does not fix D3 or D14 — it only records that
+they happened.
+
+## Migration plan
+
+Expand and contract, the same shape as the PAN/CVV removal (`0029` → `0031`),
+which is in this repository specifically because a big-bang drop on a money table
+is not recoverable.
+
+| Step | What lands | Gate before the next step |
+|---|---|---|
+| 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
+| 2 | `ledger_entries` (including the nullable `pending_movement_id` column, which the projection trigger reads and so cannot be added later), then the triggers, then the back-fill from `payments` + current `balances` | Parity green PER LOAN, not in aggregate, and **excluding `interest` entries, which project nowhere by design** — including them invents a mismatch on every loan that has ever accrued |
+| 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes.** D14 becomes possible, not closed |
+| 4 | `pending_movements`, the `ALTER` that adds the FK closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
+| 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
+
+**The back-fill is the risky step, and it is lossy in one direction that must be
+stated rather than discovered.** Historical rows have a balance but no history:
+there is no record of which past movements produced today's number, because that
+is precisely what D8 says was never kept. So the back-fill writes one
+`entry_type = 'opening_balance'` row per loan carrying the current balance. It is
+not a reconstruction of the past — **it is an explicit admission that the past is
+unavailable**, and the distinct type is what keeps that admission legible, so no
+one later mistakes an opening balance for an audited movement.
+
+`opening_balance` is its own value in the `entry_type` CHECK rather than a
+`disbursement` "marked as reconstructed": a marker that exists only in prose is
+not a marker, and reusing a real event type would make a reconstructed balance
+indistinguishable from an actual disbursement to every query that asks.
+
+## Non-goals, and the PRs that are required
+
+Not in this ADR, and not in whatever PR implements its first step:
+
+| # | Follow-up PR | Why it is separate | Gate |
+|---|---|---|---|
+| 1 | The failing lost-update test against today's code | It has to fail before anything is built, or the fix is unfalsifiable | The failure is the correctly-paired race, not a wrong repro |
+| 2 | Ledger schema + projection trigger migration | Runnable DDL belongs where it executes and can be tested | Parity per loan, seeded and back-filled, with `interest` excluded (it projects nowhere) |
+| 3 | Write-path conversion — `balances` written only by the trigger | Independently revertible; this is the step that touches live money | PR 1's test now passes. **D3 closes** |
+| 4 | Maker-checker: `pending_movements`, `resolve_pending_movement()`, adjust and waive | Its own design decision (see above), reviewable on its own merits | Every numbered requirement above, each failing when removed |
+| 5 | Payment waterfall | The allocation algorithm is unrelated to how balances are stored | Allocation tests: order, short payments, partial periods |
+
+Explicitly **not** goals of any of the above:
+
+- **Closing D14.** The ledger makes a per-component allocation *possible* — one
+  row per component instead of one number — and that is all. The algorithm is
+  PR 5.
+- **Reconstructing history.** The back-fill writes one `opening_balance` row per
+  loan and admits the past is unavailable. See the migration plan.
+- **Changing what a borrower sees.** `balances.balance` keeps its current meaning
+  and its current readers; only the writer changes.
+- **Interest accrual, fee assessment schedules, or delinquency rules.** The
+  ledger records movements; it does not decide when they happen.
+
+## Production rollout and rollback
+
+The steps above say what lands. This says how it lands on a live money table,
+because "expand and contract" names a strategy and not a procedure, and the
+difference is where this goes wrong.
+
+### The cutover, in order
+
+| # | Action | Why this order |
+|---|---|---|
+| 1 | Deploy the schema: tables, projection trigger, and the `balances` write-guard **disabled** | The guard is a separate `ALTER TABLE ... ENABLE TRIGGER`, so schema and enforcement land in different deploys and either can be reverted alone |
+| 2 | Back-fill `opening_balance` entries, with writes still going to `balances` directly | Nothing reads the ledger yet, so a wrong back-fill is a table to truncate, not an incident |
+| 3 | Run parity in report-only mode over every loan | Fails here cost nothing — see below |
+| 4 | Deploy `balance.py` writing ledger entries instead of `balances` | The projection trigger now maintains `balances`; the old path is gone in the same deploy that adds the new one |
+| 5 | Enable the write-guard | Last, because until step 4 is everywhere, a straggler pod still writing `balances` directly would start erroring |
+
+**Writes are not paused and not dual-written.** Both were considered:
+
+- *Pausing* means refusing payments during the cutover. On a servicing system
+  that is a queue of retries, angry borrowers, and late fees assessed on
+  payments we refused to take.
+- *Dual-writing* means `balance.py` writing both the ledger and `balances`
+  directly for a period, then stopping. It sounds safer and is not: while both
+  paths write, the projection trigger and the direct write both target
+  `balances`, so they race each other and the ledger's own projection is what
+  loses. Dual-writing is right when the two destinations are independent. Here
+  the second destination is derived from the first, so writing both is writing
+  the same number twice by two rules that can disagree.
+
+What makes the pause unnecessary is that step 4 is atomic per write, not per
+system. Every payment either wrote the old way or the new way; none wrote half.
+A pod mid-deploy is writing one or the other correctly, and the projection is
+correct under both, because step 2 built `balances` from the same trigger that
+maintains it.
+
+### Locks
+
+Step 5 is the one to watch. The guard is a `BEFORE UPDATE OR DELETE` row trigger
+on `balances`, so it takes no table lock at write time — but installing it does:
+`CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE`, which waits for in-flight writes to
+that table and blocks new ones while it waits. That is a short wait on a healthy
+system and an unbounded one behind a long transaction.
+
+So: `SET lock_timeout = '3s'` around the `CREATE TRIGGER`, and retry rather than
+queue. A migration that blocks every payment while waiting for a lock it may not
+get is worse than one that fails and is run again.
+
+The projection trigger itself locks a single `balances` row per entry, which is
+the same row `apply_payment_once` locks today. No new contention shape.
+
+### If parity fails
+
+Where it fails decides what to do, which is why step 3 exists before step 4:
+
+- **After the back-fill (step 3), before the write-path switch.** Nothing reads
+  the ledger yet. Truncate `ledger_entries`, fix the back-fill, run it again.
+  There is no rollback because there was no cutover. **This is the step whose job
+  is to catch the back-fill being wrong, and it is free.**
+- **After the write-path switch (step 4 or 5).** Do NOT reconcile by writing to
+  `balances`: that is the thing under suspicion, and correcting the projection by
+  hand destroys the evidence of how it diverged. Disable the write-guard, revert
+  `balance.py` to the direct-write path, and leave the ledger in place accruing
+  nothing. The system is then back to today's behaviour with a stale ledger, the
+  divergence is still measurable, and no borrower balance was touched.
+
+The parity check is `SUM(amount) GROUP BY loan_id, component` against `balances`,
+which is the same query the ongoing test uses. A per-loan report, never a single
+aggregate: one loan wrong by +$100 and another by -$100 sums to zero, and a
+system that reports "in balance" while two borrowers are wrong is worse than one
+that reports nothing.
+
+`interest` entries are excluded from the principal comparison, deliberately and
+not as an oversight -- see the sign table above. An implementer who includes them
+will chase a phantom mismatch on every loan that has ever accrued interest.
+
+## Consequences
+
+**Good.**
+
+- "Who changed this balance, when, why, and who approved it" becomes a `SELECT`.
+  D8 answerable for the first time.
+- D3 closes without a lock.
+- D14 becomes **possible**, not closed. The ledger gives a payment somewhere to
+  record a fees/interest/principal split, which is the prerequisite -- but the
+  allocation algorithm (what order, what happens when a payment is short, how
+  partial periods behave) is a separate change with its own tests, and this ADR
+  neither specifies nor delivers it. Saying D14 closes "without a
+  separate feature", which overstated it: a schema that *can* hold a waterfall is
+  not a waterfall.
+- Maker-checker has somewhere to live, and rejected proposals survive as evidence
+  rather than being discarded.
+- The projection is a plain `SUM` with no approval filter, so no reader can
+  forget one and silently count unapproved money.
+- Payment posting is idempotent by unique index, so `payment_applications` stops
+  being the only thing standing between a retry and a double-post.
+
+**Costs, stated rather than discovered later.**
+
+- **Two tables instead of one.** Splitting proposals out of the ledger is what
+  keeps the append-only guarantee absolute, but it means a money movement can now
+  be described in two places, and `pending_movements` is deliberately *not*
+  append-only — resolving a proposal mutates it. That mutation is the single
+  exception in the whole design, and it is confined to a table the balance is
+  never derived from. If that exception ever needs to grow, it is a sign this
+  split was drawn in the wrong place.
+
+- `ledger_entries` grows without bound. No retention policy is proposed here, and
+  under SOX these are exactly the records that must be kept — so growth is the
+  intended behaviour, not an oversight, and archival is a separate decision.
+- The projection can drift. A trigger bug means `balances` disagrees with its own
+  ledger, and the read path would serve the wrong number silently. The parity
+  test is the only thing standing between that and production, which is an
+  argument for running it in CI rather than on request.
+- Every write path in `balance.py` changes. That file also holds
+  `apply_payment_once`, whose `payment_applications` guard becomes redundant —
+  redundant is not harmful, but leaving two idempotency mechanisms where one is
+  authoritative is its own confusion, and it should be removed deliberately in
+  step 3 rather than left.
+- The back-fill's opening entries are not real history and never will be.
+
+**Explicitly not claimed.** This is not a general-ledger or double-entry
+accounting system: entries are single-sided deltas against one loan, with no
+contra account and no trial balance. It answers the servicing audit question Week
+6 asked. It is not an accounting system of record, and calling it one later would
+be the same category of overclaim as the README's PCI-DSS banner.
+
+## Answered, previously open
+
+**Does `past_due` fold into the ledger?** Yes -- see "`past_due` is in scope"
+above. Leaving it out would have put a hole in the audit trail exactly where fee
+waivers are, and waivers are one of the two actions Week 6 named as needing a
+second approver. It makes step 4 larger and gives `balances` a second derived
+column, both recorded in Consequences.
+
+**What remains genuinely undecided** is nothing in this ADR's own scope. The
+allocation order for D14's waterfall is deliberately out of scope, and the
+retention policy for `ledger_entries` is a separate decision noted in
+Consequences.
+
+## Appendix A — why there is no runnable SQL here
+
+The SQL in this document is the **shape of the decision**, not the migration:
+table sketches whose constraints each carry an invariant, and — for the two
+procedures — signatures with the guarantees they owe.
+
+Partial, unexecuted SQL gets treated as authoritative by whoever implements it,
+and then drifts from the migration that actually runs. **The copy nobody applies
+is the copy nobody notices is wrong.** So `resolve_pending_movement()` and
+`ledger_entry_matches_its_proposal()` are stated as requirements instead — what
+each must guarantee, every item of which becomes a test in the PR that writes
+it.
+
+Three short trigger bodies survive, deliberately: `project_ledger_entry()`,
+`pending_movements_single_transition()` and
+`pending_movement_resolution_is_complete()`. Each is one invariant in about a
+dozen lines, and the projection trigger in particular *is* the decision — "the
+balance is a projection" is a claim about four lines of `UPDATE`. Restating them
+in prose would be longer than the code and less precise, which is the failure
+mode in the other direction.
+
+The line to hold: **a procedure gets specified, an invariant gets shown.** If a
+block grows a branch that needs its own test, it has stopped being an invariant
+and belongs in a migration.
+
+The full runnable DDL belongs in the migration files created by steps 2 and 4 of
+the plan above, not here. An ADR that grows into a migration stops being read as a
+decision -- reviewers noted this one was heading that way at 600+ lines -- and a
+schema that lives in two places drifts, with the copy nobody applies quietly
+becoming wrong.
+
+What this document is responsible for, and what a later reader should hold it to:
+
+- **the decision** — an append-only ledger with a trigger-maintained projection,
+  and why the alternatives were rejected;
+- **the invariants** — signed deltas keyed to the effect on what the borrower
+  owes; `balances.balance` is principal; one terminal transition per proposal;
+  no self-approval; the ledger actor is the approver; an entry matches its
+  proposal field-for-field;
+- **the sequencing** — which step can land before which, and what gate each one
+  has to pass;
+- **the costs** — two derived columns, unbounded growth, a projection that can
+  drift, and the fact that D14 is enabled rather than closed.
+
+## Appendix B — requirements for the maker-checker ADR
+
+**Not approved by this ADR.** This is the requirements list the follow-up PR has
+to satisfy, kept here so the ledger decisions above can be checked against the
+thing they are shaped for. A reviewer approving ADR 0010 is approving the ledger
+and the two schema consequences named above, not the workflow below.
+
+### Why the ledger is shaped for it
+
+> Approval columns on `ledger_entries` would require the approver to `UPDATE`
+> that row, which the append-only trigger forbids. Immutability and approval have
+> to be checked against each other, not each alone.
+
+The answer is not to weaken the trigger. It is to stop putting proposals in the
 ledger at all.
 
 **A row in `ledger_entries` means money moved.** A proposed adjustment is not a
@@ -498,12 +767,6 @@ asserted by a migration test: an approval that inserted a different loan,
 component, amount or type than the one reviewed would be a maker-checker bypass
 wearing the shape of an approval.
 
-*This sentence used to say "the trigger above". The trigger above is
-`pending_movement_resolution_is_complete()`, which enforces approval-implies-entry
-and says nothing about field agreement; the one meant is defined below. A
-positional reference to the wrong thing is the same defect as a citation that
-does not resolve, so both triggers are now named.*
-
 ```sql
 -- Signature only. The body belongs in the migration that creates it (step 4),
 -- where it can be executed and tested; what this ADR fixes is that approval is
@@ -546,11 +809,11 @@ CHECK, because that state is legitimately transient inside the transaction. So:
     3. write `ledger_entry_id` back
     4. COMMIT → the deferred trigger checks approval-implies-entry
 
-An earlier draft of this ADR had these mutually blocking, so every approval would
-have failed. PostgreSQL CHECK constraints cannot be `DEFERRABLE`, which is why
-step 4's rule is a constraint trigger rather than a deferred CHECK.
+Written the other way round these block each other and every approval fails.
+PostgreSQL CHECK constraints cannot be `DEFERRABLE`, which is why step 4's rule
+is a constraint trigger rather than a deferred CHECK.
 
-### What actually makes the function the only path
+### What makes the function the only path
 
 The prose claimed `adjustment` and `fee_waived` entries were "unreachable except
 through" `resolve_pending_movement()`. The constraints shown do not achieve that:
@@ -615,189 +878,3 @@ the append-only trigger worth having.
 
 This is why maker-checker was blocked before: there was nowhere to put a request
 that is not yet a fact.
-
-## Alternatives considered
-
-**Pure event sourcing — no `balances` table, `SUM` on every read.** Rejected, and
-it is the closer call. It is the cleaner model and removes the projection as a
-thing that can drift. But every read path in `servicing-service` and the frontend
-currently reads `balances.balance`, so this converts a contained schema addition
-into a change touching every consumer, and it makes balance reads O(entries) on
-the hot path with no cache to fall back to. The projection keeps the blast radius
-small and keeps `SUM` available as the auditable truth; a parity test buys the
-property that pure event sourcing gets structurally. If the projection ever does
-drift in a way the test catches in CI, revisit this — that would be evidence the
-trade was wrong, and it is the specific trigger to reopen this decision.
-
-**`SELECT … FOR UPDATE` on `balances`, and stop there.** Closes D3 only. Leaves
-D8 open and D14 impossible, and leaves maker-checker with nowhere to live. It is strictly
-less work, and it is the right answer only if the ledger is never built — in
-which case D8 stays permanently unanswerable, which Week 6 already rejected.
-
-**An `audit_log` table alongside the mutable balance.** Rejected: two sources of
-truth that can disagree, and the disagreement is undetectable because neither is
-derived from the other. It also does not fix D3 or D14 — it only records that
-they happened.
-
-## Migration plan
-
-Expand and contract, the same shape as the PAN/CVV removal (`0029` → `0031`),
-which is in this repository specifically because a big-bang drop on a money table
-is not recoverable.
-
-| Step | What lands | Gate before the next step |
-|---|---|---|
-| 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
-| 2 | `ledger_entries` (including the nullable `pending_movement_id` column, which the projection trigger reads and so cannot be added later), then the triggers, then the back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
-| 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes.** D14 becomes possible, not closed |
-| 4 | `pending_movements`, the `ALTER` that adds the FK closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
-| 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
-
-**The back-fill is the risky step, and it is lossy in one direction that must be
-stated rather than discovered.** Historical rows have a balance but no history:
-there is no record of which past movements produced today's number, because that
-is precisely what D8 says was never kept. So the back-fill writes one
-`entry_type = 'opening_balance'` row per loan carrying the current balance. It is
-not a reconstruction of the past — **it is an explicit admission that the past is
-unavailable**, and the distinct type is what keeps that admission legible, so no
-one later mistakes an opening balance for an audited movement.
-
-*Review fix: this said the entry would be a `disbursement` "marked as
-reconstructed", and no marker existed anywhere in the schema — the distinction
-lived only in this sentence. Worse, `disbursement` is a real event type, so a
-reconstructed opening balance would have been indistinguishable from an actual
-loan disbursement by any query. `opening_balance` is now its own type in the
-`entry_type` CHECK.*
-
-## Non-goals, and the PRs that are required
-
-Not in this ADR, and not in whatever PR implements its first step:
-
-| # | Follow-up PR | Why it is separate | Gate |
-|---|---|---|---|
-| 1 | The failing lost-update test against today's code | It has to fail before anything is built, or the fix is unfalsifiable | The failure is the correctly-paired race, not a wrong repro |
-| 2 | Ledger schema + projection trigger migration | Runnable DDL belongs where it executes and can be tested | Parity: projection == `SUM(amount)` for every loan, seeded and back-filled |
-| 3 | Write-path conversion — `balances` written only by the trigger | Independently revertible; this is the step that touches live money | PR 1's test now passes. **D3 closes** |
-| 4 | Maker-checker: `pending_movements`, `resolve_pending_movement()`, adjust and waive | Its own design decision (see above), reviewable on its own merits | Every numbered requirement above, each failing when removed |
-| 5 | Payment waterfall | The allocation algorithm is unrelated to how balances are stored | Allocation tests: order, short payments, partial periods |
-
-Explicitly **not** goals of any of the above:
-
-- **Closing D14.** The ledger makes a per-component allocation *possible* — one
-  row per component instead of one number — and that is all. The algorithm is
-  PR 5.
-- **Reconstructing history.** The back-fill writes one `opening_balance` row per
-  loan and admits the past is unavailable. See the migration plan.
-- **Changing what a borrower sees.** `balances.balance` keeps its current meaning
-  and its current readers; only the writer changes.
-- **Interest accrual, fee assessment schedules, or delinquency rules.** The
-  ledger records movements; it does not decide when they happen.
-
-## Consequences
-
-**Good.**
-
-- "Who changed this balance, when, why, and who approved it" becomes a `SELECT`.
-  D8 answerable for the first time.
-- D3 closes without a lock.
-- D14 becomes **possible**, not closed. The ledger gives a payment somewhere to
-  record a fees/interest/principal split, which is the prerequisite -- but the
-  allocation algorithm (what order, what happens when a payment is short, how
-  partial periods behave) is a separate change with its own tests, and this ADR
-  neither specifies nor delivers it. An earlier draft said D14 closed "without a
-  separate feature", which overstated it: a schema that *can* hold a waterfall is
-  not a waterfall.
-- Maker-checker has somewhere to live, and rejected proposals survive as evidence
-  rather than being discarded.
-- The projection is a plain `SUM` with no approval filter, so no reader can
-  forget one and silently count unapproved money.
-- Payment posting is idempotent by unique index, so `payment_applications` stops
-  being the only thing standing between a retry and a double-post.
-
-**Costs, stated rather than discovered later.**
-
-- **Two tables instead of one.** Splitting proposals out of the ledger is what
-  keeps the append-only guarantee absolute, but it means a money movement can now
-  be described in two places, and `pending_movements` is deliberately *not*
-  append-only — resolving a proposal mutates it. That mutation is the single
-  exception in the whole design, and it is confined to a table the balance is
-  never derived from. If that exception ever needs to grow, it is a sign this
-  split was drawn in the wrong place.
-
-- `ledger_entries` grows without bound. No retention policy is proposed here, and
-  under SOX these are exactly the records that must be kept — so growth is the
-  intended behaviour, not an oversight, and archival is a separate decision.
-- The projection can drift. A trigger bug means `balances` disagrees with its own
-  ledger, and the read path would serve the wrong number silently. The parity
-  test is the only thing standing between that and production, which is an
-  argument for running it in CI rather than on request.
-- Every write path in `balance.py` changes. That file also holds
-  `apply_payment_once`, whose `payment_applications` guard becomes redundant —
-  redundant is not harmful, but leaving two idempotency mechanisms where one is
-  authoritative is its own confusion, and it should be removed deliberately in
-  step 3 rather than left.
-- The back-fill's opening entries are not real history and never will be.
-
-**Explicitly not claimed.** This is not a general-ledger or double-entry
-accounting system: entries are single-sided deltas against one loan, with no
-contra account and no trial balance. It answers the servicing audit question Week
-6 asked. It is not an accounting system of record, and calling it one later would
-be the same category of overclaim as the README's PCI-DSS banner.
-
-## Answered, previously open
-
-**Does `past_due` fold into the ledger?** Yes -- see "`past_due` is in scope"
-above. Leaving it out would have put a hole in the audit trail exactly where fee
-waivers are, and waivers are one of the two actions Week 6 named as needing a
-second approver. It makes step 4 larger and gives `balances` a second derived
-column, both recorded in Consequences.
-
-**What remains genuinely undecided** is nothing in this ADR's own scope. The
-allocation order for D14's waterfall is deliberately out of scope, and the
-retention policy for `ledger_entries` is a separate decision noted in
-Consequences.
-
-## Appendix A — why there is no runnable SQL here
-
-The SQL in this document is the **shape of the decision**, not the migration:
-table sketches whose constraints each carry an invariant, and — for the two
-procedures — signatures with the guarantees they owe.
-
-An earlier revision wrote those two out in full, and a reviewer named the cost:
-partial, unexecuted SQL gets treated as authoritative by whoever implements it,
-and then drifts from the migration that actually runs. **The copy nobody applies
-is the copy nobody notices is wrong.** So `resolve_pending_movement()` and
-`ledger_entry_matches_its_proposal()` are now stated as requirements — roughly
-130 lines of procedure replaced by what each must guarantee, every item of which
-becomes a test in the PR that writes it.
-
-Three short trigger bodies survive, deliberately: `project_ledger_entry()`,
-`pending_movements_single_transition()` and
-`pending_movement_resolution_is_complete()`. Each is one invariant in about a
-dozen lines, and the projection trigger in particular *is* the decision — "the
-balance is a projection" is a claim about four lines of `UPDATE`. Restating them
-in prose would be longer than the code and less precise, which is the failure
-mode in the other direction.
-
-The line to hold: **a procedure gets specified, an invariant gets shown.** If a
-block grows a branch that needs its own test, it has stopped being an invariant
-and belongs in a migration.
-
-The full runnable DDL belongs in the migration files created by steps 2 and 4 of
-the plan above, not here. An ADR that grows into a migration stops being read as a
-decision -- reviewers noted this one was heading that way at 600+ lines -- and a
-schema that lives in two places drifts, with the copy nobody applies quietly
-becoming wrong.
-
-What this document is responsible for, and what a later reader should hold it to:
-
-- **the decision** — an append-only ledger with a trigger-maintained projection,
-  and why the alternatives were rejected;
-- **the invariants** — signed deltas keyed to the effect on what the borrower
-  owes; `balances.balance` is principal; one terminal transition per proposal;
-  no self-approval; the ledger actor is the approver; an entry matches its
-  proposal field-for-field;
-- **the sequencing** — which step can land before which, and what gate each one
-  has to pass;
-- **the costs** — two derived columns, unbounded growth, a projection that can
-  drift, and the fact that D14 is enabled rather than closed.
