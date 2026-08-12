@@ -162,3 +162,42 @@ def test_kyc_check_reports_a_persistence_failure_instead_of_faking_success(fake_
 
     assert resp.status_code == 503
     assert "record" in resp.json()["detail"].lower()
+
+
+def test_an_entity_applicant_is_accepted_without_dob_or_ssn(fake_db):
+    """An LLC has no DOB or SSN, and this API must not require them.
+
+    Review finding: dob/ssn/address were required strings here while
+    origination's ApplicationIn has all three Optional. So an entity applicant --
+    which this service's own CIP logic explicitly clears on name and address
+    alone -- produced a 422, no kyc_checks row was written, intake still reported
+    "submitted", and the decision gate later refused the application. Every
+    entity application, every time.
+    """
+    resp = client.post("/kyc/check", json={
+        "application_id": 7, "applicant_id": 7,
+        "name": "Northgate Holdings LLC", "address": "1 Corporate Way",
+        "entity_type": "llc",
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200, f"entity applicant rejected: {resp.text[:200]}"
+    body = resp.json()
+    assert body["cip_passed"] is True
+    assert body["check_id"] > 0, "no CIP row was persisted, so decisioning will refuse it"
+    assert len(fake_db.inserts) == 1
+
+
+def test_a_sparse_individual_application_still_persists_a_result(fake_db):
+    """A missing field verifies as False -- it does not abort the check.
+
+    `run_cip` already treats each field as possibly absent, so accepting None
+    changes no verification behaviour; it only stops the request being rejected
+    before that logic runs.
+    """
+    resp = client.post("/kyc/check", json={
+        "application_id": 8, "applicant_id": 8, "name": "Jane Borrower",
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json()["cip_passed"] is False, "no address, so CIP must not pass"
+    assert resp.json()["check_id"] > 0, "a failed CIP is still a recorded result"

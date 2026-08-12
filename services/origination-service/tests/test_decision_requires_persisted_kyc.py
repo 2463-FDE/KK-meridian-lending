@@ -306,3 +306,29 @@ def test_an_authorized_caller_still_hits_the_kyc_gate(monkeypatch):
 
     assert excinfo.value.status_code == 409
     assert "identity verification" in str(excinfo.value.detail).lower()
+
+
+def test_the_staff_detail_read_is_scoped_to_the_application(monkeypatch):
+    """Staff must not see a repeat applicant's older identity evidence.
+
+    Review finding: the detail read took the LATEST kyc_checks row for the
+    applicant, so opening a repeat applicant's second application displayed CIP
+    evidence from their first -- the exact mixing db/migrations/0032 exists to
+    stop, still happening on the screen a human looks at, while the decision gate
+    refused that same application as unverified. Screen and gate disagreeing
+    about whether an application is verified is worse than either answer alone.
+
+    Asserted against the query rather than a rendered page: the defect is which
+    column it filters on.
+    """
+    import inspect
+    from app.routers import applications as mod
+
+    src = inspect.getsource(mod.get_application)
+    assert "models.KycCheck.application_id == app_id" in src, (
+        "the staff detail read still selects KYC by applicant, so a repeat "
+        "applicant's older evidence is shown against a newer application"
+    )
+    assert "models.KycCheck.applicant_id" not in src, (
+        "an applicant-scoped KYC filter remains in the staff detail read"
+    )

@@ -414,10 +414,16 @@ def get_application(
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
     applicant = a.applicant
+    # Scoped to THIS application, not the applicant. Review finding: this read
+    # took the latest row for the applicant, so staff opening a repeat
+    # applicant's second application saw identity evidence from their first --
+    # the exact mixing db/migrations/0032 exists to stop, still happening on the
+    # screen a human actually looks at while the decision gate refused the same
+    # application as unverified.
     kyc_row = session.scalar(
-        select(models.KycCheck).where(models.KycCheck.applicant_id == a.applicant_id)
+        select(models.KycCheck).where(models.KycCheck.application_id == app_id)
         .order_by(models.KycCheck.id.desc())
-    ) if a.applicant_id else None
+    )
     dec = session.get(models.Decision, app_id)
     offer = session.scalar(
         select(models.Offer).where(models.Offer.app_id == app_id).order_by(models.Offer.id.desc())
