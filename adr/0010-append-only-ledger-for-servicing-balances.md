@@ -52,8 +52,17 @@ approvable content.
 6. **Parity holds per loan, not in aggregate**: `balances.balance` equals the sum
    of that loan's `principal` entries, and `past_due` the sum of its `fees`
    entries, with `interest` excluded from both.
-7. **An applied payment produces exactly one entry.** `payment_id` is unique on
-   the ledger, so a retried apply cannot post twice.
+7. **Exactly one entry per payment/component pair.** The unique index is
+   `(payment_id, component)`, so an apply may write one `principal` row, one
+   `interest` row and one `fees` row for the same payment — which is what makes
+   the D14 waterfall expressible — and a retry cannot duplicate any of them.
+
+   Stated this way because "exactly one entry per payment" is the version that
+   contradicts both the index and D14: a waterfall splits one payment across
+   components by definition, so a single-row rule would forbid the thing the
+   ledger is being built to allow. Idempotency is unaffected — the retry
+   protection comes from the pair being unique, not from the payment appearing
+   once.
 
 ## What this closes
 
@@ -174,22 +183,24 @@ CREATE TABLE ledger_entries (
     actor_role   TEXT,
 
     -- Provenance. payment_id makes an apply idempotent by construction: the
-    -- unique index means the second attempt to post the same payment cannot
-    -- create a second entry, so servicing stops needing payment_applications
-    -- to tell it whether it already ran.
+    -- unique index on (payment_id, component) means a retry cannot create a
+    -- second entry FOR THE SAME COMPONENT, so servicing stops needing
+    -- payment_applications to tell it whether it already ran. One payment may
+    -- still write one row per component -- that is the waterfall (D14), and it is
+    -- why the index is on the pair rather than on payment_id alone.
     payment_id   INTEGER     REFERENCES payments(id),
 
-    -- Read by the projection trigger below, so they ship with this table: a
-    -- trigger cannot reference a column added later, and adding them afterwards
-    -- means rewriting it on a live money table.
-    approved_required   BOOLEAN NOT NULL DEFAULT false,
-    approved_at         TIMESTAMPTZ,
-
-    -- pending_movement_id is NOT here. It belongs to ADR 0011 and ships with the
-    -- table it points at. An earlier draft put it in this migration, justified by
-    -- the same "the trigger reads it" argument as the two columns above -- which
-    -- is true of them and false of it, as the trigger below shows. A maker-checker
-    -- column in a ledger-only migration needed a reason, and that was the reason.
+    -- No approval columns. approved_required, approved_at and
+    -- pending_movement_id all belong to ADR 0011, which ships them with the
+    -- pending_movements table that gives them meaning. A ledger-only migration
+    -- has nothing to approve: in steps 1 to 3 every entry is machine-originated
+    -- or a direct staff write, and the concept of an entry awaiting approval
+    -- does not exist yet.
+    --
+    -- Keeping them here would put approval state in two places -- a boolean and
+    -- a timestamp on the entry, and a resolution on the proposal -- which is a
+    -- second approval model competing with the real one, and the kind of
+    -- duplication that ends with the two disagreeing about the same movement.
 
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -320,13 +331,11 @@ that requires an actor, a reason, and (below) a second approver.
 ### `past_due` is in scope, and it ships in steps 1-3
 
 **Fee movements go in the ledger, and the `past_due` projection lands with the
-ledger — not with maker-checker.** Step 4 previously listed a "`past_due`
-projection" as well, which read as though fees waited on the approval workflow.
-They do not, and the ordering matters in the direction that is easy to get wrong:
-`waive_fee` is one of the two actions maker-checker exists to govern, so the fees
-component has to be recorded *before* anything approves a waiver. A maker-checker
-step that had to introduce its own projection would be approving movements the
-ledger could not yet represent.
+ledger — steps 1 to 3, not with maker-checker.** The ordering matters in the
+direction that is easy to get wrong: `waive_fee` is one of the two actions
+maker-checker governs, so the fees component has to exist *before* anything
+approves a waiver, or step 4 would be approving movements the ledger cannot
+represent.
 
 Leaving them out would put a hole in the audit trail exactly where fee waivers
 are -- and waivers are one of the two actions Week 6 named as needing a second
@@ -358,9 +367,10 @@ which the projection and its ledger disagree with nothing detecting it.
 ```sql
 CREATE FUNCTION project_ledger_entry() RETURNS trigger AS $$
 BEGIN
-    IF NEW.approved_required AND NEW.approved_at IS NULL THEN
-        RAISE EXCEPTION 'unapproved entries must not be written to the ledger';
-    END IF;
+    -- No approval check here. ADR 0011 adds one, keyed on the proposal rather
+    -- than on a column of this table: an 'adjustment' or 'fee_waived' entry must
+    -- name an approved pending_movement. That is single-sourced and strictly
+    -- stronger than a boolean the inserting statement sets for itself.
     IF NEW.component = 'principal' THEN
         UPDATE balances SET balance  = balance  + NEW.amount, updated_at = now()
          WHERE loan_id = NEW.loan_id;
@@ -378,13 +388,8 @@ Three things this depends on, each of which is a way to get it wrong:
   equal to that loan's current balance, **with the projection suppressed for
   that insert**, because `balances` already holds the number the entry records.
 
-  An earlier version of this section said the back-fill zeroes `balances` and
-  reprojects through the trigger, which is wrong twice over. It is a window in
-  which a live payment can land on a zeroed balance and be lost, and it
-  contradicts the rollout section a few pages down, which says direct writes
-  continue during the back-fill. Reprojecting is the tidier story and it needs a
-  pause to be true; suppressing the projection needs nothing, because the value
-  is already there.
+  Not zeroed and reprojected: that needs a pause to be safe, because a live
+  payment can land on a zeroed balance, and the rollout below does not pause.
 - **Direct writes are blocked.** `balances` becomes trigger-maintained only: a
   `BEFORE UPDATE OR DELETE` trigger on `balances` raises unless the projection
   function is the one writing. Otherwise `balance.py`'s existing `UPDATE
@@ -474,7 +479,7 @@ is not recoverable.
 | Step | What lands | Gate before the next step |
 |---|---|---|
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
-| 2 | `ledger_entries` (with `approved_required` / `approved_at`, which the projection trigger reads), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
+| 2 | `ledger_entries` (no approval columns — see ADR 0011), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
 | 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes** |
 | 4 | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
@@ -489,9 +494,9 @@ unavailable**, and the distinct type is what keeps that admission legible, so no
 one later mistakes an opening balance for an audited movement.
 
 `opening_balance` is its own value in the `entry_type` CHECK rather than a
-`disbursement` "marked as reconstructed": a marker that exists only in prose is
-not a marker, and reusing a real event type would make a reconstructed balance
-indistinguishable from an actual disbursement to every query that asks.
+`disbursement` flagged as reconstructed: reusing a real event type would make a
+reconstructed balance indistinguishable from an actual disbursement to every
+query that asks.
 
 ## The minimum slice that is ADR-compliant
 
@@ -514,17 +519,17 @@ stops is compliant with this ADR. Concretely, it must have all four of:
 function, `past_due` maker-checker, the waterfall: all of it can be declined,
 deferred, or decided differently without contradicting anything decided here.
 
-The columns that are **not** optional in step 2 are `approved_required` and
-`approved_at`, because the projection trigger reads them and a trigger cannot
-reference a column added afterwards — leaving them out means rewriting the
-trigger later on a live money table.
+**Step 2 ships no maker-checker columns at all.** Not
+`pending_movement_id`, not `approved_required`, not `approved_at`. Every one of
+them exists to serve an approval workflow this ADR does not decide, and ADR 0011
+adds all three together with the table that gives them meaning and the trigger
+that enforces them.
 
-`pending_movement_id` is **not** one of them. An earlier version of this section
-claimed it was, on the same "the trigger reads it" reasoning; the trigger shown
-above reads `approved_required` and `approved_at` and nothing else. The claim was
-wrong, and it was the load-bearing justification for shipping a maker-checker
-column in a ledger-only migration. It ships with ADR 0011, alongside the table it
-points at and the foreign key that constrains it.
+The rule that keeps this honest: a column belongs in the migration that can
+enforce its invariant. `approved_required` in a ledger-only schema is a boolean
+the inserting statement sets for itself, which enforces nothing; the same column
+next to `pending_movements` is checkable against a resolution a second person
+made.
 
 ## Non-goals, and the PRs that are required
 
@@ -751,10 +756,9 @@ procedures — signatures with the guarantees they owe.
 
 Partial, unexecuted SQL gets treated as authoritative by whoever implements it,
 and then drifts from the migration that actually runs. **The copy nobody applies
-is the copy nobody notices is wrong.** So `resolve_pending_movement()` and
-`ledger_entry_matches_its_proposal()` are stated as requirements instead — what
-each must guarantee, every item of which becomes a test in the PR that writes
-it.
+is the copy nobody notices is wrong.** So the two procedures are stated as
+requirements instead — what each must guarantee, every item of which becomes a
+test in the PR that writes it.
 
 Three short trigger bodies survive, deliberately: `project_ledger_entry()`,
 `pending_movements_single_transition()` and

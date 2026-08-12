@@ -22,6 +22,10 @@ What must hold for an implementation to be this decision.
 6. **The ledger actor is the approver**, overwritten by trigger rather than
    trusted from the caller. The requester survives on the proposal.
 7. **A rejected proposal is retained.** It is the evidence D8 says is missing.
+8. **Approval state is single-sourced.** `pending_movements.resolution` is the
+   fact; `ledger_entries.approved_required` / `approved_at` are set by the
+   resolving function from that row and never by a caller. Two writable copies of
+   "was this approved" is how the two come to disagree about the same movement.
 
 ## Why this is a separate ADR
 
@@ -146,12 +150,13 @@ ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK
 );
 ```
 
-`ledger_entries.pending_movement_id` is added **here**, not in ADR 0010's
-migration. An earlier draft shipped it with the ledger on the grounds that the
-projection trigger reads it — the trigger reads `approved_required` and
-`approved_at` and nothing else, so that was a maker-checker column riding into a
-ledger-only migration on a justification that did not hold. It belongs with the
-table it points at.
+**All three approval columns are added here, not in ADR 0010's migration** —
+`pending_movement_id`, `approved_required` and `approved_at`. A column belongs in
+the migration that can enforce its invariant, and none of them can be enforced
+without `pending_movements`: in a ledger-only schema `approved_required` is a
+boolean the inserting statement sets for itself, and `approved_at` is a timestamp
+nothing can check. Next to the proposal they are both derivable from a resolution
+a second person made, which is the difference between a record and a claim.
 
 Adding it here makes the two tables reference each other, which is a genuine
 cycle: an entry points at the proposal that authorised it, and the proposal
@@ -163,8 +168,15 @@ that replaces the impossible CHECK:
 > the executable version lands in the migration PR where it can be tested.
 
 ```sql
+-- All three approval columns arrive here, with the table that gives them meaning.
+-- ADR 0010 deliberately ships none of them: in a ledger-only schema
+-- `approved_required` is a boolean the inserting statement sets for itself, which
+-- enforces nothing, and approval state on the entry alongside a resolution on the
+-- proposal is two models for one fact.
 ALTER TABLE ledger_entries
-    ADD COLUMN pending_movement_id BIGINT UNIQUE;
+    ADD COLUMN pending_movement_id BIGINT UNIQUE,
+    ADD COLUMN approved_required   BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN approved_at         TIMESTAMPTZ;
 
 ALTER TABLE ledger_entries
     ADD CONSTRAINT ledger_entries_pending_movement_fk
