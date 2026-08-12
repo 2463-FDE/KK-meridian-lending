@@ -94,6 +94,29 @@ the one where an attacker can read the default out of the repo, so the guard pas
 protecting nothing. Comparison uses `secrets.compare_digest`, so a wrong token leaks no
 timing signal about how much of it was right.
 
+**For money movement, accounting correctness beats availability.** Written down
+because it is a real tradeoff that was decided the wrong way once already, and the
+next person will face the same argument.
+
+`payment-service` preflights `servicing-service`'s authenticated `/internal/auth-check`
+immediately before every card authorization, and that preflight **fails closed**: a
+timeout, DNS failure, TLS error, 5xx, or a 200 that is not the expected body all
+refuse the charge. So **card capture is unavailable whenever servicing is
+unavailable** — a deliberate coupling, not an oversight.
+
+The first version failed *open*, on the reasoning that "unknown is not known-bad" and
+that refusing payments during every servicing blip trades a rare accounting error for
+a common outage. That is wrong here on both counts. It left the guard catching only an
+explicit 401 — the narrow case — while the broad case, servicing simply being down,
+sailed past it. And the fallback argument, that the reconciler drains
+captured-but-unapplied rows, only holds *once servicing returns*: until then real money
+has left a real card while the balance has not moved. An uncharged customer retries in
+a minute; a charged customer with no credit files a complaint.
+
+Two things bound the availability cost: the preflight timeout is short, so an outage
+fails fast rather than hanging the request, and replaying an already-captured payment
+never reaches the check, because it authorizes nothing.
+
 **What this does not close.** `DEBT.md` **D8** is about who may *authorize* a money
 movement — no role check, no second approver, no ledger entry — and remains fully open.
 That is a different question from who can *reach* the endpoint, which is what the token

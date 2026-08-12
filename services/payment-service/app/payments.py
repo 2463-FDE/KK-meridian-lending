@@ -121,22 +121,38 @@ def _require_servicing_auth() -> None:
 
 
 def _servicing_auth_ok() -> bool:
-    """Ask servicing whether our token works, BEFORE authorizing a card.
+    """Confirm servicing will accept our credentials, BEFORE authorizing a card.
 
-    Review round 2 (high): the token is sent to apply-payment only after the
-    processor has already authorized. If payment-service and servicing-service
-    hold different token values -- a rotation applied to one and not the other --
-    the borrower is charged and every apply is rejected, so the money is captured
-    and the balance never moves until a human reconciles it.
+    **Fails closed.** True is returned only for an explicit 200 carrying the
+    expected body. A timeout, DNS failure, TLS error, connection reset, 5xx or an
+    unrecognised body all mean the same thing for this decision: we cannot
+    confirm the system that credits the borrower is reachable, so we do not take
+    their money.
 
-    Refusing to charge is the right failure. An uncharged customer retries; a
-    charged customer with no credit has to be found first. The compose /health
-    checks cannot catch this: they are open by design, so they report that the
-    process is up and never that our credentials work there.
+    Review round 4 corrected this, and the earlier version was mine to defend.
+    It returned True on any exception, reasoning that "unknown is not known-bad"
+    and that refusing payments on every servicing blip trades a rare accounting
+    error for a common outage. That argument is wrong here, for two reasons.
 
-    A transient failure is NOT treated as an auth failure -- only an explicit
-    401/403 blocks the charge, because making every servicing blip refuse
-    payments would trade a rare accounting error for a common outage.
+    First, it contradicts what this guard is for. The preflight exists because a
+    capture that cannot be credited is the worst outcome in the system; letting
+    an unreachable servicing through means the guard only caught an explicit
+    401 -- the narrow case -- while the broad case, servicing simply being down,
+    sailed past it.
+
+    Second, "the reconciler will fix it" is not an answer a borrower accepts.
+    payment-service does have a durable drain for captured-but-unapplied rows,
+    and it does work -- but it only works once servicing comes back, and until
+    then real money has left a real card while the balance has not moved. An
+    uncharged customer retries in a minute; a charged customer with no credit
+    files a complaint.
+
+    The cost is stated rather than hidden: card capture is now unavailable
+    whenever servicing is unavailable. That coupling is deliberate and is
+    recorded in ARCHITECTURE.md -- for money movement, accounting correctness
+    beats availability. The timeout is kept short so an outage fails fast rather
+    than hanging the request, and replaying an already-captured payment does not
+    reach this check at all, because it authorizes nothing.
     """
     try:
         resp = httpx.get(
@@ -145,14 +161,31 @@ def _servicing_auth_ok() -> bool:
             timeout=2.0,
         )
     except Exception as e:  # noqa
-        log.warning("servicing auth preflight did not complete: %s", e)
-        return True                      # unknown, not known-bad: do not block
-    if resp.status_code in (401, 403):
         log.error(
-            "servicing rejected our internal token on preflight (%s) -- refusing to "
-            "charge, because a capture could not be credited. Check "
-            "INTERNAL_SERVICE_TOKEN parity between payment-service and servicing-service",
+            "servicing auth preflight did not complete (%s) -- refusing to charge, "
+            "because a capture could not be credited while servicing is unreachable",
+            type(e).__name__,
+        )
+        return False
+    if resp.status_code != 200:
+        log.error(
+            "servicing auth preflight returned %s -- refusing to charge. If this is "
+            "401/403, check INTERNAL_SERVICE_TOKEN parity between payment-service "
+            "and servicing-service",
             resp.status_code,
+        )
+        return False
+    try:
+        body = resp.json()
+    except Exception:  # noqa
+        log.error("servicing auth preflight returned a 200 that was not JSON -- refusing to charge")
+        return False
+    # A 200 from something that is not servicing's auth-check -- a proxy error
+    # page, a misrouted health endpoint -- must not be read as authorization.
+    if body.get("auth") != "ok":
+        log.error(
+            "servicing auth preflight returned 200 without auth=ok (%r) -- refusing to charge",
+            body,
         )
         return False
     return True

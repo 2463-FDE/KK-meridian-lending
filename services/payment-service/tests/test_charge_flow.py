@@ -844,22 +844,72 @@ def test_a_charge_is_refused_when_servicing_will_not_accept_our_token(monkeypatc
     )
 
 
-def test_a_transient_preflight_failure_does_not_block_payments(monkeypatch):
-    """Unknown is not known-bad.
+@pytest.mark.parametrize("failure", [
+    RuntimeError("connection reset"),
+    TimeoutError("servicing timed out"),
+    OSError("name resolution failed"),
+])
+@pytest.mark.real_servicing_preflight
+def test_an_unreachable_servicing_blocks_the_charge(monkeypatch, failure):
+    """Fails CLOSED. This test previously asserted the opposite.
 
-    Making every servicing blip refuse payments would trade a rare accounting
-    error for a common outage, so only an explicit 401/403 blocks the charge.
+    It pinned "unknown is not known-bad" -- that a timeout, DNS failure or TLS
+    error let the charge proceed, on the reasoning that refusing payments during
+    every servicing blip trades a rare accounting error for a common outage.
+
+    Review round 4 rejected that, correctly. The argument contradicts what the
+    guard is for: letting an unreachable servicing through meant the preflight
+    only caught an explicit 401 -- the narrow case -- while the broad case,
+    servicing being down, sailed past it. And "the reconciler will fix it" only
+    holds once servicing returns; until then real money has left a real card
+    while the balance has not moved.
     """
     from app import payments as payments_mod
 
     def _boom(*a, **k):
-        raise RuntimeError("connection reset")
+        raise failure
 
     monkeypatch.setattr(payments_mod.httpx, "get", _boom)
+    assert payments_mod._servicing_auth_ok() is False
+
+
+@pytest.mark.parametrize("body", [{"status": "ok"}, {"auth": "no"}, {}, "not-json"])
+@pytest.mark.real_servicing_preflight
+def test_a_200_that_is_not_the_auth_check_is_not_authorization(monkeypatch, body):
+    """A proxy error page or a misrouted health endpoint can return 200.
+
+    Reading any 200 as permission to charge would let an infrastructure
+    misconfiguration stand in for the check itself.
+    """
+    from app import payments as payments_mod
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            if body == "not-json":
+                raise ValueError("no json")
+            return body
+
+    monkeypatch.setattr(payments_mod.httpx, "get", lambda *a, **k: _Resp())
+    assert payments_mod._servicing_auth_ok() is False
+
+
+@pytest.mark.real_servicing_preflight
+def test_a_healthy_servicing_permits_the_charge(monkeypatch):
+    """The guard must not refuse when servicing is genuinely fine."""
+    from app import payments as payments_mod
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"status": "ok", "auth": "ok"}
+
+    monkeypatch.setattr(payments_mod.httpx, "get", lambda *a, **k: _Resp())
     assert payments_mod._servicing_auth_ok() is True
 
 
 @pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.real_servicing_preflight
 def test_the_preflight_reports_an_auth_rejection(monkeypatch, status):
     from app import payments as payments_mod
 
@@ -963,4 +1013,45 @@ def test_the_guard_covers_every_authorize_charge_call_site(monkeypatch):
     assert guard_calls >= authorize_calls, (
         f"{authorize_calls} authorize_charge() call sites but only {guard_calls} "
         "preflight guards -- every path that can charge a card must check first"
+    )
+
+
+@pytest.mark.real_servicing_preflight
+def test_the_route_returns_503_and_never_charges_when_servicing_is_unreachable(monkeypatch):
+    """End to end through the API: an outage refuses, and the card is untouched.
+
+    The unit tests above prove `_servicing_auth_ok()` returns False. This proves
+    the consequence a borrower actually experiences -- a 503, and no
+    authorization attempt -- because a guard that returns False and is then
+    ignored by the caller would satisfy the unit tests and still capture money.
+    """
+    from fastapi.testclient import TestClient
+    from app import payments as payments_mod
+    from app.main import app
+
+    authorized = []
+
+    def _boom(*a, **k):
+        raise RuntimeError("connection reset")
+
+    class _Db:
+        def query(self, sql, params=None):
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return [{"id": 99, "loan_id": 42, "amount": 10.0}]
+            return []
+
+    monkeypatch.setattr(payments_mod.httpx, "get", _boom)          # servicing unreachable
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod.processor, "authorize_charge",
+                        lambda *a, **k: authorized.append(a) or "auth_x")
+
+    resp = TestClient(app).post("/payments", json={
+        "loan_id": 42, "processor_token": "tok_x", "last4": "1111", "brand": "visa",
+        "amount": 10.0, "method": "card", "idempotency_key": "outage-key-1",
+    }, headers={"X-Internal-Token": "test-internal-token"})
+
+    assert resp.status_code == 503, f"expected 503, got {resp.status_code}: {resp.text[:200]}"
+    assert not authorized, (
+        "the card was authorized while servicing was unreachable -- a capture that "
+        "could not be credited, which is the outcome this guard exists to prevent"
     )
