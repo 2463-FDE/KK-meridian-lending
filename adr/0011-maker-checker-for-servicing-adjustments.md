@@ -125,17 +125,23 @@ ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK
 );
 ```
 
-The cycle is closed here, once both tables exist — **in step 4, not step 2**,
-together with the commit-time rule that replaces the impossible CHECK.
+`ledger_entries.pending_movement_id` is added **here**, not in ADR 0010's
+migration. An earlier draft shipped it with the ledger on the grounds that the
+projection trigger reads it — the trigger reads `approved_required` and
+`approved_at` and nothing else, so that was a maker-checker column riding into a
+ledger-only migration on a justification that did not hold. It belongs with the
+table it points at.
 
-That split is what lets the ledger ship without maker-checker. `ledger_entries`
-carries `pending_movement_id` from step 2, because the projection trigger reads
-it and a trigger cannot reference a column added later; the column is nullable
-and unconstrained until the table it points at exists. Nothing about the ledger
-depends on that FK, so a reviewer can approve steps 1 to 3 and defer everything
-below:
+Adding it here makes the two tables reference each other, which is a genuine
+cycle: an entry points at the proposal that authorised it, and the proposal
+points back at the entry it produced. Split the ordinary way — create the column
+and the table, then add the foreign key — together with the commit-time rule
+that replaces the impossible CHECK:
 
 ```sql
+ALTER TABLE ledger_entries
+    ADD COLUMN pending_movement_id BIGINT UNIQUE;
+
 ALTER TABLE ledger_entries
     ADD CONSTRAINT ledger_entries_pending_movement_fk
     FOREIGN KEY (pending_movement_id) REFERENCES pending_movements(id);

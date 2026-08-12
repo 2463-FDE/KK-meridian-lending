@@ -105,14 +105,15 @@ because there is one number and it has no components.
 **Record money movements as immutable rows. Derive the balance from them.**
 
 ```sql
--- The two tables reference EACH OTHER: ledger_entries.pending_movement_id points
--- at a proposal, and pending_movements.ledger_entry_id points back at the entry
--- an approval produced. That is a genuine cycle, so neither can be created with
--- both foreign keys already in place.
+-- Full runnable DDL is in Appendix A; the excerpts below are the shape of the
+-- decision, not the migration file.
 --
--- Resolved the way a cycle normally is: create both tables, then add the second
--- foreign key with an ALTER. Full runnable DDL is in Appendix A; the excerpts
--- below are the shape of the decision, not the migration file.
+-- ADR 0011 adds pending_movement_id to this table, and the two tables then
+-- reference each other: an entry points at the proposal that authorised it, and
+-- the proposal points back at the entry it produced. That cycle is 0011's to
+-- split -- create both, then add the second foreign key with an ALTER -- and it
+-- is named here only so nobody designs around a constraint this migration does
+-- not have.
 CREATE TABLE ledger_entries (
     id           BIGSERIAL   PRIMARY KEY,
     loan_id      INTEGER     NOT NULL REFERENCES loans(id),
@@ -143,17 +144,17 @@ CREATE TABLE ledger_entries (
     -- to tell it whether it already ran.
     payment_id   INTEGER     REFERENCES payments(id),
 
-    -- Maker-checker linkage. The COLUMNS are declared here, because the
-    -- projection trigger below reads them and a trigger cannot reference a
-    -- column added later. The FOREIGN KEY is added after pending_movements
-    -- exists (see the ALTER below) -- that is the cycle, split at the only
-    -- point where it can be split.
-    --
-    -- UNIQUE, so one approved proposal produces exactly one ledger entry and an
-    -- entry can never be attributed to a proposal it does not match.
-    pending_movement_id BIGINT UNIQUE,
+    -- Read by the projection trigger below, so they ship with this table: a
+    -- trigger cannot reference a column added later, and adding them afterwards
+    -- means rewriting it on a live money table.
     approved_required   BOOLEAN NOT NULL DEFAULT false,
     approved_at         TIMESTAMPTZ,
+
+    -- pending_movement_id is NOT here. It belongs to ADR 0011 and ships with the
+    -- table it points at. An earlier draft put it in this migration, justified by
+    -- the same "the trigger reads it" argument as the two columns above -- which
+    -- is true of them and false of it, as the trigger below shows. A maker-checker
+    -- column in a ledger-only migration needed a reason, and that was the reason.
 
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -275,7 +276,7 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
 Only `adjustment` may go either way, which is precisely why it is the entry type
 that requires an actor, a reason, and (below) a second approver.
 
-**Who the actor is, in one rule:** `ledger_entries.actor_id` is whoever *authorised* the movement. For an `adjustment` or `fee_waived` that is the **approver**, not the requester -- the ledger answers "who allowed this money to move". The requester is preserved rather than discarded: `pending_movements.requested_by` holds it, and `pending_movement_id` is UNIQUE, so both people are recoverable from either direction. Machine-originated entries (`payment`, `fee_assessed`, `disbursement`, `opening_balance`) have no actor, and the CHECK exempts exactly those.
+**Who the actor is, in one rule:** `ledger_entries.actor_id` is whoever *authorised* the movement. For an `adjustment` or `fee_waived` that is the **approver**, not the requester -- the ledger answers "who allowed this money to move". The requester is preserved rather than discarded, by the linkage ADR 0011 adds: `pending_movements.requested_by` holds it, and the entry's `pending_movement_id` is UNIQUE, so both people are recoverable from either direction. Recorded here because it decides what `actor_id` MEANS on this table, which is a ledger question and has to be answered before anything writes to it. Machine-originated entries (`payment`, `fee_assessed`, `disbursement`, `opening_balance`) have no actor, and the CHECK exempts exactly those.
 
 ### `past_due` is in scope
 
@@ -324,10 +325,17 @@ END $$ LANGUAGE plpgsql;
 
 Three things this depends on, each of which is a way to get it wrong:
 
-- **Initialisation.** The back-fill writes its `opening_balance` entry per loan
-  *through* this trigger, having first set `balances.balance` and `past_due` to
-  zero. The projection is therefore built by the same code path that maintains
-  it, rather than by a one-off script whose arithmetic could differ.
+- **Initialisation.** The back-fill writes one `opening_balance` entry per loan
+  equal to that loan's current balance, **with the projection suppressed for
+  that insert**, because `balances` already holds the number the entry records.
+
+  An earlier version of this section said the back-fill zeroes `balances` and
+  reprojects through the trigger, which is wrong twice over. It is a window in
+  which a live payment can land on a zeroed balance and be lost, and it
+  contradicts the rollout section a few pages down, which says direct writes
+  continue during the back-fill. Reprojecting is the tidier story and it needs a
+  pause to be true; suppressing the projection needs nothing, because the value
+  is already there.
 - **Direct writes are blocked.** `balances` becomes trigger-maintained only: a
   `BEFORE UPDATE OR DELETE` trigger on `balances` raises unless the projection
   function is the one writing. Otherwise `balance.py`'s existing `UPDATE
@@ -417,9 +425,9 @@ is not recoverable.
 | Step | What lands | Gate before the next step |
 |---|---|---|
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
-| 2 | `ledger_entries` (including the nullable `pending_movement_id` column, which the projection trigger reads and so cannot be added later), then the triggers, then the back-fill from `payments` + current `balances` | Parity green PER LOAN, not in aggregate, and **excluding `interest` entries, which project nowhere by design** — including them invents a mismatch on every loan that has ever accrued |
+| 2 | `ledger_entries` (with `approved_required` / `approved_at`, which the projection trigger reads), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
 | 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes** |
-| 4 | `pending_movements`, the `ALTER` that adds the FK closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
+| 4 | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
@@ -457,12 +465,17 @@ stops is compliant with this ADR. Concretely, it must have all four of:
 function, `past_due` maker-checker, the waterfall: all of it can be declined,
 deferred, or decided differently without contradicting anything decided here.
 
-The one thing that is **not** optional and lands in step 2 is the nullable
-`pending_movement_id` column on `ledger_entries`. It is unconstrained and points
-at nothing until ADR 0011 exists. It ships early only because the projection
-trigger reads the row it belongs to, and a trigger cannot reference a column
-added afterwards — so leaving it out means rewriting the trigger later on a live
-money table.
+The columns that are **not** optional in step 2 are `approved_required` and
+`approved_at`, because the projection trigger reads them and a trigger cannot
+reference a column added afterwards — leaving them out means rewriting the
+trigger later on a live money table.
+
+`pending_movement_id` is **not** one of them. An earlier version of this section
+claimed it was, on the same "the trigger reads it" reasoning; the trigger shown
+above reads `approved_required` and `approved_at` and nothing else. The claim was
+wrong, and it was the load-bearing justification for shipping a maker-checker
+column in a ledger-only migration. It ships with ADR 0011, alongside the table it
+points at and the foreign key that constrains it.
 
 ## Non-goals, and the PRs that are required
 
@@ -499,7 +512,7 @@ difference is where this goes wrong.
 | 1 | Deploy the schema: tables, projection trigger, and the `balances` write-guard **disabled** | The guard is a separate `ALTER TABLE ... ENABLE TRIGGER`, so schema and enforcement land in different deploys and either can be reverted alone |
 | 2 | Back-fill `opening_balance` entries, with writes still going to `balances` directly | Nothing reads the ledger yet, so a wrong back-fill is a table to truncate, not an incident |
 | 3 | Run parity in report-only mode over every loan | Fails here cost nothing — see below |
-| 4 | Deploy `balance.py` writing ledger entries instead of `balances` | The projection trigger now maintains `balances`; the old path is gone in the same deploy that adds the new one |
+| 4 | Deploy `balance.py` writing ledger entries instead of `balances`, then run the **delta pass** | The projection trigger now maintains `balances`; the old path is gone in the same deploy that adds the new one. The delta pass closes the gap the back-fill could not — see below |
 | 5 | Enable the write-guard | Last, because until step 4 is everywhere, a straggler pod still writing `balances` directly would start erroring |
 
 **Writes are not paused and not dual-written.** Both were considered:
@@ -517,9 +530,46 @@ difference is where this goes wrong.
 
 What makes the pause unnecessary is that step 4 is atomic per write, not per
 system. Every payment either wrote the old way or the new way; none wrote half.
-A pod mid-deploy is writing one or the other correctly, and the projection is
-correct under both, because step 2 built `balances` from the same trigger that
-maintains it.
+A pod mid-deploy is writing one or the other correctly, and `balances` is right
+under both — the old path writes it directly, the new path writes it through the
+projection.
+
+### The delta pass, and why the back-fill alone is not enough
+
+Between the back-fill and the last pod finishing step 4, live payments move
+`balances` directly and write **no** ledger entry. The ledger is therefore behind
+by exactly those payments, and no amount of care in the back-fill fixes it,
+because they had not happened yet when it ran. This is the part the "no pause"
+decision costs, and it has to be paid rather than argued away.
+
+It is payable exactly, because the movements are already recorded. Servicing's
+idempotency guard writes one `payment_applications` row per applied payment, so
+after step 4 completes:
+
+```sql
+-- Every payment applied after its loan's opening entry that has no ledger entry.
+SELECT pa.*
+  FROM payment_applications pa
+  JOIN ledger_entries oe ON oe.loan_id = pa.loan_id
+                        AND oe.entry_type = 'opening_balance'
+ WHERE pa.applied_at > oe.occurred_at
+   AND NOT EXISTS (SELECT 1 FROM ledger_entries le WHERE le.payment_id = pa.payment_id);
+```
+
+Those get `payment` entries written **with the projection suppressed**, for the
+same reason the opening entries were: `balances` already reflects them. The
+delta pass is idempotent by that `NOT EXISTS`, so it can be run repeatedly and
+run again if it is interrupted.
+
+Parity is asserted **after** the delta pass. Asserting it before is asserting
+something the design says will be false.
+
+Two things this does not cover, stated rather than discovered: adjustments and
+fee waivers made through `adjust-balance` / `waive-fee` during the window leave
+no `payment_applications` row, so they are invisible to the query above. Both are
+staff actions on a specific loan and both are rare. **Freeze them for the
+duration** — a CSR waiting an hour is a different order of problem from a
+borrower's balance being wrong — and the delta pass covers everything else.
 
 ### Locks
 
@@ -548,8 +598,23 @@ Where it fails decides what to do, which is why step 3 exists before step 4:
   `balances`: that is the thing under suspicion, and correcting the projection by
   hand destroys the evidence of how it diverged. Disable the write-guard, revert
   `balance.py` to the direct-write path, and leave the ledger in place accruing
-  nothing. The system is then back to today's behaviour with a stale ledger, the
-  divergence is still measurable, and no borrower balance was touched.
+  nothing. The system is then back to today's behaviour, the divergence is still
+  measurable, and no borrower balance was touched.
+
+  **What happens to the entries already written.** They stay, and they stay
+  authoritative for the period they cover. They are not orphans: every one of
+  them already moved `balances` through the projection trigger, so the borrower's
+  balance is correct and the entry is the record of why. Nothing needs undoing —
+  deleting them would destroy the only history the system has ever had.
+
+  What this costs is that the ledger now has a **hole**: entries up to the
+  revert, nothing after it. So a second attempt at cutover must **not** re-run
+  the back-fill, which would write a second `opening_balance` on top of history
+  that is already there and double every loan that has one. It resumes from the
+  last entry instead, with the same delta query, whose `NOT EXISTS` makes it the
+  right tool for both jobs. The `opening_balance` entry is the marker that says
+  which loans have already been initialised, which is a second reason it is its
+  own `entry_type` rather than a flag.
 
 The parity check is `SUM(amount) GROUP BY loan_id, component` against `balances`,
 which is the same query the ongoing test uses. A per-loan report, never a single
