@@ -4,7 +4,7 @@
 - **Date:** 2026-08-11
 - **Author:** In-house team
 - **Closes:** the ADR Week 6 owed and never produced (`docs/ROADMAP.md`, G-ADR-0010)
-- **Bears on:** `DEBT.md` D3, D8, D14
+- **Bears on:** `DEBT.md` D3 (closed by step 3), D8 (closed by step 4), D14 (**enabled, not closed** -- the allocation algorithm is separate work)
 
 ## Context
 
@@ -68,6 +68,9 @@ because there is one number and it has no components.
 **Record money movements as immutable rows. Derive the balance from them.**
 
 ```sql
+-- Order matters: pending_movements is created FIRST, because ledger_entries
+-- carries a foreign key to it, and every trigger below is defined only after
+-- the columns it reads exist. See the migration plan for the step ordering.
 CREATE TABLE ledger_entries (
     id           BIGSERIAL   PRIMARY KEY,
     loan_id      INTEGER     NOT NULL REFERENCES loans(id),
@@ -97,6 +100,16 @@ CREATE TABLE ledger_entries (
     -- create a second entry, so servicing stops needing payment_applications
     -- to tell it whether it already ran.
     payment_id   INTEGER     REFERENCES payments(id),
+
+    -- Maker-checker linkage, declared here rather than bolted on by a later
+    -- ALTER. An earlier draft added these below the projection trigger that
+    -- reads them, so the migration could not have run in the order written.
+    -- `pending_movement_id` is UNIQUE, so one approved proposal can produce
+    -- exactly one ledger entry and an entry can never be attributed to a
+    -- proposal it does not match.
+    pending_movement_id BIGINT UNIQUE REFERENCES pending_movements(id),
+    approved_required   BOOLEAN NOT NULL DEFAULT false,
+    approved_at         TIMESTAMPTZ,
 
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -150,8 +163,9 @@ posting a payment is an `INSERT` of a delta, and two concurrent inserts both
 land. Nothing is overwritten, so nothing can be lost.
 
 D3 therefore closes as a *consequence* of this design rather than as separate
-work, and D14 does too: a payment writes one row per component, so the waterfall
-is the data model instead of a calculation layered on top.
+work. D14 becomes POSSIBLE but is not closed: a payment can now write one row
+per component, which is the prerequisite for a waterfall -- the allocation
+algorithm itself is separate work with its own tests (step 5).
 
 **This is not a reason to skip the failing test.** Week 6 asked for a test proving
 the lost update, and it should still be written first, against today's code, and
@@ -224,6 +238,8 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
 
 Only `adjustment` may go either way, which is precisely why it is the entry type
 that requires an actor, a reason, and (below) a second approver.
+
+**Who the actor is, in one rule:** `ledger_entries.actor_id` is whoever *authorised* the movement. For an `adjustment` or `fee_waived` that is the **approver**, not the requester -- the ledger answers "who allowed this money to move". The requester is preserved rather than discarded: `pending_movements.requested_by` holds it, and `pending_movement_id` is UNIQUE, so both people are recoverable from either direction. Machine-originated entries (`payment`, `fee_assessed`, `disbursement`, `opening_balance`) have no actor, and the CHECK exempts exactly those.
 
 ### `past_due` is in scope
 
@@ -365,11 +381,6 @@ CREATE TRIGGER pending_movements_one_way
 -- The approved entry must BE the movement that was approved. A unique link, so
 -- one approval can never yield two entries and an entry cannot be attributed to
 -- a proposal it does not match.
-ALTER TABLE ledger_entries
-    ADD COLUMN pending_movement_id BIGINT UNIQUE REFERENCES pending_movements(id),
-    ADD COLUMN approved_required   BOOLEAN NOT NULL DEFAULT false,
-    ADD COLUMN approved_at         TIMESTAMPTZ;
-
 -- adjustment and fee_waived are the maker-checker subjects, so they may only
 -- enter the ledger through an approved proposal.
 ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK (
@@ -385,6 +396,77 @@ the one reviewed would be a maker-checker bypass wearing the shape of an
 approval.
 
 ```sql
+-- The single enforcement point. Approval is not a sequence of statements an
+-- application is trusted to perform in the right order -- it is one function,
+-- and the ledger insert is unreachable except through it.
+--
+-- An earlier draft left this block empty and described the behaviour in prose,
+-- which is how a maker-checker control ends up existing only in the paragraph
+-- that claims it.
+CREATE FUNCTION resolve_pending_movement(
+    p_movement_id BIGINT,
+    p_resolver    INTEGER,
+    p_resolution  TEXT          -- 'approved' | 'rejected'
+) RETURNS BIGINT AS $$
+DECLARE
+    m         pending_movements%ROWTYPE;
+    new_entry BIGINT;
+BEGIN
+    IF p_resolution NOT IN ('approved','rejected') THEN
+        RAISE EXCEPTION 'resolution must be approved or rejected, got %', p_resolution;
+    END IF;
+
+    -- Lock the proposal for the life of the transaction. Two approvers clicking
+    -- at once would otherwise both read resolution IS NULL and both insert.
+    SELECT * INTO m FROM pending_movements WHERE id = p_movement_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no such pending movement %', p_movement_id;
+    END IF;
+
+    -- Exactly one transition, ever. Not approved -> rejected, not a second
+    -- approver overwriting the first.
+    IF m.resolution IS NOT NULL THEN
+        RAISE EXCEPTION 'pending movement % is already %', m.id, m.resolution;
+    END IF;
+
+    -- The requester may not approve their own request. Enforced here as well as
+    -- by the table CHECK, because this is the path that writes the money.
+    IF p_resolver = m.requested_by THEN
+        RAISE EXCEPTION 'self-approval is not permitted on movement %', m.id;
+    END IF;
+
+    IF p_resolution = 'rejected' THEN
+        UPDATE pending_movements
+           SET resolution = 'rejected', resolved_by = p_resolver, resolved_at = now()
+         WHERE id = m.id;
+        RETURN NULL;                      -- a rejection writes no ledger entry
+    END IF;
+
+    -- The entry is built FROM the locked proposal row, never from caller input,
+    -- so loan, component, amount and entry_type cannot differ from what was
+    -- reviewed. That is the difference between an approval and a bypass wearing
+    -- the shape of one.
+    --
+    -- The actor on the resulting ledger entry is the APPROVER: the ledger records
+    -- who authorised the movement. The requester is not lost -- pending_movement_id
+    -- is UNIQUE, so both people are recoverable by joining back.
+    INSERT INTO ledger_entries (
+        loan_id, component, amount, entry_type, reason,
+        actor_id, actor_role,
+        pending_movement_id, approved_required, approved_at
+    )
+    SELECT m.loan_id, m.component, m.amount, m.entry_type, m.reason,
+           p_resolver, (SELECT role FROM users WHERE id = p_resolver),
+           m.id, true, now()
+    RETURNING id INTO new_entry;
+
+    UPDATE pending_movements
+       SET resolution = 'approved', resolved_by = p_resolver,
+           resolved_at = now(), ledger_entry_id = new_entry
+     WHERE id = m.id;
+
+    RETURN new_entry;
+END $$ LANGUAGE plpgsql;
 ```
 
 A CSR raising an adjustment writes a `pending_movements` row. The balance does
@@ -422,7 +504,7 @@ drift in a way the test catches in CI, revisit this — that would be evidence t
 trade was wrong, and it is the specific trigger to reopen this decision.
 
 **`SELECT … FOR UPDATE` on `balances`, and stop there.** Closes D3 only. Leaves
-D8 and D14 open, and leaves maker-checker with nowhere to live. It is strictly
+D8 open and D14 impossible, and leaves maker-checker with nowhere to live. It is strictly
 less work, and it is the right answer only if the ledger is never built — in
 which case D8 stays permanently unanswerable, which Week 6 already rejected.
 
@@ -440,9 +522,9 @@ is not recoverable.
 | Step | What lands | Gate before the next step |
 |---|---|---|
 | 1 | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
-| 2 | `ledger_entries`, triggers, back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
-| 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. D3 and D14 close |
-| 4 | `pending_movements`, maker-checker on adjust and waive, `past_due` projection | A test proving self-approval is refused, one proving an approval writes exactly one ledger entry matching its proposal, and one proving a resolved proposal cannot be re-resolved |
+| 2 | `pending_movements` first, then `ledger_entries` (it carries the FK), then the triggers, then the back-fill from `payments` + current `balances` | Parity test green: projection == `SUM` for every loan, seeded and back-filled |
+| 3 | Writes move to the ledger; `balances` written only by the trigger | Step 1's test now passes. **D3 closes.** D14 becomes possible, not closed |
+| 4 | `pending_movements` + `resolve_pending_movement()`, maker-checker on adjust and waive, `past_due` projection | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | 5 | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
