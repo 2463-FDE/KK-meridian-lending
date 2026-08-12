@@ -158,29 +158,46 @@ export async function apiGet(path: string, extraHeaders?: Record<string, string>
 const INTAKE_KEY = "meridian.intake.idempotency_key";
 const INTAKE_RESUME = "meridian.intake.resume_token";
 
+/**
+ * A CSPRNG value from sessionStorage, minted on first use.
+ *
+ * Both intake credentials are generated HERE, in the browser, before anything
+ * is sent. That ordering is the whole point and is worth stating plainly: a
+ * credential the server mints and returns is one the client does not have if
+ * the RESPONSE is lost. The applicant then retries, cannot prove the draft is
+ * theirs, is refused, and starts over -- creating the duplicate the
+ * idempotency key exists to prevent. Minting before the first request means
+ * the browser still holds the credential when the network fails mid-flight.
+ */
+function mintedOnce(storageKey: string): string {
+  if (typeof window === "undefined") return "";
+  const existing = window.sessionStorage.getItem(storageKey);
+  if (existing) return existing;
+  if (typeof crypto === "undefined" || !crypto.randomUUID) {
+    // Deliberately no Date.now()+Math.random() fallback. That is guessable,
+    // and one of these two values authorises access to an application. A
+    // browser without the Web Crypto API gets no retry credential rather than
+    // a weak one -- it loses recovery, not confidentiality.
+    return "";
+  }
+  const value = crypto.randomUUID() + crypto.randomUUID().replace(/-/g, "");
+  window.sessionStorage.setItem(storageKey, value);
+  return value;
+}
+
 /** The key for the CURRENT draft, minted once and reused for every retry. */
 export function intakeIdempotencyKey(): string {
-  if (typeof window === "undefined") return "";
-  let key = window.sessionStorage.getItem(INTAKE_KEY);
-  if (!key) {
-    // crypto.randomUUID is the browser CSPRNG. A predictable key would let a
-    // guess collide with somebody else's draft.
-    key = typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : String(Date.now()) + Math.random().toString(36).slice(2);
-    window.sessionStorage.setItem(INTAKE_KEY, key);
-  }
-  return key;
+  return mintedOnce(INTAKE_KEY);
 }
 
-export function intakeResumeToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.sessionStorage.getItem(INTAKE_RESUME);
-}
-
-export function rememberIntakeResumeToken(token: string | null | undefined) {
-  if (typeof window === "undefined" || !token) return;
-  window.sessionStorage.setItem(INTAKE_RESUME, token);
+/**
+ * The recovery secret proving this browser started the draft.
+ *
+ * Sent as `X-Resume-Token` on EVERY submission including the first, so the
+ * server can store its hash at creation time and compare it on any retry.
+ */
+export function intakeResumeToken(): string {
+  return mintedOnce(INTAKE_RESUME);
 }
 
 /**

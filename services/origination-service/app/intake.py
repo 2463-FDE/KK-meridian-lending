@@ -31,93 +31,75 @@ class ResumeNotAuthorized(Exception):
 
 
 def resume_application(idempotency_key: str, resume_token: str | None):
-    """Recover an incomplete application. Requires the KEY and the TOKEN.
+    """Recover an incomplete application. Requires the KEY and the CLIENT'S SECRET.
 
-    Returns (app_id, raw_access_token, raw_resume_token), or None if the key names
-    no application -- which is the ordinary first-attempt case and means "create
-    one".
+    Returns (app_id, raw_access_token, raw_resume_token) where the resume token
+    echoed back is the caller's own secret, or None if the key names no
+    application -- the ordinary first-attempt case, meaning "create one".
 
-    Raises ResumeNotAuthorized if the key names an application and the token does
-    not authorise it.
+    Raises ResumeNotAuthorized if the key names an application and the secret
+    does not authorise it.
 
-    **Why both.** 0036 let the key alone mint a fresh access token, on the
-    reasoning -- written into the docstring -- that presenting the key proved
-    ownership. It does not. A client-chosen key is not a secret: it travels in
-    request bodies, proxy logs and client-side code, and it can be guessed.
-    Anyone holding one could obtain a live access token and from there request a
-    decision, read the application and trigger a credit pull. That is application
-    takeover, through the path added to make retries safe.
+    **Why the secret comes from the client.** An earlier version minted it on the
+    server and returned it in the response. That strands the applicant in exactly
+    the case this whole contract exists for: if the first POST commits the rows
+    and the RESPONSE is lost -- gateway timeout, closed tab, dropped connection --
+    the client never receives the token it is later required to present. It
+    retries with the key alone, is refused, and has to start over. The duplicate
+    it then creates is the defect the idempotency key was added to prevent.
 
-    So the key IDENTIFIES and the token AUTHORISES:
+    A credential the client generates before it sends anything is one it still
+    holds when the network fails. The server stores only the sha256 hash, so the
+    raw value exists in the browser and in one request body's worth of transit,
+    never at rest.
 
-    - the key says which application a retry belongs to;
-    - the resume token, server-generated and 32 bytes of `secrets`, says the
-      caller is the one that started it.
-
-    The resume token is rotated on every successful recovery and the old one
-    consumed, so a token captured from a log cannot be replayed after the
-    legitimate client has used it.
+    **It is not rotated.** Rotation was in the previous design and is incompatible
+    with this one: handing back a NEW secret on each recovery reintroduces the
+    same lost-response hole one attempt later. So the secret is stable for the
+    life of the draft and cleared by the client when the application completes.
+    The trade is deliberate and worth naming -- a stolen secret stays valid until
+    the draft ends, which is the ordinary property of a bearer credential. The
+    ACCESS token still rotates on every recovery, so the thing that authorises
+    decisioning is not long-lived.
     """
+    rows = db.query(
+        "SELECT id FROM applications WHERE idempotency_key = %s", (idempotency_key,)
+    )
+    if not rows:
+        return None
     if not resume_token:
-        # Nothing to compare. Same refusal as a wrong one -- see below.
-        rows = db.query(
-            "SELECT 1 FROM applications WHERE idempotency_key = %s", (idempotency_key,)
-        )
-        if not rows:
-            return None
+        # The key names a real application and the caller offered no secret.
+        # Refused, and indistinguishable from a wrong one.
         raise ResumeNotAuthorized()
 
     raw_access_token, access_token_hash = decision_state.new_access_token()
-    raw_resume_token, resume_hash = decision_state.new_resume_token()
 
-    # ONE statement: validate and rotate together.
-    #
-    # Review round: this used to read the row, validate in Python, then run an
-    # unconditional UPDATE ... WHERE id = %s. Two concurrent retries could both
-    # pass validation and both rotate, last write wins -- so a borrower's
-    # double-submit could end up holding an access token whose resume token had
-    # already been rotated away by its own twin, and only support could recover
-    # it. Validating and mutating in separate statements is a race by
-    # construction, however careful the validation is.
-    #
-    # The WHERE clause carries every condition resume_token_matches checked:
-    # the key, the token hash, not consumed, not expired. Postgres evaluates it
-    # while holding the row lock the UPDATE takes, so exactly one of two
-    # concurrent retries can match -- the other sees the already-rotated hash and
-    # returns no row.
+    # Compare-and-swap: the secret is checked inside the UPDATE, under the row
+    # lock it takes, so two concurrent retries cannot both proceed on a stale
+    # read. Only the ACCESS token is rotated -- the recovery secret is the
+    # client's and stays put.
     updated = db.query(
         "UPDATE applications SET "
         "       access_token_hash = %s, "
         "       access_token_expires_at = now() + (%s || ' seconds')::interval, "
-        "       access_token_consumed_at = NULL, "
-        "       resume_token_hash = %s, "
-        "       resume_token_expires_at = now() + (%s || ' seconds')::interval, "
-        "       resume_token_consumed_at = NULL "
+        "       access_token_consumed_at = NULL "
         " WHERE idempotency_key = %s "
         "   AND resume_token_hash = %s "
         "   AND resume_token_consumed_at IS NULL "
         "   AND resume_token_expires_at > now() "
         " RETURNING id",
         (access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS,
-         resume_hash, config.ACCESS_TOKEN_TTL_SECONDS,
          idempotency_key, decision_state.hash_access_token(resume_token)),
     )
 
     if not updated:
-        # Zero rows is a REJECTION, never a fall-through. It means the key names
-        # nothing, or the token was wrong, expired, already consumed, or lost a
-        # race -- and the caller must not be able to tell those apart.
-        exists = db.query(
-            "SELECT 1 FROM applications WHERE idempotency_key = %s", (idempotency_key,)
-        )
-        if not exists:
-            return None
-        log.warning("refused a resume -- the compare-and-swap matched no row")
+        log.warning("refused a resume -- the recovery secret did not match")
         raise ResumeNotAuthorized()
 
     app_id = updated[0]["id"]
     log.info("intake resumed an existing application app_id=%s", app_id)
-    return app_id, raw_access_token, raw_resume_token
+    # The caller already has this; echoing it keeps one return shape.
+    return app_id, raw_access_token, resume_token
 
 
 def create_application(payload: dict, resume_token: str | None = None):
@@ -147,7 +129,12 @@ def create_application(payload: dict, resume_token: str | None = None):
             return existing
 
     raw_access_token, access_token_hash = decision_state.new_access_token()
-    raw_resume_token, resume_hash = decision_state.new_resume_token()
+    # The client's own secret, hashed. Not minted here: a credential the server
+    # invents is one the client never receives if the response is lost, and the
+    # applicant is then locked out of their own in-flight application.
+    raw_resume_token = resume_token
+    resume_hash = (decision_state.hash_access_token(resume_token)
+                   if resume_token else None)
 
 
     # Both inserts in ONE transaction. Two concurrent retries with the same key

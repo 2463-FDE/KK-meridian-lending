@@ -16,13 +16,14 @@ import { fictionalApplicant, submitApplication } from "./fixtures";
 test("a retry after an intake failure reuses the same idempotency key", async ({ page }) => {
   const applicant = fictionalApplicant("Retry", /* even ssn */ true, 100_000);
 
-  // Fail the first submission at the gateway, exactly as a KYC outage would --
-  // the response carries the resume handle the client must keep.
+  // Fail the first submission at the gateway, exactly as a KYC outage would.
   let attempts = 0;
   const keysSeen: string[] = [];
+  const secretsSeen: (string | undefined)[] = [];
   await page.route("**/los/applications", async (route) => {
     const body = route.request().postDataJSON() as { idempotency_key?: string };
     keysSeen.push(body?.idempotency_key ?? "");
+    secretsSeen.push(route.request().headers()["x-resume-token"]);
     attempts += 1;
     if (attempts === 1) {
       await route.fulfill({
@@ -34,20 +35,22 @@ test("a retry after an intake failure reuses the same idempotency key", async ({
             message: "This application was recorded but not verified.",
             app_id: 4242,
             access_token: "acc-tok",
-            resume_token: "res-tok",
+            // A server-minted token. The client must NOT adopt it -- see the
+            // assertion below. It is here because a real deployment mid-rollout
+            // may still send one, and adopting it would rebuild the defect.
+            resume_token: "server-minted-do-not-adopt",
             resume: "POST /applications with the same idempotency_key",
           },
         }),
       });
       return;
     }
-    // The retry must carry BOTH the same key and the resume token.
-    expect(route.request().headers()["x-resume-token"]).toBe("res-tok");
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        app_id: 4242, status: "submitted", resume_token: "res-tok-2",
+        app_id: 4242, status: "submitted",
+        resume_token: "server-minted-do-not-adopt-2",
         access_token: "acc-tok-2",
         kyc: { name_verified: true, dob_verified: true, address_verified: true, ssn_verified: true },
       }),
@@ -67,6 +70,52 @@ test("a retry after an intake failure reuses the same idempotency key", async ({
   expect(keysSeen).toHaveLength(2);
   expect(keysSeen[0]).toBeTruthy();
   expect(keysSeen[1]).toBe(keysSeen[0]);
+
+  // The ordering that makes a lost response survivable: the credential is on
+  // the FIRST request, before any response exists. A client that waits to be
+  // issued one has nothing to retry with when the response never arrives.
+  expect(secretsSeen[0]).toBeTruthy();
+  expect(secretsSeen[1]).toBe(secretsSeen[0]);
+  expect(secretsSeen[1]).not.toBe("server-minted-do-not-adopt");
+});
+
+test("a lost first response does not strand the applicant", async ({ page }) => {
+  // The reported failure, driven through the real UI: the first submission is
+  // received by the server and its RESPONSE never comes back. The browser
+  // learns nothing from it -- so whatever it needs to retry, it must already
+  // have had.
+  const applicant = fictionalApplicant("Lost", true, 100_000);
+
+  let attempts = 0;
+  const secretsSeen: (string | undefined)[] = [];
+  await page.route("**/los/applications", async (route) => {
+    attempts += 1;
+    secretsSeen.push(route.request().headers()["x-resume-token"]);
+    if (attempts === 1) {
+      // Not an error response -- no response at all, which is the case a
+      // status-code test cannot reach.
+      await route.abort("connectionaborted");
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        app_id: 4242, status: "submitted", access_token: "acc-tok",
+        kyc: { name_verified: true, dob_verified: true, address_verified: true, ssn_verified: true },
+      }),
+    });
+  });
+
+  await submitApplication(page, applicant, { stopAtReview: true });
+  await page.getByRole("button", { name: /submit application/i }).click();
+  await expect(page.locator(".alert-error").first()).toBeVisible();
+
+  await page.getByRole("button", { name: /submit application/i }).click();
+  await expect.poll(() => attempts).toBeGreaterThanOrEqual(2);
+
+  expect(secretsSeen[0]).toBeTruthy();
+  expect(secretsSeen[1]).toBe(secretsSeen[0]);
 });
 
 test("the idempotency key is never put in a URL", async ({ page }) => {

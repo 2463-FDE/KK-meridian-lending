@@ -11,7 +11,6 @@ import {
   clearIntakeRetryCredentials,
   intakeIdempotencyKey,
   intakeResumeToken,
-  rememberIntakeResumeToken,
 } from "../../lib/api";
 import { usd, pct, paymentPlanText } from "../../lib/format";
 
@@ -411,7 +410,6 @@ export default function ApplyPage() {
       }, resumeHeader())) as AppResult;
       // Keep the server's resume token: it is what authorises recovering this
       // application if the next attempt fails. The key alone cannot.
-      rememberIntakeResumeToken(res.resume_token);
       setApp(res);
       setStep(5);
     } catch (err) {
@@ -429,8 +427,6 @@ export default function ApplyPage() {
       // Preserving it here is what makes the retry idempotent -- the key names
       // the draft, this authorises recovering it.
       const structured = (err as ApiError | undefined)?.data;
-      const token = structured?.resume_token;
-      if (typeof token === "string" && token) rememberIntakeResumeToken(token);
       setApiError(errMsg(err, "Could not submit your application."));
     } finally {
       setBusy(false);
