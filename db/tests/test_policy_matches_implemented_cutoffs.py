@@ -68,15 +68,31 @@ RETIREMENT_MARKERS = ("retired", "used to publish", "used to say", "adr/0007",
 
 
 def _api_facing_files():
-    """Docstrings and schema comments a caller can read.
+    """Every surface that PUBLISHES the rule to a human or an API consumer.
 
-    Routers because FastAPI publishes their docstrings on /docs; schemas because
-    they are the request/response contract. Not every file in the repo -- the
-    claim being guarded is one made to an API consumer.
+    The first version of this scan covered routers and schemas, and the retired
+    cutoff was still live in three places it did not look: the underwriting UI's
+    reason placeholder -- labelled "shown to the applicant if denied", so it
+    suggested a DTI justification for an adverse-action notice -- two DDL
+    comments, and the loan-assistant system prompt, which regenerates the claim
+    on every officer summary.
+
+    A prompt is the worst of them. It is not documentation describing behaviour;
+    it MANUFACTURES the claim at runtime, so a stale rule there is published
+    fresh to staff on every call.
     """
     services = REPO / "services"
     files = list(services.glob("*/app/routers/*.py"))
     files += list(services.glob("*/app/schemas.py"))
+    # LLM prompts: a claim factory, not a description of one.
+    files += list(services.glob("*/app/llm_client.py"))
+    # UI text: placeholders, labels and options are published rules.
+    frontend = REPO / "frontend" / "app"
+    if frontend.exists():
+        files += [f for f in frontend.rglob("*.tsx") if "node_modules" not in f.parts]
+    # Schema comments ship with the database and are read by whoever debugs it.
+    files += list((REPO / "db" / "init").glob("*.sql"))
+    files += list((REPO / "db" / "migrations").glob("*.sql"))
     return sorted(f for f in files if f.name != "__init__.py")
 
 
@@ -115,14 +131,60 @@ def test_no_api_facing_doc_publishes_a_retired_cutoff(path):
     )
 
 
-def test_the_api_scan_found_files_to_scan():
-    """Guards the guard: an empty file list passes the parametrized test by
-    having nothing to run."""
+def test_the_scan_covers_every_kind_of_published_surface():
+    """Guards the guard, and names the surfaces rather than counting files.
+
+    A count passes when a whole CATEGORY is missing. Each of these is a surface
+    where the retired cutoff was actually found.
+    """
     files = _api_facing_files()
-    assert len(files) >= 5, f"only {len(files)} API-facing file(s) found: {files}"
-    assert any("applications.py" in f.name for f in files), (
-        "the origination router is not being scanned, and it is where the retired "
-        "cutoff actually was"
+    names = [str(f) for f in files]
+    for needle, why in [
+        ("applications.py", "the origination router -- where the cutoff was in a docstring"),
+        ("schemas.py", "the request contract"),
+        ("llm_client.py", "the summary prompt, which regenerates the claim per call"),
+        (".tsx", "UI text -- the reason placeholder shown to staff and quoted to applicants"),
+        (".sql", "schema comments, read by whoever debugs the database"),
+    ]:
+        assert any(needle in n for n in names), (
+            f"the scan does not cover {needle} ({why})"
+        )
+    assert len(files) >= 10, f"only {len(files)} file(s) scanned"
+
+
+def test_no_adverse_action_reason_suggests_an_unevaluated_criterion():
+    """The no-ship case, stated as its own test.
+
+    The underwriting reason box is labelled "shown to the applicant if denied".
+    A placeholder there is a suggested adverse-action reason, so offering a DTI
+    justification put a criterion the system never evaluates into a Reg B notice.
+    Staff can still type anything -- what is fixed is the system PROPOSING it.
+    """
+    ui = REPO / "frontend" / "app" / "underwriting" / "[appId]" / "page.tsx"
+    if not ui.exists():                                   # pragma: no cover
+        pytest.skip("underwriting page not present")
+    text = ui.read_text(encoding="utf-8")
+    for m in re.finditer(r'placeholder="([^"]*)"', text):
+        assert "dti" not in m.group(1).lower(), (
+            f"the reason placeholder suggests a DTI-based adverse-action reason: "
+            f"{m.group(1)!r}"
+        )
+
+
+def test_the_summary_prompt_does_not_ask_for_a_ratio_it_is_not_given():
+    """A prompt is a claim factory. Asking the model for a debt-to-income ratio
+    when no debt figure is in the payload produces a fabricated number on every
+    call -- in the same prompt that tells it not to invent information."""
+    prompt_file = REPO / "services" / "loan-assistant" / "app" / "llm_client.py"
+    src = prompt_file.read_text(encoding="utf-8")
+    system = src[src.index("_SYSTEM = "):src.index("class _LLMOutput")]
+    rule_lines = [l for l in system.splitlines()
+                  if "dti" in l.lower() or "debt-to-income" in l.lower()]
+    offending = [l for l in rule_lines
+                 if not any(m in l.lower() for m in ("do not", "not given", "fabricated"))]
+    assert not offending, (
+        f"the system prompt still instructs the model to reason about DTI: "
+        f"{offending}"
     )
 
 

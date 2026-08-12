@@ -33,7 +33,7 @@ test("REFER resolved by staff approval yields one offer, one loan, and an audita
     expect(await countRows(client, "loans", "app_id", appId)).toBe(0);
 
     // --- staff resolves the refer, reason mandatory ------------------------
-    const reason = "DTI recalculated under policy threshold after verifying updated income";
+    const reason = "Verified updated income documentation; score band reconsidered";
     await signInAsStaff(page);
     await resolveReferAsStaff(page, appId, "approve", reason);
 

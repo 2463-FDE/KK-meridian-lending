@@ -60,9 +60,16 @@ TIMEOUT_SECONDS = 20.0
 # identifiers (name, email, phone, address) are deliberately excluded — a risk
 # summary doesn't need them, and they have no business reaching a third-party API.
 # income/employment_years are required here: the system prompt instructs the model
-# to judge risk_tier from DTI and employment length, so those facts must actually
-# reach it — without them the model was inventing a risk chip from data it never
-# saw (Codex review on PR #2).
+# to judge risk_tier from loan-to-income and employment length, so those facts must
+# actually reach it — without them the model was inventing a risk chip from data it
+# never saw (Codex review on PR #2).
+#
+# The rule used to say DEBT-to-income. Nothing in this payload carries the
+# applicant's existing debt obligations -- there is no such field anywhere in the
+# system (adr/0007) -- so the model was being asked for a ratio it could only
+# fabricate, in the same prompt that tells it not to invent information. Every
+# officer summary generated under that rule published a criterion Meridian does
+# not evaluate.
 _PROMPT_ALLOWED_FIELDS = (
     "amount", "term_months", "purpose", "income", "employer", "job_title", "employment_years",
 )
@@ -77,8 +84,12 @@ produce a concise, factual summary in the exact JSON schema provided.
 Rules:
 - NEVER include SSN, full card numbers, or CVV in your output.
 - Use only the data provided — do not invent information.
-- risk_tier: 'low' if DTI<30% and employment>2yr; 'high' if DTI>50% or employment<6mo;
+- risk_tier: judge from LOAN-TO-INCOME (amount / annual income) and employment
+  length, both of which are in the data you are given. 'low' if loan-to-income
+  < 0.25 and employment > 2yr; 'high' if loan-to-income > 0.5 or employment < 6mo;
   'decline' if income cannot plausibly service the loan; else 'medium'.
+  Do NOT reason about debt-to-income: you are not given the applicant's existing
+  debt obligations, and a DTI inferred from income alone is a fabricated number.
 - flags: list specific concerns (e.g. "Employment < 1 year", "Loan-to-income ratio > 4x").
   Empty list if none.
 """.strip()

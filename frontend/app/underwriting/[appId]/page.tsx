@@ -433,8 +433,12 @@ function UnderwritingDetailContent() {
       </div>
 
       {/* Manual review -- feature: staff tool to resolve a "refer" decision
-          (policies/underwriting_guidelines.md's manual-review band, score
-          600-659 or DTI 43-50%). Scoped to refer only -- staff cannot use
+          (policies/underwriting_guidelines.md's manual-review band, model
+          score 600-659). The DTI half of that band was retired -- nothing
+          computes a debt-to-income ratio, see adr/0007 -- and the placeholder
+          below used to suggest one as an adverse-action reason, which put a
+          criterion the system never evaluated into a notice sent to a denied
+          applicant. Scoped to refer only -- staff cannot use
           this to override a clean automated approve/deny (the backend
           enforces this too; see review_application's "only a 'refer'
           decision can be reviewed" 422).
@@ -494,7 +498,7 @@ function UnderwritingDetailContent() {
                 rows={3}
                 value={reviewReason}
                 onChange={(e) => setReviewReason(e.target.value)}
-                placeholder="e.g. DTI recalculated under policy threshold after verifying updated income"
+                placeholder="e.g. Verified updated income documentation; score band reconsidered"
               />
               {reviewErr ? <div className="alert alert-error">{reviewErr}</div> : null}
               <button
