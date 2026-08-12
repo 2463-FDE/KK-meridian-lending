@@ -1025,6 +1025,8 @@ def test_the_route_returns_503_and_never_charges_when_servicing_is_unreachable(m
     authorization attempt -- because a guard that returns False and is then
     ignored by the caller would satisfy the unit tests and still capture money.
     """
+    import os
+
     from fastapi.testclient import TestClient
     from app import payments as payments_mod
     from app.main import app
@@ -1048,7 +1050,11 @@ def test_the_route_returns_503_and_never_charges_when_servicing_is_unreachable(m
     resp = TestClient(app).post("/payments", json={
         "loan_id": 42, "processor_token": "tok_x", "last4": "1111", "brand": "visa",
         "amount": 10.0, "method": "card", "idempotency_key": "outage-key-1",
-    }, headers={"X-Internal-Token": "test-internal-token"})
+    # The configured token, not a literal. conftest sets it with setdefault, so a
+    # developer or runner with INTERNAL_SERVICE_TOKEN already exported got a 401
+    # here and a failure that read like "the outage path is broken" when the only
+    # thing wrong was the header this test sent itself.
+    }, headers={"X-Internal-Token": os.environ["INTERNAL_SERVICE_TOKEN"]})
 
     assert resp.status_code == 503, f"expected 503, got {resp.status_code}: {resp.text[:200]}"
     assert not authorized, (

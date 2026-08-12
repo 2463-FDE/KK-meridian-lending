@@ -77,6 +77,14 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="not authorized")
 
 
+# The tables the preflight below must write to, because they are the tables the
+# real apply-payment writes to. Asserted against `balance.apply_payment_once`'s
+# source rather than maintained by hand: a hand-kept list of protected things
+# reads as complete while missing one, which is how the probe came to write to a
+# table the money path never touches.
+_PREFLIGHT_WRITE_TABLES = ("payment_applications", "balances")
+
+
 @app.get("/internal/auth-check")
 def internal_auth_check(
     x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
@@ -93,15 +101,16 @@ def internal_auth_check(
     with no credit on the loan, which is the outcome the whole preflight exists
     to prevent.
 
-    So the check now exercises the same dependency apply-payment does -- a light
-    read against `balances` and `payment_applications`, the two tables
-    `balance.apply_payment_once` writes. It proves the path, not just the
-    credential.
+    So the check exercises what apply-payment exercises: an INSERT into
+    `payment_applications` and an UPDATE of `balances`, the two tables
+    `balance.apply_payment_once` writes, through the same connection helper, in
+    one transaction that is always rolled back. It proves the path, not the
+    credential and not a stand-in for the path.
 
-    Kept cheap on purpose: two LIMIT 1 reads, no writes, no transaction. It runs
-    before every card authorization, so it must not become the reason payments
-    are slow. Empty tables are fine -- what matters is that the statements
-    execute.
+    Kept cheap on purpose: two statements, no commit, and SKIP LOCKED so it can
+    never wait on a real apply. It runs before every card authorization, so it
+    must not become the reason payments are slow. Empty tables are fine -- what
+    matters is that the statements execute.
     """
     _require_internal(x_internal_token)
     try:
@@ -115,14 +124,49 @@ def internal_auth_check(
         # Same connection helper and therefore the same role and transaction
         # semantics as the real apply, because a preflight on a different
         # connection proves nothing about the one that matters.
+        #
+        # Review round 7: the write used to land in `preflight_writes`, a table
+        # that existed only to be written to. That was the same defect one level
+        # down -- it proved *a* write, not *this* write. Per-table grant drift, a
+        # constraint or trigger failure, or bloat on `payment_applications` or
+        # `balances` specifically all left the probe table healthy, so the
+        # preflight answered 200 and the card was captured against an apply that
+        # could not land. A proxy for the thing is not the thing.
+        #
+        # So the probe now runs the statements `balance.apply_payment_once`
+        # runs, against the tables it writes. `_PREFLIGHT_WRITE_TABLES` is
+        # asserted against that function's source, so a future write path that
+        # touches a third table fails the test rather than silently escaping the
+        # probe.
         with db.transaction() as cur:
+            # Same statement shape as the real apply, including ON CONFLICT, so
+            # the unique index is exercised too. The sentinel is negative and
+            # random: `payments.id` is a positive SERIAL, so it cannot collide
+            # with a real payment, and two concurrent preflights cannot block
+            # each other on the primary key.
+            sentinel = -secrets.randbelow(2_000_000_000) - 1
             cur.execute(
-                "INSERT INTO preflight_writes (checked_at) VALUES (now()) RETURNING id"
+                "INSERT INTO payment_applications (payment_id, loan_id, amount) "
+                "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING "
+                "RETURNING payment_id",
+                (sentinel, sentinel, 0),
             )
             cur.fetchall()
-            # Never committed. The row exists only long enough to prove the
-            # write path works, so this leaves no data to clean up and no
-            # sequence contention on a real table.
+            # A real row, so row-level triggers and the numeric column are
+            # exercised, but SKIP LOCKED so this never waits behind an
+            # apply-payment that is mid-flight on the same loan. This runs
+            # before every card authorization; it must not become the reason
+            # payments are slow, and it must never be the reason one blocks.
+            # No row available to lock degrades to a zero-row UPDATE, which
+            # still requires the write privilege and still fails inside a
+            # read-only transaction.
+            cur.execute(
+                "UPDATE balances SET updated_at = updated_at WHERE loan_id = "
+                "(SELECT loan_id FROM balances ORDER BY loan_id LIMIT 1 "
+                "FOR UPDATE SKIP LOCKED)"
+            )
+            # Never committed. Both writes exist only long enough to prove the
+            # path works, so this leaves no data to clean up.
             cur.execute("ROLLBACK")
     except Exception as e:  # noqa
         log.error(

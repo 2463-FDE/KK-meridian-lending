@@ -385,3 +385,153 @@ def test_auth_check_write_is_rolled_back(monkeypatch):
     joined = " ".join(statements)
     assert "INSERT" in joined, "the preflight performed no write"
     assert "ROLLBACK" in joined, "the preflight's write was not rolled back"
+
+
+# --- review round 7: the probe must write to the tables the money path writes -
+
+
+def _preflight_calls(monkeypatch):
+    """Run the preflight against a recording cursor; return (sql, params) pairs."""
+    from contextlib import contextmanager
+
+    calls = []
+
+    class _RecordingDb:
+        def query(self, sql, params=None):
+            return []
+
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                def execute(self, sql, params=None):
+                    calls.append((" ".join(sql.split()), params))
+                def fetchall(self):
+                    return []
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _RecordingDb())
+    resp = client.get("/internal/auth-check", headers={"X-Internal-Token": TOKEN})
+    assert resp.status_code == 200
+    return calls
+
+
+def _preflight_statements(monkeypatch):
+    return [sql for sql, _ in _preflight_calls(monkeypatch)]
+
+
+def test_the_preflight_writes_to_every_table_the_real_apply_writes(monkeypatch):
+    """Derived from `apply_payment_once`'s source, not from a list I maintain.
+
+    Review round 7. The probe wrote to `preflight_writes`, a table that existed
+    only to be written to, and called that proof the apply-payment path was
+    writable. It was not: per-table grant drift, a constraint or trigger failure,
+    or bloat on `payment_applications` or `balances` specifically all leave a
+    dedicated probe table perfectly healthy. The preflight answered 200, the card
+    was captured, and the apply still failed -- the exact charge-without-credit
+    this endpoint exists to prevent, reached through the endpoint built to
+    prevent it.
+
+    This is the same shape as three earlier defects on this branch: a
+    hand-maintained list of protected things reads as complete while missing one.
+    So the expectation is derived. If a future write path touches a third table,
+    this fails instead of the probe silently going stale.
+    """
+    import inspect
+    import re
+
+    from app import balance
+
+    src = inspect.getsource(balance.apply_payment_once)
+    written = set(re.findall(r"INSERT INTO (\w+)", src)) | set(
+        re.findall(r"UPDATE (\w+) SET", src))
+
+    assert written, "could not read the write path out of apply_payment_once"
+    assert written == set(main._PREFLIGHT_WRITE_TABLES), (
+        f"apply_payment_once writes {sorted(written)} but the preflight declares "
+        f"{sorted(main._PREFLIGHT_WRITE_TABLES)} -- a table the money path writes "
+        f"is not being proved before a card is captured"
+    )
+
+    joined = " ".join(_preflight_statements(monkeypatch))
+    for table in written:
+        assert re.search(rf"(INSERT INTO|UPDATE) {table}\b", joined), (
+            f"the preflight never writes to {table}, which apply_payment_once does"
+        )
+
+
+def test_the_preflight_cannot_collide_with_a_real_payment(monkeypatch):
+    """The sentinel must be unreachable by a real row.
+
+    `payments.id` is a positive SERIAL, so a negative payment_id can never name a
+    real payment. Two consecutive probes must also differ, or concurrent
+    preflights would serialise behind one primary key while a card waits.
+
+    Read from the BOUND PARAMETERS, not the SQL text -- the sentinel is passed as
+    a parameter rather than formatted into the statement, which is where it
+    belongs.
+    """
+    seen = []
+    for _ in range(6):
+        inserts = [params for sql, params in _preflight_calls(monkeypatch)
+                   if sql.startswith("INSERT INTO payment_applications")]
+        assert len(inserts) == 1, f"expected one probe insert, got {inserts}"
+        payment_id, loan_id, amount = inserts[0]
+        assert payment_id < 0, "the sentinel payment_id could name a real payment"
+        assert loan_id < 0, "the sentinel loan_id could name a real loan"
+        assert amount == 0, "the probe proposed a nonzero amount"
+        seen.append(payment_id)
+
+    assert len(set(seen)) > 1, (
+        "every probe used the same sentinel, so concurrent preflights would block "
+        "on the primary key while a cardholder waits"
+    )
+
+
+@pytest.mark.parametrize("broken", ["payment_applications", "balances"])
+def test_the_preflight_refuses_when_either_money_table_fails(monkeypatch, broken):
+    """Charles's case: the probe table is writable and a real one is not.
+
+    Parametrised over both tables rather than written once, because the failure
+    being guarded against is table-SPECIFIC -- that is the whole reason a
+    dedicated probe table was the wrong answer.
+    """
+    from contextlib import contextmanager
+
+    class _PartiallyBrokenDb:
+        def query(self, sql, params=None):
+            return []
+
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                def execute(self, sql, params=None):
+                    if broken in sql:
+                        raise RuntimeError(
+                            f'permission denied for table {broken}')
+                def fetchall(self):
+                    return []
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _PartiallyBrokenDb())
+
+    resp = client.get("/internal/auth-check", headers={"X-Internal-Token": TOKEN})
+
+    assert resp.status_code == 503, (
+        f"{broken} was unwritable and the preflight still greenlit a capture the "
+        f"apply could not have credited"
+    )
+
+
+def test_the_preflight_never_waits_on_a_live_apply(monkeypatch):
+    """It runs before every authorization, so it must not be able to block.
+
+    The balances probe locks a real row to exercise row-level triggers. Without
+    SKIP LOCKED that lock queues behind an apply-payment in flight on the same
+    loan, and the preflight -- and the cardholder -- wait on it.
+    """
+    stmts = " ".join(_preflight_statements(monkeypatch)).upper()
+    assert "FOR UPDATE" in stmts, "the balances probe does not touch a real row"
+    assert "SKIP LOCKED" in stmts, (
+        "the preflight takes a row lock without SKIP LOCKED, so a live "
+        "apply-payment on that loan makes every card authorization wait"
+    )
