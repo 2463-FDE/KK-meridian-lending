@@ -510,6 +510,91 @@ def _strip_contradicting_macro_claims(summary: str, flags: list, signal):
     return cleaned, kept_flags, dropped
 
 
+# Categorical risk language, for the post-parse scrub below.
+#
+# Deliberately narrow. "reduces repayment risk" and "the risk of a missed
+# payment" are ordinary English about a real subject and must survive -- what
+# must not is the model placing this application on a SCALE, which is the thing
+# no published rule authorises it to do. So these match an adjective-plus-risk
+# construction or a named tier/grade/rating, not the word "risk".
+_RISK_LABEL_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # An adjective placing the application on a scale, next to "risk".
+    r"\b(?:very\s+)?(?:low|medium|moderate|high|elevated|severe|substantial"
+    r"|significant|minimal|poor|excellent|good|bad|strong|weak)[\s-]+risk\b",
+    # A named scale, whatever value it carries.
+    r"\brisk[\s-]+(?:tier|grade|rating|category|classification|score|level"
+    r"|band|profile)\b",
+    # "Tier: B", "Grade = 3", "Rating: high".
+    r"\b(?:tier|grade|rating|band)\s*[:=]\s*(?:[A-D]\b|[1-5]\b|low|medium"
+    r"|moderate|high|decline)\b",
+    # The model narrating that it is classifying.
+    r"\b(?:classif|categoris|categoriz)\w*\s+(?:this\s+|the\s+)?"
+    r"(?:applicant|application|borrower|loan)\b",
+    # A decision recommendation, which is a classification with one bit.
+    r"\brecommend(?:ed|s)?\s+(?:to\s+)?(?:decline|deny|reject|approve)\b",
+    r"\b(?:should|must)\s+be\s+(?:declined|denied|rejected|approved)\b",
+))
+
+
+def _is_a_risk_classification(text: str) -> bool:
+    return any(p.search(text or "") for p in _RISK_LABEL_PATTERNS)
+
+
+def _strip_risk_classifications(summary: str, flags: list):
+    """Remove model prose that classifies the application.
+
+    Removing `risk_tier` from the contract closed the STRUCTURED path -- the
+    coloured chip. It did not close the prose path: a response of
+    `{"summary": "High-risk borrower...", "flags": ["High risk"]}` validates
+    against `_LLMOutput`, survives `model_dump()` and renders to staff exactly
+    like the chip did. The invariant this PR claims is that no unaudited model
+    risk label reaches staff, and until this guard existed it held only for one
+    of the two ways a label can arrive.
+
+    The system prompt already forbids it. That is not enough, and this file
+    already says so about a different claim: `_strip_contradicting_macro_claims`
+    exists precisely because a prompt can discourage but not prevent. The same
+    reasoning applies to the same class of failure, so the same shape of guard
+    applies -- remove the sentence, keep the rest, log it, and fail closed if
+    nothing survives.
+
+    Removal rather than rewriting, for the reason the macro scrub gives: editing
+    a judgement out of the middle of a sentence would make this service the
+    author of a claim it cannot stand behind.
+    """
+    dropped = 0
+    kept_sentences = []
+    for sentence in _split_sentences(summary):
+        if sentence and _is_a_risk_classification(sentence):
+            dropped += 1
+            continue
+        kept_sentences.append(sentence)
+
+    kept_flags = []
+    for flag in flags:
+        if isinstance(flag, str) and _is_a_risk_classification(flag):
+            dropped += 1
+            continue
+        kept_flags.append(flag)
+
+    cleaned = " ".join(s for s in kept_sentences if s).strip()
+    if dropped:
+        # The text itself is not logged: it is the model's judgement about a
+        # real applicant, and writing it to a log makes a durable record of the
+        # thing being suppressed.
+        log.warning(
+            "removed %d model risk-classification claim(s) from the summary -- "
+            "no approved rule maps an application to a tier",
+            dropped,
+        )
+    if not cleaned:
+        raise LLMResponseError(
+            "the model's summary consisted entirely of risk classifications, "
+            "which no published policy rule authorises it to assign"
+        )
+    return cleaned, kept_flags, dropped
+
+
 def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     """
     Summarize a loan application for a loan officer.
@@ -619,6 +704,14 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     fields = llm_output.model_dump()
     fields["summary"], fields["flags"], _ = _strip_contradicting_macro_claims(
         fields["summary"], fields.get("flags") or [], signal,
+    )
+
+    # The prose half of the no-risk-label invariant. Removing `risk_tier` from
+    # the contract closed the chip; a model can still write "High-risk borrower"
+    # into `summary` or "High risk" into `flags`, and staff read that the same
+    # way. Runs after the macro scrub so both operate on sentences.
+    fields["summary"], fields["flags"], _ = _strip_risk_classifications(
+        fields["summary"], fields["flags"],
     )
 
     return LoanSummary(
