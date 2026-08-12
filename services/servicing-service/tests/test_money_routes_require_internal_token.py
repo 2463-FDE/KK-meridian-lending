@@ -267,25 +267,43 @@ def test_auth_check_reports_unavailable_when_the_database_is_down(monkeypatch):
     assert "persist" in resp.json()["detail"].lower()
 
 
-def test_auth_check_touches_the_tables_apply_payment_writes(monkeypatch):
-    """Named tables, not any query: the point is the dependency, not liveness.
+def test_auth_check_uses_the_same_connection_helper_as_the_real_apply(monkeypatch):
+    """The probe must run where the real write runs.
 
-    A check that read some unrelated table would pass this file's other test
-    while proving nothing about whether an apply-payment could land.
+    This test previously asserted the check SELECTed from `balances` and
+    `payment_applications` by name. That was the right instinct -- prove the
+    dependency, not liveness -- applied to the wrong operation: reads on those
+    tables succeed on a read-only replica while the apply's INSERT and UPDATE
+    fail. Superseded by the write probe; what survives is the part that still
+    matters, which is that the probe goes through `db.transaction()`, the same
+    helper `apply_payment_once` uses, and therefore the same role and transaction
+    semantics. A preflight on a different connection proves nothing about the one
+    that carries the money.
     """
-    seen = []
+    used = {"transaction": False}
+    from contextlib import contextmanager
 
-    class _RecordingDb:
+    class _Db:
         def query(self, sql, params=None):
-            seen.append(" ".join(sql.split()))
             return []
 
-    monkeypatch.setattr(main, "db", _RecordingDb())
+        @contextmanager
+        def transaction(self):
+            used["transaction"] = True
+            class _Cur:
+                def execute(self, sql, params=None):
+                    pass
+                def fetchall(self):
+                    return [{"id": 1}]
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _Db())
 
     assert client.get("/internal/auth-check", headers={"X-Internal-Token": TOKEN}).status_code == 200
-    joined = " ".join(seen)
-    assert "balances" in joined, "the preflight never touched balances"
-    assert "payment_applications" in joined, "the preflight never touched payment_applications"
+    assert used["transaction"], (
+        "the preflight did not use db.transaction(), so it did not exercise the "
+        "connection the real apply-payment writes through"
+    )
 
 
 def test_auth_check_still_refuses_an_unauthenticated_caller(monkeypatch):
@@ -298,3 +316,72 @@ def test_auth_check_still_refuses_an_unauthenticated_caller(monkeypatch):
     monkeypatch.setattr(main, "db", _DeadDb())
 
     assert client.get("/internal/auth-check").status_code == 401
+
+
+def test_auth_check_refuses_when_reads_pass_but_writes_fail(monkeypatch):
+    """The case two SELECTs could not see.
+
+    Review round 6: a read-only replica, a revoked INSERT grant, a read-only
+    transaction or a full disk all let reads succeed while
+    `apply_payment_once`'s INSERT and UPDATE fail. The preflight returned 200,
+    payment-service captured the card, and the apply failed -- a real charge with
+    no credit, reached through the check built to prevent it.
+
+    Reads prove reachability. Only a write proves what this endpoint claims.
+    """
+    from contextlib import contextmanager
+
+    class _ReadOnlyDb:
+        def query(self, sql, params=None):
+            return []                       # reads are fine
+
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                def execute(self, sql, params=None):
+                    if sql.strip().upper().startswith("INSERT"):
+                        raise RuntimeError(
+                            "cannot execute INSERT in a read-only transaction")
+                def fetchall(self):
+                    return []
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _ReadOnlyDb())
+
+    resp = client.get("/internal/auth-check", headers={"X-Internal-Token": TOKEN})
+
+    assert resp.status_code == 503, (
+        "reads succeeded and the write failed, and the preflight still greenlit a "
+        "card capture that could not have been credited"
+    )
+
+
+def test_auth_check_write_is_rolled_back(monkeypatch):
+    """The probe must leave nothing behind.
+
+    It runs before every card authorization, so a committed row per charge would
+    be both a data-growth problem and a lie about what the table means.
+    """
+    from contextlib import contextmanager
+
+    statements = []
+
+    class _RecordingDb:
+        def query(self, sql, params=None):
+            return []
+
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                def execute(self, sql, params=None):
+                    statements.append(" ".join(sql.split()).upper())
+                def fetchall(self):
+                    return [{"id": 1}]
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _RecordingDb())
+
+    assert client.get("/internal/auth-check", headers={"X-Internal-Token": TOKEN}).status_code == 200
+    joined = " ".join(statements)
+    assert "INSERT" in joined, "the preflight performed no write"
+    assert "ROLLBACK" in joined, "the preflight's write was not rolled back"

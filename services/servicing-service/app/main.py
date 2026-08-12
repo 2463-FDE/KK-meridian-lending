@@ -105,12 +105,30 @@ def internal_auth_check(
     """
     _require_internal(x_internal_token)
     try:
-        db.query("SELECT 1 FROM balances LIMIT 1")
-        db.query("SELECT 1 FROM payment_applications LIMIT 1")
+        # A WRITE, rolled back. Two SELECTs were not enough: a read-only replica,
+        # a revoked INSERT grant, a read-only transaction or a full disk all let
+        # reads pass while apply_payment_once's INSERT INTO payment_applications
+        # and UPDATE balances fail -- so a 200 still greenlit a capture that could
+        # not be credited. Reads prove reachability; only a write proves the
+        # thing this endpoint claims.
+        #
+        # Same connection helper and therefore the same role and transaction
+        # semantics as the real apply, because a preflight on a different
+        # connection proves nothing about the one that matters.
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO preflight_writes (checked_at) VALUES (now()) RETURNING id"
+            )
+            cur.fetchall()
+            # Never committed. The row exists only long enough to prove the
+            # write path works, so this leaves no data to clean up and no
+            # sequence contention on a real table.
+            cur.execute("ROLLBACK")
     except Exception as e:  # noqa
         log.error(
-            "auth-check could not reach the tables apply-payment needs (%s) -- "
-            "reporting unavailable so no card is captured that we could not credit",
+            "auth-check could not complete a write against the apply-payment path "
+            "(%s) -- reporting unavailable so no card is captured that we could "
+            "not credit",
             type(e).__name__,
         )
         raise HTTPException(

@@ -355,3 +355,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
+
+-- Write-path probe for payment-service's preflight (db/migrations/0033). Always
+-- rolled back, so it stays empty; a surviving row means a preflight committed.
+CREATE TABLE IF NOT EXISTS preflight_writes (
+    id         BIGSERIAL PRIMARY KEY,
+    checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

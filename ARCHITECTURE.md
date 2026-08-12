@@ -107,10 +107,14 @@ refuse the charge.
 That distinction is the contract, and getting it wrong is a real charge with no credit:
 an earlier version authenticated and returned without touching the database, so a
 servicing process that was up with its database down answered 200, the card was
-captured, and the follow-up `apply-payment` failed. The check now performs a light read
-against `balances` and `payment_applications` — the two tables `apply_payment_once`
-writes — so it proves the path rather than the credential. Two `LIMIT 1` reads, no
-writes: it runs before every authorization and must not become why payments are slow. So **card capture is unavailable whenever servicing is
+captured, and the follow-up `apply-payment` failed. The check performs a real **write** — an
+`INSERT` into `preflight_writes` inside a transaction it then rolls back, through the
+same `db.transaction()` helper `apply_payment_once` uses, so the same role and
+transaction semantics. Reads were not enough: a read-only replica, a revoked `INSERT`
+grant, a read-only transaction or a full disk all let `SELECT`s pass while the apply's
+`INSERT`/`UPDATE` fails, and a 200 still greenlit an uncreditable capture. **Reads prove
+reachability; only a write proves what this endpoint claims.** It is rolled back, so it
+leaves no data and no sequence pressure on the tables the money lives in. So **card capture is unavailable whenever servicing is
 unavailable** — a deliberate coupling, not an oversight.
 
 The first version failed *open*, on the reasoning that "unknown is not known-bad" and
