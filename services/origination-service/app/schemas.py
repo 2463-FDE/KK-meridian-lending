@@ -8,6 +8,16 @@ T = TypeVar("T")
 
 
 class ApplicationIn(BaseModel):
+    # Optional, and the reason it exists is retry safety rather than convenience.
+    # Intake commits the applicant and application rows BEFORE calling
+    # kyc-service, so a KYC failure used to leave the caller with a 503, no
+    # identifier, and "please retry" -- and a retry created a second applicant and
+    # a second application. One person, two borrower records.
+    #
+    # A retry carrying the same key resumes the first application instead. Nullable
+    # so existing callers are unaffected; the partial unique index in
+    # db/migrations/0036 only constrains rows that supply one.
+    idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=200)
     name: str = Field(min_length=1)
     dob: Optional[str] = None
     ssn: Optional[str] = None

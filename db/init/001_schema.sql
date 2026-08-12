@@ -76,7 +76,13 @@ CREATE TABLE IF NOT EXISTS applications (
     accept_token_hash          TEXT,
     accept_token_expires_at    TIMESTAMPTZ,
     accept_token_consumed_at   TIMESTAMPTZ,
-    created_at        TIMESTAMPTZ DEFAULT now()
+    created_at        TIMESTAMPTZ DEFAULT now(),
+    -- Client-supplied key making intake safe to retry (db/migrations/0036).
+    -- Intake commits this row BEFORE calling kyc-service, so a KYC failure used
+    -- to leave the caller with a 503 and no identifier -- and a retry created a
+    -- second applicant and a second application. A retry with the same key
+    -- resumes this one instead.
+    idempotency_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_applications_accept_token_hash
@@ -363,6 +369,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 -- A few indexes added over time for the servicing dashboard. (No reason/driver
 -- columns on decisions.)
+CREATE UNIQUE INDEX IF NOT EXISTS applications_idempotency_key_uniq
+    ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);

@@ -271,10 +271,26 @@ def submit_application(body: ApplicationIn):
                     "check INTERNAL_SERVICE_TOKEN parity between origination and kyc-service",
                     status, app_id,
                 )
+            # The handle goes back with the failure. Returning a bare 503 left the
+            # caller with nothing to retry WITH -- no app_id, no token -- so the
+            # only available action was a fresh POST, which created a second
+            # applicant and a second application and stranded this one.
+            #
+            # app_id alone would not be enough: it is a guessable integer and
+            # proves nothing, which is why run_decision requires the token. Both
+            # travel together or neither is useful.
             raise HTTPException(
                 status_code=503,
-                detail=("identity verification is unavailable: this application was "
-                        "recorded but not verified, and cannot proceed. Please retry."),
+                detail={
+                    "error": "identity_verification_unavailable",
+                    "message": ("This application was recorded but not verified, and "
+                                "cannot proceed until identity verification completes. "
+                                "Retry with the same idempotency_key, or request a "
+                                "decision with the access_token below once it is."),
+                    "app_id": app_id,
+                    "access_token": access_token,
+                    "resume": "POST /applications with the same idempotency_key",
+                },
             )
         # Any other HTTP status (5xx from kyc-service, say) is a genuine
         # service-side hiccup and keeps the original resilience: intake succeeds

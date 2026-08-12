@@ -19,6 +19,7 @@ Canary approach: distinct, unmistakable values for each PII field, then assert
 none of them appears anywhere in captured log output while the row itself is
 written correctly.
 """
+import contextlib
 import logging
 
 import pytest
@@ -38,19 +39,47 @@ _CANARY = {
 
 
 class _FakeDb:
-    """Captures what intake writes without needing Postgres."""
+    """Captures what intake writes without needing Postgres.
+
+    Both inserts moved into `db.transaction()` when intake became idempotent
+    (db/migrations/0036): the applicant and the application have to land or fail
+    together, or a retry that loses the race leaves an orphan applicant. So this
+    fake models the cursor as well as `query` -- stubbing only `query` let the
+    real database be hit, which is why these tests started failing against live
+    data rather than against the fake.
+    """
 
     def __init__(self):
         self.applicant_params = None
         self.application_params = None
+        self.resumed = None
 
+    # --- the transactional path (both inserts) --------------------------------
+    @contextlib.contextmanager
+    def transaction(self):
+        outer = self
+
+        class _Cur:
+            def execute(self, sql, params=None):
+                if "INSERT INTO applicants" in sql:
+                    outer.applicant_params = params
+                    self._last = [{"id": 4242}]
+                elif "INSERT INTO applications" in sql:
+                    outer.application_params = params
+                    self._last = [{"id": 8484}]
+                else:
+                    self._last = []
+
+            def fetchall(self):
+                return self._last
+
+        yield _Cur()
+
+    # --- the non-transactional reads (resume lookup, applicant_id) ------------
     def query(self, sql, params=None):
-        if "INSERT INTO applicants" in sql:
-            self.applicant_params = params
-            return [{"id": 4242}]
-        if "INSERT INTO applications" in sql:
-            self.application_params = params
-            return [{"id": 8484}]
+        if "FROM applications WHERE idempotency_key" in " ".join(sql.split()):
+            self.resumed = params
+            return []                       # unused key: a fresh application
         return []
 
 
@@ -58,6 +87,10 @@ class _FakeDb:
 def fake_db(monkeypatch):
     fake = _FakeDb()
     monkeypatch.setattr(intake.db, "query", fake.query)
+    # Both, since the inserts moved into a transaction. Patching `query` alone
+    # left `transaction` pointing at the real database, so these tests ran
+    # against live data and asserted a stubbed app_id against a real sequence.
+    monkeypatch.setattr(intake.db, "transaction", fake.transaction)
     return fake
 
 

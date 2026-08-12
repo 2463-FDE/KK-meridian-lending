@@ -10,6 +10,48 @@ from . import config, db, decision_state
 log = get_logger("intake")
 
 
+class _LostIdempotencyRace(Exception):
+    """Two requests carried the same idempotency key and this one lost.
+
+    Raised INSIDE the transaction on purpose, so the applicant row inserted a
+    moment earlier is rolled back with it. ON CONFLICT DO NOTHING does not raise,
+    so without this the transaction would commit an applicant whose application
+    was refused -- the orphan the key exists to prevent.
+    """
+
+
+def resume_application(idempotency_key: str):
+    """The application this key already created, with a fresh access token.
+
+    Returns (app_id, raw_access_token) or None if the key is unused.
+
+    A fresh token rather than the original: only the sha256 hash is persisted, so
+    the raw value from the first attempt is genuinely unrecoverable -- it existed
+    in that response body and nowhere else. Re-issuing is the only way to hand the
+    caller a usable handle, and it is safe because the caller has just proved it
+    owns this application by presenting the key that created it.
+
+    Rotating also invalidates the first token, which is the right direction: an
+    intake that failed and was resumed should leave one live handle, not two.
+    """
+    rows = db.query(
+        "SELECT id FROM applications WHERE idempotency_key = %s", (idempotency_key,)
+    )
+    if not rows:
+        return None
+    app_id = rows[0]["id"]
+    raw_access_token, access_token_hash = decision_state.new_access_token()
+    db.query(
+        "UPDATE applications SET access_token_hash = %s, "
+        "       access_token_expires_at = now() + (%s || ' seconds')::interval, "
+        "       access_token_consumed_at = NULL "
+        " WHERE id = %s",
+        (access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS, app_id),
+    )
+    log.info("intake resumed an existing application app_id=%s", app_id)
+    return app_id, raw_access_token
+
+
 def create_application(payload: dict) -> tuple[int, str]:
     """Insert applicant + application.
 
@@ -25,31 +67,76 @@ def create_application(payload: dict) -> tuple[int, str]:
     marker. The raw value exists in this function and in the response body,
     nowhere else -- never in the database, never in a log line.
     """
-    applicant = db.query(
-        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, email, phone, address, zip_code) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (
-            payload.get("name"), payload.get("dob"), payload.get("ssn"),
-            payload.get("ein"), payload.get("is_entity", False),
-            payload.get("email"), payload.get("phone"), payload.get("address"),
-            payload.get("zip_code"),
-        ),
-    )
-    applicant_id = applicant[0]["id"]
+    idempotency_key = payload.get("idempotency_key")
+
+    # A retry of a submission that already exists resumes it. Checked before the
+    # applicant INSERT, because the duplicate this prevents is a duplicate PERSON
+    # as much as a duplicate application -- deduplicating only the application
+    # would still leave an orphan applicant row per retry.
+    if idempotency_key:
+        existing = resume_application(idempotency_key)
+        if existing:
+            return existing
+
     raw_access_token, access_token_hash = decision_state.new_access_token()
-    app_row = db.query(
-        "INSERT INTO applications (applicant_id, amount, term_months, purpose, income, "
-        "employer, job_title, employment_years, access_token_hash, access_token_expires_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, "
-        "        now() + (%s || ' seconds')::interval) RETURNING id",
-        (
-            applicant_id, payload.get("amount"), payload.get("term_months", 36),
-            payload.get("purpose"), payload.get("income"),
-            payload.get("employer"), payload.get("job_title"), payload.get("employment_years"),
-            access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS,
-        ),
-    )
-    app_id = app_row[0]["id"]
+
+
+    # Both inserts in ONE transaction. Two concurrent retries with the same key
+    # both miss the lookup above, and the partial unique index lets exactly one
+    # application land -- but the loser has already inserted an applicant, and
+    # outside a transaction that applicant would survive as an orphan. The whole
+    # point of this change is that a retry leaves one person on record.
+    try:
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO applicants (name, dob, ssn, ein, is_entity, email, phone, "
+                "address, zip_code) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (
+                    payload.get("name"), payload.get("dob"), payload.get("ssn"),
+                    payload.get("ein"), payload.get("is_entity", False),
+                    payload.get("email"), payload.get("phone"), payload.get("address"),
+                    payload.get("zip_code"),
+                ),
+            )
+            applicant_id = cur.fetchall()[0]["id"]
+            cur.execute(
+                "INSERT INTO applications (applicant_id, amount, term_months, purpose, income, "
+                "employer, job_title, employment_years, access_token_hash, "
+                "access_token_expires_at, idempotency_key) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                "        now() + (%s || ' seconds')::interval, %s) "
+                "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL "
+                "DO NOTHING RETURNING id",
+                (
+                    applicant_id, payload.get("amount"), payload.get("term_months", 36),
+                    payload.get("purpose"), payload.get("income"),
+                    payload.get("employer"), payload.get("job_title"),
+                    payload.get("employment_years"),
+                    access_token_hash, config.ACCESS_TOKEN_TTL_SECONDS, idempotency_key,
+                ),
+            )
+            inserted = cur.fetchall()
+            if not inserted:
+                # Lost the race with a concurrent retry carrying the same key.
+                #
+                # RAISE, so the transaction rolls back and takes the applicant with
+                # it. ON CONFLICT DO NOTHING does not error -- it returns no row and
+                # the transaction would COMMIT, leaving precisely the orphan
+                # applicant this whole change exists to prevent. Detecting the
+                # conflict is not enough; the insert that preceded it has to be
+                # undone.
+                raise _LostIdempotencyRace(idempotency_key)
+
+    except _LostIdempotencyRace:
+        # The other request won and its application is committed. Resume it --
+        # our own applicant insert was rolled back with the transaction, so the
+        # retry leaves exactly one person and one application on record.
+        existing = resume_application(idempotency_key)
+        if existing:
+            return existing
+        raise
+
+    app_id = inserted[0]["id"]
     # Gap C: identifiers only. The intake payload carries SSN, DOB, address,
     # phone and email -- none of it belongs in an application log.
     log.info("application intake persisted app_id=%s applicant_id=%s", app_id, applicant_id)

@@ -60,8 +60,11 @@ def real_db(monkeypatch):
                 access_token_consumed_at TIMESTAMPTZ,
                 accept_token_hash TEXT,
                 accept_token_expires_at TIMESTAMPTZ,
-                accept_token_consumed_at TIMESTAMPTZ
+                accept_token_consumed_at TIMESTAMPTZ,
+                idempotency_key TEXT
             );
+            CREATE UNIQUE INDEX applications_idempotency_key_uniq
+                ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
             CREATE TABLE kyc_checks (
                 id SERIAL PRIMARY KEY,
                 applicant_id INTEGER REFERENCES applicants(id),
