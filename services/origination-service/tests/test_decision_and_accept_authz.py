@@ -115,7 +115,13 @@ class _FakeRunDecisionTxCursor:
     def execute(self, sql, params=None):
         self.calls.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("SELECT status FROM applications"):
+        if stmt.startswith("SELECT cip_passed FROM kyc_checks"):
+            # Round 10: the manual-review and boarding paths read the identity
+            # gate through this cursor. Passing by default so the tests here stay
+            # about what they are about; the gate's own refusals are covered in
+            # test_manual_review_requires_kyc.py.
+            self._last = [{"cip_passed": getattr(self, "cip_passed", True)}]
+        elif stmt.startswith("SELECT status FROM applications"):
             self._last = [{"status": self.locked_status}] if self.locked_status is not None else []
         elif stmt.startswith("SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
                               "FROM manual_reviews"):
@@ -543,7 +549,12 @@ class _FakeAcceptTxCursor:
     def execute(self, sql, params=None):
         self.executed.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("SELECT status, accept_token_hash"):
+        if stmt.startswith("SELECT cip_passed FROM kyc_checks"):
+            # Round 10: boarding reads the identity gate under its own lock.
+            # Passing by default; the refusal cases are in
+            # test_manual_review_requires_kyc.py.
+            self._last = [{"cip_passed": getattr(self, "cip_passed", True)}]
+        elif stmt.startswith("SELECT status, accept_token_hash"):
             self._last = [{
                 "status": self.locked_status,
                 "accept_token_hash": self.token_hash,

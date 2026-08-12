@@ -70,7 +70,13 @@ class _FakeReviewTxCursor:
     def execute(self, sql, params=None):
         self.calls.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("SELECT status FROM applications"):
+        if stmt.startswith("SELECT cip_passed FROM kyc_checks"):
+            # Round 10: the manual-review and boarding paths read the identity
+            # gate through this cursor. Passing by default so the tests here stay
+            # about what they are about; the gate's own refusals are covered in
+            # test_manual_review_requires_kyc.py.
+            self._last = [{"cip_passed": getattr(self, "cip_passed", True)}]
+        elif stmt.startswith("SELECT status FROM applications"):
             self._last = [{"status": self.locked_status}]
         elif stmt.startswith("SELECT outcome FROM decisions"):
             # Audit fix: review_application re-verifies current_outcome == 'refer'

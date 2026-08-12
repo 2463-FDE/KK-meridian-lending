@@ -397,6 +397,35 @@ def _attempt_kyc_recheck(app_id: int) -> None:
                     app_id, type(e).__name__)
 
 
+def _require_persisted_kyc_locked(app_id: int, cur) -> None:
+    """The identity gate, read through an open transaction's cursor.
+
+    Same rule as `_require_persisted_kyc`: a passing CIP row for THIS
+    application. Separate because it must run inside a caller's transaction, on
+    the connection holding the row lock -- `db.query()` would read on a different,
+    autocommitted connection and could see a state the lock was taken to exclude.
+
+    No recheck here, deliberately. Recovery belongs where an applicant is waiting
+    on it (the decision gate); a staff member resolving a referral is not the
+    moment to make an outbound call to kyc-service from inside a transaction
+    holding a lock on the application row.
+    """
+    cur.execute(
+        "SELECT cip_passed FROM kyc_checks WHERE application_id = %s "
+        "ORDER BY cip_passed DESC NULLS LAST, id DESC LIMIT 1",
+        (app_id,),
+    )
+    rows = cur.fetchall()
+    if rows and rows[0]["cip_passed"] is True:
+        return
+    log.error("refusing a manual review on app_id=%s -- no passing CIP row", app_id)
+    raise HTTPException(
+        status_code=409,
+        detail=("identity verification has not completed for this application "
+                "yet, so it cannot be decided. Please try again shortly."),
+    )
+
+
 def _require_persisted_kyc(app_id: int) -> None:
     """Refuse to decide an application that has no persisted KYC result.
 
@@ -1077,6 +1106,20 @@ def review_application(
                 detail="cannot decide on an already-funded application",
             )
 
+        # Review round 10 (high): this path bypassed the identity gate entirely.
+        # run_decision refuses an application without a passing CIP row, and then
+        # a staff member could resolve any pre-existing 'refer' here -- write
+        # manual_reviews, flip decisions.outcome to approve, and be issued an
+        # accept token -- with identity never proven. Legacy rows are the reachable
+        # case: db/migrations/0032 leaves application_id NULL where the link could
+        # not be inferred, so those applications have no CIP result for THIS
+        # application and are exactly the ones sitting in 'refer'.
+        #
+        # Inside the lock and before anything is written, so a concurrent apply
+        # cannot land a decision this check would have refused. A manual review is
+        # a human overriding the MODEL, not a human overriding identification.
+        _require_persisted_kyc_locked(app_id, cur)
+
         # Audit fix: the current_outcome == 'refer' check above reads via
         # db.query() on a separate, autocommitted connection BEFORE this
         # transaction even opens -- a concurrent run_decision could change
@@ -1375,6 +1418,19 @@ def accept_offer(
             ok, status_code, message = decision_state.verify_accept_token(locked, x_offer_accept_token)
             if not ok:
                 raise HTTPException(status_code=status_code, detail=message)
+
+        # Review round 10: boarding is the step that creates the loan, so it is
+        # the one place identity absolutely has to be proven, and it was relying
+        # on the two paths upstream having proven it. That holds for anything
+        # decided after this PR and not for what is already on record: an
+        # application approved before the gate existed still carries a valid
+        # accept token, and boarding it would fund a loan for an applicant this
+        # system cannot show was identified.
+        #
+        # Checked here rather than trusted from upstream because this is the
+        # irreversible one. A duplicated check on the money step is the cheapest
+        # defence there is.
+        _require_persisted_kyc_locked(app_id, cur)
 
         # Re-read the offer fresh under the lock too -- there is no
         # offer-edit/cancel endpoint in this system today, so its rate
