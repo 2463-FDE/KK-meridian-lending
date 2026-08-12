@@ -200,14 +200,15 @@ def submit_application(body: ApplicationIn):
            "address_verified": False, "ssn_verified": False}
     is_entity = bool(payload.get("is_entity"))
     try:
+        # Identity fields are NOT sent. kyc-service grades the applicants row it
+        # reads for itself (review round 9): sending them made the CIP verdict a
+        # function of this request rather than of stored state, so any caller
+        # holding the internal token could manufacture passing evidence. They are
+        # redundant now, and not sending them keeps a second copy of the SSN off
+        # the wire and out of another service's request handling entirely.
         resp = clients.post(clients.KYC_URL, "/kyc/check", {
             "application_id": app_id,
             "applicant_id": applicant_id,
-            "name": payload.get("name"),
-            "dob": payload.get("dob"),
-            "ssn": payload.get("ssn"),
-            "address": payload.get("address"),
-            "entity_type": "llc" if is_entity else None,
         }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
         # Review round 6 (medium): these four used to be RECONSTRUCTED from the
         # single `cip_passed` flag -- `dob_verified = passed and not is_entity`
@@ -370,25 +371,23 @@ def _attempt_kyc_recheck(app_id: int) -> None:
     trusts this function's return; the gate trusts the table.
     """
     rows = db.query(
-        "SELECT a.applicant_id, p.name, p.dob, p.ssn, p.address, p.is_entity "
-        "FROM applications a JOIN applicants p ON p.id = a.applicant_id "
-        "WHERE a.id = %s",
+        # applicant_id only: the recheck sends identifiers and kyc-service reads
+        # the identity columns itself. Selecting an SSN we do not use would be
+        # handling PII for no reason.
+        "SELECT a.applicant_id FROM applications a "
+        "JOIN applicants p ON p.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
     )
     if not rows:
         return
     r = rows[0]
     try:
+        # Identifiers only. kyc-service reads the applicant itself (round 9), so
+        # re-sending the identity fields would put a second copy of the SSN on
+        # the wire to be ignored at the other end.
         clients.post(clients.KYC_URL, "/kyc/check", {
             "application_id": app_id,
             "applicant_id": r["applicant_id"],
-            "name": r["name"],
-            # str() because these arrive as date/typed values off the row, and
-            # kyc-service verifies presence, not format.
-            "dob": str(r["dob"]) if r["dob"] else None,
-            "ssn": r["ssn"],
-            "address": r["address"],
-            "entity_type": "llc" if r["is_entity"] else None,
         }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
         log.info("kyc recheck completed at decision time app_id=%s", app_id)
     except Exception as e:  # noqa

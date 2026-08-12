@@ -27,8 +27,20 @@ log = get_logger("kyc-api")
 router = APIRouter(prefix="/kyc", tags=["kyc"])
 
 
-def _require_matching_application(application_id: int, applicant_id: int) -> None:
-    """The application must exist and belong to this applicant.
+def _require_matching_application(application_id: int, applicant_id: int) -> dict:
+    """The application must exist and belong to this applicant. Returns the applicant.
+
+    Review round 9 (high): this returned nothing, and the handler then ran CIP
+    over the REQUEST BODY. So the pairing was verified and the evidence was not:
+    anyone holding the shared internal token could post fabricated identity
+    attributes against a real application and this service would persist a
+    passing compliance record for them. The linkage check proved the IDs were
+    real while the thing being recorded came from the caller -- which is the
+    forgery it was written to stop, moved one field along.
+
+    It returns the stored applicant now, and the verdict is computed from those
+    columns. Identity evidence has to be about what the system knows, not about
+    what the request says.
 
     Deliberately fails CLOSED on a database error. The alternative -- treating an
     unreadable applications table as "cannot disprove the link, so allow it" --
@@ -42,7 +54,11 @@ def _require_matching_application(application_id: int, applicant_id: int) -> Non
     """
     try:
         rows = db.query(
-            "SELECT 1 FROM applications WHERE id = %s AND applicant_id = %s LIMIT 1",
+            "SELECT p.name, p.dob, p.ssn, p.address, "
+            "       COALESCE(p.is_entity, false) AS is_entity "
+            "  FROM applications a "
+            "  JOIN applicants p ON p.id = a.applicant_id "
+            " WHERE a.id = %s AND a.applicant_id = %s LIMIT 1",
             (application_id, applicant_id),
         )
     except Exception as e:  # noqa
@@ -60,6 +76,7 @@ def _require_matching_application(application_id: int, applicant_id: int) -> Non
             status_code=404,
             detail="no such application for this applicant",
         )
+    return rows[0]
 
 
 @router.post("/check", response_model=CipCheckOut)
@@ -73,7 +90,6 @@ def kyc_check(
     if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="not authorized")
 
-    payload = body.model_dump()
     # Gap C (PR #6 review): this used to log the whole CIP payload -- name, DOB,
     # SSN and address -- at INFO on every identity check. Identifiers only now.
     # Not "redacted": the request body simply never reaches a log line, which is
@@ -93,9 +109,24 @@ def kyc_check(
     # trusted: the application must exist and must actually belong to this
     # applicant. That makes the body a claim about existing state rather than an
     # instruction to create it.
-    _require_matching_application(body.application_id, body.applicant_id)
+    applicant = _require_matching_application(body.application_id, body.applicant_id)
 
-    cip = kyc.run_cip(payload)  # CIP only — no sanctions / UBO / monitoring (debt D11)
+    # CIP runs over the STORED applicant, never the request body. The body's
+    # identity fields are accepted for compatibility and deliberately unused:
+    # a caller holding the internal token could otherwise post any non-empty
+    # strings and have this service persist a passing compliance record from
+    # them, against a real application. See _require_matching_application.
+    #
+    # CIP only -- no sanctions / UBO / monitoring (debt D11).
+    cip = kyc.run_cip({
+        "name": applicant["name"],
+        # These arrive typed off the row (DATE, TEXT). run_cip asks only whether
+        # a field is present, so str() is enough and str(None) must not become
+        # the string "None" -- hence the explicit conditional.
+        "dob": str(applicant["dob"]) if applicant["dob"] is not None else None,
+        "ssn": applicant["ssn"],
+        "address": applicant["address"],
+    })
 
     # Review round 6 (high): this was `name_verified and address_verified` for
     # EVERYONE, which was survivable only because the schema forced every
@@ -109,7 +140,11 @@ def kyc_check(
     # The rule is applicant-type aware now. An individual is identified by name,
     # address, date of birth and SSN -- the four factors CIP exists to collect,
     # and the same four the intake form already requires.
-    is_entity = bool(body.entity_type)
+    # From the applicants row, not `body.entity_type`. The entity branch is the
+    # WEAKER rule -- an LLC clears on name and address alone (D11) -- so letting
+    # the caller assert it would let a natural person be graded as a company by
+    # setting one field.
+    is_entity = bool(applicant["is_entity"])
     if is_entity:
         # Unchanged, and still debt D11: an LLC clears on name and address with
         # no natural person verified and no beneficial owner captured. That gap

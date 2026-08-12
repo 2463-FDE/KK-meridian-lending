@@ -31,6 +31,20 @@ from app.routers import kyc as kyc_router
 
 from .conftest import AUTH_HEADERS, INTERNAL_TOKEN
 
+
+def _db_row(sql, params=None):
+    """One stub for both reads the handler makes.
+
+    Round 9: the linkage read returns the STORED applicant, because the CIP
+    verdict is computed from those columns instead of the request body. A stub
+    that answered every query with the same insert row let the handler read
+    nothing real while the tests still passed.
+    """
+    if "FROM applications" in sql:
+        return [{"name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
+                 "address": "42 Main St, Springfield", "is_entity": False}]
+    return [{"id": 77}]
+
 client = TestClient(app)
 
 _BODY = {
@@ -51,7 +65,9 @@ class _RecordingDb:
 
     def query(self, sql, params=None):
         self.calls.append((sql, params))
-        return [{"id": 1}]
+        # Round 9: the linkage read also supplies the identity fields CIP is
+        # graded on, so it cannot answer with the insert row.
+        return _db_row(sql, params)
 
 
 @pytest.fixture
@@ -151,7 +167,7 @@ def test_a_persistence_failure_is_reported_not_swallowed(monkeypatch):
         def query(self, sql, params=None):
             if "INSERT INTO kyc_checks" in sql:
                 raise RuntimeError("permission denied for table kyc_checks")
-            return [{"1": 1}]                      # the linkage check passes
+            return _db_row(sql, params)             # the linkage check passes
 
     monkeypatch.setattr(kyc_router, "db", _FailingInsert())
 
@@ -167,7 +183,7 @@ def test_an_insert_that_returns_no_row_is_also_a_failure(monkeypatch):
         def query(self, sql, params=None):
             if "INSERT INTO kyc_checks" in sql:
                 return []
-            return [{"1": 1}]
+            return _db_row(sql, params)
 
     monkeypatch.setattr(kyc_router, "db", _SilentInsert())
 
