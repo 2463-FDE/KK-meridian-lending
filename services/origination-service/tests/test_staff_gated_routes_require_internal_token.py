@@ -34,6 +34,7 @@ import contextlib
 from unittest.mock import patch
 
 from app import config, intake
+from app.routers import applications as applications_router
 from app.database import get_session
 from app.main import app
 from fastapi.testclient import TestClient
@@ -153,8 +154,25 @@ def test_application_submission_stays_anonymous():
     """Regression guard: POST on the SAME path is the borrower's own
     submission (frontend/app/apply/page.tsx) and must NOT be gated by the
     GET fix -- proven by reaching intake, not by a 403."""
+    # `db` is stubbed as well as `intake`. Intake now VERIFIES that a kyc_checks
+    # row landed before reporting an application as submitted (the rolling-deploy
+    # fix), so leaving the real db in place made this authorization test depend
+    # on a schema being loaded -- it failed in CI on a missing table while
+    # proving nothing about authorization.
+    class _Db:
+        def query(self, sql, params=None):
+            flat = " ".join(sql.split())
+            if "SELECT applicant_id FROM applications" in flat:
+                return [{"applicant_id": 4242}]
+            if "FROM kyc_checks" in flat:
+                return [{"cip_passed": True}]
+            return []
+
     with patch.object(intake, "create_application",
-                      return_value=(4242, "tok", "resume-tok")) as create:
+                      return_value=(4242, "tok", "resume-tok")) as create,             patch.object(applications_router, "db", _Db()),             patch.object(applications_router.clients, "post",
+                         lambda *a, **kw: {"cip_passed": True, "name_verified": True,
+                                           "dob_verified": True, "address_verified": True,
+                                           "ssn_verified": True}):
         resp = client.post("/applications", json={
             "name": "Jane Borrower", "amount": 9000, "term_months": 24,
             "income": 40000, "purpose": "test",
