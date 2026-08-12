@@ -101,7 +101,16 @@ next person will face the same argument.
 `payment-service` preflights `servicing-service`'s authenticated `/internal/auth-check`
 immediately before every card authorization, and that preflight **fails closed**: a
 timeout, DNS failure, TLS error, 5xx, or a 200 that is not the expected body all
-refuse the charge. So **card capture is unavailable whenever servicing is
+refuse the charge.
+
+**A 200 means "I can accept and persist an apply-payment", not "our tokens match."**
+That distinction is the contract, and getting it wrong is a real charge with no credit:
+an earlier version authenticated and returned without touching the database, so a
+servicing process that was up with its database down answered 200, the card was
+captured, and the follow-up `apply-payment` failed. The check now performs a light read
+against `balances` and `payment_applications` — the two tables `apply_payment_once`
+writes — so it proves the path rather than the credential. Two `LIMIT 1` reads, no
+writes: it runs before every authorization and must not become why payments are slow. So **card capture is unavailable whenever servicing is
 unavailable** — a deliberate coupling, not an oversight.
 
 The first version failed *open*, on the reasoning that "unknown is not known-bad" and

@@ -15,7 +15,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-from . import balance, config, delinquency, payments, reconciliation
+from . import balance, config, db, delinquency, payments, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
@@ -81,20 +81,42 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
 def internal_auth_check(
     x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
 ):
-    """Authenticated readiness, for callers that must not act if auth is broken.
+    """Can this service accept AND PERSIST an apply-payment right now?
 
-    Review round 2 (high): payment-service sends its token to apply-payment only
-    AFTER the processor has already authorized the card. If the two services are
-    deployed with different token values -- a rotation applied to one and not the
-    other -- the borrower is charged and every apply is rejected, so the money is
-    captured and the balance never moves until someone reconciles it by hand.
+    That is the contract, and it is deliberately stronger than "our tokens
+    match". Review round 5: this used to authenticate and return, touching no
+    database at all -- and I documented that as a feature ("no database access,
+    no state, so a 200 means exactly the token you sent is the token I expect").
+    It was the defect. payment-service reads a 200 as permission to capture a
+    card, so a servicing process that is up with its database down answered 200,
+    the card was charged, and the follow-up apply-payment failed: a real charge
+    with no credit on the loan, which is the outcome the whole preflight exists
+    to prevent.
 
-    `/health` cannot detect that: it is deliberately open, so it answers "the
-    process is up", never "your credentials work here". This route answers the
-    second question and nothing else -- no database access, no state, so a 200
-    means exactly "the token you sent is the token I expect".
+    So the check now exercises the same dependency apply-payment does -- a light
+    read against `balances` and `payment_applications`, the two tables
+    `balance.apply_payment_once` writes. It proves the path, not just the
+    credential.
+
+    Kept cheap on purpose: two LIMIT 1 reads, no writes, no transaction. It runs
+    before every card authorization, so it must not become the reason payments
+    are slow. Empty tables are fine -- what matters is that the statements
+    execute.
     """
     _require_internal(x_internal_token)
+    try:
+        db.query("SELECT 1 FROM balances LIMIT 1")
+        db.query("SELECT 1 FROM payment_applications LIMIT 1")
+    except Exception as e:  # noqa
+        log.error(
+            "auth-check could not reach the tables apply-payment needs (%s) -- "
+            "reporting unavailable so no card is captured that we could not credit",
+            type(e).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="servicing cannot persist an apply-payment right now",
+        )
     return {"status": "ok", "auth": "ok"}
 
 

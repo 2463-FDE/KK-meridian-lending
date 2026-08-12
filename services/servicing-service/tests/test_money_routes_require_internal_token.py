@@ -241,3 +241,60 @@ def test_an_empty_header_cannot_match_an_empty_configured_token(monkeypatch):
     resp = client.post("/accounts/1/late-fee", headers={"X-Internal-Token": ""})
 
     assert resp.status_code == 401
+
+
+# --- review round 5: a 200 must mean "I can persist", not "tokens match" ------
+
+def test_auth_check_reports_unavailable_when_the_database_is_down(monkeypatch):
+    """The preflight must prove the path apply-payment uses, not the credential.
+
+    Review round 5: this endpoint authenticated and returned, touching no
+    database -- and that was documented as a feature. It was the defect.
+    payment-service reads a 200 as permission to capture a card, so a servicing
+    process that is up with its database down answered 200, the card was
+    charged, and the follow-up apply-payment failed. A real charge with no credit
+    on the loan, which is exactly what the preflight exists to prevent.
+    """
+    class _DeadDb:
+        def query(self, sql, params=None):
+            raise RuntimeError("could not connect to server")
+
+    monkeypatch.setattr(main, "db", _DeadDb())
+
+    resp = client.get("/internal/auth-check", headers={"X-Internal-Token": TOKEN})
+
+    assert resp.status_code == 503
+    assert "persist" in resp.json()["detail"].lower()
+
+
+def test_auth_check_touches_the_tables_apply_payment_writes(monkeypatch):
+    """Named tables, not any query: the point is the dependency, not liveness.
+
+    A check that read some unrelated table would pass this file's other test
+    while proving nothing about whether an apply-payment could land.
+    """
+    seen = []
+
+    class _RecordingDb:
+        def query(self, sql, params=None):
+            seen.append(" ".join(sql.split()))
+            return []
+
+    monkeypatch.setattr(main, "db", _RecordingDb())
+
+    assert client.get("/internal/auth-check", headers={"X-Internal-Token": TOKEN}).status_code == 200
+    joined = " ".join(seen)
+    assert "balances" in joined, "the preflight never touched balances"
+    assert "payment_applications" in joined, "the preflight never touched payment_applications"
+
+
+def test_auth_check_still_refuses_an_unauthenticated_caller(monkeypatch):
+    """Authentication runs first: a caller with no token learns nothing about
+    the database, and a database failure is not an authentication bypass."""
+    class _DeadDb:
+        def query(self, sql, params=None):                          # pragma: no cover
+            raise AssertionError("the database was touched before authentication")
+
+    monkeypatch.setattr(main, "db", _DeadDb())
+
+    assert client.get("/internal/auth-check").status_code == 401
