@@ -27,7 +27,54 @@ solved incident; a card captured against a credit that could not land.
 **This skill is the check that would have caught them.** Run it on any change that
 touches money, identity, audit, or a document describing a control.
 
-## The four questions
+## Step 0 — inventory every claim the change touches
+
+**Do this before evaluating anything.** The four questions below are useless
+applied to a claim you did not know was there, and every defect in the table above
+was found in a surface nobody thought to look at: the README two days after the
+migration, the FastAPI docstring after the policy was corrected, the runbook months
+after the secrets moved.
+
+A claim is any statement about what the system **does**, **prevents**, **stores**,
+**checks**, or **guarantees**. Sweep all of these — the ones that bite are the ones
+you do not consider part of "the change":
+
+| Surface | Where to look | Why it bites |
+|---|---|---|
+| **Code** | Branch conditions, constraints, triggers, guards | The claim is what the code *does*, whatever anything says |
+| **Tests** | Names and docstrings | A test named `test_pan_is_never_stored` asserts a claim; if it now checks something narrower, the name is a false claim |
+| **API descriptions** | Route docstrings, `summary=`, `description=` | **FastAPI publishes docstrings on `/docs`.** Correcting a policy file and leaving the docstring leaves the claim exactly where a caller reads it |
+| **Schemas** | Pydantic field comments, `Field(description=)`, examples | The request/response contract; example values imply supported inputs |
+| **UI text** | Frontend labels, placeholders, tooltips, dropdown options, error copy | **A placeholder is a published rule.** A reason dropdown offering a criterion nothing evaluates is a false statement to staff and, via adverse-action letters, to applicants |
+| **LLM prompts** | System prompts, few-shot examples, output schemas | A prompt instructing a model to apply a rule *generates* that claim on every call. It is not documentation — it is a claim factory |
+| **README / runbooks** | Setup, compliance, operational sections | Read during onboarding and during incidents, i.e. when nobody re-derives |
+| **ADRs / debt register** | `adr/`, `docs/DEBT.md` | The shared record. A fix leaving a `D`-number stale moved the defect rather than closing it |
+| **Policies** | `policies/` | Read by staff and quoted to regulators |
+| **Migrations / seeds** | DDL comments, seed data | Seed rows are claims about what valid data looks like |
+
+**How to sweep, concretely.** Grep for the *subject* of the claim across the whole
+repository, not the file you edited — the number, the field name, the rule:
+
+```bash
+git diff main...HEAD --stat                 # what you touched
+grep -rniE "dti|43%|debt.to.income" --include="*.py" --include="*.ts"      --include="*.tsx" --include="*.md" --include="*.sql" .
+```
+
+Then write the inventory down before judging any of it:
+
+```
+| # | Surface | File:line | The claim, as a reader would take it | Changed by this PR? |
+```
+
+**Two rules that decide whether the sweep was real:**
+
+1. **A claim you inventoried and did not change still gets the four questions.** If
+   the change makes an existing claim false — a schema edit, a retired rule — it is
+   in scope regardless of whether you edited that file.
+2. **If the inventory has one row, you probably swept one file.** A regulated
+   change almost always publishes its claim in three or four places.
+
+## The four questions — applied to EVERY inventoried claim
 
 Answer all four, in order. A claim that cannot answer one is not ready to ship —
 and the honest fix is usually to narrow the claim, not to add machinery.
@@ -133,12 +180,19 @@ Ask specifically:
 Report per claim, in this shape:
 
 ```
+INVENTORY   N claims found across M surfaces (list them, with file:line)
+
+then, per claim:
+
 CLAIM       one falsifiable sentence
 SOURCE      file:line of the thing that enforces it
 TEST        test name + the mutation result that proves it bites
 LIMITATION  what a reader might infer that is not true
 VERDICT     Done | Partial | Decision required | Not started
 ```
+
+Report the inventory even when a surface came back empty — "no UI text publishes
+this" is a finding a reader can check, and "I did not look at the UI" is not.
 
 If the mutation did not fail, say so and stop. An unproven claim reported as
 verified is the defect this skill exists to prevent, committed by the tool meant
