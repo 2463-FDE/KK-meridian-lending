@@ -27,13 +27,20 @@ INSERT INTO applications (id, applicant_id, amount, term_months, purpose, income
 SELECT setval('applications_id_seq', 6014);
 
 -- KYC: CIP fields only; the entity (6/6014) cleared with no UBO and no sanctions screen.
-INSERT INTO kyc_checks (applicant_id, name_verified, dob_verified, address_verified, ssn_verified) VALUES
-  (1, TRUE, TRUE, TRUE, TRUE),
-  (2, TRUE, TRUE, TRUE, TRUE),
-  (3, TRUE, TRUE, TRUE, TRUE),
-  (4, TRUE, TRUE, TRUE, TRUE),
-  (5, TRUE, TRUE, TRUE, TRUE),
-  (6, TRUE, FALSE, TRUE, FALSE);   -- entity: no real person verified, cleared anyway
+-- application_id is populated here, not left NULL. The decision gate accepts a
+-- CIP row only for the application it was run for (db/migrations/0032), so a
+-- seeded row without it would display as identity evidence in the UI while
+-- decisioning refused the same application as unverified -- and only on FRESH
+-- databases, since migrated ones are back-filled. That fresh-versus-migrated
+-- skew is worse than either behaviour on its own, because it makes a smoke test
+-- pass or fail depending on how the database was built (PR #18 review).
+INSERT INTO kyc_checks (applicant_id, application_id, name_verified, dob_verified, address_verified, ssn_verified) VALUES
+  (1, 4471, TRUE, TRUE, TRUE, TRUE),
+  (2, 5582, TRUE, TRUE, TRUE, TRUE),
+  (3, 6011, TRUE, TRUE, TRUE, TRUE),
+  (4, 6012, TRUE, TRUE, TRUE, TRUE),
+  (5, 6013, TRUE, TRUE, TRUE, TRUE),
+  (6, 6014, TRUE, FALSE, TRUE, FALSE);   -- entity: no real person verified, cleared anyway
 
 -- Decisions: outcome only. Denials 6012/6013 have no recorded reason anywhere.
 INSERT INTO decisions (app_id, outcome) VALUES

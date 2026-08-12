@@ -525,16 +525,6 @@ def run_decision(
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]
 
-    # PR #18 review: an application that reached the database before KYC failed
-    # must not be able to walk into decisioning. Checked here rather than in the
-    # intake response because THIS route is directly reachable -- the gateway
-    # proxies /los/* anonymously by design, so a caller with an app_id can ask
-    # for a decision without ever seeing what intake returned.
-    #
-    # Before the credit pull and before the attempt lease, so a rejected
-    # application costs no bureau call and leaves no attempt row behind.
-    _require_persisted_kyc(app_id)
-
     existing = db.query("SELECT app_id FROM decisions WHERE app_id = %s", (app_id,))
     is_staff = _is_staff(x_user_role, x_internal_token)
     if existing:
@@ -565,6 +555,26 @@ def run_decision(
         if not is_staff and not is_owner:
             raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
         requested_by = x_user_role if is_staff else "borrower"
+
+    # PR #18 review: an application that reached the database before KYC failed
+    # must not walk into decisioning. Checked here rather than in the intake
+    # response because THIS route is directly reachable -- the gateway proxies
+    # /los/* anonymously by design, so a caller with an app_id can ask for a
+    # decision without ever seeing what intake returned.
+    #
+    # AFTER authorization, deliberately. It ran before it in the first version,
+    # which reintroduced an oracle this route had already closed: an anonymous
+    # caller guessing an app_id got 409 for a real application with no KYC row
+    # and 403 otherwise, so the response distinguished "this application exists"
+    # from "you may not ask" before the caller had proven anything. Every
+    # unauthorized path on this route collapses to one generic 403 on purpose
+    # (see the access-token comment above), and a check that runs earlier than
+    # the trust boundary undoes that no matter how correct the check itself is.
+    #
+    # Still before start_decision_attempt and the decision-service call, so an
+    # authorized-but-unverified application costs no bureau inquiry and leaves
+    # no attempt row.
+    _require_persisted_kyc(app_id)
 
     # PR #6 review (Finding 2): TXN A -- lock the application, recheck
     # funded/manual finality (the authoritative check -- everything above

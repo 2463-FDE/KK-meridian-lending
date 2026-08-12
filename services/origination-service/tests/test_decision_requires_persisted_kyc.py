@@ -57,6 +57,13 @@ class _Db:
 
 
 def _run(db):
+    """Call the route as an AUTHORIZED caller.
+
+    The KYC gate sits behind the authorization branch (review round 4), so a
+    test that does not authorize gets the generic 403 and never reaches it.
+    These tests are about the gate, so they authorize; the oracle tests below
+    deliberately do not, and assert the 403.
+    """
     return applications_router.run_decision(
         8484,
         applications_router.DecisionIn(),
@@ -68,6 +75,7 @@ def _run(db):
 def test_an_application_with_no_kyc_row_cannot_be_decided(monkeypatch):
     db = _Db(kyc_rows=[])
     monkeypatch.setattr(applications_router, "db", db)
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
 
     with pytest.raises(HTTPException) as excinfo:
         _run(db)
@@ -83,6 +91,8 @@ def test_the_gate_runs_before_any_bureau_call_or_attempt_row(monkeypatch):
     burn a decision_attempts row; after the credit pull, it would bill a real
     hard inquiry for an applicant we declined to identify.
     """
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
     db = _Db(kyc_rows=[])
     monkeypatch.setattr(applications_router, "db", db)
 
@@ -105,6 +115,7 @@ def test_a_recorded_but_FAILED_cip_is_still_decidable(monkeypatch):
     would mean an applicant who fails verification can never be told no. The
     denied-workflow E2E depends on exactly this.
     """
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
     db = _Db(kyc_rows=[{"1": 1}])
     monkeypatch.setattr(applications_router, "db", db)
 
@@ -143,6 +154,7 @@ def test_the_gate_keys_on_the_application_not_the_applicant(monkeypatch):
     and the old expectation is inverted rather than deleted so the reasoning that
     produced it stays visible.
     """
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
     db = _Db(kyc_rows=[{"1": 1}])
     monkeypatch.setattr(applications_router, "db", db)
     monkeypatch.setattr(
@@ -175,6 +187,7 @@ def test_a_repeat_applicants_old_kyc_does_not_cover_a_new_application(monkeypatc
     row exists for the applicant's OLD application and none for the new one, so
     the new one is refused.
     """
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
     queried = []
 
     class _Db:
@@ -227,3 +240,69 @@ def test_the_two_copies_of_the_status_constant_agree():
     from app import decision_state
 
     assert decision_state.KYC_UNVERIFIED_STATUS == applications_router.KYC_UNVERIFIED_STATUS
+
+
+# --- review round 4: the gate must not become an oracle -----------------------
+
+def test_an_anonymous_caller_learns_nothing_from_the_kyc_gate(monkeypatch):
+    """Authorize first. The gate must not answer before the trust boundary.
+
+    Review finding: `_require_persisted_kyc` ran BEFORE the staff/access-token
+    check, so an anonymous caller guessing an app_id got 409 for a real
+    application with no KYC row and 403 otherwise. The response distinguished
+    "this application exists" from "you may not ask" before the caller had
+    proven anything.
+
+    This route already collapses every unauthorized path into one generic 403 on
+    purpose -- wrong token, expired token, already-used token, never-issued token
+    all look identical. A correct check placed earlier than the trust boundary
+    undoes that, however correct the check itself is.
+    """
+    db = _Db(kyc_rows=[])                       # a real application, no KYC row
+    monkeypatch.setattr(applications_router, "db", db)
+
+    def _must_not_run(*a, **kw):                                   # pragma: no cover
+        raise AssertionError("work was done for an unauthorized caller")
+
+    monkeypatch.setattr(applications_router.decision_state, "start_decision_attempt", _must_not_run)
+    monkeypatch.setattr(applications_router.clients, "post", _must_not_run)
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, t: False)
+
+    with pytest.raises(HTTPException) as excinfo:
+        applications_router.run_decision(
+            8484, applications_router.DecisionIn(),
+            x_user_role=None, x_internal_token=None,
+        )
+
+    assert excinfo.value.status_code == 403, (
+        "an anonymous caller got a KYC-specific status, which confirms the "
+        "application exists before they have proven anything"
+    )
+    assert "identity verification" not in str(excinfo.value.detail).lower(), (
+        "the 403 body leaks that the refusal was about KYC"
+    )
+
+
+def test_an_authorized_caller_still_hits_the_kyc_gate(monkeypatch):
+    """Moving the check must not disable it.
+
+    The pairing matters: the test above passes on a build with no gate at all,
+    so it only means something alongside this one.
+    """
+    db = _Db(kyc_rows=[])
+    monkeypatch.setattr(applications_router, "db", db)
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, t: True)
+
+    def _must_not_run(*a, **kw):                                   # pragma: no cover
+        raise AssertionError("decisioning began for an application with no CIP row")
+
+    monkeypatch.setattr(applications_router.decision_state, "start_decision_attempt", _must_not_run)
+
+    with pytest.raises(HTTPException) as excinfo:
+        applications_router.run_decision(
+            8484, applications_router.DecisionIn(),
+            x_user_role=None, x_internal_token=None,
+        )
+
+    assert excinfo.value.status_code == 409
+    assert "identity verification" in str(excinfo.value.detail).lower()

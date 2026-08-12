@@ -432,3 +432,51 @@ def test_servicing_reproduces_the_disclosed_payment_from_the_boarded_rate(seeded
             f"app {o['app_id']}: servicing bills {billed} against a disclosed "
             f"{disclosed} at loans.apr={o['loan_rate']}"
         )
+
+
+def test_seeded_kyc_rows_satisfy_the_application_scoped_decision_gate(seeded_db):
+    """A fresh database must not disagree with a migrated one about KYC.
+
+    `db/migrations/0032` scopes CIP evidence to an application, and the decision
+    gate accepts a row only `WHERE application_id = app_id`. A migrated database
+    is back-filled; a fresh one is whatever `db/init` writes. When the seed left
+    `application_id` NULL, seeded applications displayed identity evidence in the
+    UI while decisioning refused them as unverified -- and only on fresh
+    databases, so a smoke test passed or failed depending on how the database was
+    built (PR #18 review).
+
+    Asserted against the gate's own predicate rather than against a count, so it
+    fails for the reason a reader would care about.
+    """
+    with seeded_db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM kyc_checks")
+        total = cur.fetchone()[0]
+        assert total, "no seeded kyc_checks rows to check"
+
+        cur.execute("SELECT count(*) FROM kyc_checks WHERE application_id IS NULL")
+        unlinked = cur.fetchone()[0]
+        assert unlinked == 0, (
+            f"{unlinked} of {total} seeded kyc_checks rows have no application_id, so "
+            "the decision gate treats those applications as unverified while the UI "
+            "shows them as verified"
+        )
+
+        # Every seeded row must satisfy the gate for its own application.
+        cur.execute(
+            "SELECT k.application_id FROM kyc_checks k "
+            "LEFT JOIN applications a ON a.id = k.application_id "
+            "WHERE a.id IS NULL"
+        )
+        dangling = [r[0] for r in cur.fetchall()]
+        assert not dangling, f"kyc_checks rows point at applications that do not exist: {dangling}"
+
+        # And the linkage must agree with the applicant on the application.
+        cur.execute(
+            "SELECT k.id FROM kyc_checks k JOIN applications a ON a.id = k.application_id "
+            "WHERE a.applicant_id <> k.applicant_id"
+        )
+        mismatched = [r[0] for r in cur.fetchall()]
+        assert not mismatched, (
+            f"kyc_checks rows linked to an application belonging to a different "
+            f"applicant: {mismatched}"
+        )
