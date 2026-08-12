@@ -1,2 +1,11 @@
 pytest==9.0.3
 pytest-cov==7.1.0
+# Test-only. This service's app never imports httpx -- it talks to Postgres via
+# psycopg2 and to nothing else over HTTP -- but fastapi.testclient.TestClient is
+# built on starlette's TestClient, which requires it. Same reason kyc-service
+# declares it here rather than in requirements.txt, and same pin.
+#
+# Recorded because it looks unused: `grep httpx services/servicing-service/app`
+# returns nothing, so removing it as dead weight is an easy mistake. It is not
+# dead; without it every TestClient-based test fails at collection.
+httpx==0.28.1

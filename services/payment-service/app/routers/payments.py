@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Header, HTTPException
 
 from .. import config, payments, reconcile
-from ..payments import IdempotencyKeyConflict
+from ..payments import IdempotencyKeyConflict, ServicingAuthUnavailable
 from ..schemas import PaymentIn, PaymentOut
 
 router = APIRouter(tags=["payments"])
@@ -62,3 +62,12 @@ def post_payment(
         )
     except IdempotencyKeyConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except ServicingAuthUnavailable:
+        # 503, not 500: the card was NOT charged, and retrying once the token
+        # skew is corrected is the right thing for the caller to do. Reported as
+        # a payments outage rather than as a client error, because nothing about
+        # the request was wrong (review round 2).
+        raise HTTPException(
+            status_code=503,
+            detail="payments are temporarily unavailable; no charge was made",
+        )

@@ -1,2 +1,7 @@
 psycopg2-binary==2.9.10
 pytest==9.0.3
+# test_compose_declares_every_env_var_services_read.py parses docker-compose.yml.
+# It was already installed locally, which is why CI was the first place the
+# import failed -- the same local-masks-CI shape as the .env findings on this
+# branch, one layer up in the dependency list.
+PyYAML==6.0.2
