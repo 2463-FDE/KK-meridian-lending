@@ -70,12 +70,14 @@ services:
     # gateway entirely and hit it directly (review finding). Reachable from other
     # containers on the compose network by service name; not from the host.
     environment:
-      # Required, not optional: app/config.py validates the token at import and
-      # treats an UNSET ENVIRONMENT as production. Without this line the service
-      # only booted where a developer happened to have .env (which is gitignored,
-      # so never in CI) -- it died on startup everywhere else, and every page
-      # backed by servicing failed with no obvious cause.
-      ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Required, and deliberately NOT defaulted. validate_internal_token skips
+      # every strength and known-token check when ENVIRONMENT is development/
+      # dev/test/local, so a base file that defaulted to development would hand
+      # any production-like deploy money routes guarded by whatever string was
+      # typed -- including a short or repository-known one. That is the exact
+      # case this service's token exists to prevent, so the default is gone and
+      # local work opts in explicitly via `make bootstrap`.
+      ENVIRONMENT: ${ENVIRONMENT:?required -- run `make bootstrap` for local development; never defaults to development, because that would skip token validation}
       # Required on every money-moving route now (see app/main.py::_require_internal).
       # The network boundary above was previously the ONLY control, because none
       # of those routes checked anything -- the same position kyc-service was in
@@ -126,7 +128,7 @@ services:
       # ENVIRONMENT is otherwise unset and decisioning fails closed on every request
       # (see app/config.py). Default the local compose path to dev so it boots ready
       # to use; an .env that sets ENVIRONMENT still wins.
-      ENVIRONMENT: ${ENVIRONMENT:-development}
+      ENVIRONMENT: ${ENVIRONMENT:?required -- run `make bootstrap` for local development; never defaults to development, because that would skip token validation}
       # Required on every POST /decisions (see routers/decisions.py) -- defense
       # in depth so a future accidental host-port re-exposure (or any other
       # container reachable on this compose network) still can't submit

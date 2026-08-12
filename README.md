@@ -75,7 +75,12 @@ servicing schema. After a charge is captured, `payment-service` calls servicing'
 ## Quick start
 
 ```bash
-cp .env.example .env     # the real .env is already in the repo so you can just run it
+make bootstrap            # creates .env and generates INTERNAL_SERVICE_TOKEN.
+                         # docker-compose.yml supplies no default for it or for
+                         # ENVIRONMENT: a token committed here is not a secret,
+                         # and defaulting ENVIRONMENT to development would skip
+                         # the token-strength checks on the money-moving routes.
+                         # The generated token is local only -- never commit it.
 make up                  # docker compose up -d (postgres, redis, all services, frontend)
 make logs                # tail everything
 make seed                # load db/init seed data (loans, payments, decisions)

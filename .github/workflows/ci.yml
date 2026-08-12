@@ -81,6 +81,50 @@ jobs:
   # repo -- `docker build` failed on any clean checkout. This runner has no
   # such file either, so it exercises the exact same clean-checkout path the
   # Dockerfiles now fall back on (see each service's Dockerfile).
+  # Review finding: the base compose file now REQUIRES INTERNAL_SERVICE_TOKEN and
+  # ENVIRONMENT, which is correct -- a token committed here is not a secret, and an
+  # ENVIRONMENT default of "development" would skip the token-strength checks on the
+  # money-moving routes. But it also broke the documented quick start, and CI did not
+  # notice because every other job injects those variables itself.
+  #
+  # This job runs what a human is told to run, on a clean checkout, with NO
+  # environment injected -- so the quick start cannot rot without the build failing.
+  quick-start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The base compose file must REFUSE a clean checkout
+        run: |
+          if docker compose config -q 2>/dev/null; then
+            echo "docker compose config succeeded with no .env -- the base file is"
+            echo "supplying a default for INTERNAL_SERVICE_TOKEN or ENVIRONMENT again."
+            exit 1
+          fi
+          echo "refused, as intended"
+      - name: Run the documented bootstrap
+        run: make bootstrap
+      - name: The generated token must be real, and dev must be explicit
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          env = pathlib.Path(".env").read_text(encoding="utf-8")
+          tok = re.search(r"^INTERNAL_SERVICE_TOKEN=(.+)$", env, re.M)
+          assert tok, "bootstrap did not write INTERNAL_SERVICE_TOKEN"
+          assert len(tok.group(1)) >= 32, f"generated token is only {len(tok.group(1))} chars"
+          assert re.search(r"^ENVIRONMENT=development$", env, re.M), "ENVIRONMENT not set"
+          print("bootstrap produced a usable .env")
+          PY
+      - name: The stack configuration must now succeed
+        run: docker compose config -q
+      - name: The generated token must never be committable
+        run: |
+          git check-ignore .env || { echo ".env is NOT gitignored -- a generated secret could be committed"; exit 1; }
+          git status --porcelain | grep -q "^?? .env$" && { echo ".env shows as untracked-but-visible"; exit 1; } || true
+          echo ".env is ignored"
+
   docker-build:
     runs-on: ubuntu-latest
     env:
