@@ -209,15 +209,22 @@ def submit_application(body: ApplicationIn):
             "address": payload.get("address"),
             "entity_type": "llc" if is_entity else None,
         }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
-        passed = bool(resp.get("cip_passed"))
-        # Map kyc-service cip_passed -> the four KycOut booleans the frontend expects.
-        # CIP verifies name/dob/address/ssn that were provided; entity applicants have no
-        # dob/ssn so those stay false even on a pass (mirrors the old in-process stub).
+        # Review round 6 (medium): these four used to be RECONSTRUCTED from the
+        # single `cip_passed` flag -- `dob_verified = passed and not is_entity`
+        # and so on. That is a guess about another service's audit record, and it
+        # was wrong in both directions: an individual who passed on name and
+        # address alone was reported `ssn_verified: true` while the persisted
+        # `kyc_checks` row said false, and a partially-verified applicant was
+        # reported as verifying nothing. Support and audit read this response.
+        #
+        # kyc-service now returns the four factors it actually recorded, so they
+        # are passed through. The only remaining transformation is the fallback
+        # below, which is all-false and says so.
         cip = {
-            "name_verified": passed,
-            "dob_verified": passed and not is_entity,
-            "address_verified": passed,
-            "ssn_verified": passed and not is_entity,
+            "name_verified": bool(resp.get("name_verified")),
+            "dob_verified": bool(resp.get("dob_verified")),
+            "address_verified": bool(resp.get("address_verified")),
+            "ssn_verified": bool(resp.get("ssn_verified")),
         }
     except httpx.HTTPStatusError as e:
         # PR #18 review (high): a 401/403 from kyc-service is a CONFIGURATION
@@ -310,11 +317,27 @@ def _require_persisted_kyc(app_id: int) -> None:
     `POST /applications/{id}/decision`, not only through the intake response, so
     the gate has to live here rather than in the caller.
 
-    What counts as a KYC result is a row in `kyc_checks` for THIS APPLICATION,
-    not a passing one. A failed CIP is a real, recorded outcome the deny path is
-    entitled to act on; the case blocked is the one where KYC never ran or its
-    result was never persisted, which is indistinguishable from an unverified
-    applicant.
+    What counts is a row in `kyc_checks` for THIS APPLICATION whose recorded
+    verdict is a pass.
+
+    Review round 6: this used to accept any row, on the reasoning that "a failed
+    CIP is a real, recorded outcome the deny path is entitled to act on". No deny
+    path acted on it. Nothing outside kyc-service read the result at all, so a
+    recorded failure had exactly the same effect as a pass -- the application was
+    decided, and could be approved, for an applicant this system had recorded as
+    unidentified. A gate that admits a failure because something else will catch
+    it is a gate only if that something else exists.
+
+    Both cases it now refuses are the same case: we cannot show that this
+    application's applicant was identified. Either no CIP result was persisted
+    (KYC never ran, or could not be recorded), or one was and it did not pass, or
+    it predates `db/migrations/0033` and does not record a verdict. A NULL is not
+    a pass -- it is a row that does not say, which is not evidence of anything.
+
+    Not a policy change dressed as a gate: a failed CIP should end as an adverse
+    action with a reason, not a 409, and that path does not exist yet. Until it
+    does, refusing to underwrite is the fail-closed direction, and the response
+    says which of the two it is so support can tell them apart.
 
     Review finding: this used to key on the applicant, joining through
     `applications`, because `kyc_checks` had no `application_id`. That made the
@@ -330,17 +353,28 @@ def _require_persisted_kyc(app_id: int) -> None:
     do not underwrite on it.
     """
     rows = db.query(
-        "SELECT 1 FROM kyc_checks WHERE application_id = %s LIMIT 1",
+        "SELECT cip_passed FROM kyc_checks WHERE application_id = %s "
+        # A passing row wins over a non-passing one for the same application:
+        # ordering by cip_passed DESC NULLS LAST means a re-run that succeeded
+        # settles it, rather than an earlier failure blocking forever.
+        "ORDER BY cip_passed DESC NULLS LAST, id DESC LIMIT 1",
         (app_id,),
     )
-    if rows:
+    if rows and rows[0]["cip_passed"] is True:
         return
-    log.error("refusing to decide app_id=%s -- no persisted kyc_checks row", app_id)
-    raise HTTPException(
-        status_code=409,
-        detail=("this application has no completed identity verification on record "
-                "and cannot be decided. Re-submit the application."),
-    )
+
+    if not rows:
+        log.error("refusing to decide app_id=%s -- no persisted kyc_checks row", app_id)
+        detail = ("this application has no completed identity verification on record "
+                  "and cannot be decided. Re-submit the application.")
+    else:
+        # Deliberately not logged with the factors that failed: which identity
+        # element did not verify is exactly the kind of detail the logging rules
+        # on this service keep out of log lines.
+        log.error("refusing to decide app_id=%s -- recorded CIP did not pass", app_id)
+        detail = ("identity verification did not pass for this application, so it "
+                  "cannot be decided.")
+    raise HTTPException(status_code=409, detail=detail)
 
 
 @router.get("", response_model=Page[ApplicationListItem])

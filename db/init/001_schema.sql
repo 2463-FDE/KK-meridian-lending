@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS kyc_checks (
     dob_verified    BOOLEAN,
     address_verified BOOLEAN,
     ssn_verified    BOOLEAN,
+    -- The CIP verdict as kyc-service reached it (db/migrations/0033). Stored
+    -- rather than recomputed by each reader: the pass rule is applicant-type
+    -- aware, and a second copy of it would be a second thing to keep in step.
+    -- NULL means the row does not say, which the decision gate treats as not
+    -- established.
+    cip_passed      BOOLEAN,
     -- no sanctions_screened, no ubo_identified, no ongoing_monitoring columns
     created_at      TIMESTAMPTZ DEFAULT now()
 );

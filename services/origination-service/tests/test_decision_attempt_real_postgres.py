@@ -77,6 +77,7 @@ def _full_schema_sql():
                 application_id INTEGER REFERENCES applications(id),
             name_verified BOOLEAN, dob_verified BOOLEAN,
             address_verified BOOLEAN, ssn_verified BOOLEAN,
+                cip_passed BOOLEAN,
             created_at TIMESTAMPTZ DEFAULT now()
         );
         CREATE TABLE decisions (
@@ -241,8 +242,11 @@ def _seed_application(conn, app_id, amount=9000, term_months=24, income=40000,
         # result. These fixtures exercise the decision-attempt lease, not
         # identity verification, so they get a recorded result.
         c.execute(
-            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified) "
-            "VALUES (%s, %s, true)",
+            # cip_passed, not just the factors: the decision gate reads the
+            # VERDICT now (db/migrations/0033), because a row that merely
+            # existed used to satisfy it even when CIP had failed.
+            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified, "
+            "cip_passed) VALUES (%s, %s, true, true)",
             (app_id, app_id),
         )
     conn.commit()

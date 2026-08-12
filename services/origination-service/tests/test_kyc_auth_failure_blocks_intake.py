@@ -152,7 +152,8 @@ def test_a_kyc_5xx_still_takes_the_application(intake, monkeypatch):
 def test_the_happy_path_is_unchanged(intake, monkeypatch):
     def _post(base_url, path, payload, headers=None):
         assert headers == {"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN}
-        return {"cip_passed": True}
+        return {"cip_passed": True, "name_verified": True, "dob_verified": True,
+                "address_verified": True, "ssn_verified": True}
     monkeypatch.setattr(applications_router.clients, "post", _post)
 
     result = applications_router.submit_application(applications_router.ApplicationIn(**_BODY))
@@ -161,3 +162,34 @@ def test_the_happy_path_is_unchanged(intake, monkeypatch):
     assert result["kyc"].name_verified is True
     assert result["kyc"].ssn_verified is True
     assert not intake.status_updates()
+
+
+def test_the_intake_response_cannot_report_more_than_kyc_recorded(intake, monkeypatch):
+    """Review round 6 (medium): it could, and this test used to require it to.
+
+    The four booleans were rebuilt from the single `cip_passed` flag --
+    `ssn_verified = passed and not is_entity` -- so a passing individual was
+    reported as having a verified SSN whether or not one was ever checked. The
+    version of the happy-path test above literally asserted that: a stub
+    returning `{"cip_passed": True}` and nothing else was expected to produce
+    `ssn_verified is True`. The test encoded the defect, which is why the defect
+    survived a review that read the tests.
+
+    Here kyc-service reports a pass on name and address with no SSN verified --
+    which is what an entity result looks like, and what a partially verified
+    individual's would look like too. The response must say so.
+    """
+    def _post(base_url, path, payload, headers=None):
+        return {"cip_passed": True, "name_verified": True, "dob_verified": False,
+                "address_verified": True, "ssn_verified": False}
+    monkeypatch.setattr(applications_router.clients, "post", _post)
+
+    result = applications_router.submit_application(applications_router.ApplicationIn(**_BODY))
+
+    assert result["kyc"].name_verified is True
+    assert result["kyc"].address_verified is True
+    assert result["kyc"].ssn_verified is False, (
+        "the intake response reported a verified SSN that kyc-service never "
+        "recorded"
+    )
+    assert result["kyc"].dob_verified is False

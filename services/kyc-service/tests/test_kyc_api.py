@@ -129,11 +129,16 @@ def test_kyc_check_persists_all_four_cip_flags(fake_db):
 
     assert len(fake_db.inserts) == 1
     _, params = fake_db.inserts[0]
-    # (applicant_id, application_id, then the four CIP booleans). application_id
-    # was added by db/migrations/0032 so the decision gate can ask "was THIS
-    # application verified" rather than "has this applicant ever been verified",
-    # which a repeat applicant's old row used to satisfy.
-    assert params == (4, 4, True, True, True, True)
+    # (applicant_id, application_id, the four CIP booleans, then the verdict).
+    # application_id was added by db/migrations/0032 so the decision gate can ask
+    # "was THIS application verified" rather than "has this applicant ever been
+    # verified", which a repeat applicant's old row used to satisfy.
+    #
+    # cip_passed was added by 0033. The factors alone did not say whether CIP
+    # passed -- the rule that turns them into a verdict is applicant-type aware
+    # and lives in this service, so every other reader had to either duplicate it
+    # or, as the decision gate actually did, skip the question entirely.
+    assert params == (4, 4, True, True, True, True, True)
 
 
 def test_kyc_check_reports_a_persistence_failure_instead_of_faking_success(fake_db, monkeypatch):
@@ -201,3 +206,86 @@ def test_a_sparse_individual_application_still_persists_a_result(fake_db):
     assert resp.status_code == 200
     assert resp.json()["cip_passed"] is False, "no address, so CIP must not pass"
     assert resp.json()["check_id"] > 0, "a failed CIP is still a recorded result"
+
+
+# --- review round 6: the pass rule must know who it is identifying ------------
+
+
+def test_an_individual_without_dob_or_ssn_does_not_pass_cip(fake_db):
+    """The hole round 5 opened, closed.
+
+    Making dob/ssn optional was right -- an entity has neither by design and was
+    getting a 422. But `cip_passed` was `name and address` for EVERYONE, and that
+    was only ever survivable because the schema forced individuals to send the
+    other two. The 422 was doing the work the predicate looked like it was doing.
+
+    Remove the 422 and a natural person with a name and an address alone gets a
+    durable `pass`. Everything downstream trusts that one boolean, so they reach
+    decisioning and can be approved as identified.
+    """
+    resp = client.post("/kyc/check", json={
+        "application_id": 4001, "applicant_id": 4001,
+        "name": "Dana Fictional", "address": "1 Elm St",
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cip_passed"] is False, (
+        "an individual with no date of birth and no SSN was recorded as having "
+        "passed CIP"
+    )
+    assert body["status"] == "fail"
+    # And it is still RECORDED. A failed CIP is an outcome, not an error.
+    assert body["check_id"] > 0
+
+
+def test_an_individual_with_all_four_factors_passes(fake_db):
+    """The tightened rule must not refuse a properly identified person."""
+    resp = client.post("/kyc/check", json={
+        "application_id": 4002, "applicant_id": 4002,
+        "name": "Dana Fictional", "address": "1 Elm St",
+        "dob": "1990-01-01", "ssn": "999-00-0000",
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json()["cip_passed"] is True
+
+
+def test_an_entity_still_passes_on_name_and_address(fake_db):
+    """Debt D11 is preserved deliberately, not extended.
+
+    An LLC clears with no natural person verified and no beneficial owner
+    captured. That gap is tracked and is not this PR's to close -- but it is also
+    not a reason to apply the entity rule to people, which is what the old
+    predicate did.
+    """
+    resp = client.post("/kyc/check", json={
+        "application_id": 4003, "applicant_id": 4003,
+        "name": "Northgate Holdings LLC", "address": "1 Corporate Way",
+        "entity_type": "llc",
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cip_passed"] is True
+    assert body["dob_verified"] is False and body["ssn_verified"] is False
+
+
+def test_the_response_reports_the_factors_it_recorded(fake_db):
+    """The four booleans must be the recorded ones, not a reconstruction.
+
+    Origination used to rebuild them from `cip_passed` alone, so the intake
+    response could report `ssn_verified: true` while the persisted row said
+    false. This service knows the answer; it should say it.
+    """
+    resp = client.post("/kyc/check", json={
+        "application_id": 4004, "applicant_id": 4004,
+        "name": "Dana Fictional", "address": "1 Elm St", "dob": "1990-01-01",
+    }, headers=AUTH_HEADERS)
+
+    body = resp.json()
+    assert body["name_verified"] is True
+    assert body["address_verified"] is True
+    assert body["dob_verified"] is True
+    assert body["ssn_verified"] is False, "no SSN was sent, so it cannot be verified"
+    assert body["cip_passed"] is False

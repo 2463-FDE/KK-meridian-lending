@@ -33,6 +33,16 @@ class CipCheckOut(BaseModel):
     application_id: int
     status: str          # "pass" | "fail"
     cip_passed: bool
+    # The four factors as they were actually recorded. Review round 6: only
+    # `cip_passed` used to cross the wire, and origination reconstructed the four
+    # booleans from it (`dob_verified = passed and not is_entity`), so the intake
+    # response could report `ssn_verified: true` while the persisted row said
+    # false. The caller should not have to infer what this service already knows;
+    # inferring is how the API came to disagree with its own audit record.
+    name_verified: bool
+    dob_verified: bool
+    address_verified: bool
+    ssn_verified: bool
     # CIP only. These two are hardcoded false to keep the gap visible (debt D11):
     # the service performs NO sanctions/OFAC screening and captures NO beneficial owner.
     sanctions_screened: bool = False

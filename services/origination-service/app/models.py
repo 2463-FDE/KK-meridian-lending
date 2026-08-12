@@ -60,6 +60,8 @@ class KycCheck(Base):
     dob_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     address_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     ssn_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # The CIP verdict (db/migrations/0033). NULL on rows written before it.
+    cip_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

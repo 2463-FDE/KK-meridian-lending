@@ -97,9 +97,29 @@ def kyc_check(
 
     cip = kyc.run_cip(payload)  # CIP only — no sanctions / UBO / monitoring (debt D11)
 
-    # CIP "passes" if name + address verified. Entity applicants (no dob/ssn) still pass —
-    # an LLC clears with no real person verified, and no UBO captured. (debt D11)
-    cip_passed = bool(cip["name_verified"] and cip["address_verified"])
+    # Review round 6 (high): this was `name_verified and address_verified` for
+    # EVERYONE, which was survivable only because the schema forced every
+    # individual to send a dob and an ssn -- a 422 was doing the work the
+    # predicate looked like it was doing. Making those fields optional (round 5,
+    # so entity applicants could be accepted at all) removed that accident, and
+    # a natural person with a name and an address but neither a date of birth
+    # nor an SSN got a durable `pass` row. Everything downstream trusts this one
+    # boolean, so that person could reach decisioning and approval as verified.
+    #
+    # The rule is applicant-type aware now. An individual is identified by name,
+    # address, date of birth and SSN -- the four factors CIP exists to collect,
+    # and the same four the intake form already requires.
+    is_entity = bool(body.entity_type)
+    if is_entity:
+        # Unchanged, and still debt D11: an LLC clears on name and address with
+        # no natural person verified and no beneficial owner captured. That gap
+        # is deliberate and tracked; it is not a reason to extend it to people.
+        cip_passed = bool(cip["name_verified"] and cip["address_verified"])
+    else:
+        cip_passed = bool(
+            cip["name_verified"] and cip["address_verified"]
+            and cip["dob_verified"] and cip["ssn_verified"]
+        )
     status = "pass" if cip_passed else "fail"
 
     # persist the CIP result (still no sanctions/ubo columns to persist — debt preserved).
@@ -119,11 +139,15 @@ def kyc_check(
     try:
         rows = db.query(
             "INSERT INTO kyc_checks (applicant_id, application_id, name_verified, "
-            "dob_verified, address_verified, ssn_verified) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            "dob_verified, address_verified, ssn_verified, cip_passed) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (body.applicant_id, body.application_id,
              cip["name_verified"], cip["dob_verified"],
-             cip["address_verified"], cip["ssn_verified"]),
+             cip["address_verified"], cip["ssn_verified"],
+             # The verdict is persisted with the factors it came from, so a
+             # reader never has to reapply an applicant-type-aware rule that
+             # lives in this service. (db/migrations/0033)
+             cip_passed),
         )
     except Exception as e:  # noqa
         log.error(
@@ -151,6 +175,11 @@ def kyc_check(
         application_id=body.application_id,
         status=status,
         cip_passed=cip_passed,
+        # The recorded factors, not a reconstruction of them.
+        name_verified=cip["name_verified"],
+        dob_verified=cip["dob_verified"],
+        address_verified=cip["address_verified"],
+        ssn_verified=cip["ssn_verified"],
         sanctions_screened=False,  # no OFAC/sanctions screening (debt D11)
         ubo_captured=False,        # no beneficial-owner capture (debt D11)
         notes="CIP only; no sanctions/OFAC, no UBO, no ongoing monitoring, no SAR path.",

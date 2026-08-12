@@ -68,6 +68,7 @@ def real_db(monkeypatch):
                 application_id INTEGER REFERENCES applications(id),
                 name_verified BOOLEAN, dob_verified BOOLEAN,
                 address_verified BOOLEAN, ssn_verified BOOLEAN,
+                cip_passed BOOLEAN,
                 created_at TIMESTAMPTZ DEFAULT now()
             );
             CREATE TABLE decisions (
@@ -146,8 +147,11 @@ def _seed(conn, app_id, raw=_RAW, expires="now() + interval '1 hour'", consumed=
         # about the access token, not identity verification, so each seeds one --
         # after the applications row exists, since application_id is a real FK.
         c.execute(
-            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified) "
-            "VALUES (%s, %s, true)",
+            # cip_passed, not just the factors: the decision gate reads the
+            # VERDICT now (db/migrations/0033), because a row that merely
+            # existed used to satisfy it even when CIP had failed.
+            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified, "
+            "cip_passed) VALUES (%s, %s, true, true)",
             (app_id, app_id),
         )
     conn.commit()

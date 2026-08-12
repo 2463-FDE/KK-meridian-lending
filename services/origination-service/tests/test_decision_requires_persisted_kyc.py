@@ -116,7 +116,7 @@ def test_a_recorded_but_FAILED_cip_is_still_decidable(monkeypatch):
     denied-workflow E2E depends on exactly this.
     """
     monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
-    db = _Db(kyc_rows=[{"1": 1}])
+    db = _Db(kyc_rows=[{"cip_passed": True}])
     monkeypatch.setattr(applications_router, "db", db)
 
     # Past the gate, decisioning proceeds -- proven by it reaching the next step
@@ -155,7 +155,7 @@ def test_the_gate_keys_on_the_application_not_the_applicant(monkeypatch):
     produced it stays visible.
     """
     monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, tok: True)
-    db = _Db(kyc_rows=[{"1": 1}])
+    db = _Db(kyc_rows=[{"cip_passed": True}])
     monkeypatch.setattr(applications_router, "db", db)
     monkeypatch.setattr(
         applications_router.decision_state, "start_decision_attempt",
@@ -331,4 +331,78 @@ def test_the_staff_detail_read_is_scoped_to_the_application(monkeypatch):
     )
     assert "models.KycCheck.applicant_id" not in src, (
         "an applicant-scoped KYC filter remains in the staff detail read"
+    )
+
+
+# --- review round 6: a recorded CIP failure must have a consequence ----------
+
+
+def _gate_only(monkeypatch, kyc_rows):
+    """Drive run_decision far enough to hit the gate, and no further."""
+    db = _Db(kyc_rows=kyc_rows)
+    monkeypatch.setattr(applications_router, "db", db)
+    monkeypatch.setattr(applications_router.decision_state, "verify_access_token", lambda r, t: True)
+
+    def _must_not_run(*a, **kw):                                   # pragma: no cover
+        raise AssertionError("decisioning began for an application whose CIP did not pass")
+
+    monkeypatch.setattr(applications_router.decision_state, "start_decision_attempt", _must_not_run)
+    with pytest.raises(HTTPException) as excinfo:
+        applications_router.run_decision(
+            8484, applications_router.DecisionIn(),
+            x_user_role=None, x_internal_token=None,
+        )
+    return excinfo.value
+
+
+def test_a_recorded_cip_failure_blocks_decisioning(monkeypatch):
+    """The case that made the gate ornamental.
+
+    The gate accepted ANY kyc_checks row, on the stated reasoning that a failed
+    CIP is "a real, recorded outcome the deny path is entitled to act on". No
+    deny path acted on it -- nothing outside kyc-service read the result at all.
+    So a recorded failure had precisely the same effect as a pass: the
+    application was decided, and could be approved, for someone this system had
+    recorded as unidentified.
+
+    Paired with the round-6 kyc-service fix, this is the whole reachable attack:
+    an individual submits with a name and an address and no DOB or SSN, CIP
+    records a failure, and underwriting proceeds regardless.
+    """
+    exc = _gate_only(monkeypatch, [{"cip_passed": False}])
+
+    assert exc.status_code == 409
+    assert "identity verification" in str(exc.detail).lower()
+
+
+def test_a_row_with_no_recorded_verdict_is_not_a_pass(monkeypatch):
+    """NULL is a row that does not say, which is not evidence of anything.
+
+    Rows written before db/migrations/0033 carry no verdict. Reading absence as
+    approval is how the applicant-scoped gate failed before: the safe-looking
+    default was the permissive one.
+    """
+    exc = _gate_only(monkeypatch, [{"cip_passed": None}])
+
+    assert exc.status_code == 409
+
+
+def test_a_later_passing_check_settles_an_earlier_failure(monkeypatch):
+    """A re-run that succeeds must not be outvoted by the failure before it.
+
+    Otherwise a corrected application -- the applicant supplies the SSN they
+    first omitted -- is blocked permanently by its own history, and the only way
+    forward is a new application, which is worse for the applicant and worse for
+    the audit trail.
+    """
+    db = _Db(kyc_rows=[{"cip_passed": True}])
+    monkeypatch.setattr(applications_router, "db", db)
+
+    applications_router._require_persisted_kyc(8484)               # must not raise
+
+    kyc_query = next(q for q in db.queries if "FROM kyc_checks" in q)
+    assert "cip_passed" in kyc_query, "the gate no longer reads the verdict"
+    assert "ORDER BY cip_passed DESC" in kyc_query, (
+        "the gate does not prefer a passing check, so an earlier failure would "
+        "block an application its own re-run has since cleared"
     )

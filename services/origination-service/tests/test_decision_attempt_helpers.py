@@ -24,6 +24,11 @@ _APPLICATION_ROW = {
     "access_token_hash": decision_state.hash_access_token(_ACCESS_TOKEN),
     "access_token_consumed_at": None,
     "access_token_live": True,
+    # The `_fake_query` stubs here are catch-alls returning this row for every
+    # query but the decisions lookup, the KYC gate's read included -- so it has to
+    # state what it claims. These tests are about attempt handling, not the gate;
+    # the gate's own tests are in test_decision_requires_persisted_kyc.py.
+    "cip_passed": True,
 }
 
 

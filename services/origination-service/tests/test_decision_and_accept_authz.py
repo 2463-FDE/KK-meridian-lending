@@ -59,6 +59,16 @@ _APPLICATION_ROW = {
     "access_token_hash": decision_state.hash_access_token(_ACCESS_TOKEN),
     "access_token_consumed_at": None,
     "access_token_live": True,
+    # The `_fake_query` stubs below are catch-alls: they answer the decisions
+    # lookup specially and return THIS row for everything else, including the
+    # KYC gate's read. That is why it carries a verdict.
+    #
+    # It is also why these tests never really exercised the gate before: when the
+    # gate was `SELECT 1 ... if rows`, this row satisfied it by being truthy,
+    # whatever it contained. Now the gate reads `cip_passed`, so the stub has to
+    # state what it is claiming -- an application whose CIP passed. The tests that
+    # exercise the gate itself live in test_decision_requires_persisted_kyc.py.
+    "cip_passed": True,
 }
 
 
