@@ -54,6 +54,78 @@ def test_the_cutoff_list_names_no_input_the_system_does_not_have(_=None):
     )
 
 
+#: The retired numeric bands, as they were actually written. A cutoff removed
+#: from the policy and left in a docstring is still published -- FastAPI serves
+#: docstrings on /docs, so it describes the criterion to anyone reading the API.
+RETIRED_CUTOFFS = ("43-50%", "43–50%", "dti <= 43%", "dti ≤ 43%",
+                   "dti > 50%", "dti 43")
+
+#: Marks a mention as a record of the retirement rather than a claim. A file is
+#: allowed -- encouraged -- to say the rule USED to exist; it may not state it as
+#: current.
+RETIREMENT_MARKERS = ("retired", "used to publish", "used to say", "adr/0007",
+                      "no longer", "was removed")
+
+
+def _api_facing_files():
+    """Docstrings and schema comments a caller can read.
+
+    Routers because FastAPI publishes their docstrings on /docs; schemas because
+    they are the request/response contract. Not every file in the repo -- the
+    claim being guarded is one made to an API consumer.
+    """
+    services = REPO / "services"
+    files = list(services.glob("*/app/routers/*.py"))
+    files += list(services.glob("*/app/schemas.py"))
+    return sorted(f for f in files if f.name != "__init__.py")
+
+
+def _offending_lines(path):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if not any(c in low for c in RETIRED_CUTOFFS):
+            continue
+        # Context window: a retirement note may put the marker on an adjacent
+        # line, which is how the correction was actually written.
+        window = " ".join(lines[max(0, i - 3):i + 4]).lower()
+        if any(m in window for m in RETIREMENT_MARKERS):
+            continue
+        out.append(f"{path.name}:{i + 1}: {line.strip()}")
+    return out
+
+
+@pytest.mark.parametrize("path", _api_facing_files(), ids=lambda p: f"{p.parent.parent.parent.name}/{p.name}")
+def test_no_api_facing_doc_publishes_a_retired_cutoff(path):
+    """The gap the first version of this test left open.
+
+    It scanned the policy document only. The same retired band was still in
+    `review_application`'s FastAPI docstring and in `ReviewIn`'s schema comment --
+    so the policy said one thing and /docs said another, and a staff member
+    resolving a referral could read that it was raised on a criterion nothing ever
+    evaluated.
+    """
+    offending = _offending_lines(path)
+    assert not offending, (
+        "API-facing documentation publishes a retired DTI cutoff: "
+        + "; ".join(offending)
+        + ". The policy retired it (adr/0007 Resolution) because nothing computes "
+          "a DTI. Remove it, or mark it explicitly as retired."
+    )
+
+
+def test_the_api_scan_found_files_to_scan():
+    """Guards the guard: an empty file list passes the parametrized test by
+    having nothing to run."""
+    files = _api_facing_files()
+    assert len(files) >= 5, f"only {len(files)} API-facing file(s) found: {files}"
+    assert any("applications.py" in f.name for f in files), (
+        "the origination router is not being scanned, and it is where the retired "
+        "cutoff actually was"
+    )
+
+
 @pytest.mark.parametrize("threshold", ["660", "600"])
 def test_every_score_cutoff_in_the_policy_exists_in_the_code(threshold):
     """The other direction: the numbers the policy publishes must be real."""

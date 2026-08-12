@@ -692,9 +692,16 @@ def review_application(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
     """Staff tool to resolve a "refer" decision (policies/underwriting_
-    guidelines.md's manual-review band, score 600-659 or DTI 43-50%) into a
-    real approve/deny. Staff-only, no borrower path at all -- this isn't a
-    decision the applicant can make for themselves.
+    guidelines.md's manual-review band, model score 600-659) into a real
+    approve/deny. Staff-only, no borrower path at all -- this isn't a decision
+    the applicant can make for themselves.
+
+    This docstring used to publish "score 600-659 or DTI 43-50%". The DTI half
+    was retired from the policy (adr/0007 Resolution) because nothing in the
+    system computes a debt-to-income ratio -- there is no debt figure collected.
+    It is API-facing text: FastAPI serves it on /docs, so it described a criterion
+    to anyone reading the API, including a staff member deciding whether a referral
+    was raised for a reason that was never evaluated.
 
     Review fix: scoped to resolving an actual "refer" -- staff cannot use
     this to override a clean automated approve/deny (an application that
