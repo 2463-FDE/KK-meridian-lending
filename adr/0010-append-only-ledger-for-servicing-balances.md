@@ -68,9 +68,19 @@ because there is one number and it has no components.
 **Record money movements as immutable rows. Derive the balance from them.**
 
 ```sql
--- Order matters: pending_movements is created FIRST, because ledger_entries
--- carries a foreign key to it, and every trigger below is defined only after
--- the columns it reads exist. See the migration plan for the step ordering.
+-- The two tables reference EACH OTHER: ledger_entries.pending_movement_id points
+-- at a proposal, and pending_movements.ledger_entry_id points back at the entry
+-- an approval produced. That is a genuine cycle, so neither can be created with
+-- both foreign keys already in place.
+--
+-- An earlier draft claimed "pending_movements is created first" and then showed
+-- ledger_entries first anyway -- a comment contradicting the SQL beneath it,
+-- which is worse than either order, because a reader trusts the comment and
+-- copies the block. Resolved the way a cycle is normally resolved: create both
+-- tables, then add the second foreign key with an ALTER.
+--
+-- Full runnable DDL is in Appendix A. The excerpts below are the shape of the
+-- decision, not the migration file.
 CREATE TABLE ledger_entries (
     id           BIGSERIAL   PRIMARY KEY,
     loan_id      INTEGER     NOT NULL REFERENCES loans(id),
@@ -101,13 +111,15 @@ CREATE TABLE ledger_entries (
     -- to tell it whether it already ran.
     payment_id   INTEGER     REFERENCES payments(id),
 
-    -- Maker-checker linkage, declared here rather than bolted on by a later
-    -- ALTER. An earlier draft added these below the projection trigger that
-    -- reads them, so the migration could not have run in the order written.
-    -- `pending_movement_id` is UNIQUE, so one approved proposal can produce
-    -- exactly one ledger entry and an entry can never be attributed to a
-    -- proposal it does not match.
-    pending_movement_id BIGINT UNIQUE REFERENCES pending_movements(id),
+    -- Maker-checker linkage. The COLUMNS are declared here, because the
+    -- projection trigger below reads them and a trigger cannot reference a
+    -- column added later. The FOREIGN KEY is added after pending_movements
+    -- exists (see the ALTER below) -- that is the cycle, split at the only
+    -- point where it can be split.
+    --
+    -- UNIQUE, so one approved proposal produces exactly one ledger entry and an
+    -- entry can never be attributed to a proposal it does not match.
+    pending_movement_id BIGINT UNIQUE,
     approved_required   BOOLEAN NOT NULL DEFAULT false,
     approved_at         TIMESTAMPTZ,
 
@@ -389,11 +401,19 @@ ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK
 );
 ```
 
+The cycle is closed here, once both tables exist:
+
+```sql
+ALTER TABLE ledger_entries
+    ADD CONSTRAINT ledger_entries_pending_movement_fk
+    FOREIGN KEY (pending_movement_id) REFERENCES pending_movements(id);
+```
+
 Field-for-field agreement between the proposal and the entry it produces is
-enforced in the same transaction that writes both, and asserted by a migration
-test: an approval that inserted a different loan, component, amount or type than
-the one reviewed would be a maker-checker bypass wearing the shape of an
-approval.
+enforced by the trigger above **and** inside `resolve_pending_movement()`, and
+asserted by a migration test: an approval that inserted a different loan,
+component, amount or type than the one reviewed would be a maker-checker bypass
+wearing the shape of an approval.
 
 ```sql
 -- The single enforcement point. Approval is not a sequence of statements an
@@ -468,6 +488,68 @@ BEGIN
     RETURN new_entry;
 END $$ LANGUAGE plpgsql;
 ```
+
+### What actually makes the function the only path
+
+The prose claimed `adjustment` and `fee_waived` entries were "unreachable except
+through" `resolve_pending_movement()`. The constraints shown do not achieve that:
+they require a `pending_movement_id`, and nothing stopped a direct `INSERT` that
+supplied a valid one. Naming the mechanism rather than asserting the outcome:
+
+**Privileges are not the mechanism here.** The obvious answer -- `REVOKE INSERT ON
+ledger_entries` from the application role and `GRANT EXECUTE` on the function --
+does not hold in this system, for the same reason `decision_events` is protected
+by a trigger rather than a `GRANT` (ADR 0002, ADR 0006): every service connects as
+the schema-owning role, so a revoke from the owner does not stick.
+
+**A validation trigger is.** It compares the entry being inserted against the
+proposal it names, and rejects any mismatch, so a direct `INSERT` can only succeed
+by reproducing exactly what an approver already authorised:
+
+```sql
+CREATE FUNCTION ledger_entry_matches_its_proposal() RETURNS trigger AS $$
+DECLARE
+    m pending_movements%ROWTYPE;
+BEGIN
+    IF NEW.entry_type NOT IN ('adjustment','fee_waived') THEN
+        RETURN NEW;                       -- machine-originated: no proposal exists
+    END IF;
+    IF NEW.pending_movement_id IS NULL THEN
+        RAISE EXCEPTION '% entries require an approved proposal', NEW.entry_type;
+    END IF;
+
+    SELECT * INTO m FROM pending_movements WHERE id = NEW.pending_movement_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no such pending movement %', NEW.pending_movement_id;
+    END IF;
+    IF m.resolution IS DISTINCT FROM 'approved' THEN
+        RAISE EXCEPTION 'pending movement % is not approved', m.id;
+    END IF;
+    IF m.resolved_by IS NULL OR m.resolved_by = m.requested_by THEN
+        RAISE EXCEPTION 'pending movement % has no distinct approver', m.id;
+    END IF;
+
+    -- Field-for-field. An approval that inserted different terms than the ones
+    -- reviewed would be a bypass wearing the shape of an approval.
+    IF (NEW.loan_id, NEW.component, NEW.amount, NEW.entry_type)
+       IS DISTINCT FROM (m.loan_id, m.component, m.amount, m.entry_type) THEN
+        RAISE EXCEPTION 'ledger entry does not match proposal %', m.id;
+    END IF;
+
+    NEW.actor_id := m.resolved_by;        -- the actor is the APPROVER, always
+    NEW.approved_at := COALESCE(NEW.approved_at, m.resolved_at);
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ledger_entries_match_proposal
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_entry_matches_its_proposal();
+```
+
+So the honest claim is narrower than the original one and it is enforced: a direct
+`INSERT` is *possible*, and it cannot produce anything an approver did not already
+authorise -- including the actor, which the trigger overwrites with the approver
+rather than trusting the caller.
 
 A CSR raising an adjustment writes a `pending_movements` row. The balance does
 not move, because nothing was written to the ledger. A **different** staff
@@ -606,3 +688,28 @@ column, both recorded in Consequences.
 allocation order for D14's waterfall is deliberately out of scope, and the
 retention policy for `ledger_entries` is a separate decision noted in
 Consequences.
+
+## Appendix A — where the runnable SQL lives
+
+The SQL in this document is the **shape of the decision**, not the migration. It
+is deliberately excerpted: ordering, one enforcement function, and the
+constraints that carry an invariant each.
+
+The full runnable DDL belongs in the migration files created by steps 2 and 4 of
+the plan above, not here. An ADR that grows into a migration stops being read as a
+decision -- reviewers noted this one was heading that way at 600+ lines -- and a
+schema that lives in two places drifts, with the copy nobody applies quietly
+becoming wrong.
+
+What this document is responsible for, and what a later reader should hold it to:
+
+- **the decision** — an append-only ledger with a trigger-maintained projection,
+  and why the alternatives were rejected;
+- **the invariants** — signed deltas keyed to the effect on what the borrower
+  owes; `balances.balance` is principal; one terminal transition per proposal;
+  no self-approval; the ledger actor is the approver; an entry matches its
+  proposal field-for-field;
+- **the sequencing** — which step can land before which, and what gate each one
+  has to pass;
+- **the costs** — two derived columns, unbounded growth, a projection that can
+  drift, and the fact that D14 is enabled rather than closed.
