@@ -297,13 +297,23 @@ BEGIN
     prior_suppression := current_setting('meridian.suppress_projection', true);
     PERFORM set_config('meridian.suppress_projection', 'on', true);
 
-    IF NEW.balance IS DISTINCT FROM OLD.balance THEN
+    IF TG_OP = 'INSERT' AND NEW.balance <> 0 THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'principal', NEW.balance,
+                'legacy_direct_write',
+                'captured from a balances insert during ledger cutover');
+    ELSIF TG_OP = 'UPDATE' AND NEW.balance IS DISTINCT FROM OLD.balance THEN
         INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
         VALUES (NEW.loan_id, 'principal', NEW.balance - OLD.balance,
                 'legacy_direct_write',
                 'captured from a direct balances update during ledger cutover');
     END IF;
-    IF NEW.past_due IS DISTINCT FROM OLD.past_due THEN
+    IF TG_OP = 'INSERT' AND COALESCE(NEW.past_due, 0) <> 0 THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'fees', NEW.past_due,
+                'legacy_direct_write',
+                'captured from a balances insert during ledger cutover');
+    ELSIF TG_OP = 'UPDATE' AND NEW.past_due IS DISTINCT FROM OLD.past_due THEN
         INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
         VALUES (NEW.loan_id, 'fees', NEW.past_due - OLD.past_due,
                 'legacy_direct_write',
@@ -317,7 +327,7 @@ END $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS balances_capture_legacy_delta ON balances;
 CREATE TRIGGER balances_capture_legacy_delta
-    AFTER UPDATE ON balances
+    AFTER INSERT OR UPDATE ON balances
     FOR EACH ROW EXECUTE FUNCTION capture_legacy_balance_delta();
 
 -- Blocks every current UPDATE/INSERT/DELETE writer before the snapshot. The
@@ -354,7 +364,6 @@ BEGIN
      WHERE b.balance <> 0
        AND NOT EXISTS (SELECT 1 FROM ledger_entries le
                         WHERE le.loan_id = b.loan_id
-                          AND le.entry_type = 'opening_balance'
                           AND le.component = 'principal');
     GET DIAGNOSTICS seeded = ROW_COUNT;
 
@@ -365,12 +374,11 @@ BEGIN
      WHERE COALESCE(b.past_due, 0) <> 0
        AND NOT EXISTS (SELECT 1 FROM ledger_entries le
                         WHERE le.loan_id = b.loan_id
-                          AND le.entry_type = 'opening_balance'
                           AND le.component = 'fees');
 
     SELECT count(*) INTO skipped  FROM balances b
      WHERE EXISTS (SELECT 1 FROM ledger_entries le
-                    WHERE le.loan_id = b.loan_id AND le.entry_type = 'opening_balance');
+                    WHERE le.loan_id = b.loan_id AND le.component = 'principal');
     SELECT count(*) INTO zero_bal FROM balances WHERE balance = 0;
 
     PERFORM set_config('meridian.suppress_projection', 'off', true);

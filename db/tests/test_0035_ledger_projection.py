@@ -137,11 +137,12 @@ def test_past_due_is_projected_too(db):
 
 
 def test_the_backfill_seeded_something(db):
-    """Guards the guard: a migration that seeded nothing satisfies both checks
-    above by comparing zero against zero."""
+    """Guards the guard. On a migrated database these are opening_balance rows;
+    on a fresh schema the INSERT bridge sees seed boarding first and records the
+    same initial state as legacy_direct_write rows, so either honest path counts."""
     n = _exec(db, "SELECT count(*) AS n FROM ledger_entries "
-                  "WHERE entry_type = 'opening_balance'")[0]["n"]
-    assert n > 0, "the back-fill produced no opening entries -- nothing was verified"
+                  "WHERE entry_type IN ('opening_balance','legacy_direct_write')")[0]["n"]
+    assert n > 0, "ledger initialization produced no entries -- nothing was verified"
 
 
 def test_running_the_migration_again_does_not_double_anything(db):
@@ -371,6 +372,29 @@ def test_direct_writes_still_work_and_gain_an_immutable_delta(db):
     assert after == before + 1
 
 
+def test_a_loan_boarded_after_migration_gets_an_opening_delta(db):
+    """Origination's live boarding path INSERTs loans then balances. The
+    transitional bridge must cover that new row, not only updates to rows that
+    happened to exist when migration 0035 took its snapshot."""
+    loan = _exec(db, "INSERT INTO loans(app_id,principal,apr,term_months,status) "
+                     "VALUES(NULL,725,10,12,'current') RETURNING id")[0]["id"]
+    _exec(db, "INSERT INTO balances(loan_id,balance,past_due) VALUES(%s,725,15)", (loan,))
+    db.commit()
+    rows = _exec(db, "SELECT component, amount, entry_type FROM ledger_entries "
+                     "WHERE loan_id=%s ORDER BY component", (loan,))
+    assert {(r["component"], r["amount"], r["entry_type"]) for r in rows} == {
+        ("principal", 725, "legacy_direct_write"),
+        ("fees", 15, "legacy_direct_write"),
+    }
+    parity = _exec(db, "SELECT b.balance, b.past_due, "
+                       "SUM(le.amount) FILTER(WHERE le.component='principal') AS principal, "
+                       "SUM(le.amount) FILTER(WHERE le.component='fees') AS fees "
+                       "FROM balances b JOIN ledger_entries le ON le.loan_id=b.loan_id "
+                       "WHERE b.loan_id=%s GROUP BY b.balance,b.past_due", (loan,))[0]
+    assert parity["balance"] == parity["principal"]
+    assert parity["past_due"] == parity["fees"]
+
+
 def _migration_without_transaction_wrappers():
     sql = MIGRATION.read_text(encoding="utf-8").replace("BEGIN;", "", 1)
     return "".join(sql.rsplit("COMMIT;", 1))
@@ -442,7 +466,7 @@ def test_a_payment_racing_the_backfill_is_captured_once_and_converges():
             assert cur.fetchone()["balance"] == opening - 10
             cur.execute("SELECT amount FROM ledger_entries WHERE loan_id=%s "
                         "AND entry_type='legacy_direct_write'", (loan,))
-            assert [r["amount"] for r in cur.fetchall()] == [-10]
+            assert [r["amount"] for r in cur.fetchall()] == [opening, -10]
             cur.execute("SELECT COALESCE(SUM(amount),0) AS total FROM ledger_entries "
                         "WHERE loan_id=%s AND component='principal'", (loan,))
             assert cur.fetchone()["total"] == opening - 10
@@ -452,7 +476,7 @@ def test_a_payment_racing_the_backfill_is_captured_once_and_converges():
             cur.execute(_migration_without_transaction_wrappers())
             cur.execute("SELECT count(*) FROM ledger_entries WHERE loan_id=%s "
                         "AND entry_type='legacy_direct_write'", (loan,))
-            assert cur.fetchone()[0] == 1, "migration replay duplicated the captured delta"
+            assert cur.fetchone()[0] == 2, "migration replay duplicated an initial or captured delta"
         check.commit()
     finally:
         for conn in (writer, check, migrator):
@@ -472,11 +496,6 @@ def test_negative_legacy_state_can_be_opened_without_inventing_history(db):
     loan = _exec(db, "INSERT INTO loans(app_id,principal,apr,term_months,status) "
                      "VALUES(NULL,100,10,12,'current') RETURNING id")[0]["id"]
     _exec(db, "INSERT INTO balances(loan_id,balance,past_due) VALUES(%s,-25,-3)", (loan,))
-    _exec(db, "SELECT set_config('meridian.suppress_projection','on',true)")
-    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,reason) "
-              "VALUES(%s,'principal',-25,'opening_balance','legacy state'),"
-              "(%s,'fees',-3,'opening_balance','legacy state')", (loan, loan))
-    _exec(db, "SELECT set_config('meridian.suppress_projection','off',true)")
     db.commit()
     assert _exec(db, "SELECT COALESCE(SUM(amount),0) AS n FROM ledger_entries "
                      "WHERE loan_id=%s", (loan,))[0]["n"] == -28

@@ -25,7 +25,6 @@ BEGIN
      WHERE b.balance <> 0
        AND NOT EXISTS (SELECT 1 FROM ledger_entries le
                         WHERE le.loan_id = b.loan_id
-                          AND le.entry_type = 'opening_balance'
                           AND le.component = 'principal');
     GET DIAGNOSTICS seeded = ROW_COUNT;
 
@@ -36,12 +35,11 @@ BEGIN
      WHERE COALESCE(b.past_due, 0) <> 0
        AND NOT EXISTS (SELECT 1 FROM ledger_entries le
                         WHERE le.loan_id = b.loan_id
-                          AND le.entry_type = 'opening_balance'
                           AND le.component = 'fees');
 
     SELECT count(*) INTO skipped  FROM balances b
      WHERE EXISTS (SELECT 1 FROM ledger_entries le
-                    WHERE le.loan_id = b.loan_id AND le.entry_type = 'opening_balance');
+                    WHERE le.loan_id = b.loan_id AND le.component = 'principal');
     SELECT count(*) INTO zero_bal FROM balances WHERE balance = 0;
 
     PERFORM set_config('meridian.suppress_projection', 'off', true);
