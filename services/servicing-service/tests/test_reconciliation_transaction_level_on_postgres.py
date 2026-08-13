@@ -306,3 +306,45 @@ def test_the_run_records_what_it_excluded(db, settlement):
     reconcile_job.main([])
 
     assert _runs(db)[-1]["out_of_scope_captures"] == 1
+
+
+# --- the seam between the two services, bound mechanically -------------------
+
+def test_the_scope_this_filters_on_is_the_scope_payment_service_writes():
+    """The reported defect lived exactly here, in the gap between two services.
+
+    This module's ledger side is `WHERE capture_source = 'processor'`.
+    payment-service's capture UPDATE wrote the join key and the timestamp and
+    never set that column, so every real capture kept the schema default and was
+    filtered out -- and every test on both sides still passed, because each one
+    wrote the row it then read.
+
+    Neither service can import the other (both expose a package named `app`), so
+    the agreement is asserted against the source. If either side changes the
+    value, this fails on the side that did not.
+    """
+    reconciliation_src = (REPO / "services" / "servicing-service" / "app"
+                          / "reconciliation.py").read_text(encoding="utf-8")
+    payments_src = (REPO / "services" / "payment-service" / "app"
+                    / "payments.py").read_text(encoding="utf-8")
+
+    assert "capture_source = 'processor'" in reconciliation_src, (
+        "this module no longer scopes its ledger side to processor-backed "
+        "captures, so servicing's legacy POST /payments rows are compared "
+        "against a settlement file that cannot contain them"
+    )
+
+    capture_updates = [
+        stmt for stmt in payments_src.split("db.query(")
+        if "auth_status = 'captured'" in stmt
+    ]
+    assert len(capture_updates) == 2, (
+        f"expected payment-service's two capture paths, found "
+        f"{len(capture_updates)}"
+    )
+    for stmt in capture_updates:
+        assert "capture_source = 'processor'" in stmt, (
+            "a payment-service capture UPDATE does not set capture_source, so "
+            "the row it writes is outside the scope this module compares -- the "
+            "run would report ok against a ledger side the filter emptied"
+        )

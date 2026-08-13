@@ -40,6 +40,7 @@ class _FakeDb:
         self.rows = {}
         self.captured_with = None
         self.reference_with = None
+        self.capture_sql = None
 
     def query(self, sql, params=None):
         stmt = " ".join(sql.split())
@@ -54,6 +55,7 @@ class _FakeDb:
             self.captured_with = captured_at
             self.reference_with = processor_ref
             self.rows[pid]["auth_status"] = "captured"
+            self.capture_sql = stmt
         return []
 
 
@@ -265,3 +267,31 @@ def test_every_capture_update_writes_both_the_time_and_the_reference():
             "capture has no join key to the settlement file and reconciliation "
             "reports it as unreferenced"
         )
+        assert "capture_source = 'processor'" in stmt, (
+            "a capture UPDATE sets auth_status without capture_source, so the "
+            "row keeps db/migrations/0042's default of 'unknown' and "
+            "reconciliation drops it from the comparison entirely -- the run "
+            "reports ok while comparing a settlement file against a ledger side "
+            "the filter emptied"
+        )
+
+
+def test_a_capture_is_marked_in_scope_for_reconciliation(fake, monkeypatch):
+    """The reported defect, at the write itself.
+
+    Servicing's ledger side is `WHERE capture_source = 'processor'`. A capture
+    that does not set it keeps 0042's default of 'unknown' and is excluded, so
+    the control compares the settlement file against nothing and reports ok --
+    the vacuous success this whole PR exists to prevent, arriving through the one
+    column that decides what gets compared.
+    """
+    monkeypatch.setattr(
+        processor, "authorize_charge",
+        lambda *a, **k: processor.Authorization("auth-1", PROCESSOR_TIME, PROCESSOR_REF),
+    )
+
+    _charge()
+
+    assert "capture_source = 'processor'" in fake.capture_sql, (
+        "the capture UPDATE did not mark the row as processor-backed"
+    )

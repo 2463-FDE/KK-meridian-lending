@@ -77,6 +77,12 @@ defects on one loan cancel out and report a clean run. Without the processor's
 timestamp on the first-attempt path, a capture that straddled midnight was
 scoped to the wrong reconciliation day and manufactured the false breaks that
 teach an operator to stop reading them.
+
+Both capture UPDATEs also set `capture_source = 'processor'`
+(db/migrations/0042). That column is what reconciliation's ledger side filters
+on, so a capture that does not set it is silently outside the comparison -- and
+`payments` has a second writer that legitimately is (servicing's legacy route),
+which is why the column exists and why the default is not 'processor'.
 """
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
@@ -298,7 +304,16 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # key the processor gave us for it. NULL when the processor
                 # reports none -- reconciliation then reports the row as an
                 # unreferenced_capture break rather than skipping it.
-                "processor_ref = %s WHERE id = %s",
+                "processor_ref = %s, "
+                # And the row is IN SCOPE for reconciliation, because a processor
+                # authorized it (db/migrations/0042). Review fix: this was
+                # missing, so every newly captured payment kept 0042's default of
+                # 'unknown' and servicing's `capture_source = 'processor'` filter
+                # dropped it from the comparison. The control would have reported
+                # ok while comparing a settlement file against a nearly empty
+                # ledger side -- the vacuous success it exists to prevent,
+                # arriving through the one column that decides what is compared.
+                "capture_source = 'processor' WHERE id = %s",
             (auth.authorization_id, auth.captured_at, auth.processor_ref, payment_id),
         )
         applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
@@ -407,7 +422,11 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # (db/migrations/0041). A recovered capture inherits the
                 # reference the processor already assigned it, so the row still
                 # matches the settlement line written on the original day.
-                "processor_ref = %s WHERE id = %s",
+                "processor_ref = %s, "
+                # In scope for reconciliation either way: both branches reaching
+                # this statement have a processor authorization behind them, one
+                # recovered and one fresh (db/migrations/0042).
+                "capture_source = 'processor' WHERE id = %s",
                 (auth_id, captured_at, processor_ref, payment_id),
             )
 
