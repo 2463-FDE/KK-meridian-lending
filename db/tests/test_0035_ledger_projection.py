@@ -473,6 +473,31 @@ def test_legacy_applied_payment_amount_is_immutable_during_cutover(db):
     assert _exec(db, "SELECT amount FROM payments WHERE id=%s", (pay,))[0]["amount"] == 10
 
 
+def test_production_shaped_apply_records_payment_provenance_and_projects_once(db):
+    loan = _a_loan(db)
+    pay = _a_payment(db, loan, "10.00")
+    before = _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"]
+    _exec(db, "INSERT INTO payment_applications(payment_id,loan_id,amount) "
+              "VALUES(%s,%s,10)", (pay, loan))
+    _exec(db, "INSERT INTO ledger_entries "
+              "(loan_id,component,amount,entry_type,payment_id) "
+              "VALUES(%s,'principal',-10,'payment',%s)", (loan, pay))
+    db.commit()
+
+    after = _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"]
+    rows = _exec(db, "SELECT amount,payment_id,entry_type FROM ledger_entries "
+                     "WHERE payment_id=%s", (pay,))
+    assert after == before - 10
+    assert rows == [{"amount": -10, "payment_id": pay, "entry_type": "payment"}]
+
+
+def test_servicing_writers_do_not_use_absolute_balance_overwrites():
+    servicing = REPO / "services" / "servicing-service" / "app"
+    source = "\n".join(path.read_text(encoding="utf-8") for path in servicing.glob("*.py"))
+    assert "SET balance = %s" not in source
+    assert "SET past_due = %s" not in source
+
+
 def test_nullable_legacy_past_due_transitions_are_captured_as_zero_based_deltas(db):
     loan = _a_loan(db)
     _exec(db, "UPDATE balances SET past_due=NULL WHERE loan_id=%s", (loan,))

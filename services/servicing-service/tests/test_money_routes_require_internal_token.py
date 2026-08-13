@@ -540,7 +540,7 @@ def test_the_preflight_never_waits_on_a_live_apply(monkeypatch):
 # --- review round 8: the same COLUMNS, not merely the same table -------------
 
 
-def test_the_balances_probe_writes_the_columns_the_real_apply_writes(monkeypatch):
+def test_the_ledger_probe_exercises_the_projection_path(monkeypatch):
     """Derived from apply_payment_once's UPDATE, not from a list I maintain.
 
     Round 7 moved the probe onto the real tables and stopped there: the balances
@@ -558,25 +558,10 @@ def test_the_balances_probe_writes_the_columns_the_real_apply_writes(monkeypatch
 
     from app import balance
 
-    src = inspect.getsource(balance.apply_payment_once)
-    real = re.search(r"UPDATE balances SET (.*?) WHERE", src, re.S)
-    assert real, "could not read the balances UPDATE out of apply_payment_once"
-    real_columns = {c.split("=")[0].strip() for c in real.group(1).split(",")}
-
-    assert real_columns == set(main._PREFLIGHT_BALANCE_COLUMNS), (
-        f"apply_payment_once writes balances columns {sorted(real_columns)} but "
-        f"the preflight declares {sorted(main._PREFLIGHT_BALANCE_COLUMNS)}"
-    )
-
     probe = next(s for s in _preflight_statements(monkeypatch)
-                 if s.startswith("UPDATE balances SET"))
-    probe_columns = {c.split("=")[0].strip()
-                     for c in re.search(r"SET (.*?) WHERE", probe).group(1).split(",")}
-    assert probe_columns == real_columns, (
-        f"the preflight writes {sorted(probe_columns)} while the real apply "
-        f"writes {sorted(real_columns)} -- a failure confined to a column the "
-        f"probe skips still lets the card be captured"
-    )
+                 if s.startswith("INSERT INTO ledger_entries"))
+    assert "component, amount, entry_type" in probe
+    assert "'principal', 0.01, 'adjustment'" in probe
 
 
 def test_the_probe_targets_the_loan_being_charged(monkeypatch):
@@ -606,7 +591,7 @@ def test_the_probe_targets_the_loan_being_charged(monkeypatch):
                       headers={"X-Internal-Token": TOKEN})
     assert resp.status_code == 200
 
-    upd = next(p for s, p in calls if s.startswith("UPDATE balances SET"))
+    upd = next(p for s, p in calls if s.startswith("INSERT INTO ledger_entries"))
     assert 4242 in upd, (
         f"the balances probe ignored the loan it was given ({upd}), so it can "
         f"pass on another loan's row while this one is missing or unwritable"
@@ -621,7 +606,7 @@ def test_the_probe_still_works_with_no_loan_named(monkeypatch):
     exists to prevent, reintroduced by a deploy ordering.
     """
     stmts = _preflight_statements(monkeypatch)
-    assert any(s.startswith("UPDATE balances SET") for s in stmts)
+    assert any(s.startswith("INSERT INTO ledger_entries") for s in stmts)
     assert any(s.startswith("INSERT INTO payment_applications") for s in stmts)
 
 

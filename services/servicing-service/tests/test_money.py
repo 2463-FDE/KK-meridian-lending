@@ -31,10 +31,16 @@ class _FakeDb:
         if sql.startswith("SELECT past_due"):
             return [{"past_due": self.past_due}]
         if "SET balance" in sql:
-            self.balance = params[0]
+            if "balance -" in sql:
+                self.balance = float(Decimal(str(self.balance)) - Decimal(str(params[0])))
+            else:
+                self.balance = params[0]
             return []
         if "SET past_due" in sql:
-            self.past_due = params[0]
+            if "past_due, 0) -" in sql:
+                self.past_due = float(Decimal(str(self.past_due)) - Decimal(str(params[0])))
+            else:
+                self.past_due = params[0]
             return []
         raise AssertionError(f"unexpected query: {sql}")
 

@@ -86,13 +86,7 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
 # source rather than maintained by hand: a hand-kept list of protected things
 # reads as complete while missing one, which is how the probe came to write to a
 # table the money path never touches.
-_PREFLIGHT_WRITE_TABLES = ("payment_applications", "balances")
-
-# And the columns of `balances` the probe must write, for the same reason: the
-# real apply sets `balance`, and a probe that set only `updated_at` proved
-# nothing about a column-level grant, trigger or constraint on `balance`. Also
-# asserted against `apply_payment_once`'s source.
-_PREFLIGHT_BALANCE_COLUMNS = ("balance", "updated_at")
+_PREFLIGHT_WRITE_TABLES = ("payment_applications", "ledger_entries")
 
 
 @app.get("/internal/auth-check")
@@ -198,10 +192,11 @@ def internal_auth_check(
             # lockable row degrades to a zero-row UPDATE, which still requires
             # the write privilege and still fails in a read-only transaction.
             cur.execute(
-                "UPDATE balances SET balance = balance, updated_at = now() "
-                "WHERE loan_id = (SELECT loan_id FROM balances "
-                "WHERE (%s::int IS NULL OR loan_id = %s) "
-                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED)",
+                "INSERT INTO ledger_entries "
+                "(loan_id, component, amount, entry_type, actor_id, actor_role) "
+                "SELECT loan_id, 'principal', 0.01, 'adjustment', 0, 'preflight' "
+                "FROM balances WHERE (%s::int IS NULL OR loan_id = %s) "
+                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED",
                 (loan_id, loan_id),
             )
             # Never committed. Both writes exist only long enough to prove the

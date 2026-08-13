@@ -47,6 +47,7 @@ class _FakeDb:
     def __init__(self, balance=0.0):
         self.balance = balance
         self.applications = set()
+        self.ledger = set()
 
     def _run(self, sql, params=None):
         stmt = sql.strip()
@@ -58,6 +59,13 @@ class _FakeDb:
             return [{"payment_id": payment_id}]
         if stmt.startswith("SELECT balance"):
             return [{"balance": self.balance}]
+        if stmt.startswith("INSERT INTO ledger_entries"):
+            loan_id, amount, payment_id = params
+            if payment_id in self.ledger:
+                raise RuntimeError("duplicate ledger payment")
+            self.ledger.add(payment_id)
+            self.balance -= amount
+            return []
         if "SET balance" in stmt:
             self.balance = params[0]
             return []
@@ -70,11 +78,13 @@ class _FakeDb:
     def transaction(self):
         snapshot_balance = self.balance
         snapshot_applications = set(self.applications)
+        snapshot_ledger = set(self.ledger)
         try:
             yield _FakeCursor(self)
         except Exception:
             self.balance = snapshot_balance
             self.applications = snapshot_applications
+            self.ledger = snapshot_ledger
             raise
 
 
@@ -122,7 +132,7 @@ def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance
     real_run = fake_db._run
 
     def _fail_the_balance_update(sql, params=None):
-        if "SET balance" in sql.strip():
+        if "INSERT INTO ledger_entries" in sql.strip():
             raise RuntimeError("simulated balance update failure")
         return real_run(sql, params)
 

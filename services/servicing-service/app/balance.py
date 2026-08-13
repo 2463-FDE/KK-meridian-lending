@@ -38,9 +38,9 @@ def apply_payment(loan_id: int, amount: float) -> float:
     waterfall -- straight off principal (D14)."""
     current = get_balance(loan_id)                                       # READ
     new_balance = float(_to_decimal(current) - _to_decimal(amount))      # MODIFY, exact
-    db.query(                                                            # WRITE (overwrite in place)
-        "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
-        (new_balance, loan_id),
+    db.query(
+        "UPDATE balances SET balance = balance - %s, updated_at = now() WHERE loan_id = %s",
+        (amount, loan_id),
     )
     log.info("applied payment loan_id=%s balance %s -> %s", loan_id, current, new_balance)
     return new_balance
@@ -84,15 +84,18 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
             )
             return get_balance(loan_id), False
 
+        cur.execute(
+            "INSERT INTO ledger_entries "
+            "(loan_id, component, amount, entry_type, payment_id) "
+            "VALUES (%s, 'principal', -%s, 'payment', %s)",
+            (loan_id, amount, payment_id),
+        )
         cur.execute("SELECT balance FROM balances WHERE loan_id = %s", (loan_id,))
         rows = cur.fetchall()
-        current = rows[0]["balance"] if rows else 0.0
-        new_balance = float(_to_decimal(current) - _to_decimal(amount))
-        cur.execute(
-            "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
-            (new_balance, loan_id),
-        )
-        log.info("applied payment loan_id=%s balance %s -> %s", loan_id, current, new_balance)
+        if not rows:
+            raise LookupError(f"no balances row for loan_id={loan_id}")
+        new_balance = rows[0]["balance"]
+        log.info("applied payment loan_id=%s new_balance=%s", loan_id, new_balance)
     return new_balance, True
 
 
@@ -100,10 +103,17 @@ def adjust_balance(loan_id: int, new_value: float) -> float:
     """Set the balance directly. No ledger entry; the prior value is gone forever."""
     current = get_balance(loan_id)
     new_balance = float(_to_decimal(new_value))
-    db.query(
-        "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
-        (new_balance, loan_id),
-    )
+    with db.transaction() as cur:
+        cur.execute("SELECT balance FROM balances WHERE loan_id = %s FOR UPDATE", (loan_id,))
+        rows = cur.fetchall()
+        if not rows:
+            raise LookupError(f"no balances row for loan_id={loan_id}")
+        delta = _to_decimal(new_balance) - _to_decimal(rows[0]["balance"])
+        if delta:
+            cur.execute(
+                "UPDATE balances SET balance = balance + %s, updated_at = now() WHERE loan_id = %s",
+                (delta, loan_id),
+            )
     log.info("adjusted balance loan_id=%s %s -> %s", loan_id, current, new_value)
     return new_balance
 
@@ -114,8 +124,8 @@ def waive_fee(loan_id: int, amount: float) -> float:
     past_due = rows[0]["past_due"] if rows else 0.0
     new_past_due = float(_to_decimal(past_due) - _to_decimal(amount))
     db.query(
-        "UPDATE balances SET past_due = %s, updated_at = now() WHERE loan_id = %s",
-        (new_past_due, loan_id),
+        "UPDATE balances SET past_due = COALESCE(past_due, 0) - %s, updated_at = now() WHERE loan_id = %s",
+        (amount, loan_id),
     )
     log.info("waived fee loan_id=%s past_due %s -> %s", loan_id, past_due, new_past_due)
     return new_past_due
