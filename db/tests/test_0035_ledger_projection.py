@@ -444,6 +444,25 @@ def test_posted_payment_amount_cannot_invalidate_immutable_allocation(db):
     assert _exec(db, "SELECT amount FROM payments WHERE id=%s", (pay,))[0]["amount"] == 10
 
 
+def test_legacy_applied_payment_amount_is_immutable_during_cutover(db):
+    """Match servicing's current transaction: claim payment application, then
+    update balances. The bridge entry has no payment_id, so the durable
+    payment_applications row must also mark the capture amount as posted."""
+    loan = _a_loan(db)
+    pay = _a_payment(db, loan, "10.00")
+    _exec(db, "INSERT INTO payment_applications(payment_id,loan_id,amount) "
+              "VALUES(%s,%s,10)", (pay, loan))
+    _exec(db, "UPDATE balances SET balance=balance-10 WHERE loan_id=%s", (loan,))
+    db.commit()
+
+    assert _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id=%s "
+                     "AND entry_type='legacy_direct_write'", (loan,))[0]["n"] >= 1
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _exec(db, "UPDATE payments SET amount=11 WHERE id=%s", (pay,))
+    db.rollback()
+    assert _exec(db, "SELECT amount FROM payments WHERE id=%s", (pay,))[0]["amount"] == 10
+
+
 def test_a_loan_boarded_after_migration_gets_an_opening_delta(db):
     """Origination's live boarding path INSERTs loans then balances. The
     transitional bridge must cover that new row, not only updates to rows that

@@ -651,7 +651,8 @@ CREATE CONSTRAINT TRIGGER ledger_payment_allocation_exact
 CREATE OR REPLACE FUNCTION reject_posted_payment_amount_change() RETURNS trigger AS $$
 BEGIN
     IF NEW.amount IS DISTINCT FROM OLD.amount
-       AND EXISTS (SELECT 1 FROM ledger_entries WHERE payment_id = OLD.id) THEN
+       AND (EXISTS (SELECT 1 FROM ledger_entries WHERE payment_id = OLD.id)
+            OR EXISTS (SELECT 1 FROM payment_applications WHERE payment_id = OLD.id)) THEN
         RAISE EXCEPTION 'cannot change amount for posted payment %', OLD.id;
     END IF;
     RETURN NEW;
