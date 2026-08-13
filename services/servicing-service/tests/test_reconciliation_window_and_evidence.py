@@ -32,7 +32,8 @@ class _WindowDb:
     """
 
     def __init__(self, payments, start_fails=False, finish_fails=False):
-        self.payments = payments          # [(loan_id, amount, "YYYY-MM-DD"), ...]
+        # [(loan_id, processor_ref, amount, "YYYY-MM-DD"), ...]
+        self.payments = payments
         self.start_fails = start_fails
         self.finish_fails = finish_fails
         self.finished = []
@@ -56,27 +57,31 @@ class _WindowDb:
         if "FROM payments" in flat:
             since = params[0] if params and len(params) > 0 else None
             until = params[1] if params and len(params) > 1 else None
+            # GROUP BY loan_id, processor_ref, like the real query. Grouping on
+            # the loan alone would net two transactions together inside the
+            # fake, which is the exact defect the comparison was fixed for.
             totals = {}
-            for loan_id, amount, day in self.payments:
+            for loan_id, ref, amount, day in self.payments:
                 if since and day < since:
                     continue
                 if until and day > until:
                     continue
-                totals[loan_id] = totals.get(loan_id, Decimal("0")) + Decimal(amount)
-            return [{"loan_id": k, "total": v} for k, v in totals.items()]
+                key = (loan_id, ref)
+                totals[key] = totals.get(key, Decimal("0")) + Decimal(amount)
+            return [{"loan_id": loan_id, "processor_ref": ref, "total": total}
+                    for (loan_id, ref), total in totals.items()]
         return []
 
 
 def _settlement(tmp_path, rows, name="settlement.csv"):
-    """rows: [(date, loan_id, amount, type), ...]"""
+    """rows: [(date, loan_id, amount, type, processor_ref), ...]"""
     path = tmp_path / name
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["settlement_date", "processor_ref",
                                           "loan_id", "amount", "type"])
         w.writeheader()
-        for i, (day, loan_id, amount, kind) in enumerate(rows):
-            w.writerow({"settlement_date": day,
-                        "processor_ref": "PR-%d" % (200000 + i),
+        for day, loan_id, amount, kind, ref in rows:
+            w.writerow({"settlement_date": day, "processor_ref": ref,
                         "loan_id": loan_id, "amount": amount, "type": kind})
     return str(path)
 
@@ -91,10 +96,10 @@ def _install(monkeypatch, settlement, db):
 
 def test_a_daily_file_is_not_compared_against_lifetime_totals(monkeypatch, tmp_path):
     """The defect that produced 183 breaks on seeded data."""
-    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture")])
+    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture", "PR-1")])
     db = _WindowDb([
-        (4471, "1000.00", "2026-05-01"),   # history, outside the window
-        (4471, "250.00", "2026-06-02"),    # the day being reconciled
+        (4471, "PR-0", "1000.00", "2026-05-01"),   # history, outside the window
+        (4471, "PR-1", "250.00", "2026-06-02"),    # the day being reconciled
     ])
     _install(monkeypatch, settlement, db)
 
@@ -110,12 +115,12 @@ def test_a_daily_file_is_not_compared_against_lifetime_totals(monkeypatch, tmp_p
 
 def test_a_normal_daily_file_reconciles(monkeypatch, tmp_path):
     settlement = _settlement(tmp_path, [
-        ("2026-06-02", 4471, "250.00", "capture"),
-        ("2026-06-02", 5582, "410.50", "capture"),
+        ("2026-06-02", 4471, "250.00", "capture", "PR-1"),
+        ("2026-06-02", 5582, "410.50", "capture", "PR-2"),
     ])
-    db = _WindowDb([(4471, "250.00", "2026-06-02"),
-                    (5582, "410.50", "2026-06-02"),
-                    (4471, "999.00", "2026-01-01")])
+    db = _WindowDb([(4471, "PR-1", "250.00", "2026-06-02"),
+                    (5582, "PR-2", "410.50", "2026-06-02"),
+                    (4471, "PR-0", "999.00", "2026-01-01")])
     _install(monkeypatch, settlement, db)
 
     result = reconciliation.run_and_record()
@@ -128,14 +133,14 @@ def test_a_backfilled_file_spanning_days_uses_its_whole_range(monkeypatch, tmp_p
     """The window is read from the file rather than configured, so the same
     command handles a daily file and a back-fill without a flag."""
     settlement = _settlement(tmp_path, [
-        ("2026-06-01", 4471, "100.00", "capture"),
-        ("2026-06-03", 4471, "150.00", "capture"),
+        ("2026-06-01", 4471, "100.00", "capture", "PR-1"),
+        ("2026-06-03", 4471, "150.00", "capture", "PR-2"),
     ])
     db = _WindowDb([
-        (4471, "100.00", "2026-06-01"),
-        (4471, "150.00", "2026-06-03"),
-        (4471, "500.00", "2026-05-30"),    # before the range
-        (4471, "700.00", "2026-06-05"),    # after it
+        (4471, "PR-1", "100.00", "2026-06-01"),
+        (4471, "PR-2", "150.00", "2026-06-03"),
+        (4471, "PR-3", "500.00", "2026-05-30"),    # before the range
+        (4471, "PR-4", "700.00", "2026-06-05"),    # after it
     ])
     _install(monkeypatch, settlement, db)
 
@@ -151,8 +156,8 @@ def test_a_break_inside_the_window_is_still_found(monkeypatch, tmp_path):
     An implementation that scoped the ledger to nothing would pass every test
     above and detect no break ever.
     """
-    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture")])
-    db = _WindowDb([(4471, "175.00", "2026-06-02")])
+    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture", "PR-1")])
+    db = _WindowDb([(4471, "PR-1", "175.00", "2026-06-02")])
     _install(monkeypatch, settlement, db)
 
     result = reconciliation.run_and_record()
@@ -164,8 +169,8 @@ def test_a_break_inside_the_window_is_still_found(monkeypatch, tmp_path):
 # --- file identity ----------------------------------------------------------
 
 def test_rerunning_the_same_file_is_recognisable(monkeypatch, tmp_path):
-    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture")])
-    db = _WindowDb([(4471, "250.00", "2026-06-02")])
+    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture", "PR-1")])
+    db = _WindowDb([(4471, "PR-1", "250.00", "2026-06-02")])
     _install(monkeypatch, settlement, db)
 
     first = reconciliation.run_and_record()
@@ -178,9 +183,9 @@ def test_rerunning_the_same_file_is_recognisable(monkeypatch, tmp_path):
 
 
 def test_a_different_file_has_a_different_identity(monkeypatch, tmp_path):
-    a = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture")], "a.csv")
-    b = _settlement(tmp_path, [("2026-06-02", 4471, "251.00", "capture")], "b.csv")
-    db = _WindowDb([(4471, "250.00", "2026-06-02")])
+    a = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture", "PR-1")], "a.csv")
+    b = _settlement(tmp_path, [("2026-06-02", 4471, "251.00", "capture", "PR-1")], "b.csv")
+    db = _WindowDb([(4471, "PR-1", "250.00", "2026-06-02")])
 
     _install(monkeypatch, a, db)
     first = reconciliation.run_and_record()
@@ -191,8 +196,8 @@ def test_a_different_file_has_a_different_identity(monkeypatch, tmp_path):
 
 
 def test_the_window_and_source_are_persisted(monkeypatch, tmp_path):
-    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture")])
-    db = _WindowDb([(4471, "250.00", "2026-06-02")])
+    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture", "PR-1")])
+    db = _WindowDb([(4471, "PR-1", "250.00", "2026-06-02")])
     _install(monkeypatch, settlement, db)
 
     reconciliation.run_and_record()
@@ -205,8 +210,8 @@ def test_the_window_and_source_are_persisted(monkeypatch, tmp_path):
 # --- never report ok without durable evidence --------------------------------
 
 def test_a_run_whose_start_record_fails_does_not_run_at_all(monkeypatch, tmp_path):
-    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture")])
-    db = _WindowDb([(4471, "250.00", "2026-06-02")], start_fails=True)
+    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture", "PR-1")])
+    db = _WindowDb([(4471, "PR-1", "250.00", "2026-06-02")], start_fails=True)
     _install(monkeypatch, settlement, db)
 
     result = reconciliation.run_and_record()
@@ -219,8 +224,8 @@ def test_a_run_whose_start_record_fails_does_not_run_at_all(monkeypatch, tmp_pat
 def test_a_run_whose_result_cannot_be_recorded_is_not_ok(monkeypatch, tmp_path):
     """The same rule at the other end: the comparison succeeded and its result is
     not durable, so it must not be reported as success."""
-    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture")])
-    db = _WindowDb([(4471, "250.00", "2026-06-02")], finish_fails=True)
+    settlement = _settlement(tmp_path, [("2026-06-02", 4471, "250.00", "capture", "PR-1")])
+    db = _WindowDb([(4471, "PR-1", "250.00", "2026-06-02")], finish_fails=True)
     _install(monkeypatch, settlement, db)
 
     result = reconciliation.run_and_record()

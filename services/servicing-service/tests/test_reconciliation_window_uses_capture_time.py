@@ -115,21 +115,46 @@ def test_a_row_with_no_captured_at_still_falls_back_to_created_at(db):
     )
 
 
+def _capture_statements():
+    """The text of every capturing `db.query(...)` call in payments.py.
+
+    Matched on the call's own parentheses rather than by splitting the file on
+    ';'. The prose around that code contains semicolons, so a split version cut
+    the statement in half and then satisfied itself with the column name it found
+    in a COMMENT. A guard that passes on documentation is not a guard.
+    """
+    source = (REPO / "services" / "payment-service" / "app" / "payments.py").read_text(
+        encoding="utf-8"
+    )
+    calls = []
+    marker = "db.query("
+    at = source.find(marker)
+    while at != -1:
+        depth, i = 0, at + len(marker) - 1
+        while i < len(source):
+            if source[i] == "(":
+                depth += 1
+            elif source[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        calls.append(source[at:i + 1])
+        at = source.find(marker, i)
+    return [c for c in calls if "auth_status = 'captured'" in c]
+
+
 def test_the_capture_timestamp_is_written_with_the_status(db):
     """`captured_at` must never be set separately from `auth_status`.
 
     A captured row without the timestamp is a row reconciliation has to guess
     about, and the fallback above exists only for rows that predate the column.
     """
-    payments = (REPO / "services" / "payment-service" / "app" / "payments.py").read_text(
-        encoding="utf-8"
-    )
-    statements = [
-        s for s in payments.split(";") if "auth_status = 'captured'" in s
-    ]
+    statements = _capture_statements()
     assert statements, "no capture UPDATE found -- has the write path moved?"
     for stmt in statements:
-        assert "captured_at" in stmt, (
-            "a capture UPDATE sets auth_status without captured_at, so the row "
-            "records that it was captured but not when"
+        assert "captured_at = COALESCE(" in stmt, (
+            "a capture UPDATE sets auth_status without taking captured_at from "
+            "the processor, so the row records that it was captured but not "
+            "when the processor says it happened"
         )

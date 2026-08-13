@@ -10,8 +10,9 @@ What a control needs, and what this now has:
 - **an execution path that runs on a schedule** -- `app.reconcile_job`, invoked by
   cron or a compose one-shot (see docs/runbook.md). Not an in-process scheduler:
   a job that dies with its web worker is a job nobody notices stopping;
-- **a measured result** -- per-loan comparison, with a break count and a break
-  value, not one global total;
+- **a measured result** -- per-TRANSACTION comparison, keyed on the processor's
+  own settlement reference, with a break count and a break value rather than one
+  global total;
 - **a threshold that fails** -- `RECONCILIATION_BREAK_THRESHOLD`, exceeded means a
   non-zero exit and a metric, both observable from outside the process;
 - **a record of every run** -- `reconciliation_runs` (db/migrations/0034), so
@@ -21,25 +22,40 @@ What a control needs, and what this now has:
 while two loans are wrong by equal and opposite amounts. The same reasoning as
 the ledger parity check in ADR 0010, for the same reason.
 
+**Per TRANSACTION, never per loan.** Comparing net totals per loan was the
+previous behaviour and it was a hole in the middle of the control: two wrong
+transactions on one loan cancel. An unrecorded capture of 99.99 and a missing
+refund of 99.99 on loan 4471 produce exactly the totals a correct day produces,
+so the run recorded `outcome = 'ok'` -- and published a success timestamp for
+having netted its own errors away. Both sides are now keyed by the processor's
+own settlement reference (`payments.processor_ref`, db/migrations/0041), so
+those two defects surface as two breaks instead of none, and a break says
+*which* capture is responsible rather than only which loan.
+
 ## What this cannot do, stated rather than discovered
 
-**There is no per-transaction matching, because the join key is not stored.** The
-settlement file identifies each capture by the processor's own reference
-(`processor_ref`, e.g. `PR-100231`). `payments.authorization_id` holds a
-*different* identifier minted by our own authorization call -- verified against
-the live database: zero payment rows carry a `PR-` reference. So a payment cannot
-be matched to a settlement line, and this compares per-loan totals instead.
+**A capture written before migration 0041 has no reference, and cannot be
+matched.** There was nothing to back-fill from -- `authorization_id` is minted by
+our own authorization call and appears in no settlement file. Such a row is
+reported as an `unreferenced_capture` break: money we recorded that no settlement
+line can corroborate. It is NOT silently excluded, because excluding it would
+understate our own side and hide a real difference. Those breaks are finite and
+self-clearing: the window moves, and every capture written after 0041 carries the
+reference.
 
-That means a break is detected but not attributed: this control can say "loan 4471
-disagrees by 99.99" and cannot say which capture is responsible. Closing that gap
-needs `processor_ref` persisted on the payment at capture time, which is a change
-to payment-service and its schema, and it is the obvious next piece of work.
+**A settlement file with no usable reference column cannot be reconciled at all,
+and the run fails rather than falling back.** Per-loan netting is what this
+control was fixed for; quietly reverting to it when the file is malformed would
+reintroduce the defect at exactly the moment nobody is looking. The run records
+`UnreferencedSettlementRows` and exits non-zero.
 
 **There is no alerting integration.** This build has no pager, no incident tool
-and no alertmanager. What it has is a contract those things consume: a non-zero
+and no Alertmanager. What it has is a contract those things consume: a non-zero
 exit code, a `reconciliation_runs` row, and Prometheus gauges on the existing
-`/metrics` endpoint. Calling that "alerting" would be the overclaim this module is
-being fixed for.
+`/metrics` endpoint, plus the rules in `monitoring/alerts.yml` that a real
+Alertmanager would route. Without an Alertmanager deployed, **nothing is
+notified** -- the rules evaluate and fire in Prometheus and reach no human.
+Calling that "alerting" would be the overclaim this module is being fixed for.
 """
 import csv
 import datetime as dt
@@ -191,8 +207,8 @@ def settlement_total() -> float:
     return float(total)
 
 
-def _ledger_by_loan(window=(None, None)) -> dict[int, Decimal]:
-    """Captured money per loan, as we recorded it, WITHIN THE SAME WINDOW.
+def _ledger_rows(window=(None, None)) -> list[dict]:
+    """One row per (loan_id, processor_ref) we recorded as captured in the window.
 
     The window is the whole point. An earlier version summed every captured
     payment ever and compared it against one day's settlement file, so every loan
@@ -221,9 +237,15 @@ def _ledger_by_loan(window=(None, None)) -> dict[int, Decimal]:
     Only `auth_status = 'captured'`. A 'pending' row is an authorization that
     never confirmed and a 'failed' row never took money, so counting either would
     manufacture a break against a settlement file that is correct.
+
+    Grouped by `processor_ref` as well as `loan_id`, because that is what makes
+    the comparison transaction-level. Rows whose reference is NULL come back as
+    their own group per loan and the caller reports them as
+    `unreferenced_capture` breaks -- see `_ledger_by_ref`.
     """
     since, until = window
-    sql = ("SELECT loan_id, COALESCE(SUM(amount), 0) AS total FROM payments "
+    sql = ("SELECT loan_id, processor_ref, COALESCE(SUM(amount), 0) AS total "
+           "FROM payments "
            "WHERE auth_status = 'captured' AND loan_id IS NOT NULL")
     params: list = []
     # COALESCE for one reason only: rows captured before migration 0040 were
@@ -237,13 +259,53 @@ def _ledger_by_loan(window=(None, None)) -> dict[int, Decimal]:
     if until:
         sql += " AND COALESCE(captured_at, created_at) < (%s::date + INTERVAL '1 day')"
         params.append(until)
-    sql += " GROUP BY loan_id"
-    rows = db.query(sql, tuple(params))
-    return {int(r["loan_id"]): Decimal(str(r["total"])).quantize(CENT) for r in rows}
+    sql += " GROUP BY loan_id, processor_ref"
+    return db.query(sql, tuple(params))
 
 
-def _settlement_by_loan(path=None):
-    """Settled money per loan, plus the window and identity of the file itself.
+def _ledger_by_ref(window=(None, None)):
+    """Captured money keyed by (loan_id, processor_ref), plus what cannot be keyed.
+
+    Returns `(by_ref, unreferenced)`. `unreferenced` holds one entry per loan
+    whose captured rows in this window carry no `processor_ref` -- rows written
+    before migration 0041, or captured against a processor that reported no
+    settlement reference. They are returned SEPARATELY rather than folded into
+    `by_ref` under a None key, so the caller has to decide what to do about them
+    instead of comparing them against a settlement line that cannot exist.
+    """
+    by_ref: dict[tuple[int, str], Decimal] = {}
+    unreferenced: list[dict] = []
+    for r in _ledger_rows(window):
+        loan_id = int(r["loan_id"])
+        total = Decimal(str(r["total"])).quantize(CENT)
+        ref = (r.get("processor_ref") or "").strip()
+        if not ref:
+            unreferenced.append({"loan_id": loan_id, "amount": total})
+            continue
+        key = (loan_id, ref)
+        by_ref[key] = (by_ref.get(key, Decimal("0")) + total).quantize(CENT)
+    return by_ref, unreferenced
+
+
+def _ledger_by_loan(window=(None, None)) -> dict[int, Decimal]:
+    """Captured money per loan, as we recorded it, WITHIN THE SAME WINDOW.
+
+    Derived from the same rows the transaction-level comparison reads, so the
+    two can never disagree about what the window contained. Retained because
+    `/reconciliation/peek` and the capture-window tests ask this question
+    directly; the CONTROL no longer compares on it, because per-loan totals let
+    two offsetting defects cancel (see the module docstring).
+    """
+    totals: dict[int, Decimal] = {}
+    for r in _ledger_rows(window):
+        loan_id = int(r["loan_id"])
+        totals[loan_id] = (totals.get(loan_id, Decimal("0"))
+                           + Decimal(str(r["total"]))).quantize(CENT)
+    return totals
+
+
+def _settlement_by_ref(path=None):
+    """Settled money keyed by (loan_id, processor_ref), plus window and identity.
 
     Returns (totals, window, identity). The window is the min and max
     `settlement_date` the file actually contains -- so a daily file yields one
@@ -252,24 +314,38 @@ def _settlement_by_loan(path=None):
     many rows, and a digest, because "reconciliation passed" is worthless if
     nobody can say what it read.
 
-    A refund line subtracts, so this is net settled -- the same sign convention
-    `_ledger_by_loan` produces, or the comparison would be meaningless.
+    A refund line subtracts, so a reference that was captured and then refunded
+    inside the same file nets to zero. That is legitimate netting -- it is one
+    transaction's own history. Netting ACROSS references was the defect: two
+    different broken transactions on one loan cancelled each other out.
+
+    A row with no usable `processor_ref` is counted in `unreferenced_rows` and
+    its money is deliberately NOT accumulated anywhere. There is no key to
+    accumulate it under, and inventing one (loan-level, say) is precisely the
+    fallback the vacuity check refuses: the run fails instead.
     """
     path = path or SETTLEMENT_FILE
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
     raw = pathlib.Path(path).read_bytes()
-    totals: dict[int, Decimal] = {}
+    totals: dict[tuple[int, str], Decimal] = {}
     dates: list[str] = []
     rows_read = 0
     undated = 0
+    unreferenced = 0
     for row in csv.DictReader(io.StringIO(raw.decode("utf-8"))):
         rows_read += 1
         loan_id = int(row["loan_id"])
         amount = Decimal(row["amount"])
         signed = amount if row["type"] == "capture" else -amount
-        totals[loan_id] = (totals.get(loan_id, Decimal("0")) + signed).quantize(CENT)
+
+        ref = (row.get("processor_ref") or "").strip()
+        if ref:
+            key = (loan_id, ref)
+            totals[key] = (totals.get(key, Decimal("0")) + signed).quantize(CENT)
+        else:
+            unreferenced += 1
 
         # A row with no usable settlement_date is COUNTED but cannot be SCOPED.
         #
@@ -298,40 +374,82 @@ def _settlement_by_loan(path=None):
         # Surfaced so the vacuity check can fail the run rather than silently
         # comparing money it cannot place in a period.
         "undated_rows": undated,
+        # Same, for the other axis: money the file cannot identify per
+        # transaction. A run that met this and fell back to per-loan totals
+        # would silently restore the netting defect.
+        "unreferenced_rows": unreferenced,
         "sha256": hashlib.sha256(raw).hexdigest()[:16],
     }
     return totals, window, identity
 
 
 def compare() -> dict:
-    """Per-loan comparison. Pure: reads, computes, records nothing.
+    """Transaction-level comparison. Pure: reads, computes, records nothing.
 
-    Every loan appearing on EITHER side is compared. A loan settled but not
-    recorded is the worse direction -- money taken with no payment row behind it --
-    and an outer comparison is the only way to see it. An inner join over our own
-    payments would be a control that cannot detect the thing it exists for.
+    Every (loan, processor reference) appearing on EITHER side is compared. A
+    reference settled but not recorded is the worse direction -- money taken with
+    no payment row behind it -- and an outer comparison is the only way to see
+    it. An inner join over our own payments would be a control that cannot
+    detect the thing it exists for.
+
+    Keyed on the reference rather than on the loan, which is the fix for the
+    netting defect: an unrecorded capture and an equally sized missing refund on
+    the same loan now produce two breaks whose values ADD, where per-loan totals
+    produced none at all. `break_value` sums absolute differences, so no two
+    findings can cancel by construction.
     """
-    settlement, window, identity = _settlement_by_loan()
-    ledger = _ledger_by_loan(window)
+    settlement, window, identity = _settlement_by_ref()
+    ledger, unreferenced = _ledger_by_ref(window)
 
     breaks = []
-    for loan_id in sorted(set(ledger) | set(settlement)):
-        ours = ledger.get(loan_id, Decimal("0.00"))
-        theirs = settlement.get(loan_id, Decimal("0.00"))
+    for loan_id, ref in sorted(set(ledger) | set(settlement)):
+        ours = ledger.get((loan_id, ref), Decimal("0.00"))
+        theirs = settlement.get((loan_id, ref), Decimal("0.00"))
         if ours != theirs:
             breaks.append({
                 "loan_id": loan_id,
+                "processor_ref": ref,
+                # Which side is missing, because the three cases need different
+                # answers: money settled we never recorded is a possible
+                # unrecorded charge, money recorded the processor never settled
+                # is a possible phantom capture, and a differing amount on a
+                # reference both sides know is a posting error.
+                "kind": ("settlement_only" if ours == 0
+                         else "ledger_only" if theirs == 0
+                         else "amount_mismatch"),
                 "ledger": str(ours),
                 "settlement": str(theirs),
                 "difference": str(ours - theirs),
             })
 
+    # Captures we cannot match at all. Reported, never skipped: skipping them
+    # would understate our own side of the comparison and turn a known blind
+    # spot into a clean run.
+    for row in sorted(unreferenced, key=lambda r: r["loan_id"]):
+        breaks.append({
+            "loan_id": row["loan_id"],
+            "processor_ref": None,
+            "kind": "unreferenced_capture",
+            "ledger": str(row["amount"]),
+            "settlement": "0.00",
+            "difference": str(row["amount"]),
+        })
+
     break_value = sum(
         (abs(Decimal(b["difference"])) for b in breaks), Decimal("0.00")
     ).quantize(CENT)
 
+    loans = ({loan_id for loan_id, _ in ledger}
+             | {loan_id for loan_id, _ in settlement}
+             | {row["loan_id"] for row in unreferenced})
+
     return {
-        "loans_compared": len(set(ledger) | set(settlement)),
+        "loans_compared": len(loans),
+        # The number that says how fine the comparison actually was. A run with
+        # loans_compared > 0 and references_compared == 0 compared nothing at
+        # transaction level, which is what the vacuity check looks for.
+        "references_compared": len(set(ledger) | set(settlement)),
+        "unreferenced_captures": len(unreferenced),
         "breaks_found": len(breaks),
         "break_value": break_value,
         "breaks": breaks,
@@ -384,6 +502,19 @@ _VACUITY_CHECKS = (
         lambda r: (r.get("source") or {}).get("undated_rows", 0) > 0,
         "some settlement rows have no usable settlement_date, so their money "
         "cannot be placed in the window the rest of the file defines",
+    ),
+    (
+        # The netting defect's own guard rail. This control's whole correction
+        # was to stop comparing net totals per loan; a file whose lines carry no
+        # processor reference cannot be compared any other way, and falling back
+        # to per-loan totals would restore the defect silently, at exactly the
+        # moment the input is already known to be malformed. Failing is the only
+        # answer that does not lie.
+        "UnreferencedSettlementRows",
+        lambda r: (r.get("source") or {}).get("unreferenced_rows", 0) > 0,
+        "some settlement rows carry no processor_ref, so they cannot be matched "
+        "to a capture and the comparison would have to fall back to the per-loan "
+        "netting this control exists to replace",
     ),
 )
 
@@ -450,6 +581,8 @@ def run_and_record() -> dict:
             outcome="error",
             error_code=code,
             loans_compared=result["loans_compared"],
+            references_compared=result["references_compared"],
+            unreferenced_captures=result["unreferenced_captures"],
             window=(result["window_start"], result["window_end"]),
             source=result["source"],
         )
@@ -463,6 +596,8 @@ def run_and_record() -> dict:
         run_id,
         outcome=outcome,
         loans_compared=result["loans_compared"],
+        references_compared=result["references_compared"],
+        unreferenced_captures=result["unreferenced_captures"],
         breaks_found=result["breaks_found"],
         break_value=result["break_value"],
         breaks=result["breaks"][:MAX_RECORDED_BREAKS],
@@ -480,13 +615,16 @@ def run_and_record() -> dict:
     # registry dies with it -- the durable record IS the metric, and the API
     # derives the gauges from it at scrape time (see _ReconciliationCollector).
     if outcome == "ok":
-        log.info("reconciliation ok loans=%s", result["loans_compared"])
+        log.info("reconciliation ok loans=%s refs=%s",
+                 result["loans_compared"], result["references_compared"])
     else:
-        # Loan ids and amounts only. That is what a break IS; there is nothing
-        # about the cardholder here to leak.
+        # Loan ids, settlement references and amounts only. That is what a break
+        # IS; there is nothing about the cardholder here to leak.
         log.error(
-            "reconciliation BREACH loans=%s breaks=%s value=%s threshold=%s",
-            result["loans_compared"], result["breaks_found"],
+            "reconciliation BREACH loans=%s refs=%s unreferenced=%s breaks=%s "
+            "value=%s threshold=%s",
+            result["loans_compared"], result["references_compared"],
+            result["unreferenced_captures"], result["breaks_found"],
             result["break_value"], BREAK_THRESHOLD,
         )
 
@@ -515,12 +653,20 @@ def _start_run() -> int | None:
 
 def _finish_run(run_id, *, outcome, loans_compared=0, breaks_found=0,
                 break_value=Decimal("0.00"), breaks=(), error_code=None,
-                window=(None, None), source=None) -> bool:
+                window=(None, None), source=None,
+                references_compared=0, unreferenced_captures=0) -> bool:
     """Record the result. Returns whether it was durably written.
 
     The caller turns a False into a non-zero exit: a run whose RESULT could not
     be recorded is in the same position as one whose start could not be, and
     reporting success for it would be the defect this module exists to remove.
+
+    `references_compared` and `unreferenced_captures` are appended to the
+    statement rather than slotted in beside `loans_compared`, which they belong
+    with logically. The parameter tuple's positions are asserted directly by the
+    tests that prove a run recorded its threshold and its bounded break list, and
+    silently renumbering them would move those assertions onto different values
+    while they kept passing.
     """
     if run_id is None:
         return False
@@ -529,11 +675,13 @@ def _finish_run(run_id, *, outcome, loans_compared=0, breaks_found=0,
             "UPDATE reconciliation_runs SET finished_at = now(), outcome = %s, "
             "loans_compared = %s, breaks_found = %s, break_value = %s, "
             "breaks = %s::jsonb, error_code = %s, "
-            "window_start = %s::date, window_end = %s::date, source = %s::jsonb "
+            "window_start = %s::date, window_end = %s::date, source = %s::jsonb, "
+            "references_compared = %s, unreferenced_captures = %s "
             "WHERE id = %s",
             (outcome, loans_compared, breaks_found, break_value,
              json.dumps(list(breaks)), error_code,
-             window[0], window[1], json.dumps(source or {}), run_id),
+             window[0], window[1], json.dumps(source or {}),
+             references_compared, unreferenced_captures, run_id),
         )
         return True
     except Exception as e:  # noqa

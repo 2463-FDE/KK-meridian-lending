@@ -19,20 +19,31 @@ from app.reconcile_job import EXIT_BREACH, EXIT_ERROR, EXIT_OK, main
 
 
 def _settlement(tmp_path, rows):
+    """rows: [(loan_id, amount, type, processor_ref), ...]
+
+    The reference is explicit rather than generated from the row index. The
+    comparison is keyed on it now, so a test that did not state which reference
+    it meant could not say what it was asserting -- and a generated one would
+    silently stop matching the ledger side the moment a row was inserted above
+    it.
+    """
     path = tmp_path / "settlement.csv"
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["settlement_date", "processor_ref",
                                           "loan_id", "amount", "type"])
         w.writeheader()
-        for i, (loan_id, amount, kind) in enumerate(rows):
-            w.writerow({"settlement_date": "2026-06-01",
-                        "processor_ref": f"PR-{100000 + i}",
+        for loan_id, amount, kind, ref in rows:
+            w.writerow({"settlement_date": "2026-06-01", "processor_ref": ref,
                         "loan_id": loan_id, "amount": amount, "type": kind})
     return str(path)
 
 
 class _Db:
-    """Records writes so a run can be proven to have left a trace."""
+    """Records writes so a run can be proven to have left a trace.
+
+    `ledger_rows` is what the grouped payments query returns: one row per
+    (loan_id, processor_ref).
+    """
 
     def __init__(self, ledger_rows):
         self.ledger_rows = ledger_rows
@@ -62,12 +73,12 @@ class _Db:
 
 @pytest.fixture
 def clean(monkeypatch, tmp_path):
-    """Ledger and settlement agree, per loan."""
+    """Ledger and settlement agree, transaction for transaction."""
     monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE",
-                        _settlement(tmp_path, [(4471, "250.00", "capture"),
-                                               (5582, "410.50", "capture")]))
-    db = _Db([{"loan_id": 4471, "total": Decimal("250.00")},
-              {"loan_id": 5582, "total": Decimal("410.50")}])
+                        _settlement(tmp_path, [(4471, "250.00", "capture", "PR-100231"),
+                                               (5582, "410.50", "capture", "PR-100232")]))
+    db = _Db([{"loan_id": 4471, "processor_ref": "PR-100231", "total": Decimal("250.00")},
+              {"loan_id": 5582, "processor_ref": "PR-100232", "total": Decimal("410.50")}])
     monkeypatch.setattr(reconciliation, "db", db)
     monkeypatch.setattr(reconciliation, "BREAK_THRESHOLD", Decimal("0"))
     return db
@@ -77,9 +88,9 @@ def clean(monkeypatch, tmp_path):
 def broken(monkeypatch, tmp_path):
     """The processor settled 99.99 we have no payment row for."""
     monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE",
-                        _settlement(tmp_path, [(4471, "250.00", "capture"),
-                                               (4471, "99.99", "capture")]))
-    db = _Db([{"loan_id": 4471, "total": Decimal("250.00")}])
+                        _settlement(tmp_path, [(4471, "250.00", "capture", "PR-100231"),
+                                               (4471, "99.99", "capture", "PR-100244")]))
+    db = _Db([{"loan_id": 4471, "processor_ref": "PR-100231", "total": Decimal("250.00")}])
     monkeypatch.setattr(reconciliation, "db", db)
     monkeypatch.setattr(reconciliation, "BREAK_THRESHOLD", Decimal("0"))
     return db
@@ -123,7 +134,7 @@ def test_money_settled_for_a_loan_we_never_recorded_is_a_break(monkeypatch, tmp_
     that cannot detect the thing it exists for.
     """
     monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE",
-                        _settlement(tmp_path, [(9999, "500.00", "capture")]))
+                        _settlement(tmp_path, [(9999, "500.00", "capture", "PR-100999")]))
     monkeypatch.setattr(reconciliation, "db", _Db([]))
     monkeypatch.setattr(reconciliation, "BREAK_THRESHOLD", Decimal("0"))
 
@@ -263,7 +274,8 @@ def test_a_configured_threshold_absorbs_a_break_below_it(broken, monkeypatch):
 def test_the_recorded_break_list_is_bounded(monkeypatch, tmp_path):
     """A systemic break -- a settlement file for the wrong date -- would otherwise
     put every loan into one database row."""
-    many = [(1000 + i, "10.00", "capture") for i in range(reconciliation.MAX_RECORDED_BREAKS + 20)]
+    many = [(1000 + i, "10.00", "capture", "PR-%d" % (300000 + i))
+            for i in range(reconciliation.MAX_RECORDED_BREAKS + 20)]
     monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE", _settlement(tmp_path, many))
     db = _Db([])
     monkeypatch.setattr(reconciliation, "db", db)

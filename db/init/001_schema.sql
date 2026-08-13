@@ -343,6 +343,15 @@ CREATE TABLE IF NOT EXISTS payments (
     -- before ever calling authorize_charge() again, instead of blindly
     -- re-charging. See services/payment-service/app/payments.py.
     authorization_id TEXT,
+    -- The PROCESSOR's own settlement reference for this capture, e.g. PR-100231
+    -- (db/migrations/0041), written in the same UPDATE that sets auth_status.
+    -- This is the join key to the settlement file: authorization_id above is a
+    -- DIFFERENT identifier minted by our own authorization call and appears in
+    -- no settlement file, which is why reconciliation could only compare
+    -- per-loan totals and could therefore net two offsetting defects to zero.
+    -- NULL on rows captured before 0041; reconciliation reports those as
+    -- unreferenced_capture breaks rather than skipping them.
+    processor_ref TEXT,
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
@@ -412,6 +421,15 @@ CREATE INDEX IF NOT EXISTS idx_payments_captured_at
     ON payments (captured_at)
  WHERE auth_status = 'captured';
 
+-- Mirrors db/migrations/0041. One settlement line, one capture: two payment
+-- rows claiming the same processor reference is either a double-recorded
+-- capture or a mis-keyed one, and either makes the transaction-level
+-- comparison ambiguous exactly where it has to be exact. Partial so the
+-- unreferenced legacy rows do not collide with each other.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_processor_ref
+    ON payments (processor_ref)
+ WHERE processor_ref IS NOT NULL;
+
 -- D7: one row per reconciliation run (db/migrations/0034). Counts and totals
 -- only -- no card data, no applicant identifiers, no processor references. A
 -- control that leaves no trace is indistinguishable from one that never ran.
@@ -421,6 +439,13 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
     finished_at     TIMESTAMPTZ,
     outcome         TEXT        NOT NULL CHECK (outcome IN ('ok','breach','error')),
     loans_compared  INTEGER     NOT NULL DEFAULT 0,
+    -- How fine the comparison was: it is keyed on (loan_id, processor_ref), and
+    -- a run matching many loans but few references compared coarse per-loan
+    -- totals, which is the state this control was fixed out of. Captures with no
+    -- reference cannot be matched at all and are counted separately AND reported
+    -- as breaks (db/migrations/0034, 0041).
+    references_compared   INTEGER NOT NULL DEFAULT 0,
+    unreferenced_captures INTEGER NOT NULL DEFAULT 0,
     breaks_found    INTEGER     NOT NULL DEFAULT 0,
     break_value     NUMERIC(14,2) NOT NULL DEFAULT 0,
     threshold_value NUMERIC(14,2) NOT NULL DEFAULT 0,

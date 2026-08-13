@@ -31,8 +31,16 @@ the processor. `idempotency_key` is now forwarded to the real processor call
 dedupes on) and to the stub, and `get_authorization()` lets a caller ask
 "does the processor already have a record of this key?" *before* charging
 again -- see payments.py::charge()'s pending-retry branch.
+
+Review fix (reconciliation): `authorize_charge()` returned the authorization id
+and threw the rest of the processor's answer away. It now returns an
+`Authorization` carrying the processor's own capture timestamp and its
+settlement reference as well, because reconciliation needs both -- see that
+class's docstring for what each one was costing.
 """
+import hashlib
 import re
+from typing import NamedTuple
 
 import httpx
 
@@ -64,44 +72,113 @@ class ChargeDeclinedError(RuntimeError):
     """
 
 
+class Authorization(NamedTuple):
+    """Everything the processor tells us about one capture.
+
+    Review fix: `authorize_charge()` used to return the authorization id alone
+    and DISCARD the rest of the processor's response. Two consequences, both
+    landing on reconciliation:
+
+    * `captured_at` was thrown away, so payments.py stamped `now()` on the
+      normal charge path. A charge whose processor confirmation and local UPDATE
+      straddle midnight was then scoped to the wrong reconciliation day -- the
+      exact false-break class migration 0040 exists to close, closed for
+      recovered rows and left open on the path almost every capture takes.
+    * `processor_ref` was never asked for at all, so no payment row carried the
+      settlement file's own join key and reconciliation could compare nothing
+      finer than a per-loan total. Per-loan totals let two offsetting defects
+      cancel and report `ok` (db/migrations/0041).
+
+    Both extra fields are OPTIONAL, because a processor that does not report
+    them is a real configuration and must not block a capture whose money has
+    already moved. A missing value is recorded as missing: a NULL `captured_at`
+    falls back to `now()`, and a NULL `processor_ref` is reported by
+    reconciliation as an `unreferenced_capture` break. Neither is invented.
+    """
+
+    authorization_id: str
+    #: The processor's own capture time, ISO-8601. None if it reports none.
+    captured_at: str | None = None
+    #: The reference the settlement file will carry for this capture, e.g.
+    #: PR-100231. None if the processor reports none.
+    processor_ref: str | None = None
+
+
 # Review fix: stands in for a real processor's own idempotency-key store --
 # a real processor (Stripe et al.) remembers an authorization it already
 # issued for a given key and returns that SAME authorization on a repeat
 # call instead of charging again. Keyed on idempotency_key, not token/amount,
 # since a key is the thing a retry is guaranteed to repeat.
-_stub_authorizations: dict[str, str] = {}
-# Capture timestamps for the stub processor, so the recovery path can be
-# exercised across a date boundary without a real processor.
-_stub_captured_at: dict[str, str] = {}
+#
+# Holds the whole Authorization rather than just the id, so the stub can answer
+# the same three questions a real processor answers on lookup.
+_stub_authorizations: dict[str, Authorization] = {}
 
 
-def _stub_authorize(processor_token: str, amount: float, idempotency_key: str = None) -> str:
+def _stub_settlement_reference(processor_token: str, idempotency_key: str = None) -> str:
+    """A stable, unique stand-in for the processor's settlement reference.
+
+    Derived from the idempotency key, because that is the value guaranteed
+    unique per payment. Deriving it from the token would collide across the many
+    payments a demo or a test suite makes with the same mock card, and
+    `idx_payments_processor_ref` is UNIQUE on purpose.
+
+    Shaped like the references in the settlement file (`PR-...`) so a dev run
+    exercises the same string shape production will, and marked STUB so nobody
+    can mistake one for evidence from a real processor.
+    """
+    seed = idempotency_key or processor_token or ""
+    return "PR-STUB-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def _stub_authorize(processor_token: str, amount: float,
+                    idempotency_key: str = None) -> Authorization:
     if idempotency_key and idempotency_key in _stub_authorizations:
         return _stub_authorizations[idempotency_key]
     if amount == _TEST_DECLINE_AMOUNT:
         raise ChargeDeclinedError(f"processor declined: test-decline amount {amount}")
     if not _MOCK_TOKEN_RE.match(processor_token or ""):
         raise ChargeDeclinedError("processor declined: token not recognized")
-    auth_id = "auth_stub_" + processor_token[-12:]
+    auth = Authorization(
+        authorization_id="auth_stub_" + processor_token[-12:],
+        # The stub authorizes right now, so OUR clock IS the capture time and
+        # there is no processor timestamp to inherit. None rather than a
+        # fabricated value: payments.py falls back to now(), which is correct
+        # here, and this is the case the cross-midnight tests distinguish from a
+        # recovered row.
+        captured_at=None,
+        processor_ref=_stub_settlement_reference(processor_token, idempotency_key),
+    )
     if idempotency_key:
-        _stub_authorizations[idempotency_key] = auth_id
-    return auth_id
+        _stub_authorizations[idempotency_key] = auth
+    return auth
 
 
-def get_authorization(idempotency_key: str) -> str | None:
-    """Ask the processor whether it already has an authorization on record
-    for this idempotency_key, without issuing a new charge.
+def _authorization_from_body(body: dict) -> Authorization:
+    """Read one processor response into the three things we persist."""
+    return Authorization(
+        authorization_id=body["authorization_id"],
+        # Named for what the processor calls it; absent on older stubs.
+        captured_at=body.get("captured_at") or body.get("created"),
+        # Same story: processors name the settlement handle differently, and the
+        # one that matters is whichever name appears in the settlement file.
+        processor_ref=(body.get("processor_ref")
+                       or body.get("settlement_reference")
+                       or body.get("reference")),
+    )
 
-    Review fix: a process that dies between the processor approving a charge
-    and payments.py persisting `authorization_id`/`auth_status='captured'`
-    used to leave a payment stuck 'pending' with no local record that the
-    charge already happened -- a retry then called authorize_charge() again,
-    a real risk of a second charge at the processor. A pending retry calls
-    this FIRST; only if the processor genuinely has no record of the key is
-    it safe to call authorize_charge() (see payments.py::charge()).
 
-    Returns None if the processor has no record of this key (never charged,
-    or genuinely unreachable in a dev/test stub configuration).
+def lookup_authorization(idempotency_key: str) -> Authorization | None:
+    """Everything the processor knows about this key, in ONE round trip.
+
+    The pending-row recovery path needs three facts about a charge it may
+    already have made: that the processor holds it, when the processor took the
+    money, and what reference the settlement file will use. Asking three times
+    would mean three calls to a payment processor on the path an incident
+    actually exercises, and three chances for the answers to disagree.
+
+    Returns None if the processor has no record of this key (never charged, or
+    genuinely unreachable in a dev/test stub configuration).
     """
     if not idempotency_key:
         return None
@@ -130,14 +207,31 @@ def get_authorization(idempotency_key: str) -> str | None:
 
     if not body.get("approved"):
         return None
-    return body["authorization_id"]
+    return _authorization_from_body(body)
+
+
+def get_authorization(idempotency_key: str) -> str | None:
+    """Whether the processor already has an authorization on record for this
+    idempotency_key, without issuing a new charge.
+
+    Review fix: a process that dies between the processor approving a charge
+    and payments.py persisting `authorization_id`/`auth_status='captured'`
+    used to leave a payment stuck 'pending' with no local record that the
+    charge already happened -- a retry then called authorize_charge() again,
+    a real risk of a second charge at the processor. A pending retry looks the
+    key up FIRST; only if the processor genuinely has no record of it is it safe
+    to call authorize_charge() (see payments.py::charge()).
+
+    Kept as the narrow id-only question. The recovery path itself uses
+    `lookup_authorization()`, because it also needs the capture time and the
+    settlement reference and must not pay for three round trips to get them.
+    """
+    existing = lookup_authorization(idempotency_key)
+    return existing.authorization_id if existing else None
 
 
 def get_authorization_captured_at(idempotency_key: str) -> str | None:
     """The processor's OWN capture timestamp for an existing authorization.
-
-    Used by the pending-row recovery path. `get_authorization()` proves the
-    processor already has the charge; this says WHEN it took it.
 
     Why it matters: a service that died after processor approval leaves the row
     'pending'. The borrower retries -- possibly the next morning -- and recording
@@ -151,41 +245,21 @@ def get_authorization_captured_at(idempotency_key: str) -> str | None:
     `now()`, which is the previous behaviour and the best available estimate --
     but it is a fallback, not the default.
     """
-    if not idempotency_key:
-        return None
-    if not PROCESSOR_API_KEY:
-        if not ALLOW_PAYMENT_STUB:
-            raise ProcessorUnavailableError(
-                f"PROCESSOR_API_KEY is not set (ENVIRONMENT={ENVIRONMENT!r}) -- refusing "
-                "to read a capture timestamp from a fake processor outside development/test."
-            )
-        return _stub_captured_at.get(idempotency_key)
-
-    try:
-        resp = httpx.get(
-            f"{PROCESSOR_BASE_URL}/charges",
-            params={"idempotency_key": idempotency_key},
-            headers={"Authorization": f"Bearer {PROCESSOR_API_KEY}"},
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-    except Exception as exc:
-        if not ALLOW_PAYMENT_STUB:
-            raise ProcessorUnavailableError(f"processor lookup call failed: {exc}") from exc
-        log.warning("processor capture-time lookup failed (%s) -- using stub", exc)
-        return _stub_captured_at.get(idempotency_key)
-
-    if not body.get("approved"):
-        return None
-    # Named for what the processor calls it; absent on older stubs.
-    return body.get("captured_at") or body.get("created")
+    existing = lookup_authorization(idempotency_key)
+    return existing.captured_at if existing else None
 
 
-def authorize_charge(processor_token: str, amount: float, idempotency_key: str = None) -> str:
+def authorize_charge(processor_token: str, amount: float,
+                     idempotency_key: str = None) -> Authorization:
     """Confirm a real authorization for exactly `amount` before any payment
-    is marked captured or any balance is touched. Returns the processor's
-    authorization id on success.
+    is marked captured or any balance is touched.
+
+    Returns the `Authorization` the processor reported: its authorization id,
+    its own capture timestamp, and the settlement reference the file will carry.
+    Review fix -- this used to return the id ALONE, which is why the happy path
+    stamped `captured_at = now()` on a capture the processor may have taken on
+    the previous day, and why no captured row carried a reference reconciliation
+    could match against a settlement line.
 
     `idempotency_key` (Review fix) is forwarded to the real processor so it
     also dedupes on its end -- a repeat call with the same key returns the
@@ -233,4 +307,15 @@ def authorize_charge(processor_token: str, amount: float, idempotency_key: str =
 
     if not body.get("approved"):
         raise ChargeDeclinedError(f"processor declined: {body.get('reason', 'no reason given')}")
-    return body["authorization_id"]
+    auth = _authorization_from_body(body)
+    if auth.processor_ref is None:
+        # Not fatal -- the money has moved and the row must record that. Logged
+        # at ERROR because it is an operator-actionable configuration gap: every
+        # capture without a reference is a break reconciliation will report and
+        # nobody can attribute, so it costs an investigation per payment.
+        log.error(
+            "processor approved a charge without a settlement reference -- this "
+            "capture cannot be matched to a settlement line and reconciliation "
+            "will report it as unreferenced"
+        )
+    return auth

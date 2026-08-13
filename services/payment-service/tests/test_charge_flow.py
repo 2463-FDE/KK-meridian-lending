@@ -99,20 +99,19 @@ class _FakeDb:
             return [self._by_key[idempotency_key]]
         if stmt.startswith("UPDATE"):
             if "auth_status = 'captured'" in stmt:
-                # Review fix: auth_status and authorization_id are written in
-                # the same UPDATE. The recovery path also carries the
-                # processor's own capture time (db/migrations/0040), so that
-                # statement has three parameters and the fresh-capture one has
-                # two -- distinguished by the SQL, not by the count, so a
-                # future third form cannot be silently mis-parsed here.
-                if "COALESCE" in stmt:
-                    auth_id, captured_at, payment_id = params
-                else:
-                    auth_id, payment_id = params
-                    captured_at = None
+                # Review fix: auth_status, authorization_id, the processor's own
+                # capture time (db/migrations/0040) and its settlement reference
+                # (db/migrations/0041) are all written in ONE UPDATE. Both
+                # capture paths -- first attempt and recovered pending row --
+                # now use the same four-parameter form, because the first
+                # attempt was the one still stamping now() and storing no
+                # reference. Unpacked strictly: a path that dropped a column
+                # would raise here rather than quietly storing a NULL.
+                auth_id, captured_at, processor_ref, payment_id = params
                 self._by_id[payment_id]["auth_status"] = "captured"
                 self._by_id[payment_id]["authorization_id"] = auth_id
                 self._by_id[payment_id]["captured_at"] = captured_at
+                self._by_id[payment_id]["processor_ref"] = processor_ref
             elif "auth_status = 'failed'" in stmt:
                 (payment_id,) = params
                 self._by_id[payment_id]["auth_status"] = "failed"
@@ -560,20 +559,26 @@ def test_retry_after_crash_before_auth_status_persists_reuses_existing_authoriza
     the process dies before auth_status/authorization_id are persisted
     (still 'pending' on record). A same-key retry must NOT call
     authorize_charge() again -- it must ask the processor for its own record
-    of the idempotency_key (get_authorization()) and reuse that."""
+    of the idempotency_key (lookup_authorization()) and reuse that."""
     authorize_calls = []
+    APPROVED = processor.Authorization(
+        authorization_id="auth_abc123",
+        captured_at="2026-08-08T23:58:00+00:00",
+        processor_ref="PR-100231",
+    )
 
     def _fake_authorize(token, amount, idempotency_key=None):
         authorize_calls.append((token, amount, idempotency_key))
-        return "auth_abc123"
+        return APPROVED
 
-    def _fake_get_authorization(idempotency_key):
+    def _fake_lookup(idempotency_key):
         # Mirrors a real processor's own idempotency-key store: it remembers
-        # the authorization from the first (crashed) attempt.
-        return "auth_abc123" if authorize_calls else None
+        # the authorization from the first (crashed) attempt, including the
+        # capture time and settlement reference it assigned then.
+        return APPROVED if authorize_calls else None
 
     monkeypatch.setattr(payments.processor, "authorize_charge", _fake_authorize)
-    monkeypatch.setattr(payments.processor, "get_authorization", _fake_get_authorization)
+    monkeypatch.setattr(payments.processor, "lookup_authorization", _fake_lookup)
 
     real_query = fake_db.query
 
@@ -602,7 +607,13 @@ def test_retry_after_crash_before_auth_status_persists_reuses_existing_authoriza
 
     assert result["status"] == "captured"
     assert len(authorize_calls) == 1  # never re-issued a charge on retry
-    assert fake_db._by_key["crash-before-persist"]["authorization_id"] == "auth_abc123"
+    recovered = fake_db._by_key["crash-before-persist"]
+    assert recovered["authorization_id"] == "auth_abc123"
+    # The recovered row inherits the reference the processor assigned on the
+    # ORIGINAL attempt, so it still matches the settlement line written that day
+    # (db/migrations/0041). A reference minted on the retry would match nothing.
+    assert recovered["processor_ref"] == "PR-100231"
+    assert recovered["captured_at"] == "2026-08-08T23:58:00+00:00"
 
 
 def test_authorize_charge_fails_closed_when_no_processor_is_configured(monkeypatch):
@@ -842,7 +853,7 @@ def test_a_charge_is_refused_when_servicing_will_not_accept_our_token(monkeypatc
     monkeypatch.setattr(payments_mod, "db", _Db())
     monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
     monkeypatch.setattr(payments_mod.processor, "authorize_charge",
-                        lambda *a, **k: authorized.append(a) or "auth_x")
+                        lambda *a, **k: authorized.append(a) or processor.Authorization("auth_x"))
 
     with pytest.raises(payments_mod.ServicingAuthUnavailable):
         payments_mod.charge(42, "tok_x", "1111", 10.0, "preflight-key-1")
@@ -956,9 +967,9 @@ def test_a_pending_retry_is_also_guarded(monkeypatch):
 
     monkeypatch.setattr(payments_mod, "db", _Db())
     monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
-    monkeypatch.setattr(payments_mod.processor, "get_authorization", lambda k: None)
+    monkeypatch.setattr(payments_mod.processor, "lookup_authorization", lambda k: None)
     monkeypatch.setattr(payments_mod.processor, "authorize_charge",
-                        lambda *a, **k: authorized.append(a) or "auth_x")
+                        lambda *a, **k: authorized.append(a) or processor.Authorization("auth_x"))
 
     with pytest.raises(payments_mod.ServicingAuthUnavailable):
         payments_mod.charge(42, "tok_x", "1111", 10.0, "retry-key-1")
@@ -1060,7 +1071,7 @@ def test_the_route_returns_503_and_never_charges_when_servicing_is_unreachable(m
     monkeypatch.setattr(payments_mod.httpx, "get", _boom)          # servicing unreachable
     monkeypatch.setattr(payments_mod, "db", _Db())
     monkeypatch.setattr(payments_mod.processor, "authorize_charge",
-                        lambda *a, **k: authorized.append(a) or "auth_x")
+                        lambda *a, **k: authorized.append(a) or processor.Authorization("auth_x"))
 
     resp = TestClient(app).post("/payments", json={
         "loan_id": 42, "processor_token": "tok_x", "last4": "1111", "brand": "visa",

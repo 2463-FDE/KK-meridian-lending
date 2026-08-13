@@ -62,10 +62,21 @@ key retry then called authorize_charge() again with no way to know that.
 Two things close this: (1) `authorization_id` (db/migrations/0019) is now
 persisted in the SAME UPDATE statement that flips auth_status to
 'captured' -- one atomic write, not two; (2) a pending retry calls
-`processor.get_authorization()` FIRST to ask the processor whether it
+`processor.lookup_authorization()` FIRST to ask the processor whether it
 already has a record of this idempotency_key, and only calls
 `authorize_charge()` (now itself passed the idempotency_key, so the
 processor also dedupes on its end) if the processor genuinely has none.
+
+Review fix (reconciliation, D7): the capture UPDATE now also persists
+`processor_ref` -- the processor's OWN settlement reference for the capture
+(db/migrations/0041) -- and takes `captured_at` from the processor rather than
+from `now()` on BOTH capture paths, not only on the recovered one. Without the
+reference, reconciliation had no join key to the settlement file and could
+compare nothing finer than a net total per loan, which let two offsetting
+defects on one loan cancel out and report a clean run. Without the processor's
+timestamp on the first-attempt path, a capture that straddled midnight was
+scoped to the wrong reconciliation day and manufactured the false breaks that
+teach an operator to stop reading them.
 """
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
@@ -246,7 +257,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # touches the loan balance at all.
         _require_servicing_auth(row["loan_id"])
         try:
-            auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
+            auth = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
         except ChargeDeclinedError as exc:
             db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
             log.warning("charge declined payment_id=%s: %s", payment_id, exc)
@@ -265,8 +276,30 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # authorization that crosses midnight lands the capture in
                 # the previous day's window and reports a false break
                 # (db/migrations/0040).
-                "captured_at = now() WHERE id = %s",
-            (auth_id, payment_id),
+                #
+                # Review fix: this said `now()` unconditionally, because
+                # authorize_charge() returned only the authorization id and
+                # discarded the processor's own timestamp. So the fix landed for
+                # recovered pending rows and not for the FIRST attempt -- the
+                # path almost every capture takes. A charge whose processor
+                # confirmation and this UPDATE straddle midnight (a slow
+                # authorization, a clock skew between us and the processor) was
+                # scoped to the wrong reconciliation day and produced exactly the
+                # false break 0040 exists to prevent.
+                #
+                # COALESCE, not a bare value: a processor that reports no
+                # timestamp leaves our clock as the best available estimate,
+                # which is the previous behaviour -- now a fallback rather than
+                # the rule.
+                "captured_at = COALESCE(%s::timestamptz, now()), "
+                # The processor's own settlement reference (db/migrations/0041).
+                # Written here and nowhere else, in the same statement as the
+                # status, so a captured row cannot exist without whatever join
+                # key the processor gave us for it. NULL when the processor
+                # reports none -- reconciliation then reports the row as an
+                # unreferenced_capture break rather than skipping it.
+                "processor_ref = %s WHERE id = %s",
+            (auth.authorization_id, auth.captured_at, auth.processor_ref, payment_id),
         )
         applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
     else:
@@ -309,14 +342,20 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 "still pending authorization, checking processor before retrying",
                 safe_key, payment_id,
             )
-            existing_auth_id = processor.get_authorization(idempotency_key)
-            if existing_auth_id:
+            # ONE lookup for all three facts this branch needs -- that the
+            # processor holds the charge, when it took the money, and which
+            # settlement reference it will appear under. Three separate calls
+            # would be three round trips to a payment processor on the path an
+            # incident actually exercises, and three chances for the answers to
+            # disagree with each other.
+            existing = processor.lookup_authorization(idempotency_key)
+            if existing:
                 log.info(
                     "processor already has an authorization on record for "
                     "idempotency_key=%s -> payment_id=%s, reusing it instead of "
                     "re-charging", safe_key, payment_id,
                 )
-                auth_id = existing_auth_id
+                auth_id = existing.authorization_id
                 # The PROCESSOR's capture time, not ours.
                 #
                 # The money was taken when the processor took it -- possibly
@@ -330,7 +369,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # None when the processor reports no timestamp, and the SQL
                 # below then falls back to now() -- the previous behaviour and
                 # the best estimate available, but a fallback, not the default.
-                captured_at = processor.get_authorization_captured_at(idempotency_key)
+                captured_at = existing.captured_at
+                processor_ref = existing.processor_ref
             else:
                 # This retry's own processor_token since the token itself is
                 # never persisted (ADR 0008); idempotency_key is passed along
@@ -344,7 +384,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # again once the token skew is fixed, and no card was charged.
                 _require_servicing_auth(row["loan_id"])
                 try:
-                    auth_id = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
+                    auth = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
                 except ChargeDeclinedError as exc:
                     db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
                     log.warning("charge declined on retry payment_id=%s: %s", payment_id, exc)
@@ -352,15 +392,23 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                         "payment_id": payment_id, "loan_id": row["loan_id"],
                         "status": "failed", "applied_amount": float(row["amount"]),
                     }
-                # This branch charged just now, so our clock IS the capture time.
-                captured_at = None
+                auth_id = auth.authorization_id
+                # This branch charged just now, so unless the processor reports
+                # its own timestamp our clock IS the capture time.
+                captured_at = auth.captured_at
+                processor_ref = auth.processor_ref
             db.query(
                 "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
                 # captured_at travels with auth_status, never separately
                 # (db/migrations/0040). COALESCE so a recovered capture keeps
                 # the processor's own timestamp and a fresh one uses ours.
-                "captured_at = COALESCE(%s::timestamptz, now()) WHERE id = %s",
-                (auth_id, captured_at, payment_id),
+                "captured_at = COALESCE(%s::timestamptz, now()), "
+                # The settlement reference, from whichever branch above ran
+                # (db/migrations/0041). A recovered capture inherits the
+                # reference the processor already assigned it, so the row still
+                # matches the settlement line written on the original day.
+                "processor_ref = %s WHERE id = %s",
+                (auth_id, captured_at, processor_ref, payment_id),
             )
 
         if row["applied_at"] is None:

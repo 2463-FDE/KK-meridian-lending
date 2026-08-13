@@ -92,8 +92,9 @@ orchestrates the LOS flow and calls them over HTTP.
 
 ## Reconciliation (D7)
 
-Compares captured payments against the processor's settlement file, per loan, and
-fails when they disagree.
+Compares captured payments against the processor's settlement file **transaction
+by transaction**, keyed on the processor's own settlement reference, and fails when
+they disagree.
 
 ```bash
 # One run, from the servicing container. Exit code is the contract.
@@ -169,9 +170,12 @@ be written -- at the start or at the end -- it exits non-zero and never reports
 `ok`. A control whose output is not recorded is a log line, and "when did this
 last agree?" must not be answerable by a run that left no trace.
 
-**What it reports.** Every run writes a `reconciliation_runs` row -- counts, signed
-per-loan totals, the threshold it was judged against, and on failure the exception
-TYPE only. `GET /reconciliation/peek` returns the two totals plus
+**What it reports.** Every run writes a `reconciliation_runs` row -- counts (loans
+compared, references compared, unreferenced captures), signed per-reference totals,
+the threshold it was judged against, and on failure the exception TYPE only. Each
+break names the transaction (`processor_ref`) and its direction (`settlement_only`,
+`ledger_only`, `amount_mismatch`, `unreferenced_capture`), so it can be
+investigated rather than re-derived. `GET /reconciliation/peek` returns the two totals plus
 `last_successful_run` and `recent_failures`, so "when did this last agree?" has an
 answer. Prometheus gauges on the existing `/metrics`:
 
@@ -203,13 +207,20 @@ service and evaluated every 30s; the rules are visible at
 
   Wiring an Alertmanager is a deployment decision -- where pages go, who is on
   call, what the escalation path is -- and is not one this repository can make.
-- **No per-transaction matching.** The settlement file identifies a capture by the
-  processor's `processor_ref`; `payments.authorization_id` is a different
-  identifier from our own authorization call, and no payment row carries a `PR-`
-  reference. So a break is detected but **not attributed** -- "loan 4471 disagrees
-  by 99.99", not which capture caused it. Fixing that means persisting
-  `processor_ref` at capture time in payment-service, and it is the next piece of
-  work here.
+- **Captures written before migration 0041 cannot be matched.** `processor_ref` is
+  persisted on every capture from that migration onward, but there was nothing to
+  back-fill historical rows FROM -- `authorization_id` is minted by our own
+  authorization call and appears in no settlement file. Such a row is reported as
+  an `unreferenced_capture` break: money we recorded that no settlement line can
+  corroborate. It is deliberately **not** skipped, because skipping it would
+  understate our own side of the comparison. Expect these on the days legacy
+  captures fall in; they are finite and self-clearing as the window moves.
+- **A settlement file with no `processor_ref` column cannot be reconciled at all.**
+  The run records `UnreferencedSettlementRows` and exits non-zero rather than
+  falling back to comparing per-loan totals. That fallback is the defect this
+  control was fixed out of -- two wrong transactions on one loan cancel and the run
+  reports `ok` -- and reintroducing it silently, on a file already known to be
+  malformed, is the worst moment to do it.
 
 ## Known operational pain (unresolved)
 
