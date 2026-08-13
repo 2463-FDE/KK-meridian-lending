@@ -90,6 +90,154 @@ orchestrates the LOS flow and calls them over HTTP.
 - **Look at the portfolio:** `GET /lss/loans?limit=25&offset=0&status=current` (requires auth).
 - **Reconciliation eyeball:** `GET /lss/reconciliation/peek` (ledger vs settlement totals).
 
+## Reconciliation (D7)
+
+Compares captured payments against the processor's settlement file **transaction
+by transaction**, keyed on the processor's own settlement reference, and fails when
+they disagree.
+
+```bash
+# One run, from the servicing container. Exit code is the contract.
+docker compose exec servicing-service python -m app.reconcile_job
+#   0  clean          -- ran, everything within threshold
+#   1  breach         -- ran, breaks exceeded the threshold   (a money finding)
+#   2  could not run  -- settlement file missing, database down (a control finding)
+```
+
+### It is scheduled by this repository
+
+`docker compose up` starts a **`reconciliation`** service that runs the job on a
+schedule. It is in the default services list, not behind a profile:
+
+```bash
+docker compose up -d                 # the scheduler starts with everything else
+docker compose logs -f reconciliation
+```
+
+This used to be a command plus a paragraph telling you to wire cron yourself. A
+normal deployment therefore kept answering `/health` while reconciliation never
+ran once -- which is the failure D7 names. A control an operator has to remember
+to enable is the same defect with an extra step, so it is on by default.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RECONCILE_INTERVAL_SECONDS` | `86400` | Seconds between runs. Lower it in a demo to watch it work. |
+| `restart: unless-stopped` | — | The job exits non-zero on a breach or a control failure; the scheduler must survive that. An exit code is a finding to read, not a reason to stop reconciling. |
+
+The scheduler decides only **when**. Whether a run was good is decided in
+`reconciliation.run_and_record`, recorded in `reconciliation_runs`, and published
+through the metrics below -- so a bug in the scheduler cannot manufacture a
+success. It stops promptly on `SIGTERM` rather than sleeping through a shutdown.
+
+**It runs as a separate process, not inside the API.** An in-process scheduler
+dies with its web worker and nothing reports that it stopped.
+
+### A run that compared nothing is an error, not a success
+
+`within_threshold` used to be `break_value <= threshold` and nothing else. An
+empty settlement file, a file with no usable `settlement_date`, or one whose
+loans match nothing on the ledger all produce zero breaks -- because nothing was
+compared -- so the run recorded `ok`, stamped `last_successful_run`, and
+published a fresh success timestamp. A broken feed became indistinguishable from
+a clean reconciliation, and the staleness alarm below went quiet in exactly the
+way that means "healthy".
+
+Each of these now records `outcome='error'`, leaves the last-success timestamp
+untouched, and exits `2`:
+
+| `error_code` | Cause | Who fixes it |
+|---|---|---|
+| `EmptySettlementFile` | Zero rows read | Whoever owns the feed |
+| `IncompleteSettlementWindow` | No usable `settlement_date`, so the period is unknown | Whoever owns the file format |
+| `NothingCompared` | Rows present, but no loan on either side | Scope or identifier mismatch |
+
+Tune with `RECONCILIATION_BREAK_THRESHOLD` (default `0`). An unparseable or
+negative value falls back to `0` rather than to permissive.
+
+**Both sides are scoped to the same window.** The period comes from the settlement
+file's own `settlement_date` values -- a daily file yields one day, a back-filled
+file yields the range it covers -- and the ledger side is filtered to the same
+dates on `payments.created_at`. Without that, one day's settlement is compared
+against every payment ever recorded and almost every loan looks like a break; a
+control that flags nearly everything reports nothing, because nobody can read it.
+
+The window and the file's identity (name, row count, sha256 prefix) are recorded
+on the run, so a result can be attributed to a period and a file. "0 breaks" over
+an unknown window from an unknown file is not evidence.
+
+**The job fails closed when it cannot leave evidence.** If the run record cannot
+be written -- at the start or at the end -- it exits non-zero and never reports
+`ok`. A control whose output is not recorded is a log line, and "when did this
+last agree?" must not be answerable by a run that left no trace.
+
+**What it reports.** Every run writes a `reconciliation_runs` row -- counts (loans
+compared, references compared, unreferenced captures), signed per-reference totals,
+the threshold it was judged against, and on failure the exception TYPE only. Each
+break names the transaction (`processor_ref`) and its direction (`settlement_only`,
+`ledger_only`, `amount_mismatch`, `unreferenced_capture`), so it can be
+investigated rather than re-derived. `GET /reconciliation/peek` returns the two totals plus
+`last_successful_run` and `recent_failures`, so "when did this last agree?" has an
+answer. Prometheus gauges on the existing `/metrics`:
+
+- `servicing_reconciliation_breaks`
+- `servicing_reconciliation_break_value`
+- `servicing_reconciliation_last_run_ok`
+- `servicing_reconciliation_last_success_timestamp` -- the one the rules below
+  watch. A run that stops happening produces no failures at all, so staleness is
+  the signal.
+
+**Alert rules are wired.** `monitoring/alerts.yml` is loaded by the `prometheus`
+service and evaluated every 30s; the rules are visible at
+<http://localhost:9090/alerts>.
+
+| Alert | Fires when |
+|---|---|
+| `ReconciliationStale` | No successful run for over 26h (the daily schedule plus jitter) |
+| `ReconciliationMetricMissing` | The metric is absent entirely -- the service is down, or reconciliation has never succeeded. A separate rule because `ReconciliationStale` cannot fire on a series that does not exist, which would make the loudest failure the quietest |
+| `ReconciliationBreach` | The most recent run was not clean, including a run that compared nothing |
+
+**What it does NOT do, and do not plan around otherwise.**
+
+- **Alert rules fire; nothing is routed.** The rules above are genuinely
+  evaluated by Prometheus and reach `firing`. There is **no Alertmanager** in this
+  compose file, so nothing pages anyone, emails anyone or opens a ticket -- a
+  firing alert has to be looked at on the Prometheus UI. Describing that as
+  "alerting" would be the overclaim this work exists to remove, so `alerts.yml`
+  says the same thing in its own header.
+
+  Wiring an Alertmanager is a deployment decision -- where pages go, who is on
+  call, what the escalation path is -- and is not one this repository can make.
+- **Only processor-backed captures are compared.** `payments` has a second live
+  writer -- servicing-service's legacy `POST /payments` -- which calls no
+  processor, so no settlement file can contain a line for it. Those rows are
+  labelled `capture_source = 'servicing_legacy'` (migration `0042`), excluded
+  from the comparison and **counted** on the run as `out_of_scope_captures`, so
+  the narrowing is visible. Rows written before `0042` whose provenance cannot be
+  established are `'unknown'` and treated the same way. That the legacy route
+  moves a balance with no processor behind it at all is D2, and this control does
+  not close it.
+- **A settlement row whose type is not `capture` or `refund`, whose amount is not
+  a positive number, or whose amount carries sub-cent precision, fails the run**
+  (`MalformedSettlementRows`). The sign comes from the type; a parser that
+  guessed at a row it could not read would turn a feed-integrity problem into a
+  money finding. And every amount is compared against `payments.amount`, which is
+  `NUMERIC(14,2)` -- a row of `10.004` would round into a clean match against a
+  `10.00` capture and report agreement on money this system cannot hold.
+- **Captures written before migration 0041 cannot be matched.** `processor_ref` is
+  persisted on every capture from that migration onward, but there was nothing to
+  back-fill historical rows FROM -- `authorization_id` is minted by our own
+  authorization call and appears in no settlement file. Such a row is reported as
+  an `unreferenced_capture` break: money we recorded that no settlement line can
+  corroborate. It is deliberately **not** skipped, because skipping it would
+  understate our own side of the comparison. Expect these on the days legacy
+  captures fall in; they are finite and self-clearing as the window moves.
+- **A settlement file with no `processor_ref` column cannot be reconciled at all.**
+  The run records `UnreferencedSettlementRows` and exits non-zero rather than
+  falling back to comparing per-loan totals. That fallback is the defect this
+  control was fixed out of -- two wrong transactions on one loan cancel and the run
+  reports `ok` -- and reintroducing it silently, on a file already known to be
+  malformed, is the worst moment to do it.
+
 ## Known operational pain (unresolved)
 
 - **Payment retries — FIXED, keep watching.** The processor occasionally times out and

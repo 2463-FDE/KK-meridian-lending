@@ -1,0 +1,81 @@
+# Alerting rules for the reconciliation control (D7).
+#
+# What these ARE: Prometheus rules, loaded by the prometheus service in
+# docker-compose.yml and evaluated on every cycle. They move to `pending` and
+# then `firing`, and are visible at http://localhost:9090/alerts.
+#
+# What these are NOT: notifications. There is no Alertmanager in this compose
+# file, so nothing pages anyone, emails anyone or opens a ticket. A firing alert
+# has to be looked at. Saying otherwise would be the exact defect this control
+# was written to close -- a true-sounding claim with nothing behind it -- so the
+# runbook says the same thing in the same words.
+#
+# Wiring an Alertmanager is a deployment decision (where do pages go, who is on
+# call, what is the escalation path) and is not one this repository can make.
+
+groups:
+  - name: reconciliation
+    interval: 30s
+    rules:
+      # The control stopped running at all.
+      #
+      # This is D7's original failure mode: reconciliation that silently is not
+      # running looks exactly like reconciliation that is running and finding
+      # nothing. The API keeps answering /health either way, so nothing else
+      # notices.
+      #
+      # 26h rather than 24h because the scheduler runs daily -- a threshold
+      # equal to the period fires on ordinary jitter and teaches operators to
+      # ignore it.
+      - alert: ReconciliationStale
+        expr: >
+          time() - servicing_reconciliation_last_success_timestamp > 26 * 3600
+        for: 15m
+        labels:
+          severity: critical
+          control: D7
+        annotations:
+          summary: "Reconciliation has not succeeded in over 26 hours"
+          description: >
+            servicing_reconciliation_last_success_timestamp is
+            {{ $value | humanizeDuration }} old. Either the scheduler is not
+            running, or every run since then failed. Both mean the ledger and
+            the processor are no longer being compared.
+          runbook: docs/runbook.md
+
+      # The metric is absent entirely.
+      #
+      # A separate rule because absence and staleness are different faults with
+      # the same consequence: `ReconciliationStale` cannot fire on a series that
+      # does not exist, so without this the loudest failure would be the
+      # quietest. A reconciliation that has NEVER succeeded has no timestamp at
+      # all.
+      - alert: ReconciliationMetricMissing
+        expr: absent(servicing_reconciliation_last_success_timestamp)
+        for: 15m
+        labels:
+          severity: critical
+          control: D7
+        annotations:
+          summary: "The reconciliation success metric is not being reported"
+          description: >
+            servicing-service is not exposing
+            servicing_reconciliation_last_success_timestamp. Either the service
+            is down, or reconciliation has never recorded a successful run.
+          runbook: docs/runbook.md
+
+      # The comparison ran and found a real difference.
+      - alert: ReconciliationBreach
+        expr: servicing_reconciliation_last_run_ok == 0
+        for: 5m
+        labels:
+          severity: warning
+          control: D7
+        annotations:
+          summary: "The most recent reconciliation run was not clean"
+          description: >
+            The last run recorded a breach or an error. An error includes a run
+            that compared nothing -- an empty settlement file, an unusable
+            settlement window, or no matching loans -- which is a finding about
+            the control, not about the money.
+          runbook: docs/runbook.md

@@ -10,7 +10,7 @@ What this migration is responsible for -- the binding invariants from ADR 0010:
 
   1. entries are immutable
   2. an entry is a signed delta, never a total
-  3. `balances` is written by the projection and nothing else
+  3. projection writes `balances`; transitional direct writers are delta-captured
   4. the sign is keyed to what the borrower owes
   5. a human-directed entry names the human
   7. exactly one entry per (payment_id, component)
@@ -20,6 +20,9 @@ running the migration twice must not double anything.
 """
 import os
 import pathlib
+import threading
+import time
+import uuid
 
 import psycopg2
 import psycopg2.extras
@@ -241,7 +244,6 @@ def test_an_entry_cannot_be_changed_or_removed(db, statement):
 @pytest.mark.parametrize("entry_type, amount", [
     ("payment", 10.00),          # a payment that increases what is owed
     ("fee_assessed", -10.00),    # a fee that reduces it
-    ("opening_balance", -10.00),
     ("disbursement", -10.00),
     ("fee_waived", 10.00),
 ])
@@ -334,7 +336,7 @@ def test_one_payment_may_span_components(db):
 
 # --- the write-guard ships disabled -----------------------------------------
 
-def test_the_guard_function_exists_but_is_not_attached(db):
+def test_the_guard_function_exists_but_only_the_capture_bridge_is_attached(db):
     """Step 5 enables it. Attaching it now would turn every existing writer into
     an exception before any of them has been converted."""
     fn = _exec(db, "SELECT count(*) AS n FROM pg_proc p JOIN pg_namespace n "
@@ -346,19 +348,138 @@ def test_the_guard_function_exists_but_is_not_attached(db):
                     "ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
                     "WHERE c.relname = 'balances' AND NOT t.tgisinternal "
                     "AND n.nspname = %s", (SCHEMA,))
-    assert trg[0]["n"] == 0, (
-        "a trigger is already attached to balances -- every unconverted writer "
-        "would start raising"
+    assert trg[0]["n"] == 1, (
+        "balances must have exactly the transitional delta-capture trigger; the "
+        "step-5 rejecting guard remains disabled until writers are converted"
     )
 
 
-def test_direct_writes_to_balances_still_work_at_this_step(db):
-    """Deliberate. This migration changes no behaviour; step 3 converts the
-    writers and step 5 forbids the direct path. Asserting it here means a future
-    change that enables the guard early fails loudly rather than in production."""
+def test_direct_writes_still_work_and_gain_an_immutable_delta(db):
+    """Compatibility bridge: old application versions keep working, but no
+    committed direct delta is absent from the ledger after the snapshot."""
     loan = _a_loan(db)
-    _exec(db, "UPDATE balances SET balance = balance WHERE loan_id = %s", (loan,))
+    before = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id=%s "
+                       "AND entry_type='legacy_direct_write'", (loan,))[0]["n"]
+    _exec(db, "UPDATE balances SET balance = balance - 7 WHERE loan_id = %s", (loan,))
     db.commit()
+    rows = _exec(db, "SELECT amount, component FROM ledger_entries WHERE loan_id=%s "
+                     "AND entry_type='legacy_direct_write' ORDER BY id DESC LIMIT 1", (loan,))
+    assert len(rows) == 1 and rows[0]["amount"] == -7
+    assert rows[0]["component"] == "principal"
+    after = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id=%s "
+                      "AND entry_type='legacy_direct_write'", (loan,))[0]["n"]
+    assert after == before + 1
+
+
+def _migration_without_transaction_wrappers():
+    sql = MIGRATION.read_text(encoding="utf-8").replace("BEGIN;", "", 1)
+    return "".join(sql.rsplit("COMMIT;", 1))
+
+
+def test_a_payment_racing_the_backfill_is_captured_once_and_converges():
+    """Pause the exact migration after it has installed the bridge and locked
+    balances, start the legacy production-shaped payment transaction, then
+    finish and commit the migration. The payment must wait, resume through the
+    newly visible trigger, and leave parity rather than a missed snapshot delta."""
+    schema = f"ledger_race_{uuid.uuid4().hex[:10]}"
+    migrator = psycopg2.connect(DATABASE_URL)
+    writer = psycopg2.connect(DATABASE_URL)
+    check = psycopg2.connect(DATABASE_URL)
+    try:
+        migrator.autocommit = False
+        with migrator.cursor() as cur:
+            cur.execute(f"CREATE SCHEMA {schema}")
+        migrator.commit()
+        for name in INIT_FILES[:-1]:
+            with migrator.cursor() as cur:
+                cur.execute(f"SET search_path TO {schema}")
+                cur.execute((INIT / name).read_text(encoding="utf-8"))
+            migrator.commit()
+
+        with migrator.cursor() as cur:
+            cur.execute(f"SET search_path TO {schema}")
+            cur.execute("SELECT loan_id, balance FROM balances ORDER BY loan_id LIMIT 1")
+            loan, opening = cur.fetchone()
+        migrator.commit()
+
+        sql = _migration_without_transaction_wrappers()
+        marker = "-- --------------------------------------------------------------------------\n-- Back-fill:"
+        prefix, suffix = sql.split(marker, 1)
+        with migrator.cursor() as cur:
+            cur.execute(f"SET search_path TO {schema}")
+            cur.execute(prefix)
+
+        outcome = []
+        def pay():
+            try:
+                with writer.cursor() as cur:
+                    cur.execute(f"SET search_path TO {schema}")
+                    cur.execute("INSERT INTO payments (loan_id, amount) VALUES (%s, 10) RETURNING id", (loan,))
+                    payment_id = cur.fetchone()[0]
+                    cur.execute("INSERT INTO payment_applications(payment_id,loan_id,amount) VALUES (%s,%s,10)",
+                                (payment_id, loan))
+                    cur.execute("UPDATE balances SET balance=balance-10 WHERE loan_id=%s", (loan,))
+                writer.commit()
+                outcome.append("committed")
+            except Exception as exc:  # surfaced in the assertion below
+                writer.rollback()
+                outcome.append(exc)
+
+        thread = threading.Thread(target=pay)
+        thread.start()
+        time.sleep(0.25)
+        assert thread.is_alive(), "the payment did not block behind the migration cutover lock"
+
+        with migrator.cursor() as cur:
+            cur.execute(marker + suffix)
+        migrator.commit()
+        thread.join(timeout=10)
+        assert outcome == ["committed"]
+
+        with check.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SET search_path TO {schema}")
+            cur.execute("SELECT balance FROM balances WHERE loan_id=%s", (loan,))
+            assert cur.fetchone()["balance"] == opening - 10
+            cur.execute("SELECT amount FROM ledger_entries WHERE loan_id=%s "
+                        "AND entry_type='legacy_direct_write'", (loan,))
+            assert [r["amount"] for r in cur.fetchall()] == [-10]
+            cur.execute("SELECT COALESCE(SUM(amount),0) AS total FROM ledger_entries "
+                        "WHERE loan_id=%s AND component='principal'", (loan,))
+            assert cur.fetchone()["total"] == opening - 10
+
+        with check.cursor() as cur:
+            cur.execute(f"SET search_path TO {schema}")
+            cur.execute(_migration_without_transaction_wrappers())
+            cur.execute("SELECT count(*) FROM ledger_entries WHERE loan_id=%s "
+                        "AND entry_type='legacy_direct_write'", (loan,))
+            assert cur.fetchone()[0] == 1, "migration replay duplicated the captured delta"
+        check.commit()
+    finally:
+        for conn in (writer, check, migrator):
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        try:
+            migrator.autocommit = True
+            with migrator.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        finally:
+            writer.close(); check.close(); migrator.close()
+
+
+def test_negative_legacy_state_can_be_opened_without_inventing_history(db):
+    loan = _exec(db, "INSERT INTO loans(app_id,principal,apr,term_months,status) "
+                     "VALUES(NULL,100,10,12,'current') RETURNING id")[0]["id"]
+    _exec(db, "INSERT INTO balances(loan_id,balance,past_due) VALUES(%s,-25,-3)", (loan,))
+    _exec(db, "SELECT set_config('meridian.suppress_projection','on',true)")
+    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,reason) "
+              "VALUES(%s,'principal',-25,'opening_balance','legacy state'),"
+              "(%s,'fees',-3,'opening_balance','legacy state')", (loan, loan))
+    _exec(db, "SELECT set_config('meridian.suppress_projection','off',true)")
+    db.commit()
+    assert _exec(db, "SELECT COALESCE(SUM(amount),0) AS n FROM ledger_entries "
+                     "WHERE loan_id=%s", (loan,))[0]["n"] == -28
 
 
 # --- the projection must actually project -----------------------------------

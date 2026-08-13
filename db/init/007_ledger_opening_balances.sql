@@ -15,6 +15,7 @@ DECLARE
     skipped  INTEGER;
     zero_bal INTEGER;
 BEGIN
+    LOCK TABLE balances IN SHARE ROW EXCLUSIVE MODE;
     PERFORM set_config('meridian.suppress_projection', 'on', true);
 
     INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
@@ -44,6 +45,17 @@ BEGIN
     SELECT count(*) INTO zero_bal FROM balances WHERE balance = 0;
 
     PERFORM set_config('meridian.suppress_projection', 'off', true);
+
+    IF EXISTS (
+        SELECT 1
+          FROM balances b
+          LEFT JOIN ledger_entries le ON le.loan_id = b.loan_id
+         GROUP BY b.loan_id, b.balance, b.past_due
+        HAVING b.balance <> COALESCE(SUM(le.amount) FILTER (WHERE le.component = 'principal'), 0)
+            OR COALESCE(b.past_due, 0) <> COALESCE(SUM(le.amount) FILTER (WHERE le.component = 'fees'), 0)
+    ) THEN
+        RAISE EXCEPTION '007 ledger opening-balance parity validation failed';
+    END IF;
 
     -- A migration that silently seeds nothing looks identical to one that seeded
     -- everything, so both counts are reported.

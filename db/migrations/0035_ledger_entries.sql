@@ -1,13 +1,15 @@
 -- 0035 -- ADR 0010 step 2: the append-only ledger and its projection.
 --
--- Schema only. This migration does NOT move any writer onto the ledger -- that
--- is step 3 (PR E) -- and does NOT enable the guard that stops direct writes to
--- `balances` -- that is step 5. After this runs, the system behaves exactly as
--- it did before, plus a ledger that agrees with it.
+-- Expand/cutover schema. This migration does NOT move application writers onto
+-- the ledger -- that is step 3 (PR E) -- and does NOT enable the guard that
+-- rejects direct writes to `balances` -- that is step 5. It does install a
+-- compatibility capture trigger: old direct writers keep their API behaviour,
+-- but every committed delta is mirrored into the immutable ledger so the live
+-- backfill cannot be born correct and drift immediately after commit.
 --
 -- That is deliberate and it is the whole point of expand/contract on a money
--- table: the schema lands and can be reverted with nothing depending on it, and
--- the parity test proves the back-fill was right BEFORE any behaviour changes.
+-- table: the schema lands before writers are converted, and the parity test plus
+-- transitional capture bridge prove no committed balance movement is omitted.
 --
 -- Invariants this migration is responsible for (ADR 0010's binding list):
 --   1. entries are immutable                       -- ledger_entries_immutable
@@ -38,7 +40,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     -- and every query that means "real money movements" already filters on
     -- entry_type.
     entry_type   TEXT        NOT NULL CHECK (entry_type IN
-                   ('opening_balance','disbursement','payment',
+                   ('opening_balance','legacy_direct_write','disbursement','payment',
                     'fee_assessed','fee_waived','adjustment')),
     reason       TEXT,
 
@@ -163,7 +165,8 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
     OR (entry_type = 'fee_waived'      AND amount < 0)
     OR (entry_type = 'fee_assessed'    AND amount > 0)
     OR (entry_type = 'disbursement'    AND amount > 0)
-    OR (entry_type = 'opening_balance' AND amount > 0)
+    OR (entry_type = 'opening_balance' AND amount <> 0)
+    OR (entry_type = 'legacy_direct_write' AND amount <> 0)
     OR (entry_type = 'adjustment')
 );
 
@@ -176,7 +179,8 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
 -- 'opening_balance' is exempt because no one authored it.
 ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_actor_required;
 ALTER TABLE ledger_entries ADD CONSTRAINT ledger_actor_required CHECK (
-    entry_type IN ('disbursement','fee_assessed','payment','opening_balance')
+    entry_type IN ('disbursement','fee_assessed','payment','opening_balance',
+                   'legacy_direct_write')
     OR (actor_id IS NOT NULL AND actor_role IS NOT NULL)
 );
 
@@ -272,6 +276,56 @@ COMMENT ON FUNCTION balances_are_trigger_maintained() IS
     'with: CREATE TRIGGER balances_guard BEFORE UPDATE OR DELETE ON balances '
     'FOR EACH ROW EXECUTE FUNCTION balances_are_trigger_maintained();';
 
+-- Expand/cutover bridge. Existing application versions still UPDATE balances
+-- directly, so a lock held only for the snapshot would cease protecting parity
+-- the instant this transaction commits. Install the capture trigger in the SAME
+-- transaction as the backfill: a writer already in flight waits for our table
+-- lock, then sees this trigger when it resumes after commit. Every direct delta
+-- therefore has an immutable entry even before step 3 converts the writers.
+--
+-- This transitional type is intentionally honest about limited provenance. A
+-- database trigger can prove what changed and in which transaction; it cannot
+-- invent a payment id or human actor the legacy UPDATE did not carry.
+CREATE OR REPLACE FUNCTION capture_legacy_balance_delta() RETURNS trigger AS $$
+DECLARE
+    prior_suppression TEXT;
+BEGIN
+    IF current_setting('meridian.projecting', true) = 'on' THEN
+        RETURN NEW;
+    END IF;
+
+    prior_suppression := current_setting('meridian.suppress_projection', true);
+    PERFORM set_config('meridian.suppress_projection', 'on', true);
+
+    IF NEW.balance IS DISTINCT FROM OLD.balance THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'principal', NEW.balance - OLD.balance,
+                'legacy_direct_write',
+                'captured from a direct balances update during ledger cutover');
+    END IF;
+    IF NEW.past_due IS DISTINCT FROM OLD.past_due THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'fees', NEW.past_due - OLD.past_due,
+                'legacy_direct_write',
+                'captured from a direct balances update during ledger cutover');
+    END IF;
+
+    PERFORM set_config('meridian.suppress_projection',
+                       COALESCE(prior_suppression, 'off'), true);
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS balances_capture_legacy_delta ON balances;
+CREATE TRIGGER balances_capture_legacy_delta
+    AFTER UPDATE ON balances
+    FOR EACH ROW EXECUTE FUNCTION capture_legacy_balance_delta();
+
+-- Blocks every current UPDATE/INSERT/DELETE writer before the snapshot. The
+-- lock is held through parity validation and COMMIT. CREATE TRIGGER above takes
+-- a stronger lock on a first run; this explicit mode documents and preserves
+-- the cutover guarantee on idempotent replays too.
+LOCK TABLE balances IN SHARE ROW EXCLUSIVE MODE;
+
 -- --------------------------------------------------------------------------
 -- Back-fill: one opening_balance entry per loan, equal to that loan's current
 -- balance, WITH THE PROJECTION SUPPRESSED.
@@ -327,6 +381,30 @@ BEGIN
                  'opening balance; % loan(s) at zero were skipped (an entry of '
                  'amount 0 is not a movement and the CHECK forbids it)',
                  seeded, skipped, zero_bal;
+END $$;
+
+-- Do not publish a ledger born out of balance. This is per loan/component so
+-- equal and opposite errors on different borrowers cannot net to zero.
+DO $$
+DECLARE
+    mismatch RECORD;
+BEGIN
+    SELECT b.loan_id, b.balance, b.past_due,
+           COALESCE(SUM(le.amount) FILTER (WHERE le.component = 'principal'), 0) AS principal_ledger,
+           COALESCE(SUM(le.amount) FILTER (WHERE le.component = 'fees'), 0) AS fees_ledger
+      INTO mismatch
+      FROM balances b
+      LEFT JOIN ledger_entries le ON le.loan_id = b.loan_id
+     GROUP BY b.loan_id, b.balance, b.past_due
+    HAVING b.balance <> COALESCE(SUM(le.amount) FILTER (WHERE le.component = 'principal'), 0)
+        OR COALESCE(b.past_due, 0) <> COALESCE(SUM(le.amount) FILTER (WHERE le.component = 'fees'), 0)
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION '0035 parity failed for loan %: balance % vs ledger %, past_due % vs fees %',
+                        mismatch.loan_id, mismatch.balance, mismatch.principal_ledger,
+                        mismatch.past_due, mismatch.fees_ledger;
+    END IF;
 END $$;
 
 COMMENT ON TABLE ledger_entries IS
