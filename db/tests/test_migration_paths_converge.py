@@ -90,13 +90,34 @@ def conn():
 # --- helpers to compare shapes ------------------------------------------------
 
 def _columns(conn, schema, table):
+    """Column name -> (fully qualified type, nullability).
+
+    `format_type(atttypid, atttypmod)` rather than information_schema's
+    `data_type`, because that view reports both `NUMERIC(14,2)` and
+    unconstrained `NUMERIC` as plain "numeric" -- the precision and scale live
+    in `numeric_precision`/`numeric_scale`, which the old comparison never read.
+    Two schemas could therefore "converge" while one enforced money to the cent
+    and the other accepted arbitrary precision.
+
+    In a lending schema that typmod is the data-integrity contract, not
+    cosmetic metadata: it is what stops a rate or a balance being stored at a
+    precision the rest of the system does not expect. The same call also covers
+    `varchar(n)` length and timestamp precision, which had the same blind spot.
+    """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-            "WHERE table_schema = %s AND table_name = %s ORDER BY column_name",
+            "SELECT a.attname AS column_name, "
+            "       format_type(a.atttypid, a.atttypmod) AS full_type, "
+            "       CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable "
+            "  FROM pg_attribute a "
+            "  JOIN pg_class c ON c.oid = a.attrelid "
+            "  JOIN pg_namespace n ON n.oid = c.relnamespace "
+            " WHERE n.nspname = %s AND c.relname = %s "
+            "   AND a.attnum > 0 AND NOT a.attisdropped "
+            " ORDER BY a.attname",
             (schema, table),
         )
-        return {r["column_name"]: (r["data_type"], r["is_nullable"]) for r in cur.fetchall()}
+        return {r["column_name"]: (r["full_type"], r["is_nullable"]) for r in cur.fetchall()}
 
 
 def _unique_columns(conn, schema, table):
@@ -369,3 +390,29 @@ def test_the_four_previously_colliding_constraints_are_guarded(conn):
         assert column in _unique_columns(conn, schema, table), (
             f"{table}.{column} lost its uniqueness across the replay"
         )
+
+
+def test_the_column_comparison_actually_sees_numeric_precision(conn):
+    """Proof that the convergence assertions can fail on precision.
+
+    Every path test above passes, which is only meaningful if the comparison
+    could have failed. It could not before: information_schema reports both
+    NUMERIC(14,2) and unconstrained NUMERIC as "numeric", so a legacy upgrade
+    enforcing money to the cent and a fresh install accepting arbitrary
+    precision compared equal -- and in a lending schema that typmod is the
+    data-integrity contract.
+
+    Two tables, one difference, asserted visible.
+    """
+    schema = SCHEMAS["fresh"]
+    _run_sql(conn, schema, "CREATE TABLE precise_money (m NUMERIC(14,2));")
+    _run_sql(conn, schema, "CREATE TABLE loose_money (m NUMERIC);")
+
+    precise = _columns(conn, schema, "precise_money")
+    loose = _columns(conn, schema, "loose_money")
+
+    assert precise["m"] != loose["m"], (
+        f"NUMERIC(14,2) and NUMERIC compare equal ({precise['m']}), so the "
+        "convergence tests cannot detect a money-precision divergence"
+    )
+    assert "14,2" in precise["m"][0].replace(" ", "")
