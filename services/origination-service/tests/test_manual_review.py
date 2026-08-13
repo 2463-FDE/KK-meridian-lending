@@ -1,7 +1,8 @@
 """Tests for POST /applications/{app_id}/review (db/migrations/0018, 0020).
 
 Feature: a staff tool to resolve a "refer" decision (policies/underwriting_
-guidelines.md's manual-review band, score 600-659 or DTI 43-50%), or to
+guidelines.md's manual-review band, model score 600-659 -- the DTI half of
+that band was retired, see adr/0007), or to
 record staff's own approve/deny outright. Requirement: once staff decides,
 that decision is FINAL -- no staff member (not even a different one) may
 change it afterward, a reason is required up front, and two simultaneous
@@ -70,7 +71,13 @@ class _FakeReviewTxCursor:
     def execute(self, sql, params=None):
         self.calls.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("SELECT status FROM applications"):
+        if stmt.startswith("SELECT cip_passed FROM kyc_checks"):
+            # Round 10: the manual-review and boarding paths read the identity
+            # gate through this cursor. Passing by default so the tests here stay
+            # about what they are about; the gate's own refusals are covered in
+            # test_manual_review_requires_kyc.py.
+            self._last = [{"cip_passed": getattr(self, "cip_passed", True)}]
+        elif stmt.startswith("SELECT status FROM applications"):
             self._last = [{"status": self.locked_status}]
         elif stmt.startswith("SELECT outcome FROM decisions"):
             # Audit fix: review_application re-verifies current_outcome == 'refer'

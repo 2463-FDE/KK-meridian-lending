@@ -1,6 +1,6 @@
 # ADR 0007: Underwriting policy names DTI and fraud-flag cutoffs the code never implements
 
-- **Status:** Accepted
+- **Status:** Accepted. **Resolved 2026-08-12** — see *Resolution* below.
 - **Date:** 2026-07-15
 - **Author:** In-house team
 
@@ -107,3 +107,37 @@ rather than letting it stay implicit.
   without product/compliance input would repeat the exact mistake (an
   under-specified control shipped as if it were a real one) this ADR exists
   to stop happening again.
+
+## Resolution (2026-08-12)
+
+This ADR named the gap and deliberately did not choose between closing it in the
+code or in the policy, because that is a product and compliance call rather than
+an engineering one. **The owner chose to amend the policy.**
+
+`policies/underwriting_guidelines.md` now publishes only the cutoffs the system
+applies — model score ≥ 660 approve, 600–659 refer, < 600 deny — and the DTI and
+fraud-flag criteria are documented as **defined but not applied**, with what
+implementing them would require.
+
+**Why amending was the right call here, and it is not "the code wins".** The
+system collects gross income and nothing about existing debt, so every DTI it
+could compute today would be income-only — not a debt-to-income ratio at all. A
+fabricated ratio inside a Reg B denial reason is worse than a policy that
+overpromises: the first is a specific false statement to an applicant about why
+they were refused, the second is a document that needs correcting. Implementing
+DTI honestly starts with collecting the numerator, and that is scoped in the
+policy rather than guessed at here.
+
+**What this explicitly does not do:**
+
+- it does not change any lending outcome. No applicant is decided differently;
+- it does not close the underlying gap. Meridian still does not assess
+  debt-to-income or fraud, and a lender arguably should. What changed is that the
+  documents stop claiming otherwise;
+- it does not touch the `decision_events` overstatement described above. Those
+  rows still record `reason_codes` for a model with two inputs.
+
+`db/tests/test_policy_matches_implemented_cutoffs.py` now enforces the
+correspondence mechanically: a cutoff published in the policy that the code does
+not apply fails a test. That is what stops this particular drift recurring — the
+previous version of this ADR could only describe it.

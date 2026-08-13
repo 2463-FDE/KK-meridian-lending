@@ -27,6 +27,7 @@ confirmed them -- the FFIEC check is still outstanding -- so they pin the
 solver against change and are not evidence of correctness.
 """
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,12 @@ from app import schedule
 _GOLDEN = (
     Path(__file__).resolve().parents[3] / "db" / "golden" / "model_b_schedule_vectors.json"
 )
-_VECTORS = json.loads(_GOLDEN.read_text())["vectors"]
+# parse_float=Decimal (D1): the schedule rows are Decimal to the serializer
+# boundary now, and comparing them against JSON-parsed binary floats would fail
+# on values that are equal in cents -- Decimal("366.12") != 366.12 as a float.
+# Parsing the golden vectors as Decimal makes the comparison EXACT rather than
+# float-tolerant, which is stricter than what this test did before.
+_VECTORS = json.loads(_GOLDEN.read_text(), parse_float=Decimal)["vectors"]
 _NAMES = sorted(_VECTORS)
 
 

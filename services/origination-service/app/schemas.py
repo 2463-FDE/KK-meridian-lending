@@ -8,6 +8,16 @@ T = TypeVar("T")
 
 
 class ApplicationIn(BaseModel):
+    # Optional, and the reason it exists is retry safety rather than convenience.
+    # Intake commits the applicant and application rows BEFORE calling
+    # kyc-service, so a KYC failure used to leave the caller with a 503, no
+    # identifier, and "please retry" -- and a retry created a second applicant and
+    # a second application. One person, two borrower records.
+    #
+    # A retry carrying the same key resumes the first application instead. Nullable
+    # so existing callers are unaffected; the partial unique index in
+    # db/migrations/0036 only constrains rows that supply one.
+    idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=200)
     name: str = Field(min_length=1)
     dob: Optional[str] = None
     ssn: Optional[str] = None
@@ -71,6 +81,10 @@ class KycOut(BaseModel):
 
 
 class ApplicationCreated(BaseModel):
+    # Returned once, like access_token, and only the hash is stored. Required
+    # ALONGSIDE the idempotency key to recover an incomplete application: the key
+    # identifies which one, this authorises the caller. See db/migrations/0037.
+    resume_token: Optional[str] = None
     app_id: int
     status: str
     kyc: KycOut
@@ -122,8 +136,11 @@ class DecisionOut(BaseModel):
 
 class ReviewIn(BaseModel):
     # Feature: lets staff resolve a "refer" decision (policies/underwriting_
-    # guidelines.md's manual-review band, score 600-659 or DTI 43-50%) into a
-    # real approve/deny -- see routers/applications.py::review_application.
+    # guidelines.md's manual-review band, model score 600-659) into a real
+    # approve/deny -- see routers/applications.py::review_application.
+    #
+    # The DTI half of that band ("or DTI 43-50%") was retired from the policy,
+    # because nothing computes a DTI -- see adr/0007 Resolution.
     # Scoped to approve/deny only for now, no counteroffer.
     outcome: Literal["approve", "deny"]
     reason: str = Field(min_length=1, max_length=2000)

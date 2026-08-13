@@ -1,0 +1,21 @@
+{
+  "key": "deck-proof-1786388728539",
+  "first": {
+    "status": 200,
+    "body": {
+      "payment_id": 428,
+      "loan_id": 4471,
+      "status": "captured",
+      "applied_amount": 250
+    }
+  },
+  "second": {
+    "status": 200,
+    "body": {
+      "payment_id": 428,
+      "loan_id": 4471,
+      "status": "captured",
+      "applied_amount": 250
+    }
+  }
+}

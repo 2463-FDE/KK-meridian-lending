@@ -48,10 +48,16 @@ def amortization(principal: float, annual_rate_pct: float, term_months: int,
         rows.append({
             "n": n,
             "due_date": due.isoformat(),
-            "payment": float(payment),
-            "principal": float(principal_part),
-            "interest": float(interest),
-            "balance": float(max(balance, Decimal("0"))),
+            # Decimal, not float. D1: these rows were cast to binary float here
+            # and re-parsed by every caller, so a value that is exact in cents
+            # stopped being exact several statements before anything displayed
+            # it. The cast now happens once, at the serializer -- `ScheduleRow`
+            # declares these as float, so the wire format is unchanged and only
+            # the arithmetic in between is fixed.
+            "payment": payment,
+            "principal": principal_part,
+            "interest": interest,
+            "balance": max(balance, Decimal("0")),
         })
     return rows
 
@@ -95,13 +101,17 @@ def amortization_from_contract(principal, annual_rate_pct, term_months: int,
         rows.append({
             "n": n,
             "due_date": due.isoformat(),
-            "payment": float(payment),
-            "principal": float(principal_part),
-            "interest": float(interest),
+            # Decimal to the serializer boundary (D1). This is the REDISPLAY
+            # path: these amounts are read back from a disclosure the borrower
+            # has already been shown, so a cent that moves here is a cent the
+            # contract does not say.
+            "payment": payment,
+            "principal": principal_part,
+            "interest": interest,
             # Not clamped to zero. If the stored amounts do not amortize the
             # stored principal, that is a real inconsistency and hiding it here
             # would defeat the point of storing them.
-            "balance": float(balance),
+            "balance": balance,
         })
     return rows
 

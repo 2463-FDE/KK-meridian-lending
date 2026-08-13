@@ -59,6 +59,16 @@ _APPLICATION_ROW = {
     "access_token_hash": decision_state.hash_access_token(_ACCESS_TOKEN),
     "access_token_consumed_at": None,
     "access_token_live": True,
+    # The `_fake_query` stubs below are catch-alls: they answer the decisions
+    # lookup specially and return THIS row for everything else, including the
+    # KYC gate's read. That is why it carries a verdict.
+    #
+    # It is also why these tests never really exercised the gate before: when the
+    # gate was `SELECT 1 ... if rows`, this row satisfied it by being truthy,
+    # whatever it contained. Now the gate reads `cip_passed`, so the stub has to
+    # state what it is claiming -- an application whose CIP passed. The tests that
+    # exercise the gate itself live in test_decision_requires_persisted_kyc.py.
+    "cip_passed": True,
 }
 
 
@@ -105,7 +115,13 @@ class _FakeRunDecisionTxCursor:
     def execute(self, sql, params=None):
         self.calls.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("SELECT status FROM applications"):
+        if stmt.startswith("SELECT cip_passed FROM kyc_checks"):
+            # Round 10: the manual-review and boarding paths read the identity
+            # gate through this cursor. Passing by default so the tests here stay
+            # about what they are about; the gate's own refusals are covered in
+            # test_manual_review_requires_kyc.py.
+            self._last = [{"cip_passed": getattr(self, "cip_passed", True)}]
+        elif stmt.startswith("SELECT status FROM applications"):
             self._last = [{"status": self.locked_status}] if self.locked_status is not None else []
         elif stmt.startswith("SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
                               "FROM manual_reviews"):
@@ -533,7 +549,12 @@ class _FakeAcceptTxCursor:
     def execute(self, sql, params=None):
         self.executed.append((sql.strip(), params))
         stmt = sql.strip()
-        if stmt.startswith("SELECT status, accept_token_hash"):
+        if stmt.startswith("SELECT cip_passed FROM kyc_checks"):
+            # Round 10: boarding reads the identity gate under its own lock.
+            # Passing by default; the refusal cases are in
+            # test_manual_review_requires_kyc.py.
+            self._last = [{"cip_passed": getattr(self, "cip_passed", True)}]
+        elif stmt.startswith("SELECT status, accept_token_hash"):
             self._last = [{
                 "status": self.locked_status,
                 "accept_token_hash": self.token_hash,
