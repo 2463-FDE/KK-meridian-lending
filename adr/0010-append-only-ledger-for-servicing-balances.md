@@ -594,7 +594,7 @@ is not recoverable.
 |---|---|---|
 | **PR-1** | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |
 | **PR-2** | `ledger_entries` (no approval columns — see ADR 0011), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
-| **PR-3** | The three MACHINE writers move to the ledger — `apply_payment`, `apply_payment_once` and `delinquency.assess_late_fee` outside the balance module, and the legacy `POST /payments` path converted to `INSERT ... RETURNING id` + `apply_payment_once()` so its entries carry a real `payment_id` | PR-1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns only the projection trigger's own statement |
+| **PR-3** | The three MACHINE writers move to the ledger — `apply_payment`, `apply_payment_once` and `delinquency.assess_late_fee` outside the balance module, and the legacy `POST /payments` path converted to `INSERT ... RETURNING id` + `apply_payment_once()` so its entries carry a real `payment_id` | PR-1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns the projection trigger's own statement **and the two staff paths** (`adjust_balance`, `waive_fee`), which are still direct writers until PR-5. The zero-direct-writer form of this check belongs to PR-5 alone -- requiring it at PR-3 would either block PR-3 for ever or force the staff paths to convert before an approval path exists, which is the unapproved-movement risk this ADR is avoiding |
 | **PR-4** | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
 | **PR-6** | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
@@ -703,7 +703,7 @@ Not in this ADR, and not in whatever PR implements its first step:
 
 Explicitly **not** goals of any of the above:
 
-- **Closing D14** — see *What this closes*. The algorithm is PR 5.
+- **Closing D14** — see *What this closes*. The algorithm is PR-6.
 - **Reconstructing history.** The back-fill writes one `opening_balance` row per
   loan and admits the past is unavailable. See the migration plan.
 - **Changing what a borrower sees.** `balances.balance` keeps its current meaning
@@ -847,7 +847,7 @@ makes the check agree with the index.
 
 And the pass can only ever reconstruct principal. `payment_applications` stores
 one `amount` per payment with no component breakdown — the split does not exist
-in that table because the waterfall does not exist yet (D14, PR-5). So:
+in that table because the waterfall does not exist yet (D14, PR-6). So:
 
 - **the delta pass is for pre-waterfall, principal-only payments, and that is
   all it is for.** It runs during cutover, when `apply_payment_once` writes

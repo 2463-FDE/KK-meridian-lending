@@ -162,3 +162,44 @@ def test_the_sequence_is_not_vacuous():
     text = _text(A10)
     for n in SEQUENCE:
         assert f"PR-{n}" in text, f"PR-{n} ({SEQUENCE[n]}) is not in the ADR"
+
+
+def test_no_pr_label_names_the_waterfall_outside_a_table_row():
+    """`PR 5` with a space slipped past the table-row check.
+
+    The non-goals table said the waterfall is PR-6 while the paragraph under it
+    said "the algorithm is PR 5". A reader can still end up assigning PR-5 to
+    both the write-guard step and the waterfall -- the exact drift these tests
+    exist to stop, surviving in prose because the first version of this check
+    only looked at `| **PR-n** |` table cells.
+    """
+    text = _text(A10)
+    for line in text.splitlines():
+        if line.lstrip().startswith("|"):
+            continue                     # table rows are covered above
+        if re.search(r"waterfall|D14", line, re.I) and re.search(r"\bPR[-\s]5\b", line):
+            raise AssertionError(
+                f"the payment waterfall is called PR-5 in prose: {line.strip()!r}"
+            )
+
+
+def test_the_pr3_gate_does_not_require_the_pr5_invariant():
+    """PR-3's gate cannot demand zero direct writers.
+
+    `adjust_balance` and `waive_fee` are still direct writers until PR-5, by
+    this ADR's own sequence. An implementer following a zero-direct-writer gate
+    at PR-3 would either block PR-3 for ever or convert the staff paths before
+    an approval path exists -- reintroducing the unapproved append-only movement
+    the whole ordering is designed to prevent.
+    """
+    text = _text(A10)
+    row = next(
+        line for line in text.splitlines()
+        if line.startswith("| **PR-3** |") and "grep 'UPDATE balances'" in line
+    )
+    assert "staff paths" in row or "adjust_balance" in row, (
+        "the PR-3 gate demands that grep returns ONLY the projection, which is "
+        "the PR-5 invariant. It must allow the two staff writers that this ADR "
+        "says are still direct until PR-5."
+    )
+    assert "PR-5" in row, "the PR-3 gate does not say where the strict check belongs"
