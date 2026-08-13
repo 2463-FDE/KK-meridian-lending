@@ -201,8 +201,21 @@ def _ledger_by_loan(window=(None, None)) -> dict[int, Decimal]:
     number as a real finding.
 
     Bounds are inclusive on both ends and interpreted as calendar dates against
-    `payments.created_at`, which is when we recorded the charge. A settlement file
-    is produced from the processor's own view of the same period.
+    `payments.captured_at` -- when the processor CONFIRMED the capture. A
+    settlement file is produced from the processor's own view of the same period,
+    so the two sides must be scoped by the same event.
+
+    Not `created_at`, which was the previous behaviour and was wrong. That column
+    is stamped at INSERT, while the row is still `auth_status = 'pending'` and
+    before the processor has been called. An authorization that is slow, retried,
+    or recovered after a crash can be created on one day and captured on the
+    next, so a capture the processor settles on the 9th could carry a
+    `created_at` of the 8th -- excluded from the 9th's window and reported as a
+    money break when nothing is wrong.
+
+    That is the worst kind of false positive for a money control. A reviewer who
+    learns the breaks are usually spurious stops reading them, and a control
+    nobody believes has stopped working.
 
     Only `auth_status = 'captured'`. A 'pending' row is an authorization that
     never confirmed and a 'failed' row never took money, so counting either would
@@ -212,11 +225,16 @@ def _ledger_by_loan(window=(None, None)) -> dict[int, Decimal]:
     sql = ("SELECT loan_id, COALESCE(SUM(amount), 0) AS total FROM payments "
            "WHERE auth_status = 'captured' AND loan_id IS NOT NULL")
     params: list = []
+    # COALESCE for one reason only: rows captured before migration 0040 were
+    # back-filled from created_at, and a row that somehow escaped the back-fill
+    # must still be compared rather than silently dropped from the ledger side.
+    # Dropping it would UNDERSTATE our total and produce a break in the other
+    # direction -- a missing row is not a safe default for a money control.
     if since:
-        sql += " AND created_at >= %s::date"
+        sql += " AND COALESCE(captured_at, created_at) >= %s::date"
         params.append(since)
     if until:
-        sql += " AND created_at < (%s::date + INTERVAL '1 day')"
+        sql += " AND COALESCE(captured_at, created_at) < (%s::date + INTERVAL '1 day')"
         params.append(until)
     sql += " GROUP BY loan_id"
     rows = db.query(sql, tuple(params))

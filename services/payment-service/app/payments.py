@@ -258,7 +258,14 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # two separate statements -- a crash between them left 'captured'
         # with no authorization id on record. One UPDATE, one atomic write.
         db.query(
-            "UPDATE payments SET auth_status = 'captured', authorization_id = %s WHERE id = %s",
+            "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
+                # captured_at travels with auth_status, never separately.
+                # Reconciliation scopes its window on it; created_at is
+                # stamped at INSERT while the row is still pending, so an
+                # authorization that crosses midnight lands the capture in
+                # the previous day's window and reports a false break
+                # (db/migrations/0040).
+                "captured_at = now() WHERE id = %s",
             (auth_id, payment_id),
         )
         applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
@@ -332,7 +339,14 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                         "status": "failed", "applied_amount": float(row["amount"]),
                     }
             db.query(
-                "UPDATE payments SET auth_status = 'captured', authorization_id = %s WHERE id = %s",
+                "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
+                # captured_at travels with auth_status, never separately.
+                # Reconciliation scopes its window on it; created_at is
+                # stamped at INSERT while the row is still pending, so an
+                # authorization that crosses midnight lands the capture in
+                # the previous day's window and reports a false break
+                # (db/migrations/0040).
+                "captured_at = now() WHERE id = %s",
                 (auth_id, payment_id),
             )
 

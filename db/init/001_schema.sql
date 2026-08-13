@@ -331,6 +331,12 @@ CREATE TABLE IF NOT EXISTS payments (
     -- rows (before this column existed) default to 'captured' -- they really
     -- were, just without a formal record of it.
     auth_status TEXT NOT NULL DEFAULT 'captured',
+    -- When the processor CONFIRMED the capture (db/migrations/0040), written in
+    -- the same UPDATE that sets auth_status. Reconciliation scopes its window on
+    -- this rather than created_at: created_at is stamped at INSERT while the row
+    -- is still pending, so an authorization crossing midnight would put the
+    -- capture in the previous day's window and report a false break.
+    captured_at TIMESTAMPTZ,
     -- Review fix (db/migrations/0019): the processor's own authorization id,
     -- persisted in the SAME UPDATE that flips auth_status to 'captured' --
     -- a pending retry asks the processor for this via get_authorization()
@@ -398,6 +404,13 @@ CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
 
 CREATE INDEX IF NOT EXISTS idx_kyc_checks_application_id ON kyc_checks(application_id);
+
+-- Mirrors db/migrations/0040. Reconciliation's window predicate reads this on
+-- every run; without it here a fresh install and a migrated one would differ,
+-- which test_migration_paths_converge catches -- and did.
+CREATE INDEX IF NOT EXISTS idx_payments_captured_at
+    ON payments (captured_at)
+ WHERE auth_status = 'captured';
 
 -- D7: one row per reconciliation run (db/migrations/0034). Counts and totals
 -- only -- no card data, no applicant identifiers, no processor references. A
