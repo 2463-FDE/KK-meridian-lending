@@ -452,6 +452,15 @@ CREATE TRIGGER balances_capture_legacy_delta
     AFTER INSERT OR UPDATE ON balances
     FOR EACH ROW EXECUTE FUNCTION capture_legacy_balance_delta();
 
+CREATE OR REPLACE FUNCTION balances_cannot_be_deleted_during_cutover() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'balances rows cannot be deleted during ledger cutover';
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS balances_reject_delete_during_cutover ON balances;
+CREATE TRIGGER balances_reject_delete_during_cutover
+    BEFORE DELETE ON balances
+    FOR EACH ROW EXECUTE FUNCTION balances_cannot_be_deleted_during_cutover();
+
 -- Do not publish a ledger born out of balance. This is per loan/component so
 -- equal and opposite errors on different borrowers cannot net to zero.
 DO $$

@@ -374,9 +374,9 @@ def test_the_guard_function_exists_but_only_the_capture_bridge_is_attached(db):
                     "ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
                     "WHERE c.relname = 'balances' AND NOT t.tgisinternal "
                     "AND n.nspname = %s", (SCHEMA,))
-    assert trg[0]["n"] == 1, (
-        "balances must have exactly the transitional delta-capture trigger; the "
-        "step-5 rejecting guard remains disabled until writers are converted"
+    assert trg[0]["n"] == 2, (
+        "balances must have exactly the transitional delta-capture and delete-"
+        "rejection triggers; the step-5 general guard remains disabled"
     )
 
 
@@ -396,6 +396,14 @@ def test_direct_writes_still_work_and_gain_an_immutable_delta(db):
     after = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id=%s "
                       "AND entry_type='legacy_direct_write'", (loan,))[0]["n"]
     assert after == before + 1
+
+
+def test_a_balance_row_cannot_be_deleted_during_cutover(db):
+    loan = _a_loan(db)
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _exec(db, "DELETE FROM balances WHERE loan_id=%s", (loan,))
+    db.rollback()
+    assert _exec(db, "SELECT count(*) AS n FROM balances WHERE loan_id=%s", (loan,))[0]["n"] == 1
 
 
 @pytest.mark.parametrize("entry_type,component,amount", [
