@@ -103,16 +103,52 @@ docker compose exec servicing-service python -m app.reconcile_job
 #   2  could not run  -- settlement file missing, database down (a control finding)
 ```
 
-**Schedule it as a separate process, not inside the API.** An in-process scheduler
-dies with its web worker and nothing reports that it stopped, which is the failure
-D7 already had: a control that silently is not running looks exactly like one that
-is running and finding nothing.
+### It is scheduled by this repository
 
-```cron
-# Daily, after the processor's settlement file lands. Cron mails on any non-zero
-# exit, so a breach and a broken control both get noticed.
-30 6 * * *  docker compose -f /srv/meridian/docker-compose.yml exec -T servicing-service python -m app.reconcile_job
+`docker compose up` starts a **`reconciliation`** service that runs the job on a
+schedule. It is in the default services list, not behind a profile:
+
+```bash
+docker compose up -d                 # the scheduler starts with everything else
+docker compose logs -f reconciliation
 ```
+
+This used to be a command plus a paragraph telling you to wire cron yourself. A
+normal deployment therefore kept answering `/health` while reconciliation never
+ran once -- which is the failure D7 names. A control an operator has to remember
+to enable is the same defect with an extra step, so it is on by default.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RECONCILE_INTERVAL_SECONDS` | `86400` | Seconds between runs. Lower it in a demo to watch it work. |
+| `restart: unless-stopped` | — | The job exits non-zero on a breach or a control failure; the scheduler must survive that. An exit code is a finding to read, not a reason to stop reconciling. |
+
+The scheduler decides only **when**. Whether a run was good is decided in
+`reconciliation.run_and_record`, recorded in `reconciliation_runs`, and published
+through the metrics below -- so a bug in the scheduler cannot manufacture a
+success. It stops promptly on `SIGTERM` rather than sleeping through a shutdown.
+
+**It runs as a separate process, not inside the API.** An in-process scheduler
+dies with its web worker and nothing reports that it stopped.
+
+### A run that compared nothing is an error, not a success
+
+`within_threshold` used to be `break_value <= threshold` and nothing else. An
+empty settlement file, a file with no usable `settlement_date`, or one whose
+loans match nothing on the ledger all produce zero breaks -- because nothing was
+compared -- so the run recorded `ok`, stamped `last_successful_run`, and
+published a fresh success timestamp. A broken feed became indistinguishable from
+a clean reconciliation, and the staleness alarm below went quiet in exactly the
+way that means "healthy".
+
+Each of these now records `outcome='error'`, leaves the last-success timestamp
+untouched, and exits `2`:
+
+| `error_code` | Cause | Who fixes it |
+|---|---|---|
+| `EmptySettlementFile` | Zero rows read | Whoever owns the feed |
+| `IncompleteSettlementWindow` | No usable `settlement_date`, so the period is unknown | Whoever owns the file format |
+| `NothingCompared` | Rows present, but no loan on either side | Scope or identifier mismatch |
 
 Tune with `RECONCILIATION_BREAK_THRESHOLD` (default `0`). An unparseable or
 negative value falls back to `0` rather than to permissive.
@@ -142,15 +178,31 @@ answer. Prometheus gauges on the existing `/metrics`:
 - `servicing_reconciliation_breaks`
 - `servicing_reconciliation_break_value`
 - `servicing_reconciliation_last_run_ok`
-- `servicing_reconciliation_last_success_timestamp` -- the one to alert on. A run
-  that stops happening produces no failures at all, so staleness is the signal.
+- `servicing_reconciliation_last_success_timestamp` -- the one the rules below
+  watch. A run that stops happening produces no failures at all, so staleness is
+  the signal.
+
+**Alert rules are wired.** `monitoring/alerts.yml` is loaded by the `prometheus`
+service and evaluated every 30s; the rules are visible at
+<http://localhost:9090/alerts>.
+
+| Alert | Fires when |
+|---|---|
+| `ReconciliationStale` | No successful run for over 26h (the daily schedule plus jitter) |
+| `ReconciliationMetricMissing` | The metric is absent entirely -- the service is down, or reconciliation has never succeeded. A separate rule because `ReconciliationStale` cannot fire on a series that does not exist, which would make the loudest failure the quietest |
+| `ReconciliationBreach` | The most recent run was not clean, including a run that compared nothing |
 
 **What it does NOT do, and do not plan around otherwise.**
 
-- **No alerting integration.** There is no pager, no incident tool and no
-  alertmanager in this build. What exists is a contract those things consume: the
-  exit code, the table, the gauges. Calling it alerting would be the overclaim this
-  work exists to remove.
+- **Alert rules fire; nothing is routed.** The rules above are genuinely
+  evaluated by Prometheus and reach `firing`. There is **no Alertmanager** in this
+  compose file, so nothing pages anyone, emails anyone or opens a ticket -- a
+  firing alert has to be looked at on the Prometheus UI. Describing that as
+  "alerting" would be the overclaim this work exists to remove, so `alerts.yml`
+  says the same thing in its own header.
+
+  Wiring an Alertmanager is a deployment decision -- where pages go, who is on
+  call, what the escalation path is -- and is not one this repository can make.
 - **No per-transaction matching.** The settlement file identifies a capture by the
   processor's `processor_ref`; `payments.authorization_id` is a different
   identifier from our own authorization call, and no payment row carries a `PR-`

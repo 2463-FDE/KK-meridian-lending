@@ -155,11 +155,23 @@ def test_a_clean_run_still_records_that_it_ran(clean):
     assert clean.finished[-1][1] == 2, "the run did not record how many loans it compared"
 
 
-def test_a_run_over_nothing_is_not_a_passing_run(monkeypatch, tmp_path):
-    """Zero loans compared has to be legible in the record.
+def test_a_run_over_nothing_is_an_error_not_a_passing_run(monkeypatch, tmp_path):
+    """Zero loans compared is a CONTROL failure, not a clean run.
 
-    It is 'ok' -- nothing disagreed -- and `loans_compared = 0` is what stops a
-    misconfigured settlement path reading as a clean reconciliation.
+    This test asserted the opposite, and the reasoning it gave was wrong: "it is
+    'ok' -- nothing disagreed -- and `loans_compared = 0` is what stops a
+    misconfigured settlement path reading as a clean reconciliation."
+
+    Recording `loans_compared = 0` does not stop anything. `outcome='ok'` is what
+    `last_successful_run` and the Prometheus success timestamp are derived from,
+    so a vacuous run stamped a fresh success and the staleness alarm went quiet
+    -- precisely while the settlement feed was empty or broken. The count was
+    legible only to somebody already reading the row, which is nobody, because
+    the control was reporting healthy.
+
+    Changed because the behaviour changed, not to make a failing test pass: a
+    comparison that never happened is a finding about the control, and D7 exists
+    to stop the control lying about itself.
     """
     monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE", _settlement(tmp_path, []))
     db = _Db([])
@@ -167,9 +179,9 @@ def test_a_run_over_nothing_is_not_a_passing_run(monkeypatch, tmp_path):
 
     result = reconciliation.run_and_record()
 
-    assert result["outcome"] == "ok"
+    assert result["outcome"] == "error"
+    assert result["error_code"] == "EmptySettlementFile"
     assert result["loans_compared"] == 0
-    assert db.finished[-1][1] == 0
 
 
 # --- a control that cannot run is not a clean control -----------------------

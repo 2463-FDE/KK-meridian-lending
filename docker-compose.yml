@@ -104,6 +104,45 @@ services:
       timeout: 5s
       retries: 5
 
+  # The scheduled reconciliation control (D7).
+  #
+  # Previously the repository provided a command and a runbook telling operators
+  # to wire up cron themselves. A normal `docker compose up` therefore kept
+  # answering /health while reconciliation never ran once -- which is precisely
+  # the failure D7 names: a control that silently is not running looks exactly
+  # like one that is running and finding nothing.
+  #
+  # In the DEFAULT services list, not behind a profile. A control an operator
+  # has to remember to switch on is the same defect with an extra step.
+  #
+  # Same image and environment as servicing-service, so it reads the same
+  # settlement file, the same database and the same token rules; it just runs a
+  # different entry point.
+  reconciliation:
+    build: ./services/servicing-service
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:?required -- run `make bootstrap` for local development}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Seconds between runs. Daily by default; overridable so a demo or a test
+      # environment can run it often enough to observe.
+      RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-86400}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./db/settlement.csv:/app/data/settlement.csv:ro
+    # `restart: unless-stopped` is the point. The job exits non-zero on a breach
+    # or a control failure, and the scheduler must survive that -- an exit code
+    # is a finding to be read, not a reason to stop reconciling. The loop below
+    # runs the job, logs the exit code, and sleeps regardless of outcome.
+    restart: unless-stopped
+    command: >
+      python -m app.reconcile_scheduler
+
   kyc-service:
     build: ./services/kyc-service
     env_file:
@@ -369,6 +408,7 @@ services:
     image: prom/prometheus:v2.55.1
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"

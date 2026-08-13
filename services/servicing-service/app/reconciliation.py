@@ -304,6 +304,56 @@ def compare() -> dict:
     }
 
 
+# A run that compared nothing proved nothing.
+#
+# `within_threshold` was computed purely as `break_value <= BREAK_THRESHOLD`.
+# An empty settlement file, a file with no usable settlement_date, or one whose
+# loans match nothing on the ledger all produce zero breaks and therefore zero
+# break value -- so the run recorded `outcome='ok'`, stamped a
+# `last_successful_run`, and published a fresh success timestamp.
+#
+# That is the worst possible failure for this control: a broken or empty
+# settlement feed becomes indistinguishable from a clean reconciliation, and the
+# monitoring built on top of it goes quiet in exactly the way that means
+# "healthy". D7 exists because a control that silently is not running looks like
+# one that is running and finding nothing; recording success for a comparison
+# that never happened is the same defect one layer up.
+#
+# Each condition is a separate code because they need different humans: an empty
+# file is a feed problem, a missing window is a format problem, and zero
+# comparable loans with rows present is a scope or identifier mismatch.
+_VACUITY_CHECKS = (
+    (
+        "EmptySettlementFile",
+        lambda r: (r.get("source") or {}).get("rows", 0) == 0,
+        "the settlement file contained no rows",
+    ),
+    (
+        "IncompleteSettlementWindow",
+        lambda r: r.get("window_start") is None or r.get("window_end") is None,
+        "no usable settlement_date, so the period covered is unknown",
+    ),
+    (
+        "NothingCompared",
+        lambda r: r.get("loans_compared", 0) == 0,
+        "no loan appeared on either side of the comparison",
+    ),
+)
+
+
+def vacuity_error(result: dict) -> tuple[str, str] | None:
+    """The error code and reason for a run that compared nothing, or None.
+
+    Separate from `compare()` on purpose. `compare()` stays pure and reports
+    what it saw; deciding that what it saw does not constitute evidence is a
+    control decision, and it belongs next to the code that records outcomes.
+    """
+    for code, is_vacuous, reason in _VACUITY_CHECKS:
+        if is_vacuous(result):
+            return code, reason
+    return None
+
+
 def run_and_record() -> dict:
     """Run the comparison, record it, publish the metrics. Never raises.
 
@@ -337,6 +387,29 @@ def run_and_record() -> dict:
         log.error("reconciliation could not complete (%s)", code)
         _finish_run(run_id, outcome="error", error_code=code)
         return {"outcome": "error", "error_code": code, "run_id": run_id}
+
+    # Fail closed before any outcome is assigned. A vacuous run is an ERROR --
+    # a finding about the control -- never an 'ok' and never a 'breach', because
+    # it is not a statement about the money at all.
+    vacuous = vacuity_error(result)
+    if vacuous is not None:
+        code, reason = vacuous
+        log.error(
+            "reconciliation compared nothing (%s): %s -- recording an error, not "
+            "a success", code, reason,
+        )
+        _finish_run(
+            run_id,
+            outcome="error",
+            error_code=code,
+            loans_compared=result["loans_compared"],
+            window=(result["window_start"], result["window_end"]),
+            source=result["source"],
+        )
+        # No last_successful_run, no success timestamp: the API derives both
+        # from rows with outcome='ok', and this is not one.
+        return {**result, "outcome": "error", "error_code": code,
+                "error_reason": reason, "run_id": run_id}
 
     outcome = "ok" if result["within_threshold"] else "breach"
     recorded = _finish_run(

@@ -4,7 +4,12 @@
 
     0  ran, everything within threshold
     1  ran, breaks exceeded the threshold          -- a finding about the money
-    2  could not run                               -- a finding about the control
+    2  could not run, OR compared nothing          -- a finding about the control
+
+An empty settlement file, a file with no usable settlement_date, and a file whose
+loans match nothing on the ledger all exit 2. None of them is a clean run: they
+produce zero breaks because nothing was checked, and reporting that as success
+turns a broken feed into a healthy-looking control.
 
 Deliberately a separate process rather than a thread inside the API. An
 in-process scheduler dies with its web worker and nothing reports that it stopped,
@@ -56,7 +61,15 @@ def main(argv=None) -> int:
                       b["loan_id"], b["ledger"], b["settlement"], b["difference"])
         return EXIT_BREACH
 
-    log.error("reconciliation could not run (%s)", result.get("error_code"))
+    # Includes the vacuous cases -- empty file, unknown window, nothing
+    # comparable. Those exit 2 like any other control failure, because a run
+    # that compared nothing is a finding about the control and not about the
+    # money. Reporting them as success is what this closes.
+    reason = result.get("error_reason")
+    log.error(
+        "reconciliation could not run (%s)%s",
+        result.get("error_code"), f": {reason}" if reason else "",
+    )
     return EXIT_ERROR
 
 
