@@ -647,6 +647,20 @@ CREATE CONSTRAINT TRIGGER ledger_payment_allocation_exact
     AFTER INSERT ON ledger_entries DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION ledger_payment_allocation_matches_capture();
 
+-- A posted payment's amount is part of the immutable ledger provenance.
+CREATE OR REPLACE FUNCTION reject_posted_payment_amount_change() RETURNS trigger AS $$
+BEGIN
+    IF NEW.amount IS DISTINCT FROM OLD.amount
+       AND EXISTS (SELECT 1 FROM ledger_entries WHERE payment_id = OLD.id) THEN
+        RAISE EXCEPTION 'cannot change amount for posted payment %', OLD.id;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS payments_posted_amount_immutable ON payments;
+CREATE TRIGGER payments_posted_amount_immutable
+    BEFORE UPDATE ON payments
+    FOR EACH ROW EXECUTE FUNCTION reject_posted_payment_amount_change();
+
 -- Invariant 5: a human-directed entry names the human.
 -- 'payment' is exempt: servicing's apply-payment receives an amount and a
 -- payment_id and no actor, because the borrower is not "acting" on the balance
