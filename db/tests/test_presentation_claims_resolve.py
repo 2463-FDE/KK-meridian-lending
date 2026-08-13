@@ -234,6 +234,13 @@ def _status_problem(pr, row):
             f"is the one thing a reader can verify offline; without a file it "
             f"is a bare PR number again."
         )
+    if status == "open" and (row or {}).get("artifact"):
+        return (
+            f"PR #{pr} is open but names artifact {row['artifact']!r}. Open "
+            f"means nothing has landed, so a row that points at a file invites "
+            f"the reader to believe proposed work has repository evidence -- "
+            f"the same overclaim in a new column."
+        )
     return None
 
 
@@ -283,4 +290,34 @@ def test_the_manifest_actually_uses_both_statuses():
     assert statuses == set(MANIFEST_STATUSES), (
         f"the manifest uses {sorted(statuses)}; both {list(MANIFEST_STATUSES)} "
         f"should appear or one of the checks is never exercised"
+    )
+
+
+def test_an_open_row_may_not_name_an_artifact():
+    """The other half of the split the deck now describes.
+
+    `merged` requires a file; `open` requires the absence of one. Only the first
+    was enforced, so an open row could have pointed at a path that happened to
+    exist and read as landed evidence -- which is precisely the confusion the
+    open label exists to prevent.
+    """
+    problem = _status_problem(28, {"status": "open", "artifact": "docs/DEBT.md"})
+    assert problem is not None and "nothing has landed" in problem
+
+
+def test_the_deck_does_not_claim_every_pr_maps_to_a_file():
+    """The wording finding, pinned.
+
+    The evidence section said the manifest "maps each one to a file that exists
+    in this repository" while carrying an open row with no artifact. A reader
+    could come away believing the open maker-checker specification had durable
+    repository evidence.
+    """
+    text = DECK.read_text(encoding="utf-8")
+    assert "maps each one to a file that exists" not in text, (
+        "the deck claims every cited PR resolves to an existing file, which is "
+        "false for any open row"
+    )
+    assert "no artifact at all" in text, (
+        "the deck does not state that an open PR has no landed artifact"
     )

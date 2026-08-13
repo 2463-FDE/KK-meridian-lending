@@ -1,95 +1,65 @@
-"""Neither a fresh database nor a migrated one has a PAN or CVV column.
+"""Neither a fresh database nor a fully migrated one has a PAN or CVV column.
 
-Slide 2 of `docs/presentations/2026-08-12-three-slides.md` says the removal was
-"verified on a fresh volume **and** a migrated one -- they agree". Everything it
-cited proved half of that:
+Slide 2 of `docs/presentations/2026-08-12-three-slides.md` claims the removal was
+verified on both. Two earlier attempts at that evidence were not good enough, and
+the second one is the instructive failure:
 
-  - `db/migrations/0031_drop_payments_pan_cvv.sql` drops the columns from an
-    EXISTING database;
-  - `db/init/001_schema.sql` never creates them on a NEW one;
-  - `test_expand_contract_pan_cvv.py` proves no card data survives the contract
-    step on the legacy path.
+  - the deck first cited the migration, the init schema and a legacy-path test.
+    None of them compared the two paths, and the comparison *was* the claim;
+  - the test written to fix that built the migrated schema from a hand-written
+    `payments` table and wrapped the migration chain in `except psycopg2.Error:
+    conn.rollback()`. Unrelated-but-required objects, constraints and ordering
+    interactions could therefore fail, roll back, and never fail the test. It
+    proved a property of a schema shape production never has.
 
-None of them compares the two paths, which is exactly what the sentence claims.
-A deck asserting that every claim resolves to evidence cannot itself carry a
-claim whose evidence is "two separate facts that the reader is invited to
-combine" -- the combination is the claim, and it was the part nobody checked.
+This version uses the repository's real builders from `migration_paths.py` --
+the same ones `test_migration_paths_converge.py` uses -- so "the migrated
+database" means the same thing in both files. **Nothing is suppressed:** a
+migration that fails, fails this test.
 
-So this builds both schemas from the real files and asserts the property on
-each, plus their agreement. This file is the artifact Slide 2 cites.
+The real history is what makes this a removal rather than an absence:
+
+    legacy schema          payments.pan exists, holding real card numbers
+    0002_add_cvv           adds payments.cvv
+    0029_backfill_last4    makes the drop survivable for readers
+    0031_drop_pan_cvv      removes both
+
+so the migrated path creates card columns partway through and must end without
+them. Both halves of that are asserted below, because a proof that the columns
+are absent at the end is worth nothing if they were never present.
 """
 import os
-from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 import pytest
+
+from migration_paths import (
+    _all_migrations,
+    _apply_all_migrations,
+    _build_fresh_init,
+    _build_legacy_schema,
+    _has_executable_sql,
+    _run_sql,
+)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against"
 )
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-INIT_DIR = REPO_ROOT / "db" / "init"
-MIGRATIONS_DIR = REPO_ROOT / "db" / "migrations"
-
-INIT_SCHEMA_FILES = (
-    "001_schema.sql", "004_decision_events.sql",
-    "005_manual_reviews.sql", "006_decision_attempts.sql",
-)
-
 FRESH = "cardpath_fresh"
 MIGRATED = "cardpath_migrated"
 
-# The pre-tokenization shape, before ADR 0008. This is what a database that has
-# been running since Week 4 actually contains, and it is the starting point the
-# "migrated" half of the claim is about: columns that really hold a card number
-# and a security code, which 0031 has to remove.
-_LEGACY_PAYMENTS = """
-CREATE TABLE payments (
-    id          SERIAL PRIMARY KEY,
-    loan_id     INTEGER,
-    amount      NUMERIC(12,2),
-    method      TEXT,
-    pan         TEXT,
-    cvv         TEXT,
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
-INSERT INTO payments (loan_id, amount, method, pan, cvv)
-VALUES (1, 250.00, 'card', '4111111111111111', '123');
-"""
-
 # Any column that could hold a full card number or a security code. Substring
-# matching, because `card_number`, `pan_encrypted` and `cvv2` are the same
-# defect wearing a different name -- and a test that only looked for exactly
-# "pan" and "cvv" would pass on a rename.
+# matching, because `card_number`, `pan_encrypted` and `cvv2` are the same defect
+# wearing a different name -- an exact-match test would pass on a rename.
 FORBIDDEN_SUBSTRINGS = ("pan", "cvv", "cvc", "card_number", "cardnumber", "security_code")
 
-# Columns that contain a forbidden substring but are legitimate. `company_name`
-# contains "pan"; so does `expansion`. Listed explicitly so the check can stay
-# a substring match without becoming unusable.
+# Columns that contain a forbidden substring and are legitimate. `company_name`
+# contains "pan"; so does `expansion`. Listed explicitly so the check can stay a
+# substring match without becoming unusable.
 ALLOWED_EXACT = {"company_name", "plan", "plan_id", "expansion", "span", "japan"}
-
-
-def _run_sql(conn, schema, sql):
-    with conn.cursor() as cur:
-        cur.execute(f"SET search_path TO {schema}")
-        # 0031 refuses to run without this: it destroys data and can break a
-        # servicing instance still reading payments.pan. The harness IS the
-        # operator here, so it acknowledges explicitly rather than the gate
-        # being weakened to let automation through.
-        cur.execute("SET meridian.pan_drop_acknowledged = 'yes'")
-        cur.execute(sql)
-    conn.commit()
-
-
-def _has_executable_sql(sql: str) -> bool:
-    stripped = "\n".join(
-        line for line in sql.splitlines()
-        if line.strip() and not line.strip().startswith("--")
-    )
-    return bool(stripped.strip())
 
 
 @pytest.fixture
@@ -111,23 +81,15 @@ def conn():
 
 @pytest.fixture
 def both_paths(conn):
-    """Fresh volume, and a legacy database brought up to date."""
-    for name in INIT_SCHEMA_FILES:
-        _run_sql(conn, FRESH, (INIT_DIR / name).read_text(encoding="utf-8"))
+    """A fresh volume, and a real pre-migration database brought fully up to date.
 
-    _run_sql(conn, MIGRATED, _LEGACY_PAYMENTS)
-    for path in sorted(MIGRATIONS_DIR.glob("*.sql"), key=lambda p: p.name):
-        sql = path.read_text(encoding="utf-8")
-        if not _has_executable_sql(sql):
-            continue
-        try:
-            _run_sql(conn, MIGRATED, sql)
-        except psycopg2.Error:
-            # This schema starts from a hand-written legacy payments table, not
-            # from the full init, so migrations touching unrelated tables have
-            # nothing to apply to. The card columns are what this file is
-            # about, and 0029/0031 operate on `payments`, which does exist.
-            conn.rollback()
+    Both calls raise on any failure. If the migration chain cannot run against
+    the legacy schema, that is a broken upgrade path and this test says so,
+    rather than quietly proving something about a partial database.
+    """
+    _build_fresh_init(conn, FRESH)
+    _build_legacy_schema(conn, MIGRATED)
+    _apply_all_migrations(conn, MIGRATED)
     return conn
 
 
@@ -156,35 +118,58 @@ def test_a_fresh_database_has_no_card_columns(both_paths):
     assert not found, f"a fresh database creates card columns: {found}"
 
 
-def test_a_migrated_database_has_no_card_columns(both_paths):
-    """The legacy table really did have them, so this asserts a removal."""
+def test_a_fully_migrated_database_has_no_card_columns(both_paths):
+    """The real upgrade path, end to end, with no errors suppressed."""
     rows, found = _card_columns(both_paths, MIGRATED)
     assert rows, "the migrated schema has no columns at all -- it was never built"
-    assert not found, f"card columns survive an upgrade: {found}"
+    assert not found, f"card columns survive the real migration chain: {found}"
 
 
-def test_the_legacy_starting_point_really_had_card_columns(conn):
-    """Guard the guard.
+def test_the_legacy_starting_point_really_held_a_card_number(conn):
+    """Guard the guard, part one.
 
-    Without this, `test_a_migrated_database_has_no_card_columns` would pass on a
-    harness that silently failed to create the legacy table -- proving the
-    removal works by never having anything to remove. That is the vacuous-pass
-    trap, and this repository has already shipped it once.
+    Without this, the migrated assertion would pass on a legacy fixture that
+    never had a PAN -- proving the removal works by having nothing to remove.
+    This repository has shipped a vacuous check before.
     """
-    _run_sql(conn, MIGRATED, _LEGACY_PAYMENTS)
+    _build_legacy_schema(conn, MIGRATED)
     _, found = _card_columns(conn, MIGRATED)
-    assert sorted(found) == ["payments.cvv", "payments.pan"], (
-        f"the legacy fixture is not the pre-tokenization shape: {found}"
+    assert "payments.pan" in found, (
+        f"the legacy schema no longer starts with payments.pan: {found}. The "
+        "migrated-path proof would then be asserting an absence, not a removal."
+    )
+
+
+def test_the_chain_really_creates_a_cvv_before_dropping_it(conn):
+    """Guard the guard, part two.
+
+    `cvv` is not in the legacy schema -- `0002_add_cvv_to_payments.sql` adds it
+    and `0031` drops it. The CVV half of the claim is only meaningful if the
+    column genuinely exists partway through, so the chain is stopped right
+    after 0002 and the column checked for.
+    """
+    _build_legacy_schema(conn, MIGRATED)
+    for path in _all_migrations():
+        sql = path.read_text(encoding="utf-8")
+        if _has_executable_sql(sql):
+            _run_sql(conn, MIGRATED, sql)
+        if path.name.startswith("0002"):
+            break
+
+    _, found = _card_columns(conn, MIGRATED)
+    assert "payments.cvv" in found, (
+        f"0002 no longer introduces payments.cvv: {found}. The migrated path "
+        "would then never hold a security code, and 0031 dropping it would "
+        "prove nothing."
     )
 
 
 def test_the_two_paths_agree_on_the_payments_table(both_paths):
-    """The sentence on the slide is 'they agree', so agreement is the assertion.
+    """The sentence on the slide is that they agree, so agreement is asserted.
 
-    Compared on the card-relevant columns rather than the whole table: the
-    migrated schema is built from a hand-written legacy payments table plus the
-    migrations, so it legitimately lacks columns that only `db/init` creates.
-    What must match is what the claim is about.
+    Compared on the card-relevant columns rather than every column: the migrated
+    schema descends from the real legacy shape, so it legitimately differs
+    elsewhere. What must match is what the claim is about.
     """
     def payments_columns(schema):
         with both_paths.cursor() as cur:
@@ -204,8 +189,8 @@ def test_the_two_paths_agree_on_the_payments_table(both_paths):
         assert not any(bad in c for c in fresh_cols), f"fresh payments has {bad}"
         assert not any(bad in c for c in migrated_cols), f"migrated payments has {bad}"
 
-    # last4 is the column that makes the removal survivable -- 0029 back-filled
-    # it so payment history still renders. Both paths must have it, or the two
+    # last4 is what makes the removal survivable -- 0029 back-filled it so
+    # payment history still renders. Both paths must have it, or the two
     # databases do not in fact agree on what replaced the PAN.
     assert "last4" in fresh_cols, "fresh payments has no last4"
     assert "last4" in migrated_cols, "migrated payments has no last4"

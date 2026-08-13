@@ -191,11 +191,20 @@ this page mean different things and are not interchangeable:
 - **open** — proposed on a pull request and **not on `main`**
 
 Rows citing a `PR #NN` resolve through
-[`evidence-manifest.md`](evidence-manifest.md), which maps each one to a file that
-exists in this repository. A bare PR number is not durable evidence: it can be
-renumbered or reopened, and a reader offline cannot check it at all.
-`db/tests/test_presentation_claims_resolve.py` enforces both — the manifest must
-cover every PR the deck cites, and a merged row's artifact must exist.
+[`evidence-manifest.md`](evidence-manifest.md). A bare PR number is not durable
+evidence: it can be renumbered or reopened, and a reader offline cannot check it
+at all. The manifest resolves the two cases differently, and the difference is
+the point:
+
+- a **merged** PR names a file that exists in this repository — that is what you
+  can open and check;
+- an **open** PR names **no artifact at all**, because nothing has landed. It is
+  labelled open here and on the slide, and that label is the evidence.
+
+Saying every PR maps to an existing file would be false: PR #28 is open and has
+none. `db/tests/test_presentation_claims_resolve.py` enforces exactly this split
+— merged rows must name an existing artifact, open rows must carry an open label
+and no artifact, and any other status fails.
 
 ### Slide 1 — self-approval control gap
 
