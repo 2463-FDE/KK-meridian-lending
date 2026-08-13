@@ -203,6 +203,7 @@ def pg():
                 id INTEGER PRIMARY KEY,
                 loan_id INTEGER NOT NULL,
                 amount NUMERIC(14,2) NOT NULL,
+                auth_status TEXT NOT NULL DEFAULT 'captured',
                 UNIQUE (id, loan_id)
             );
             CREATE TABLE ledger_entries (

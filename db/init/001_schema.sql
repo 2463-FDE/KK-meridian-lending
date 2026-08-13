@@ -583,12 +583,14 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_entries_payment_loan_fk
 CREATE OR REPLACE FUNCTION ledger_entry_payment_matches_loan() RETURNS trigger AS $$
 DECLARE
     payment_loan INTEGER;
+    payment_status TEXT;
 BEGIN
     IF NEW.payment_id IS NULL THEN
         RETURN NEW;
     END IF;
 
-    SELECT loan_id INTO payment_loan FROM payments WHERE id = NEW.payment_id;
+    SELECT loan_id, auth_status INTO payment_loan, payment_status
+      FROM payments WHERE id = NEW.payment_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ledger entry names payment % which does not exist',
                         NEW.payment_id;
@@ -597,6 +599,10 @@ BEGIN
         RAISE EXCEPTION 'ledger entry moves loan % but cites payment %, which '
                         'was captured for loan %',
                         NEW.loan_id, NEW.payment_id, payment_loan;
+    END IF;
+    IF payment_status IS DISTINCT FROM 'captured' THEN
+        RAISE EXCEPTION 'ledger payment entry requires captured payment % (status: %)',
+                        NEW.payment_id, payment_status;
     END IF;
     RETURN NEW;
 END $$ LANGUAGE plpgsql;

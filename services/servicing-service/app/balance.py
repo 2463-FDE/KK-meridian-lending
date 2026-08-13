@@ -72,6 +72,15 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
     skipping it.
     """
     with db.transaction() as cur:
+        cur.execute("SELECT auth_status FROM payments WHERE id = %s", (payment_id,))
+        payment_rows = cur.fetchall()
+        if not payment_rows:
+            raise LookupError(f"payment_id={payment_id} does not exist")
+        if payment_rows[0]["auth_status"] != "captured":
+            raise ValueError(
+                f"payment_id={payment_id} is not captured "
+                f"(status={payment_rows[0]['auth_status']})"
+            )
         cur.execute(
             "INSERT INTO payment_applications (payment_id, loan_id, amount) "
             "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING RETURNING payment_id",

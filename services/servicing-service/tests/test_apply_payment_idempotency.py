@@ -48,9 +48,13 @@ class _FakeDb:
         self.balance = balance
         self.applications = set()
         self.ledger = set()
+        self.payment_statuses = {}
 
     def _run(self, sql, params=None):
         stmt = sql.strip()
+        if stmt.startswith("SELECT auth_status FROM payments"):
+            status = self.payment_statuses.get(params[0], "captured")
+            return [{"auth_status": status}] if status is not None else []
         if stmt.startswith("INSERT INTO payment_applications"):
             payment_id, loan_id, amount = params
             if payment_id in self.applications:
@@ -153,3 +157,15 @@ def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance
     assert applied is True
     assert new_balance == 70.0
     assert fake_db.balance == 70.0
+
+
+@pytest.mark.parametrize("status", ["failed", "pending"])
+def test_apply_payment_once_rejects_uncaptured_payment_before_marker(fake_db, status):
+    fake_db.payment_statuses[21] = status
+
+    with pytest.raises(ValueError, match="not captured"):
+        balance.apply_payment_once(payment_id=21, loan_id=5, amount=30.0)
+
+    assert 21 not in fake_db.applications
+    assert 21 not in fake_db.ledger
+    assert fake_db.balance == 100.0

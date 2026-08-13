@@ -220,6 +220,23 @@ def test_an_inserted_entry_moves_the_balance(db):
     assert after == before - 25, f"balance did not follow the ledger: {before} -> {after}"
 
 
+@pytest.mark.parametrize("status", ["pending", "failed"])
+def test_uncaptured_payment_cannot_create_an_immutable_credit(db, status):
+    loan = _a_loan(db)
+    before = _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"]
+    pay = _a_payment(db, loan, "25.00")
+    _exec(db, "UPDATE payments SET auth_status=%s WHERE id=%s", (status, pay))
+
+    with pytest.raises(psycopg2.errors.RaiseException, match="requires captured payment"):
+        _exec(db, "INSERT INTO ledger_entries "
+                  "(loan_id,component,amount,entry_type,payment_id) "
+                  "VALUES(%s,'principal',-25,'payment',%s)", (loan, pay))
+    db.rollback()
+
+    assert _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"] == before
+    assert _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE payment_id=%s", (pay,))[0]["n"] == 0
+
+
 def test_two_entries_compose_rather_than_racing(db):
     """Invariant 2, and the reason this closes D3.
 
