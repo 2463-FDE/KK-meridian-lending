@@ -60,13 +60,20 @@ TIMEOUT_SECONDS = 20.0
 # identifiers (name, email, phone, address) are deliberately excluded — a risk
 # summary doesn't need them, and they have no business reaching a third-party API.
 # income/employment_years are required here: the system prompt instructs the model
-# to judge risk_tier from DTI and employment length, so those facts must actually
-# reach it — without them the model was inventing a risk chip from data it never
-# saw (Codex review on PR #2).
+# to ground its prose in the loan amount, income and employment length, so
+# those facts must actually reach it — without them the model was inventing a risk chip from data it
+# never saw (Codex review on PR #2).
+#
+# The rule used to say DEBT-to-income. Nothing in this payload carries the
+# applicant's existing debt obligations -- there is no such field anywhere in the
+# system (adr/0007) -- so the model was being asked for a ratio it could only
+# fabricate, in the same prompt that tells it not to invent information. Every
+# officer summary generated under that rule published a criterion Meridian does
+# not evaluate.
 _PROMPT_ALLOWED_FIELDS = (
     "amount", "term_months", "purpose", "income", "employer", "job_title", "employment_years",
 )
-# risk_tier/flags require these two to be present and non-null — see
+# flags require these two to be present and non-null — see
 # _has_risk_grounding_data() below.
 _RISK_GROUNDING_FIELDS = ("income", "employment_years")
 
@@ -77,9 +84,17 @@ produce a concise, factual summary in the exact JSON schema provided.
 Rules:
 - NEVER include SSN, full card numbers, or CVV in your output.
 - Use only the data provided — do not invent information.
-- risk_tier: 'low' if DTI<30% and employment>2yr; 'high' if DTI>50% or employment<6mo;
-  'decline' if income cannot plausibly service the loan; else 'medium'.
-- flags: list specific concerns (e.g. "Employment < 1 year", "Loan-to-income ratio > 4x").
+- Do NOT output a risk rating, tier, grade, score or category of any kind. There
+  is no published rule that maps these facts to one, so any label you produced
+  would be your own judgement shown to staff as though it were policy -- and in a
+  manual review it could sway an approve or deny with nothing auditable behind it.
+  The deterministic decision outcome and model score already exist and come from
+  decision-service; your job is prose, not classification.
+- Do NOT reason about debt-to-income. You are not given the applicant's existing
+  debt obligations, and a ratio inferred from income alone is a fabricated number.
+- flags: list specific concerns in plain language, describing what the data shows
+  (e.g. "Employment under one year", "Loan amount is large relative to stated
+  income"). Do not state a numeric threshold as though one were published.
   Empty list if none.
 """.strip()
 
@@ -91,7 +106,6 @@ class _LLMOutput(BaseModel):
     loan_amount: float = Field(description="Requested loan amount in USD")
     term_months: int = Field(description="Loan term in months")
     purpose: str = Field(description="Stated purpose of the loan")
-    risk_tier: Literal["low", "medium", "high", "decline"]
     summary: str = Field(description="2-3 sentence plain-English summary. No PAN, CVV, or SSN.")
     flags: list[str] = Field(default_factory=list)
 
@@ -109,7 +123,7 @@ class LLMResponseError(Exception):
 
 
 class LLMInsufficientDataError(Exception):
-    """Raised when the source application is missing the data risk_tier depends on
+    """Raised when the source application is missing the data the summary depends on
     (income, employment_years — both nullable columns). Fails loudly instead of
     letting the model invent a risk chip from data it never saw."""
 
@@ -206,8 +220,22 @@ def _build_prompt(app_data: dict, signal=None) -> str:
             "invent any other external figures." + chr(10) + chr(10)
         )
     return (
-        "Summarize this loan application as JSON with fields: loan_amount, "
-        "term_months, purpose, risk_tier, summary, flags.\n\n"
+        # Derived from the response contract, never typed out again.
+        #
+        # This line is where the last revision failed: `risk_tier` was removed
+        # from `_LLMOutput`, the API schema, the fixtures and the frontend, and
+        # survived here as a literal. The prompt then asked for a field the
+        # contract had dropped -- and because `_LLMOutput` ignores unknown keys,
+        # a tier the model produced was discarded in silence. Nothing was
+        # published, but the model was still being told to form the judgment,
+        # which colours the prose and flags staff actually read.
+        #
+        # A hand-written copy of a list that lives somewhere else is the defect
+        # shape this repository keeps hitting. Generating the sentence from
+        # `_LLMOutput` makes the prompt and the contract the same statement, so
+        # removing a field from the contract removes it from the prompt.
+        f"Summarize this loan application as JSON with fields: "
+        f"{', '.join(_LLMOutput.model_fields)}.\n\n"
         f"Application data:\n{json.dumps(safe, indent=2)}\n\n"
         f"{context}"
         "Respond with only the JSON object — no markdown fences, no extra text."
@@ -482,6 +510,245 @@ def _strip_contradicting_macro_claims(summary: str, flags: list, signal):
     return cleaned, kept_flags, dropped
 
 
+# Categorical risk language, for the post-parse scrub below.
+#
+# Deliberately narrow. "reduces repayment risk" and "the risk of a missed
+# payment" are ordinary English about a real subject and must survive -- what
+# must not is the model placing this application on a SCALE, which is the thing
+# no published rule authorises it to do. So these match an adjective-plus-risk
+# construction or a named tier/grade/rating, not the word "risk".
+_RISK_LABEL_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # The scale words, used once below and kept in one place so a phrasing
+    # added to one pattern is not silently missing from another.
+    #
+    # Review round 3 found five real misses here, all of them ordinary English
+    # the first version simply did not anticipate: "The application risk is
+    # high", "Decline is recommended", "This borrower is a poor credit risk",
+    # "The overall risk appears moderate", "Approval is not recommended". The
+    # lesson is not that these five needed adding -- it is that a hand-listed
+    # set of sentence shapes reads as complete while missing the next one. So
+    # the direction is now covered both ways round rather than by enumerating
+    # sentences: adjective-then-risk AND risk-then-adjective, active AND
+    # passive recommendation.
+
+    # "high risk", "poor credit risk", "very low risk"
+    r"\b(?:very\s+)?(?:low|medium|moderate|high|elevated|severe|substantial"
+    r"|significant|minimal|poor|excellent|good|bad|strong|weak|acceptable"
+    r"|unacceptable)\s+(?:credit\s+|repayment\s+|default\s+|overall\s+)?risk\b",
+
+    # The same thing hyphenated: "high-risk borrower"
+    r"\b(?:very\s+)?(?:low|medium|moderate|high|elevated|severe|substantial"
+    r"|significant|minimal|poor|excellent|good|bad|strong|weak)-risk\b",
+
+    # Reversed and copular: "the application risk is high", "overall risk
+    # appears moderate", "risk remains elevated". This is the shape the first
+    # version missed entirely -- the adjective moved to the other side of the
+    # verb and every pattern stopped matching.
+    r"\brisk\b[^.!?]{0,40}?\b(?:is|are|was|were|seems?|appears?|remains?|looks?"
+    r"|rated|assessed|considered)\b[^.!?]{0,20}?\b(?:very\s+)?(?:low|medium"
+    r"|moderate|high|elevated|severe|substantial|significant|minimal|poor"
+    r"|excellent|good|bad|strong|weak|acceptable|unacceptable)\b",
+
+    # A named scale, whatever value it carries.
+    r"\brisk[\s-]+(?:tier|grade|rating|category|classification|score|level"
+    r"|band|profile)\b",
+
+    # "Tier: B", "Grade = 3", "Rating: high".
+    r"\b(?:tier|grade|rating|band)\s*[:=]\s*(?:[A-D]\b|[1-5]\b|low|medium"
+    r"|moderate|high|decline)\b",
+
+    # The model narrating that it is classifying.
+    r"\b(?:classif|categoris|categoriz)\w*\s+(?:this\s+|the\s+)?"
+    r"(?:applicant|application|borrower|loan)\b",
+
+    # A decision recommendation is a classification with one bit. Active...
+    r"\brecommend(?:ed|s|ing)?\s+(?:to\s+|that\s+)?(?:this\s+|the\s+)?"
+    r"(?:\w+\s+){0,2}?(?:be\s+)?(?:declin|deny|denie|reject|approv)\w*",
+    # ...and passive: "decline is recommended", "approval is not recommended".
+    r"\b(?:declin|deny|denial|denie|reject|approv)\w*\b[^.!?]{0,30}?"
+    r"\b(?:is|are|was|were)\s+(?:not\s+)?recommend\w*",
+    r"\b(?:should|must|ought\s+to)\s+(?:not\s+)?be\s+"
+    r"(?:declined|denied|rejected|approved)\b",
+    # "risky", "too risky", "looks risky", "a risky application". The
+    # adjective form carries the same judgement as "high risk" and was missed
+    # entirely by patterns built around the noun.
+    #
+    # Round 4 of this guard. Rounds 1-3 each added the shapes the previous round
+    # had not thought of -- adjective-then-noun, then noun-then-copula, now the
+    # adjective on its own. That pattern is the finding: a blacklist of phrasings
+    # is never provably complete, and each round it reads as though it is. The
+    # honest position is that this scrub is defence in depth behind a prompt that
+    # forbids classification, not a proof that no phrasing can get through; the
+    # PR body says so rather than implying the list is closed.
+    r"\brisk(?:y|ier|iest)\b",
+    # Suitability phrasing: a recommendation with the verb removed.
+    r"\b(?:not\s+)?suitable\s+for\s+(?:approval|a\s+loan|lending|credit)\b",
+    r"\b(?:un)?suitable\s+(?:applicant|application|borrower|candidate)\b",
+    r"\b(?:good|bad|poor|strong|weak)\s+(?:credit\s+)?(?:candidate|prospect)\b",
+))
+
+
+def _is_a_risk_classification(text: str) -> bool:
+    return any(p.search(text or "") for p in _RISK_LABEL_PATTERNS)
+
+
+def _strip_risk_classifications(summary: str, flags: list):
+    """Remove model prose that classifies the application.
+
+    Removing `risk_tier` from the contract closed the STRUCTURED path -- the
+    coloured chip. It did not close the prose path: a response of
+    `{"summary": "High-risk borrower...", "flags": ["High risk"]}` validates
+    against `_LLMOutput`, survives `model_dump()` and renders to staff exactly
+    like the chip did. The invariant this PR claims is that no unaudited model
+    risk label reaches staff, and until this guard existed it held only for one
+    of the two ways a label can arrive.
+
+    The system prompt already forbids it. That is not enough, and this file
+    already says so about a different claim: `_strip_contradicting_macro_claims`
+    exists precisely because a prompt can discourage but not prevent. The same
+    reasoning applies to the same class of failure, so the same shape of guard
+    applies -- remove the sentence, keep the rest, log it, and fail closed if
+    nothing survives.
+
+    Removal rather than rewriting, for the reason the macro scrub gives: editing
+    a judgement out of the middle of a sentence would make this service the
+    author of a claim it cannot stand behind.
+    """
+    dropped = 0
+    kept_sentences = []
+    for sentence in _split_sentences(summary):
+        if sentence and _is_a_risk_classification(sentence):
+            dropped += 1
+            continue
+        kept_sentences.append(sentence)
+
+    kept_flags = []
+    for flag in flags:
+        if isinstance(flag, str) and _is_a_risk_classification(flag):
+            dropped += 1
+            continue
+        kept_flags.append(flag)
+
+    cleaned = " ".join(s for s in kept_sentences if s).strip()
+    if dropped:
+        # The text itself is not logged: it is the model's judgement about a
+        # real applicant, and writing it to a log makes a durable record of the
+        # thing being suppressed.
+        log.warning(
+            "removed %d model risk-classification claim(s) from the summary -- "
+            "no approved rule maps an application to a tier",
+            dropped,
+        )
+    if not cleaned:
+        raise LLMResponseError(
+            "the model's summary consisted entirely of risk classifications, "
+            "which no published policy rule authorises it to assign"
+        )
+    return cleaned, kept_flags, dropped
+
+
+# Debt-to-income claims, for the post-parse scrub below.
+#
+# The prompt already tells the model not to reason about debt-to-income, and a
+# prompt cannot prevent anything -- the same reason _strip_contradicting_macro_
+# claims and _strip_risk_classifications exist. A response of
+# `flags: ["Debt-to-income near the policy limit"]` validated, survived both
+# existing scrubs, and reached the officer. That is the exact criterion this
+# branch retired, back in front of staff during manual review.
+#
+# It is not a threshold question. Nothing in this system carries the applicant's
+# existing debt obligations (adr/0007), so any ratio in the output was computed
+# from data the model was never given.
+#
+# The hard constraint is `debt consolidation`. It is a real, common loan purpose
+# that the summary SHOULD discuss, and it contains the word "debt". So none of
+# these patterns match "debt" alone: every one requires debt to be related to
+# income or expressed as a ratio. "Loan amount is large relative to stated
+# income" must also survive -- that is amount-to-income, grounded in two figures
+# the model is actually given, and it is the example the system prompt itself
+# offers.
+_DTI_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # DTI, D.T.I., dti ratio
+    r"\bd\.?\s?t\.?\s?i\.?\b",
+    # debt-to-income, debt to income, debt/income
+    r"\bdebt[\s\-/]*(?:to[\s\-/]*)?income\b",
+    r"\bincome[\s\-/]*(?:to[\s\-/]*)?debt\b",
+    # "debt ratio", "ratio of debt", either order, within one clause
+    r"\bdebt\w*\b[^.!?]{0,30}?\bratio\b",
+    r"\bratio\b[^.!?]{0,30}?\bdebt\w*\b",
+    # The same claim spelled out: EXISTING obligations measured against income.
+    #
+    # `payment` was in this group and had to come out. It matched "The estimated
+    # monthly payment is manageable relative to stated income" -- a statement
+    # about the REQUESTED loan, computed from the amount, term and income the
+    # model is given, and explicitly invited by the system prompt. Scrubbing it
+    # deleted grounded repayment-capacity context and, in a one-sentence
+    # summary, would have failed the whole request closed. That is a worse
+    # outcome than the defect: the officer loses real information and the
+    # borrower's file will not render.
+    #
+    # So this matches only wording that refers to obligations the applicant
+    # ALREADY has, which is precisely what this system does not know. A payment
+    # on an existing debt still matches, via the debt/obligation/liability
+    # alternation.
+    r"\b(?:existing|current|outstanding|other|monthly)\s+"
+    r"(?:debt|obligation|liabilit)\w*\b[^.!?]{0,40}?"
+    r"\b(?:relative to|compared (?:to|with)|against|versus|vs\.?|as a "
+    r"(?:share|percentage|percent|proportion) of)\b[^.!?]{0,25}?\bincome\b",
+    r"\b(?:debt|obligation|liabilit)\w*\b[^.!?]{0,40}?"
+    r"\b(?:relative to|compared (?:to|with)|against|versus|vs\.?|as a "
+    r"(?:share|percentage|percent|proportion) of)\b[^.!?]{0,25}?\bincome\b",
+))
+
+
+def _is_a_dti_claim(text: str) -> bool:
+    return any(p.search(text or "") for p in _DTI_PATTERNS)
+
+
+def _strip_dti_claims(summary: str, flags: list):
+    """Remove model prose asserting a debt-to-income relationship.
+
+    Same shape as the two scrubs beside it: drop the sentence, keep the rest,
+    log that it happened, and fail closed if nothing survives. Removal rather
+    than rewriting, because editing a ratio out of the middle of a sentence
+    would make this service the author of a claim it cannot stand behind.
+
+    No threshold is introduced and no lending rule is added. The rule is that
+    Meridian does not evaluate debt-to-income at all, so there is no number to
+    compare against and nothing here to configure.
+    """
+    dropped = 0
+    kept_sentences = []
+    for sentence in _split_sentences(summary):
+        if sentence and _is_a_dti_claim(sentence):
+            dropped += 1
+            continue
+        kept_sentences.append(sentence)
+
+    kept_flags = []
+    for flag in flags:
+        if isinstance(flag, str) and _is_a_dti_claim(flag):
+            dropped += 1
+            continue
+        kept_flags.append(flag)
+
+    cleaned = " ".join(s for s in kept_sentences if s).strip()
+    if dropped:
+        # The claim itself is not logged: it is a fabricated statement about a
+        # real applicant's finances, and a log line makes it durable.
+        log.warning(
+            "removed %d debt-to-income claim(s) from the summary -- this system "
+            "holds no debt obligations, so any such ratio was fabricated",
+            dropped,
+        )
+    if not cleaned:
+        raise LLMResponseError(
+            "the model's summary consisted entirely of debt-to-income claims, "
+            "which this system has no data to support"
+        )
+    return cleaned, kept_flags, dropped
+
+
 def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     """
     Summarize a loan application for a loan officer.
@@ -500,7 +767,7 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         raise LLMInsufficientDataError(
             f"app_id={app_data.get('id', 'unknown')} is missing "
             f"{_missing_risk_grounding_fields(app_data)} — refusing to let the "
-            "model assign a risk_tier it has no data to support."
+            "model describe risk from data it never saw."
         )
 
     # One grounded external signal (app/macro.py). Fetched before the cost
@@ -591,6 +858,22 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     fields = llm_output.model_dump()
     fields["summary"], fields["flags"], _ = _strip_contradicting_macro_claims(
         fields["summary"], fields.get("flags") or [], signal,
+    )
+
+    # The prose half of the no-risk-label invariant. Removing `risk_tier` from
+    # the contract closed the chip; a model can still write "High-risk borrower"
+    # into `summary` or "High risk" into `flags`, and staff read that the same
+    # way. Runs after the macro scrub so both operate on sentences.
+    fields["summary"], fields["flags"], _ = _strip_risk_classifications(
+        fields["summary"], fields["flags"],
+    )
+
+    # The debt-to-income half. G-DTI removed the published cutoff and the prompt
+    # instruction; this is what holds when the model writes one anyway. Nothing
+    # in this system carries the applicant's debt obligations, so a DTI claim in
+    # the summary is invented, and staff read it during manual review.
+    fields["summary"], fields["flags"], _ = _strip_dti_claims(
+        fields["summary"], fields["flags"],
     )
 
     return LoanSummary(

@@ -1,5 +1,6 @@
 -- 0018 — feature: a staff tool to resolve "refer" decisions (score 600-659
--- or DTI 43-50%, policies/underwriting_guidelines.md's manual-review band).
+-- policies/underwriting_guidelines.md's manual-review band. The DTI half of
+-- that band was retired -- nothing computes a DTI, see adr/0007.
 -- There was no way for staff to actually turn a refer into an approve/deny
 -- before this -- accept_offer already correctly blocked self-accept on
 -- anything but "approve", but nothing existed to move a refer OUT of that

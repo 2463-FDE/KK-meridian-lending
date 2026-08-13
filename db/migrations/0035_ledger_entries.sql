@@ -15,7 +15,9 @@
 --   3. balances is written by the projection alone -- trigger here, guard in step 5
 --   4. the sign is keyed to what the borrower owes -- ledger_sign_matches_type
 --   5. a human-directed entry names the human      -- ledger_actor_required
---   7. one entry per (payment_id, component)       -- ledger_entries_payment_component
+--   7. one entry per (payment_id, component)       -- ledger_entries_payment_component,
+--                                                     ledger_payment_provenance,
+--                                                     ledger_entries_payment_loan_fk
 
 BEGIN;
 
@@ -45,7 +47,14 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     actor_role   TEXT,
 
     -- Provenance. payment_id makes an apply idempotent by construction.
-    payment_id   INTEGER     REFERENCES payments(id),
+    --
+    -- Deliberately no single-column REFERENCES here: the foreign key is the
+    -- COMPOSITE one added below, which ties the payment to the same loan the
+    -- entry moves. A plain reference to payments(id) would let an entry cite a
+    -- payment captured for one borrower while moving another borrower's
+    -- balance -- and ledger rows are immutable, so that movement could never be
+    -- corrected by an update. It would sit on the wrong balance permanently.
+    payment_id   INTEGER,
 
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -59,6 +68,91 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_payment_component
     ON ledger_entries (payment_id, component) WHERE payment_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
+
+-- Invariant 7, the half the unique index cannot express: a payment entry must
+-- HAVE a payment, and nothing else may have one.
+--
+-- The index above is `UNIQUE (payment_id, component) WHERE payment_id IS NOT
+-- NULL`, and NULLs are excluded from it. So without this constraint a
+-- ledger-writing path that passed no payment_id would create entries that never
+-- collide -- a retried apply posting the balance twice, which is exactly the
+-- idempotency the pair is supposed to provide. ADR 0010's invariant 7 says so in
+-- words; this is the words made enforceable.
+--
+-- And the other direction: a non-payment entry may not consume a
+-- (payment_id, component) pair, which would block the real payment entry from
+-- ever being written. An adjustment's provenance is its proposal (ADR 0011), not
+-- a payment.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_payment_provenance;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_payment_provenance CHECK (
+    (entry_type = 'payment') = (payment_id IS NOT NULL)
+);
+
+-- The payment must belong to the SAME loan the entry moves.
+--
+-- `loan_id` and `payment_id` were independent, so a row could cite a payment
+-- captured for loan A while projecting the movement onto loan B. Nothing in the
+-- schema said otherwise, and the ledger is immutable: a wrong movement cannot be
+-- corrected by updating the row, so it stays on that borrower's balance for
+-- good.
+--
+-- Enforced by a COMPOSITE foreign key rather than a trigger, because it is a
+-- referential fact and a declarative constraint cannot be forgotten, bypassed by
+-- a session flag, or dropped independently of the column it protects. It needs a
+-- unique key on the referenced pair; `payments.id` is already the primary key, so
+-- `(id, loan_id)` is unique by construction and the index costs only space.
+--
+-- MATCH SIMPLE (the default) is what makes this work alongside the CHECK above:
+-- when `payment_id` is NULL the constraint does not apply at all, which is
+-- exactly right for the non-payment entry types. When it is present, both columns
+-- must match a real payments row -- so an entry may not cite a payment that is
+-- not attached to any loan either.
+-- Dropped in dependency order and re-added in the reverse, so a replay of this
+-- file is idempotent. The unique key cannot be dropped while the foreign key
+-- depends on its index, and this migration is replayed by
+-- db/tests/test_migration_paths_converge.py precisely to catch that.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_entries_payment_loan_fk;
+ALTER TABLE payments       DROP CONSTRAINT IF EXISTS payments_id_loan_uniq;
+
+ALTER TABLE payments ADD CONSTRAINT payments_id_loan_uniq UNIQUE (id, loan_id);
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_entries_payment_loan_fk
+    FOREIGN KEY (payment_id, loan_id) REFERENCES payments (id, loan_id);
+
+-- The same rule again, BEFORE the row is inserted.
+--
+-- Not redundancy for its own sake. The composite key is the guarantee; this is
+-- what makes the failure legible and makes it happen FIRST. A referential
+-- constraint is checked by an internal AFTER-row trigger, so without this the
+-- projection trigger can run before it -- and if the wrongly-named loan has no
+-- `balances` row, the error a developer sees is the projection's row-count
+-- complaint about loan B rather than the fact that the entry cited loan A's
+-- payment. Same rollback either way, entirely different diagnosis, and the
+-- misleading one arrives on the path most likely to be hit.
+CREATE OR REPLACE FUNCTION ledger_entry_payment_matches_loan() RETURNS trigger AS $$
+DECLARE
+    payment_loan INTEGER;
+BEGIN
+    IF NEW.payment_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT loan_id INTO payment_loan FROM payments WHERE id = NEW.payment_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ledger entry names payment % which does not exist',
+                        NEW.payment_id;
+    END IF;
+    IF payment_loan IS DISTINCT FROM NEW.loan_id THEN
+        RAISE EXCEPTION 'ledger entry moves loan % but cites payment %, which '
+                        'was captured for loan %',
+                        NEW.loan_id, NEW.payment_id, payment_loan;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_payment_belongs_to_loan ON ledger_entries;
+CREATE TRIGGER ledger_entries_payment_belongs_to_loan
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_entry_payment_matches_loan();
 
 -- Invariant 4: the sign is keyed to the effect on what the borrower owes.
 -- A payment reduces; a fee assessment increases; only an adjustment may go

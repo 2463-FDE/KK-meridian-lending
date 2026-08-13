@@ -45,6 +45,12 @@ services:
       # on the server-to-server call to decision-service so it has a check to
       # fail closed on even if a future compose change re-publishes its port.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Read by this service's startup token validation, which treats an unset
+      # ENVIRONMENT as production and fails closed (PR #18). Declared here
+      # because compose passes a host variable through only to services that
+      # name it, and `env_file: .env` is required:false -- see
+      # db/tests/test_compose_declares_every_env_var_services_read.py.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
     depends_on:
       postgres:
         condition: service_healthy
@@ -103,8 +109,27 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8003:8003"
+    # No host port. This service used to publish 8003:8003 while checking no
+    # X-Internal-Token, which made it the one remaining way to reach a backend
+    # service around the gateway: POST localhost:8003/kyc/check wrote a
+    # kyc_checks row for any applicant_id, unauthenticated. Its four siblings
+    # were closed the same way in PR #6; this one was missed. Reach it through
+    # the gateway (/kyc/*) or from another service on this network.
+    #
+    # Restored during the merge with PR #22: taking that branch's compose wholesale
+    # would have re-published the port, so the fix and the merge are both recorded
+    # here. A conflict resolution that quietly reopens a closed hole is the worst
+    # kind, because the PR that closed it still shows green.
+    environment:
+      # Required on POST /kyc/check, which writes the CIP compliance record and
+      # was reachable with no credential at all before PR #18.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Read by this service's startup token validation, which treats an unset
+      # ENVIRONMENT as production and fails closed (PR #18). Declared here
+      # because compose passes a host variable through only to services that
+      # name it, and `env_file: .env` is required:false -- see
+      # db/tests/test_compose_declares_every_env_var_services_read.py.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
     depends_on:
       postgres:
         condition: service_healthy
@@ -274,6 +299,12 @@ services:
       # Forwarded as X-Internal-Token on the staff-ops /decision/* proxy path
       # (see app/main.py) -- must match decision-service's copy above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
+      # Read by this service's startup token validation, which treats an unset
+      # ENVIRONMENT as production and fails closed (PR #18). Declared here
+      # because compose passes a host variable through only to services that
+      # name it, and `env_file: .env` is required:false -- see
+      # db/tests/test_compose_declares_every_env_var_services_read.py.
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT in .env -- see .env.example, or run python scripts/bootstrap_env.py}
       # Rate limit. The DEFAULT STACK SHIPS THE REAL CONTROL: 120 requests /
       # 60s per client IP, the same number services/gateway/app/config.py
       # falls back to.

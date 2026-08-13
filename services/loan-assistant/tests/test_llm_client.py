@@ -59,7 +59,7 @@ def test_build_prompt_includes_underwriting_fields():
 
 def test_build_prompt_includes_risk_grounding_data():
     """Regression (Codex review on PR #2): the system prompt tells the model to
-    judge risk_tier from DTI and employment length, so income and employment_years
+    ground its prose in income and employment length, so income and employment_years
     must actually reach the prompt -- otherwise the model was inventing a risk chip
     from data it never received."""
     prompt = _build_prompt(APP_DATA)
@@ -116,7 +116,11 @@ def test_summarize_application_fills_applicant_name_from_trusted_data(monkeypatc
     result = summarize_application(APP_DATA)
 
     assert result.applicant_name == "Maria Gonzalez"
-    assert result.risk_tier == "low"
+    assert not hasattr(result, "risk_tier"), (
+        "risk_tier reached the response model. It forced the model to invent a "
+        "classification boundary with no published rule behind it, and staff saw "
+        "the result as a policy-looking chip."
+    )
 
 
 def test_summarize_application_ignores_any_name_the_model_tries_to_return(monkeypatch):
@@ -260,7 +264,7 @@ def test_summarize_application_strips_markdown_json_fence(monkeypatch):
 
     result = summarize_application(APP_DATA)
 
-    assert result.risk_tier == "low"
+    assert not hasattr(result, "risk_tier")
     assert result.applicant_name == "Maria Gonzalez"
 
 

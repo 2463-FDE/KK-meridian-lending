@@ -45,8 +45,9 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql://meridian:postgres@localhost:5432/meridian
-      # servicing-service validates INTERNAL_SERVICE_TOKEN at import time and
-      # treats an unset ENVIRONMENT as production, so CI states both explicitly.
+      # Services validate INTERNAL_SERVICE_TOKEN at import time and fail closed on
+      # an empty or repository-known value (PR #18). An unset ENVIRONMENT is treated
+      # as production on purpose, so CI has to say what it is.
       ENVIRONMENT: test
       INTERNAL_SERVICE_TOKEN: test-internal-token
     steps:

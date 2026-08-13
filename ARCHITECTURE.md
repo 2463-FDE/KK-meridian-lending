@@ -64,17 +64,28 @@ paths below.
  prometheus (9090) + grafana (3001) scrape /metrics off all 8 backend services (W7).
 ```
 
-Only `gateway` (8000), `kyc-service` (8003) and `frontend` (3000) publish a host port in
-`docker-compose.yml`; every other backend service is reachable only by the gateway and
+Only `gateway` (8000) and `frontend` (3000) publish a host port in
+`docker-compose.yml`; every backend service is reachable only by the gateway and
 same-network callers (review finding: services used to be host-published alongside the
 gateway's own authz, which made its staff-only/ownership checks skippable by hitting the
 service directly). Defense in depth on top of that boundary is a shared `X-Internal-Token`,
-enforced by origination, decision, disclosure, payment and loan-assistant — see "Auth &
+enforced by origination, decision, disclosure, payment, kyc and loan-assistant — see "Auth &
 roles" below.
 
-**Still open (not fixed in PR #6):** `kyc-service` is the one service that is *both*
-host-published *and* does not check `X-Internal-Token`, so `POST localhost:8003` bypasses
-the gateway entirely.
+`kyc-service` **now checks the token on `POST /kyc/check`**, and the gateway relays
+`/kyc/*` for staff only, stripping any inbound `X-Internal-Token` so a caller cannot
+supply its own. It was the one service that was *both* host-published *and* unauthenticated,
+so `POST localhost:8003` wrote a CIP compliance record for any applicant id it named —
+verified against a running stack, not inferred.
+
+*This paragraph read "**Still open (not fixed in PR #6)**" for two months, and the delay is
+the finding.* PR #8 shipped card tokenization instead, nothing reassigned the gap, and the
+regression test that would have caught it named four services by hand and omitted this one.
+**A partial enumeration in a security test reads exactly like a complete one.** Both halves
+of the boundary are asserted now rather than described, and
+`services/gateway/tests/test_decision_service_not_host_published.py` derives its list of
+services from `services/` on disk — so a new service is covered the day its directory
+appears, not the day someone remembers to add it.
 
 `servicing-service` **now checks the token on every money-moving route** —
 `adjust-balance`, `waive-fee`, `late-fee`, `apply-payment` and the legacy `/payments`
@@ -107,10 +118,13 @@ refuse the charge.
 That distinction is the contract, and getting it wrong is a real charge with no credit:
 an earlier version authenticated and returned without touching the database, so a
 servicing process that was up with its database down answered 200, the card was
-captured, and the follow-up `apply-payment` failed. The check performs a real **write** — an
-`INSERT` into `preflight_writes` inside a transaction it then rolls back, through the
-same `db.transaction()` helper `apply_payment_once` uses, so the same role and
-transaction semantics. Reads were not enough: a read-only replica, a revoked `INSERT`
+captured, and the follow-up `apply-payment` failed. The check performs a real **write** — the same
+statements `apply_payment_once` runs, against the same tables: an `INSERT` into
+`payment_applications` and an `UPDATE` of `balances.balance`, inside a transaction it then
+rolls back, through the same `db.transaction()` helper, so the same role and transaction
+semantics. It probed a dedicated `preflight_writes` table first, which was the same defect
+one level down: per-table grant drift or a trigger failure on either money table left the
+probe table healthy, so a proxy for the thing is not the thing. Reads were not enough: a read-only replica, a revoked `INSERT`
 grant, a read-only transaction or a full disk all let `SELECT`s pass while the apply's
 `INSERT`/`UPDATE` fails, and a 200 still greenlit an uncreditable capture. **Reads prove
 reachability; only a write proves what this endpoint claims.** It is rolled back, so it
@@ -143,7 +157,7 @@ citing D8 as if it tracked the token gap.
 | `gateway` | 8000 | FastAPI + httpx + Redis | Session auth (`/auth/*`), role/ownership enforcement, reverse-proxy. Per-client-IP rate limiting (fixed window, fails open on a Redis outage). Forwards the resolved identity as `X-User-Id`/`X-User-Role`, stripping any inbound `X-User-*` the caller sent itself. See "Auth & roles" for the per-route tiers. |
 | `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (intake logs `app_id`/`applicant_id` only, never the request payload — enforced by `tests/test_intake_pii_not_logged.py`; this cell previously claimed a request-logging middleware in `logging_config.py` logged full POST bodies, which is false — no such middleware has ever existed, see `DEBT.md` D5c), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the fair-lending ZIP screen. |
 | `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge to the balance — still a single mutable column, no ledger. No host port; every money-moving route requires `X-Internal-Token` (`adjust-balance`, `waive-fee`, `late-fee`, `apply-payment`, legacy `/payments`). Read routes stay ownership-checked at the gateway. |
-| `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR. Host-published **and** does not check `X-Internal-Token` — see the boundary note above. |
+| `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`, scoped to the application it ran for. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR (`DEBT.md` D11). No host port; `POST /kyc/check` requires `X-Internal-Token` — this cell read "Host-published **and** does not check `X-Internal-Token`", which was the bypass described in the boundary note above. |
 | `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`). **Compute-only — persists nothing.** Origination is the sole writer of both `decisions` and the append-only `decision_events` audit row, written atomically after its own finality recheck (PR #6). The bureau call goes through a `BureauClient` seam that forwards an idempotency key so a retry after an ambiguous timeout recovers the original pull. Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
 | `disclosure-service` | 8005 | FastAPI + SQLAlchemy + psycopg2 | TILA/Reg-Z offer + APR + amortization (Decimal internally, float at the API boundary). `POST /offers` atomically checks decision approval and inserts (`INSERT ... SELECT ... FROM decisions WHERE outcome='approve'`) and is non-mutating on conflict (`ON CONFLICT DO NOTHING` + read-back) — a retry can never rewrite an already-disclosed loan's terms, even across a fee-rule change. `fee_pct_used` is snapshotted per offer. No host port; requires `X-Internal-Token`. |
 | `payment-service` | 8006 | FastAPI + SQLAlchemy + psycopg2 | Card/ACH charge. **Idempotent** since PR #6: `idempotency_key` is required at the API boundary and backed by a partial unique index, so a retried POST no longer double-charges (`db/migrations/0007`, re-asserted by `0010`; tests in `payment-service/tests/test_charge_flow.py`), with atomic dedupe + apply-once reconciliation (`0012`/`0013`). **PCI debt closed in PR #8:** card capture is tokenized client-side (ADR 0008, supersedes ADR 0003) — the service never receives a raw PAN/CVV/SSN, only a processor token plus last4/brand, and the token itself is never persisted. After inserting the `payments` row it calls servicing's `apply-payment`. No host port; requires `X-Internal-Token`. |
@@ -182,18 +196,31 @@ Login → unsalted-sha256 password check → opaque token in Redis (`session:<to
 TTL, no refresh/rotation, no CSRF token). The gateway resolves the session and forwards
 `X-User-Id`/`X-User-Role` downstream, stripping any inbound `X-User-*` the caller sent
 itself first (a caller used to be able to spoof `X-User-Role: admin` on an otherwise-
-anonymous route).
+anonymous route). `X-Internal-Token` is stripped from inbound requests for the same
+reason and was not: header names arrive lowercased, so a client's `X-Internal-Token`
+survived as a separate dict key from the one the gateway adds, both reached the wire, and
+the downstream `Header(alias=...)` read the client's. Any caller could hand the gateway a
+junk token and force a 401 on every internal-token route — fail-closed, so availability
+rather than escalation, but caller-controlled.
 
 The gateway enforces per-route tiers rather than a single authenticated-or-not gate:
 
 - **Anonymous-allowed**: `/los/*` (an applicant can apply/check status without an
   account) and `/assistant/policy-chat` (generic policy Q&A, no per-applicant financials).
-- **Staff-only**: `/decision/*`, `/disclosure/*` (ops/inspection path only — the real
-  decision/offer flow is origination calling those services server-to-server, never
-  through the gateway), `/assistant/applications/*/summary` (returns risk tier + internal
-  underwriting flags a borrower shouldn't see about their own application), and the
-  portfolio-wide/money-moving parts of `/lss/*`/`/payments/*` (list the whole portfolio,
-  balance adjustments, fee waivers, reconciliation).
+- **Staff-only**: `/decision/*`, `/disclosure/*`, `/kyc/*` (ops/inspection path only — the
+  real decision/offer/CIP flow is origination calling those services server-to-server,
+  never through the gateway), `/assistant/applications/*/summary` (returns risk tier +
+  internal underwriting flags a borrower shouldn't see about their own application), and
+  the portfolio-wide/money-moving parts of `/lss/*`/`/payments/*` (list the whole
+  portfolio, balance adjustments, fee waivers, reconciliation).
+
+  `/kyc/*` was **anonymous-allowed** until this was corrected, on the reasoning that an
+  applicant applies without an account. That reasoning holds for `/los/*`, which gates its
+  own sensitive routes — but `/kyc/*` forwards straight to a service whose only auth is the
+  `X-Internal-Token` *the gateway itself attaches*, so an anonymous caller got the gateway
+  to sign the request for it and could write a `kyc_checks` row for any `applicant_id`.
+  The anonymous path to CIP is `POST /los/applications`, where origination derives the
+  identity from the row it just wrote instead of trusting the caller's body.
 - **Owner-or-staff**: a specific loan's detail/schedule/payment-history/balance, and
   charging a payment — staff for any loan, a borrower only for a loan their own
   `applicant_id` owns.

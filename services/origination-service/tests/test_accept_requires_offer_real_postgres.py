@@ -93,6 +93,15 @@ def _approved_application(conn, *, with_offer: bool):
     _sql(conn, "INSERT INTO applicants (id, name, ssn) VALUES (1, 'Robin Fictional', '999-00-0001')")
     _sql(conn, "INSERT INTO applications (id, applicant_id, amount, term_months, income, status) "
                "VALUES (1, 1, 9000, 24, 60000, 'approved')")
+    # An application that reached 'approved' has a passing CIP result for itself
+    # -- the decision gate refuses without one. Boarding re-checks it under its
+    # own lock (round 10), because approval and funding are different moments and
+    # an application approved before that gate existed still carries a valid
+    # accept token. Seeded here so these tests exercise boarding rather than the
+    # gate; the gate's refusals have their own file.
+    _sql(conn, "INSERT INTO kyc_checks (applicant_id, application_id, name_verified, "
+               "dob_verified, address_verified, ssn_verified, cip_passed) "
+               "VALUES (1, 1, true, true, true, true, true)")
     _sql(conn, "INSERT INTO decisions (app_id, outcome) VALUES (1, 'approve')")
 
     raw_token = None

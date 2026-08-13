@@ -92,6 +92,19 @@ def _a_loan(conn):
     return _exec(conn, "SELECT loan_id FROM balances ORDER BY loan_id LIMIT 1")[0]["loan_id"]
 
 
+def _a_payment(conn, loan, amount="50.00"):
+    """A payment on `loan`, because a 'payment' entry must now name one.
+
+    Two constraints make this necessary rather than tidy:
+    `ledger_payment_provenance` requires a payment entry to carry a payment_id
+    (and forbids one on every other type), and `ledger_entries_payment_loan_fk`
+    requires that payment to belong to the same loan the entry moves.
+    """
+    return _exec(conn, "INSERT INTO payments (loan_id, amount, method) "
+                       "VALUES (%s, %s, 'card') RETURNING id",
+                 (loan, amount))[0]["id"]
+
+
 # --- the back-fill ----------------------------------------------------------
 
 def test_the_projection_equals_the_ledger_sum_for_every_loan(db):
@@ -159,8 +172,9 @@ def test_an_inserted_entry_moves_the_balance(db):
     loan = _a_loan(db)
     before = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
 
-    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-              "VALUES (%s, 'principal', -25.00, 'payment')", (loan,))
+    pay = _a_payment(db, loan, "25.00")
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, payment_id) "
+              "VALUES (%s, 'principal', -25.00, 'payment', %s)", (loan, pay))
     db.commit()
 
     after = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
@@ -176,9 +190,11 @@ def test_two_entries_compose_rather_than_racing(db):
     loan = _a_loan(db)
     before = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
 
-    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-              "VALUES (%s, 'principal', -10.00, 'payment'), "
-              "       (%s, 'principal', -15.00, 'payment')", (loan, loan))
+    first, second = _a_payment(db, loan, "10.00"), _a_payment(db, loan, "15.00")
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, payment_id) "
+              "VALUES (%s, 'principal', -10.00, 'payment', %s), "
+              "       (%s, 'principal', -15.00, 'payment', %s)",
+          (loan, first, loan, second))
     db.commit()
 
     after = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
@@ -208,8 +224,11 @@ def test_interest_projects_nowhere(db):
 ])
 def test_an_entry_cannot_be_changed_or_removed(db, statement):
     loan = _a_loan(db)
-    entry = _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-                      "VALUES (%s, 'principal', -1.00, 'payment') RETURNING id", (loan,))[0]["id"]
+    pay = _a_payment(db, loan, "1.00")
+    entry = _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+                      "payment_id) "
+                      "VALUES (%s, 'principal', -1.00, 'payment', %s) RETURNING id",
+                  (loan, pay))[0]["id"]
     db.commit()
 
     with pytest.raises(psycopg2.errors.RaiseException):
@@ -273,8 +292,9 @@ def test_a_machine_originated_entry_needs_no_actor(db):
     """'payment' especially: servicing's apply receives an amount and a
     payment_id and no actor. Requiring one would fail every real payment."""
     loan = _a_loan(db)
-    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-              "VALUES (%s, 'principal', -3.00, 'payment')", (loan,))
+    pay = _a_payment(db, loan, "3.00")
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, payment_id) "
+              "VALUES (%s, 'principal', -3.00, 'payment', %s)", (loan, pay))
     db.commit()
 
 
@@ -362,9 +382,11 @@ def test_an_entry_for_a_loan_with_no_balance_row_is_rejected(db):
     loan = _orphan_loan(db)
     db.commit()
 
+    pay = _a_payment(db, loan)
     with pytest.raises(psycopg2.errors.RaiseException) as excinfo:
-        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-                  "VALUES (%s, 'principal', -50.00, 'payment')", (loan,))
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+                  "payment_id) "
+                  "VALUES (%s, 'principal', -50.00, 'payment', %s)", (loan, pay))
     assert "expected exactly 1" in str(excinfo.value)
     db.rollback()
 
@@ -376,9 +398,11 @@ def test_a_rejected_entry_leaves_no_orphan(db):
     loan = _orphan_loan(db)
     db.commit()
 
+    pay = _a_payment(db, loan)
     with pytest.raises(psycopg2.errors.RaiseException):
-        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-                  "VALUES (%s, 'principal', -50.00, 'payment')", (loan,))
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+                  "payment_id) "
+                  "VALUES (%s, 'principal', -50.00, 'payment', %s)", (loan, pay))
     db.rollback()
 
     remaining = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = %s",
@@ -404,8 +428,9 @@ def test_a_normal_entry_updates_exactly_one_balance(db):
     loan = _a_loan(db)
     before = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
 
-    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-              "VALUES (%s, 'principal', -5.00, 'payment')", (loan,))
+    pay = _a_payment(db, loan, "5.00")
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, payment_id) "
+              "VALUES (%s, 'principal', -5.00, 'payment', %s)", (loan, pay))
     db.commit()
 
     after = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s", (loan,))[0]["balance"]
@@ -439,3 +464,147 @@ def test_fresh_init_and_the_migration_enforce_it_identically(db):
             f"{name} does not check how many balance rows the projection updated"
         )
         assert "expected exactly 1" in src, f"{name} has no row-count assertion"
+
+
+# --- payment provenance: the entry must cite ITS OWN loan's payment ----------
+
+def _two_loans_with_balances(conn):
+    rows = _exec(conn, "SELECT loan_id FROM balances ORDER BY loan_id LIMIT 2")
+    assert len(rows) == 2, "the seed does not carry two loans with balances"
+    return rows[0]["loan_id"], rows[1]["loan_id"]
+
+
+def test_an_entry_cannot_move_one_loan_using_another_loans_payment(db):
+    """The reported defect, and the reason it is worse than an ordinary bug.
+
+    `loan_id` and `payment_id` were independent foreign keys, so a row could
+    cite a payment captured for loan A while projecting the movement onto loan
+    B. Ledger rows are immutable: that movement could never be corrected by an
+    update, so it would sit on the wrong borrower's balance permanently, and the
+    only record of where it came from would point at the other borrower.
+    """
+    loan_a, loan_b = _two_loans_with_balances(db)
+    pay_a = _a_payment(db, loan_a, "50.00")
+    db.commit()
+
+    before = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s",
+                   (loan_b,))[0]["balance"]
+
+    with pytest.raises(psycopg2.errors.Error) as excinfo:
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+                  "payment_id) "
+                  "VALUES (%s, 'principal', -50.00, 'payment', %s)", (loan_b, pay_a))
+    db.rollback()
+
+    # The failure names the provenance mismatch, not something downstream of it.
+    assert "was captured for loan" in str(excinfo.value), (
+        f"the insert failed for the wrong reason: {excinfo.value}"
+    )
+
+    after = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s",
+                  (loan_b,))[0]["balance"]
+    assert after == before, (
+        "loan B's balance moved on a payment captured for loan A -- the "
+        "projection ran before the provenance was checked"
+    )
+    orphans = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE payment_id = %s",
+                    (pay_a,))[0]["n"]
+    assert orphans == 0, "an entry citing another loan's payment survived"
+
+
+def test_the_foreign_key_holds_even_without_the_trigger(db):
+    """The trigger makes the failure legible and makes it happen first; the
+    COMPOSITE FOREIGN KEY is the guarantee.
+
+    A guarantee that lives only in a trigger can be dropped independently of the
+    column it protects, so this drops the trigger and asserts the database still
+    refuses -- and then puts it back.
+    """
+    loan_a, loan_b = _two_loans_with_balances(db)
+    pay_a = _a_payment(db, loan_a, "60.00")
+    db.commit()
+
+    # Committed, or the rollback below would put the trigger back and the
+    # recreate would then fail on a trigger that already exists -- leaving the
+    # module-scoped connection aborted for every test after this one.
+    _exec(db, "DROP TRIGGER ledger_entries_payment_belongs_to_loan ON ledger_entries")
+    db.commit()
+    try:
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, "
+                      "entry_type, payment_id) "
+                      "VALUES (%s, 'principal', -60.00, 'payment', %s)", (loan_b, pay_a))
+    finally:
+        db.rollback()
+        _exec(db, "CREATE TRIGGER ledger_entries_payment_belongs_to_loan "
+                  "BEFORE INSERT ON ledger_entries FOR EACH ROW "
+                  "EXECUTE FUNCTION ledger_entry_payment_matches_loan()")
+        db.commit()
+
+
+def test_a_payment_entry_must_name_a_payment(db):
+    """The other half of invariant 7, and the one the unique index cannot give.
+
+    `UNIQUE (payment_id, component) WHERE payment_id IS NOT NULL` excludes NULLs,
+    so entries with no payment_id never collide -- a retried apply would post the
+    balance twice, which is exactly the idempotency the pair is supposed to
+    provide.
+    """
+    loan = _a_loan(db)
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
+                  "VALUES (%s, 'principal', -12.00, 'payment')", (loan,))
+    db.rollback()
+
+
+@pytest.mark.parametrize("entry_type,component,amount,actor", [
+    ("adjustment", "principal", "-20.00", True),
+    ("fee_waived", "fees", "-20.00", True),
+    ("fee_assessed", "fees", "20.00", False),
+    ("disbursement", "principal", "20.00", False),
+])
+def test_a_non_payment_entry_may_not_carry_a_payment(db, entry_type, component,
+                                                     amount, actor):
+    """A non-payment entry consuming a (payment_id, component) pair would block
+    the real payment entry from ever being written -- the idempotency key spent
+    on something that is not the payment. An adjustment's provenance is its
+    proposal (ADR 0011), never a payment."""
+    loan = _a_loan(db)
+    pay = _a_payment(db, loan, "20.00")
+    db.commit()
+
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+                  "actor_id, actor_role, payment_id) "
+                  "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+              (loan, component, amount, entry_type,
+               1 if actor else None, "admin" if actor else None, pay))
+    db.rollback()
+
+
+def test_an_entry_citing_a_payment_that_does_not_exist_is_refused(db):
+    loan = _a_loan(db)
+    with pytest.raises(psycopg2.errors.RaiseException) as excinfo:
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+                  "payment_id) "
+                  "VALUES (%s, 'principal', -30.00, 'payment', 987654321)", (loan,))
+    assert "does not exist" in str(excinfo.value)
+    db.rollback()
+
+
+def test_the_matching_case_still_works(db):
+    """Guards the guard. A constraint that refused every payment entry would
+    satisfy every test above and stop the ledger recording payments at all."""
+    loan = _a_loan(db)
+    before = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s",
+                   (loan,))[0]["balance"]
+    pay = _a_payment(db, loan, "40.00")
+
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+              "payment_id) "
+              "VALUES (%s, 'principal', -40.00, 'payment', %s)", (loan, pay))
+    db.commit()
+
+    after = _exec(db, "SELECT balance FROM balances WHERE loan_id = %s",
+                  (loan,))[0]["balance"]
+    assert after == before - 40

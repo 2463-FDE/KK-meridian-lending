@@ -292,15 +292,22 @@ def test_a_qualitative_reference_is_left_alone(monkeypatch):
 
 
 def test_a_contradicting_flag_is_removed_too(monkeypatch):
-    """Flags are officer-facing prose as well, and were unguarded."""
+    """Flags are officer-facing prose as well, and were unguarded.
+
+    The surviving flag used to be "Debt-to-income near the limit". That is now
+    removed by `_strip_dti_claims` -- correctly, since this system holds no debt
+    obligations and any such ratio is fabricated -- so it can no longer serve as
+    the innocent bystander here. Swapped for a flag that is genuinely grounded
+    in data the model is given, which is what this assertion always meant.
+    """
     result = _summarize_with(
         monkeypatch,
         "Adequate income for the requested amount.",
-        flags='["Unemployment at 11.9% is a concern", "Debt-to-income near the limit"]',
+        flags='["Unemployment at 11.9% is a concern", "Employment under one year"]',
     )
 
     assert all("11.9" not in f for f in result.flags)
-    assert "Debt-to-income near the limit" in result.flags
+    assert "Employment under one year" in result.flags
 
 
 def test_a_summary_that_is_nothing_but_a_false_claim_fails_closed(monkeypatch):

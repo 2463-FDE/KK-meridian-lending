@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
-from . import auth, db
+from . import auth, config, db
 from .config import (
     DECISION_URL,
     DISCLOSURE_URL,
@@ -44,6 +44,10 @@ from .rate_limit import RateLimitMiddleware
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("gateway")
+
+# Fail at boot rather than per-request if the internal token is unusable
+# (PR #18 review). Import-time so an unusable deployment never serves traffic.
+config.validate_internal_token()
 
 app = FastAPI(title="Meridian Gateway (BFF)", version="2.0.0")
 
@@ -125,9 +129,21 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
     # session). This proxy never re-serializes any header into the
     # outbound URL -- headers stay headers (see the httpx call below,
     # `headers=headers` is separate from `params=request.query_params`).
+    # `x-internal-token` is stripped for the same reason as `x-user-*`: it is an
+    # identity claim this gateway makes, never one a client is allowed to assert.
+    # Leaving it through was not merely untidy -- it was caller-controlled. Header
+    # names arrive lowercased, so a client's `X-Internal-Token: junk` survived as
+    # the key `x-internal-token`, and the `headers.update()` below then added
+    # `X-Internal-Token` as a SECOND, differently-cased key rather than replacing
+    # it. Both went on the wire, and the downstream `Header(alias=...)` resolves
+    # through Starlette's `Headers.get`, which returns the first match -- the
+    # client's. So any caller could hand the gateway a junk token and force a 401
+    # on every internal-token route: /kyc/*, /decision/*, /disclosure/*,
+    # /payments/*, and origination's staff checks on /los/*. Fails closed, so it
+    # was availability rather than escalation, but it was a stranger's switch.
     headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "authorization")
+        if k.lower() not in ("host", "content-length", "authorization", "x-internal-token")
         and not k.lower().startswith("x-user-")
     }
     if user:
@@ -297,8 +313,60 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
 
 @app.api_route("/kyc/{path:path}", methods=["GET", "POST"])
 async def kyc(path: str, request: Request, authorization: str | None = Header(None)):
-    user = auth.get_session(auth.bearer_token(authorization))
-    return await _proxy(KYC_URL, f"/{path}", request, user)
+    # Staff-only, same as /decision/* and /disclosure/* below, and for the same
+    # reason -- with one extra step of history worth keeping, because getting
+    # this wrong is what made the previous version of this change ineffective.
+    #
+    # The session used to be OPTIONAL here, matching /los/* on the reasoning that
+    # an applicant can apply without an account. But /los/* is origination, which
+    # gates its own sensitive routes; this proxy forwards straight to a service
+    # whose only auth is the X-Internal-Token that THIS FUNCTION ATTACHES. An
+    # anonymous caller therefore got the gateway to sign its request for it:
+    #
+    #     curl -X POST localhost:8000/kyc/kyc/check -d '{"applicant_id": 1, ...}'
+    #     -> 200, and a kyc_checks row for applicant 1 with name_verified=true
+    #
+    # That is forged CIP evidence in the record BSA/AML relies on, reachable on
+    # the one port deliberately published to the host. Removing kyc-service's own
+    # 8003 mapping did not touch it: the token check it added is satisfied by the
+    # gateway's own token, so the front door stayed open while the side door was
+    # being locked. Confirmed by an adversarial review and reproduced live.
+    #
+    # The real anonymous path to CIP is POST /los/applications, where origination
+    # derives applicant/application identity from the row it just wrote rather
+    # than from the caller's body. This route exists only for staff/ops tooling
+    # to inspect KYC directly, which is exactly what /decision/* and
+    # /disclosure/* concluded for the same shape of service.
+    user = _require_user(authorization)
+    if not auth.is_staff(user):
+        raise HTTPException(status_code=403, detail="staff only")
+
+    # Review finding (high): staff-only was not enough, because this proxy
+    # attaches the trusted token and kyc-service persists whatever applicant_id
+    # the body names. So any CSR, underwriter or admin could POST /kyc/kyc/check
+    # with an invented applicant and mint durable CIP evidence against a stranger
+    # -- the same forgery the anonymous fix closed, now requiring only the
+    # weakest staff role rather than no session at all.
+    #
+    # This route exists so staff and ops can INSPECT kyc-service. Inspection is
+    # a read. The mutating endpoint has exactly one legitimate caller,
+    # origination-service, which reaches it server-to-server and derives the
+    # applicant from the row it has just written rather than from a request body.
+    #
+    # Read-only here, and kyc-service independently verifies the
+    # application/applicant linkage before inserting -- neither control relies on
+    # the other, because the token proves only where a request came from and
+    # never that its contents are true.
+    if request.method != "GET":
+        raise HTTPException(
+            status_code=405,
+            detail=("kyc-service is read-only through the gateway; CIP runs as part "
+                    "of POST /los/applications"),
+        )
+    return await _proxy(
+        KYC_URL, f"/{path}", request, user,
+        extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
 
 
 @app.api_route("/decision/{path:path}", methods=["GET", "POST"])
