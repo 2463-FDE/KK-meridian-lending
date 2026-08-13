@@ -558,8 +558,10 @@ means migrating the money table a second time:
   approver and the constraint that says so has to be able to tell them apart.
 
 Everything else -- the approval function, its guarantees, the validation trigger,
-the actor rule -- is **Appendix B**, which is a requirements list for a later ADR
-and not a design approved by this one.
+the actor rule -- is `adr/0011-maker-checker-for-servicing-adjustments.md`, a
+separate decision to be approved on its own merits and not by this one. It was
+Appendix B here until the split; a pointer at an appendix that has moved is the
+same defect as a citation that does not resolve.
 
 ## Alternatives considered
 

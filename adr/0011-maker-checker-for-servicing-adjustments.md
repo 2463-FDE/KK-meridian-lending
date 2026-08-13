@@ -13,14 +13,22 @@ What must hold for an implementation to be this decision.
    money; only the approval writes a ledger entry.
 2. **Exactly one terminal transition per proposal**, ever. A resolved proposal
    cannot be re-resolved, and its substance cannot change after it is raised.
+   *Substance* is enumerated rather than left to judgement: `loan_id`,
+   `component`, `amount`, `entry_type`, `reason`, `requested_by` and
+   `requested_at`. `reason` and `requested_at` are in that list because the
+   reason is the evidence D8 says is missing, and a reason that can be rewritten
+   after approval is a note rather than evidence.
 3. **No self-approval.** The requester may not be the approver, enforced at the
    database and inside the resolving function.
 4. **An approval produces exactly one ledger entry; a rejection produces none.**
    Checked at COMMIT, because the resolving transaction is legitimately mid-state.
 5. **The entry matches the proposal field-for-field** — loan, component, amount,
    type — so an approval cannot authorise different terms than the ones reviewed.
-6. **The ledger actor is the approver**, overwritten by trigger rather than
-   trusted from the caller. The requester survives on the proposal.
+6. **The ledger actor is the approver** — both `actor_id` and `actor_role`,
+   overwritten by trigger rather than trusted from the caller. Overwriting only
+   the id would leave half the attribution caller-supplied on the entry whose
+   whole purpose is to record who authorised the movement. The requester and
+   their role survive on the proposal.
 7. **A rejected proposal is retained.** It is the evidence D8 says is missing.
 8. **A proposal must describe a movement the ledger can represent.** A
    `fee_waived` proposal targets the `fees` component and nothing else, refused
@@ -95,8 +103,23 @@ ledger at all.
 movement — it is a request that may never become one. Those are different facts
 and they get different tables:
 
-> *Illustrative and non-runnable.* Shape of the decision, not the migration —
-> the executable version lands in the migration PR where it can be tested.
+**This SQL runs.** Unlike the illustrative blocks in ADR 0010, every block below
+marked `<!-- executable -->` is extracted verbatim and executed against real
+PostgreSQL by `db/tests/test_adr_0011_enforcement_runs_on_postgres.py`, which
+then performs the approval transaction exactly as documented and asserts that it
+**commits**. That is deliberate and it is a departure from 0010's rule that
+function bodies are illustration, for one reason: this ADR's whole content is a
+set of constraints that have to hold *against each other*, and three successive
+review rounds each added a correct-looking rule that made the approval path
+unsatisfiable. A constraint design that cannot commit is not a design, and prose
+cannot tell you which of these it is.
+
+`resolve_pending_movement()` stays a signature. It is application orchestration,
+its body belongs with the migration that creates it, and what this ADR fixes
+about it is that approval is one function rather than a sequence an application
+is trusted to perform in order.
+
+<!-- executable: 1-pending-movements -->
 
 ```sql
 CREATE TABLE pending_movements (
@@ -107,6 +130,12 @@ CREATE TABLE pending_movements (
     entry_type    TEXT        NOT NULL CHECK (entry_type IN ('adjustment','fee_waived')),
     reason        TEXT        NOT NULL,      -- required: a proposal without one is unreviewable
     requested_by  INTEGER     NOT NULL,
+    -- The role is stored alongside the id on both sides because the ledger's
+    -- own actor constraint requires both, and the entry's actor is written FROM
+    -- this row rather than from the caller (invariant 6). A proposal that
+    -- recorded only ids would leave the role to be supplied by whoever inserts
+    -- the entry.
+    requested_role TEXT       NOT NULL,
     requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     -- Terminal state, written once. This table is NOT append-only: resolving a
@@ -114,13 +143,17 @@ CREATE TABLE pending_movements (
     -- here precisely so the ledger's guarantee stays absolute.
     resolution    TEXT        CHECK (resolution IN ('approved','rejected')),
     resolved_by   INTEGER,
+    resolved_role TEXT,
     resolved_at   TIMESTAMPTZ,
     ledger_entry_id BIGINT    REFERENCES ledger_entries(id),
 
     CONSTRAINT no_self_approval CHECK (resolved_by IS NULL OR resolved_by <> requested_by),
     CONSTRAINT resolution_complete CHECK (
-        (resolution IS NULL     AND resolved_by IS NULL AND resolved_at IS NULL)
-     OR (resolution IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL)
+        (resolution IS NULL
+            AND resolved_by IS NULL AND resolved_role IS NULL AND resolved_at IS NULL)
+     OR (resolution IS NOT NULL
+            AND resolved_by IS NOT NULL AND resolved_role IS NOT NULL
+            AND resolved_at IS NOT NULL)
     ),
     -- "an approval produces exactly one ledger entry, a rejection produces none"
     -- is NOT a CHECK. It cannot be: the entry is inserted after the row is marked
@@ -130,6 +163,7 @@ CREATE TABLE pending_movements (
     --
     -- PostgreSQL CHECK constraints cannot be DEFERRABLE, which is exactly why
     -- this is a constraint trigger rather than a deferred CHECK.
+
     -- Same component vocabulary as the ledger. Without this a proposal could
     -- name a component the ledger cannot hold, and the mismatch would surface
     -- only at approval time -- after a human had already reviewed and accepted it.
@@ -148,21 +182,102 @@ CREATE TABLE pending_movements (
         entry_type <> 'fee_waived' OR component = 'fees'
     )
 );
+```
 
--- Exactly one terminal transition. pending -> approved or pending -> rejected,
--- and never anything afterwards: not approved -> rejected, not a second approver
--- overwriting the first, not an amount edited after review. Without this the
--- table is mutable in the ordinary sense and "who approved this" becomes a
--- question about the latest writer rather than about a decision.
+**One column is added to `ledger_entries` here, and none in ADR 0010's
+migration** — `pending_movement_id`. A column belongs in the migration that can
+enforce its invariant, and this one cannot be enforced without `pending_movements`
+to point at: the foreign key, the `UNIQUE` constraint and the validation trigger
+all need the table to exist.
+
+`approved_required` and `approved_at` exist in **neither** ADR. They would have
+been a second, writable answer to "was this approved" sitting beside the
+proposal's own resolution, and the only thing they buy is an avoided join.
+`approved_required` is derivable from `entry_type` and `approved_at` is
+`pending_movements.resolved_at`.
+
+Adding the column makes the two tables reference each other, which is a genuine
+cycle: an entry points at the proposal that authorised it, and the proposal
+points back at the entry it produced. Split the ordinary way — create the table
+first (its foreign key to `ledger_entries` resolves immediately), then add the
+column and the foreign key back.
+
+**The `approved_entries_have_a_proposal` CHECK belongs in this block and not the
+one above**, because it names `pending_movement_id` — a column that does not
+exist until the `ALTER` two lines earlier. An earlier revision of this ADR put it
+in the table block, which made the document's own SQL unrunnable in the order it
+was written. That is the third time this document has had an ordering
+contradiction, and it is why the blocks are executed by a test now rather than
+read for plausibility.
+
+<!-- executable: 2-ledger-entries-link -->
+
+```sql
+-- ONE column, not three. An earlier version of this ADR added
+-- `approved_required` and `approved_at` alongside it, and then claimed
+-- `pending_movements.resolution` was the single source of truth for approval --
+-- which cannot both be true. They are gone: the proposal is the record, the entry
+-- points at it, and any reader wanting approval metadata joins one row.
+--
+-- Nothing was lost with them. `approved_required` is derivable from entry_type
+-- (an 'adjustment' or 'fee_waived' requires a proposal; nothing else does) and
+-- `approved_at` is `pending_movements.resolved_at`. Keeping denormalised copies
+-- would have bought one avoided join and cost the thing this ADR is for: a
+-- second, writable answer to "was this approved".
+ALTER TABLE ledger_entries
+    ADD COLUMN pending_movement_id BIGINT UNIQUE;
+
+ALTER TABLE ledger_entries
+    ADD CONSTRAINT ledger_entries_pending_movement_fk
+    FOREIGN KEY (pending_movement_id) REFERENCES pending_movements(id);
+
+-- The approved entry must BE the movement that was approved. The UNIQUE above
+-- means one approval can never yield two entries; this says which entry types
+-- must come from an approval at all. adjustment and fee_waived are the
+-- maker-checker subjects, so they may only enter the ledger through a proposal;
+-- the machine-originated types must carry none, so a payment cannot be dressed
+-- up as an approved adjustment.
+ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK (
+    (entry_type IN ('adjustment','fee_waived') AND pending_movement_id IS NOT NULL)
+ OR (entry_type NOT IN ('adjustment','fee_waived') AND pending_movement_id IS NULL)
+);
+```
+
+### Exactly one terminal transition, and nothing else ever changes
+
+`pending_movements` is the one mutable table in this design, so what may change
+about a row is enumerated rather than left to whoever writes the next UPDATE.
+
+**`reason` and `requested_at` are frozen with the rest of the substance.** An
+earlier revision froze only loan, component, amount, type and requester, which
+left *why* a money movement was requested rewritable after it had been approved
+— by any code path holding the application database role, and this system
+deliberately does not rely on privileges for enforcement. The reason is the
+evidence D8 says is missing; a reason that can be rewritten after the fact is not
+evidence, it is a note. `requested_at` goes with it for the same reason: an
+approval reviewed at one time and re-dated to another is a different record of
+the same decision.
+
+<!-- executable: 3-single-transition -->
+
+```sql
 CREATE FUNCTION pending_movements_single_transition() RETURNS trigger AS $$
 BEGIN
     -- The substance never changes, resolved or not. Checked first so it applies
     -- to both branches below.
+    --
+    -- `reason` and `requested_at` are in this list, not merely the fields that
+    -- describe the money. Anything with the application role could otherwise
+    -- rewrite why a staff money movement was requested, after a second person
+    -- had approved the reason they were shown.
     IF NEW.loan_id      IS DISTINCT FROM OLD.loan_id
     OR NEW.component    IS DISTINCT FROM OLD.component
     OR NEW.amount       IS DISTINCT FROM OLD.amount
     OR NEW.entry_type   IS DISTINCT FROM OLD.entry_type
-    OR NEW.requested_by IS DISTINCT FROM OLD.requested_by THEN
+    OR NEW.reason        IS DISTINCT FROM OLD.reason
+    OR NEW.requested_by   IS DISTINCT FROM OLD.requested_by
+    OR NEW.requested_role IS DISTINCT FROM OLD.requested_role
+    OR NEW.requested_at   IS DISTINCT FROM OLD.requested_at THEN
         RAISE EXCEPTION 'the substance of a pending movement is immutable';
     END IF;
 
@@ -187,9 +302,18 @@ BEGIN
         IF NEW.ledger_entry_id IS NULL THEN
             RAISE EXCEPTION 'pending movement % is already %', OLD.id, OLD.resolution;
         END IF;
-        IF NEW.resolution  IS DISTINCT FROM OLD.resolution
-        OR NEW.resolved_by IS DISTINCT FROM OLD.resolved_by
-        OR NEW.resolved_at IS DISTINCT FROM OLD.resolved_at THEN
+        -- Only an APPROVAL produces an entry. The deferred trigger catches a
+        -- rejection carrying one at COMMIT anyway, but catching it at the
+        -- statement names the offending write instead of failing the whole
+        -- transaction later with no indication of which statement did it.
+        IF OLD.resolution <> 'approved' THEN
+            RAISE EXCEPTION 'pending movement % was %, so it produces no ledger entry',
+                OLD.id, OLD.resolution;
+        END IF;
+        IF NEW.resolution    IS DISTINCT FROM OLD.resolution
+        OR NEW.resolved_by   IS DISTINCT FROM OLD.resolved_by
+        OR NEW.resolved_role IS DISTINCT FROM OLD.resolved_role
+        OR NEW.resolved_at   IS DISTINCT FROM OLD.resolved_at THEN
             RAISE EXCEPTION 'a resolved movement may only gain its ledger entry link';
         END IF;
         RETURN NEW;
@@ -201,86 +325,62 @@ END $$ LANGUAGE plpgsql;
 CREATE TRIGGER pending_movements_one_way
     BEFORE UPDATE ON pending_movements
     FOR EACH ROW EXECUTE FUNCTION pending_movements_single_transition();
-
-**The approval sequence this permits, stated explicitly because the trigger is
-what enforces it:**
-
-1. `UPDATE pending_movements SET resolution='approved', resolved_by=…,
-   resolved_at=now() WHERE id=… AND resolution IS NULL` — the compare-and-swap
-   that decides who approved it. Zero rows means somebody else already resolved
-   it, and the caller stops.
-2. `INSERT INTO ledger_entries (…, pending_movement_id) VALUES (…)` — the entry,
-   carrying the proposal it came from.
-3. `UPDATE pending_movements SET ledger_entry_id=… WHERE id=…` — the link back.
-   This is the one post-resolution write the trigger allows, and only from NULL.
-
-All three run in one transaction, so a crash between them leaves no approved
-proposal without its entry. Step 3 is separate only because the entry's id does
-not exist until step 2 has run; a single statement would need the id before it
-was generated.
-
--- The approved entry must BE the movement that was approved. A unique link, so
--- one approval can never yield two entries and an entry cannot be attributed to
--- a proposal it does not match.
--- adjustment and fee_waived are the maker-checker subjects, so they may only
--- enter the ledger through an approved proposal.
-ALTER TABLE ledger_entries ADD CONSTRAINT approved_entries_have_a_proposal CHECK (
-    (entry_type IN ('adjustment','fee_waived') AND pending_movement_id IS NOT NULL)
- OR (entry_type NOT IN ('adjustment','fee_waived') AND pending_movement_id IS NULL)
-);
 ```
 
-**One column is added here, and none in ADR 0010's migration** —
-`pending_movement_id`. A column belongs in the migration that can enforce its
-invariant, and this one cannot be enforced without `pending_movements` to point
-at: the foreign key, the `UNIQUE` constraint and the validation trigger all need
-the table to exist.
+### The commit-time rule, and why it must re-read the row
 
-`approved_required` and `approved_at` exist in **neither** ADR. They would have
-been a second, writable answer to "was this approved" sitting beside the
-proposal's own resolution, and the only thing they buy is an avoided join.
-`approved_required` is derivable from `entry_type` and `approved_at` is
-`pending_movements.resolved_at`.
+Approval implies exactly one entry; rejection implies none. This cannot be an
+immediate check, because the resolving transaction is legitimately mid-state
+between marking the movement approved and linking the entry it just inserted.
 
-Adding it here makes the two tables reference each other, which is a genuine
-cycle: an entry points at the proposal that authorised it, and the proposal
-points back at the entry it produced. Split the ordinary way — create the column
-and the table, then add the foreign key — together with the commit-time rule
-that replaces the impossible CHECK:
+**It also cannot read `NEW`.** PostgreSQL queues one deferred trigger event per
+UPDATE, each carrying the row version *that event* produced, and fires every one
+of them at COMMIT. The approval sequence updates the row twice — once to resolve
+it, once to link the entry — so the first event still arrives at COMMIT holding
+`resolution = 'approved'` and `ledger_entry_id IS NULL`. A trigger reading `NEW`
+therefore raises on **every** approval, blocking all staff money movements, while
+looking correct on the page.
 
-> *Illustrative and non-runnable.* Shape of the decision, not the migration —
-> the executable version lands in the migration PR where it can be tested.
+An earlier revision of this ADR read `NEW`. It was reported by review, and it is
+the exact failure this document has now produced three times: a rule that is
+right in isolation and unsatisfiable next to the ones already there. So the
+trigger re-selects the proposal's **current** state at firing time, which is the
+only state the transaction is actually committing:
+
+<!-- executable: 4-resolution-complete -->
 
 ```sql
--- ONE column, not three. An earlier version of this ADR added
--- `approved_required` and `approved_at` alongside it, and then claimed
--- `pending_movements.resolution` was the single source of truth for approval --
--- which cannot both be true. They are gone: the proposal is the record, the entry
--- points at it, and any reader wanting approval metadata joins one row.
---
--- Nothing was lost with them. `approved_required` is derivable from entry_type
--- (an 'adjustment' or 'fee_waived' requires a proposal; nothing else does) and
--- `approved_at` is `pending_movements.resolved_at`. Keeping denormalised copies
--- would have bought one avoided join and cost the thing this ADR is for: a
--- second, writable answer to "was this approved".
-ALTER TABLE ledger_entries
-    ADD COLUMN pending_movement_id BIGINT UNIQUE;
-
-ALTER TABLE ledger_entries
-    ADD CONSTRAINT ledger_entries_pending_movement_fk
-    FOREIGN KEY (pending_movement_id) REFERENCES pending_movements(id);
-
--- Approval implies exactly one entry; rejection implies none. Checked at COMMIT,
--- because the resolving transaction is legitimately mid-state between marking the
--- movement approved and linking the entry it just inserted.
 CREATE FUNCTION pending_movement_resolution_is_complete() RETURNS trigger AS $$
+DECLARE
+    final_resolution TEXT;
+    final_entry      BIGINT;
 BEGIN
-    IF NEW.resolution = 'approved' AND NEW.ledger_entry_id IS NULL THEN
+    -- The row AS IT STANDS NOW, not as it stood when this event was queued.
+    -- Running at COMMIT inside the same transaction, this sees every earlier
+    -- statement's effect -- so the intermediate approved-without-entry state
+    -- that queued one of these events is no longer what is being validated.
+    --
+    -- Both queued events re-read the same final row and agree, which makes the
+    -- check idempotent rather than order-dependent. That is the property worth
+    -- having: an implementation that adds a third UPDATE to this sequence must
+    -- not be able to break the constraint by doing so.
+    SELECT resolution, ledger_entry_id
+      INTO final_resolution, final_entry
+      FROM pending_movements
+     WHERE id = NEW.id;
+
+    IF NOT FOUND THEN
+        -- Inserted and deleted in the same transaction. Nothing is being
+        -- committed about this proposal, so there is nothing to validate.
+        RETURN NULL;
+    END IF;
+
+    IF final_resolution = 'approved' AND final_entry IS NULL THEN
         RAISE EXCEPTION 'approved movement % has no ledger entry', NEW.id;
     END IF;
-    IF NEW.resolution IS DISTINCT FROM 'approved' AND NEW.ledger_entry_id IS NOT NULL THEN
+    IF final_resolution IS DISTINCT FROM 'approved' AND final_entry IS NOT NULL THEN
         RAISE EXCEPTION 'movement % is %, so it must have no ledger entry',
-                        NEW.id, COALESCE(NEW.resolution, 'pending');
+                        NEW.id, COALESCE(final_resolution, 'pending');
     END IF;
     RETURN NULL;
 END $$ LANGUAGE plpgsql;
@@ -290,6 +390,35 @@ CREATE CONSTRAINT TRIGGER pending_movements_resolution_complete
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION pending_movement_resolution_is_complete();
 ```
+
+### The approval sequence this permits
+
+Stated explicitly, because the triggers above are what enforce it and getting the
+order wrong is what deadlocked two earlier revisions:
+
+1. `UPDATE pending_movements SET resolution='approved', resolved_by=…,
+   resolved_role=…, resolved_at=now() WHERE id=… AND resolution IS NULL` — the
+   compare-and-swap
+   that decides who approved it. Zero rows means somebody else already resolved
+   it, and the caller stops.
+2. `INSERT INTO ledger_entries (…, pending_movement_id) VALUES (…)` — the entry,
+   carrying the proposal it came from. The validation trigger requires the
+   proposal to be approved already, which is why this cannot come first.
+3. `UPDATE pending_movements SET ledger_entry_id=… WHERE id=…` — the link back.
+   This is the one post-resolution write the transition trigger allows, and only
+   from NULL.
+4. `COMMIT` — the deferred trigger re-reads the row and checks
+   approval-implies-entry against its final state.
+
+All four run in one transaction, so a crash between them leaves no approved
+proposal without its entry. Step 3 is separate only because the entry's id does
+not exist until step 2 has run; a single statement would need the id before it
+was generated.
+
+`db/tests/test_adr_0011_enforcement_runs_on_postgres.py` executes exactly this
+sequence against real PostgreSQL and asserts the COMMIT succeeds — and asserts,
+by reverting the trigger to the `NEW`-reading version inside the test, that it
+would not have.
 
 Field-for-field agreement between the proposal and the entry it produces is
 enforced twice — inside `resolve_pending_movement()`, which builds the entry from
@@ -365,19 +494,13 @@ the schema-owning role, so a revoke from the owner does not stick.
 proposal it names, and rejects any mismatch, so a direct `INSERT` can only succeed
 by reproducing exactly what an approver already authorised:
 
-> *Illustrative and non-runnable.* Shape of the decision, not the migration —
-> the executable version lands in the migration PR where it can be tested.
+This one is executable too, and for the same reason as the others: it is half of
+the ordering constraint that deadlocked earlier revisions. It requires the
+proposal to be approved *already*, which is what forces the entry insert to come
+second, and a version of this document that only described that requirement could
+not show whether the sequence it prescribes actually satisfies it.
 
-```sql
--- Signature only; the body lands with step 4's migration.
-CREATE FUNCTION ledger_entry_matches_its_proposal() RETURNS trigger;
-
-CREATE TRIGGER ledger_entries_match_proposal
-    BEFORE INSERT ON ledger_entries
-    FOR EACH ROW EXECUTE FUNCTION ledger_entry_matches_its_proposal();
-```
-
-**What it must reject**, for `adjustment` and `fee_waived` entries only —
+**What it rejects**, for `adjustment` and `fee_waived` entries only —
 machine-originated types (`payment`, `fee_assessed`, `disbursement`,
 `opening_balance`) have no proposal and pass straight through:
 
@@ -387,9 +510,72 @@ machine-originated types (`payment`, `fee_assessed`, `disbursement`,
 - any disagreement on `loan_id`, `component`, `amount` or `entry_type` between
   the entry and the proposal it names.
 
-And one thing it must **overwrite** rather than validate: `actor_id` is set to
-the proposal's approver, so a direct INSERT cannot misattribute who authorised
-the movement even while reproducing everything else correctly.
+And one thing it **overwrites** rather than validates: `actor_id` is set to the
+proposal's approver, so a direct INSERT cannot misattribute who authorised the
+movement even while reproducing everything else correctly.
+
+<!-- executable: 5-entry-matches-proposal -->
+
+```sql
+CREATE FUNCTION ledger_entry_matches_its_proposal() RETURNS trigger AS $$
+DECLARE
+    proposal pending_movements;
+BEGIN
+    -- Machine-originated entries have no proposal and are not this trigger's
+    -- business. `approved_entries_have_a_proposal` already refuses them a
+    -- pending_movement_id, so there is nothing here to check.
+    IF NEW.entry_type NOT IN ('adjustment','fee_waived') THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.pending_movement_id IS NULL THEN
+        RAISE EXCEPTION 'a % entry must name the proposal that authorised it',
+                        NEW.entry_type;
+    END IF;
+
+    -- FOR SHARE, not a plain read: the proposal must not be resolved differently
+    -- by another transaction between this check and the commit that depends on it.
+    SELECT * INTO proposal FROM pending_movements
+     WHERE id = NEW.pending_movement_id FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'pending movement % does not exist', NEW.pending_movement_id;
+    END IF;
+
+    IF proposal.resolution IS DISTINCT FROM 'approved' THEN
+        RAISE EXCEPTION 'pending movement % is %, so it authorises no entry',
+                        proposal.id, COALESCE(proposal.resolution, 'pending');
+    END IF;
+
+    -- Belt and braces with `no_self_approval` on the table. This is the path
+    -- that writes the money, so it re-checks rather than assuming the constraint
+    -- that guards the other path was never dropped.
+    IF proposal.resolved_by IS NULL OR proposal.resolved_by = proposal.requested_by THEN
+        RAISE EXCEPTION 'pending movement % has no distinct approver', proposal.id;
+    END IF;
+
+    IF NEW.loan_id    IS DISTINCT FROM proposal.loan_id
+    OR NEW.component  IS DISTINCT FROM proposal.component
+    OR NEW.amount     IS DISTINCT FROM proposal.amount
+    OR NEW.entry_type IS DISTINCT FROM proposal.entry_type THEN
+        RAISE EXCEPTION 'entry does not match pending movement % -- an approval '
+                        'may not authorise different terms than the ones reviewed',
+                        proposal.id;
+    END IF;
+
+    -- Overwritten, not validated: the actor on a human-authorised entry is the
+    -- APPROVER, and a caller reproducing everything else correctly must not get
+    -- to choose who gets the credit for authorising it. Both fields, because
+    -- ledger_actor_required needs both and overwriting only the id would leave
+    -- the role caller-supplied on exactly the row that exists to record it.
+    NEW.actor_id   := proposal.resolved_by;
+    NEW.actor_role := proposal.resolved_role;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ledger_entries_match_proposal
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_entry_matches_its_proposal();
+```
 
 So the honest claim is narrower than the original one and it is enforced: a direct
 `INSERT` is *possible*, and it cannot produce anything an approver did not already

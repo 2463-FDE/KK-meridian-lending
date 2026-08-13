@@ -256,3 +256,58 @@ def test_a_resolved_proposal_can_still_gain_its_ledger_entry_link():
     assert "OLD.ledger_entry_id IS NOT NULL" in fn, (
         "the trigger does not prevent the link being overwritten once set"
     )
+
+
+def test_no_executable_block_is_also_labelled_illustrative():
+    """0011's enforcement SQL is executed by
+    `test_adr_0011_enforcement_runs_on_postgres.py`. A block that still carried
+    0010's "illustrative and non-runnable" disclaimer would tell a reader the
+    opposite of what the test file proves, and the disclaimer is exactly what let
+    three unrunnable revisions of this design pass review.
+    """
+    text = _text(A11)
+    for match in re.finditer(r"<!--\s*executable:\s*([\w-]+)\s*-->", text):
+        preamble = text[max(0, match.start() - 400):match.start()]
+        assert "Illustrative and non-runnable" not in preamble, (
+            f"the block {match.group(1)!r} is executed by the migration tests but "
+            "is introduced as illustrative and non-runnable"
+        )
+
+
+def test_the_proposal_reason_and_time_are_frozen_with_the_rest():
+    """The reported finding. The transition trigger froze loan, component, amount,
+    type and requester but not `reason` or `requested_at`, so anything holding the
+    application database role could rewrite WHY a staff money movement was
+    requested after it had been approved.
+
+    `db/tests/test_adr_0011_enforcement_runs_on_postgres.py` proves the behaviour
+    against PostgreSQL; this asserts the document says it, because the document is
+    what an implementer follows if the trigger is ever rewritten.
+    """
+    text = _text(A11)
+    start = text.index("CREATE FUNCTION pending_movements_single_transition")
+    body = text[start:text.index("$$ LANGUAGE plpgsql;", start)]
+    for column in ("reason", "requested_at", "requested_role"):
+        assert f"NEW.{column}" in body, (
+            f"`{column}` is not frozen by the transition trigger, so it can be "
+            "rewritten after a second person approved the request they were shown"
+        )
+
+
+def test_the_deferred_check_does_not_validate_the_queued_row():
+    """PostgreSQL fires one deferred event per UPDATE, each holding that event's
+    own row values. The approval sequence updates the proposal twice, so a trigger
+    reading `NEW` still sees approved-without-entry at COMMIT and every approval
+    fails. It must re-read the proposal instead.
+    """
+    text = _text(A11)
+    start = text.index("CREATE FUNCTION pending_movement_resolution_is_complete")
+    body = text[start:text.index("$$ LANGUAGE plpgsql;", start)]
+    assert "FROM pending_movements" in body, (
+        "the commit-time check never re-reads the proposal, so it is validating "
+        "the transient state its own approval sequence passes through"
+    )
+    assert "NEW.ledger_entry_id" not in body, (
+        "the commit-time check reads NEW.ledger_entry_id -- the queued event's "
+        "value, not the row being committed"
+    )
