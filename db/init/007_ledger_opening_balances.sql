@@ -60,6 +60,9 @@ BEGIN
                  seeded, skipped, zero_bal;
 END $$;
 
+UPDATE ledger_control SET initialization_open = FALSE
+ WHERE singleton AND initialization_open;
+
 -- Attach the compatibility bridge only after seeded balances have canonical
 -- opening_balance entries. New loans boarded after initialization are captured
 -- as legacy_direct_write until application writers move to the ledger.

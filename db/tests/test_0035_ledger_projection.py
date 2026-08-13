@@ -154,6 +154,22 @@ def test_a_session_flag_cannot_suppress_a_normal_projection(db):
     db.rollback()
 
 
+@pytest.mark.parametrize("entry_type", ["opening_balance", "legacy_direct_write"])
+def test_system_only_entry_types_cannot_be_inserted_directly(db, entry_type):
+    loan = _a_loan(db)
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,reason) "
+                  "VALUES(%s,'principal',11,%s,'attempted direct system entry')",
+              (loan, entry_type))
+    db.rollback()
+
+
+def test_the_initialization_gate_cannot_be_reopened(db):
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _exec(db, "UPDATE ledger_control SET initialization_open=TRUE")
+    db.rollback()
+
+
 def test_running_the_migration_again_does_not_double_anything(db):
     """The rollback story depends on this: a second cutover attempt must not
     re-seed, or every loan with an opening balance doubles."""

@@ -474,6 +474,43 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS ledger_control (
+    singleton           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    initialization_open BOOLEAN NOT NULL DEFAULT TRUE
+);
+INSERT INTO ledger_control(singleton, initialization_open)
+VALUES (TRUE, TRUE) ON CONFLICT (singleton) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION ledger_control_cannot_reopen() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR OLD.initialization_open = FALSE
+       OR NEW.initialization_open = TRUE THEN
+        RAISE EXCEPTION 'ledger initialization gate cannot be reopened or deleted';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS ledger_control_one_way ON ledger_control;
+CREATE TRIGGER ledger_control_one_way
+    BEFORE UPDATE OR DELETE ON ledger_control
+    FOR EACH ROW EXECUTE FUNCTION ledger_control_cannot_reopen();
+
+CREATE OR REPLACE FUNCTION ledger_system_entry_is_authorized() RETURNS trigger AS $$
+BEGIN
+    IF NEW.entry_type = 'legacy_direct_write' AND pg_trigger_depth() < 2 THEN
+        RAISE EXCEPTION 'legacy_direct_write may only come from the balances capture trigger';
+    END IF;
+    IF NEW.entry_type = 'opening_balance' AND NOT EXISTS (
+        SELECT 1 FROM ledger_control WHERE singleton AND initialization_open
+    ) THEN
+        RAISE EXCEPTION 'opening_balance is closed after ledger initialization';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS ledger_entries_system_type_guard ON ledger_entries;
+CREATE TRIGGER ledger_entries_system_type_guard
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_system_entry_is_authorized();
+
 -- Invariant 7: exactly one entry per payment/component pair. NOT per payment --
 -- a waterfall (D14) splits one payment across components by definition, so a
 -- single-row rule would forbid the thing the ledger is being built to allow.
