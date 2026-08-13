@@ -155,6 +155,13 @@ def resume_application(idempotency_key: str, resume_token: str | None,
     # client's and stays put.
     updated = db.query(
         "UPDATE applications SET "
+        # The token being displaced stays valid until its own original expiry
+        # (migration 0039), so two overlapping retries both leave their caller
+        # holding something that works. Without this the earlier caller's token
+        # dies under it, and since intake clears the retry credentials on
+        # success it has nothing left to recover with.
+        "       prev_access_token_hash = access_token_hash, "
+        "       prev_access_token_expires_at = access_token_expires_at, "
         "       access_token_hash = %s, "
         "       access_token_expires_at = now() + (%s || ' seconds')::interval, "
         "       access_token_consumed_at = NULL "

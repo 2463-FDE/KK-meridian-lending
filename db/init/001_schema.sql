@@ -96,7 +96,14 @@ CREATE TABLE IF NOT EXISTS applications (
     -- different fingerprint is refused with 409 rather than being served the
     -- stored data, because the borrower can see the value they corrected and a
     -- decision made against the old one is invisible to them.
-    request_fingerprint      TEXT
+    request_fingerprint      TEXT,
+    -- The access token displaced by the most recent resume rotation
+    -- (db/migrations/0039). Accepted until its own expiry so two overlapping
+    -- retries both leave a usable credential; killed by
+    -- access_token_consumed_at along with the current slot, so single use
+    -- still means single use.
+    prev_access_token_hash       TEXT,
+    prev_access_token_expires_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_applications_accept_token_hash

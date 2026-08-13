@@ -373,11 +373,34 @@ def verify_access_token(row: dict, raw_token: str | None) -> bool:
     cannot distinguish "wrong token" from "expired" from "already used" from
     "no such application" (see run_decision).
     """
+    # Consumption covers BOTH slots. Single use is a property of the decision,
+    # not of a particular credential, so a consumed application accepts
+    # neither the current token nor the displaced one.
     if row.get("access_token_consumed_at") is not None:
         return False
-    if not row.get("access_token_hash") or not row.get("access_token_live"):
-        return False
-    return access_token_matches(row["access_token_hash"], raw_token)
+
+    if row.get("access_token_live") and access_token_matches(
+        row.get("access_token_hash"), raw_token
+    ):
+        return True
+
+    # The token displaced by the most recent resume rotation (migration 0039).
+    #
+    # Two overlapping retries both authorise, both rotate, and without this the
+    # caller whose response came back FIRST holds a token the second rotation
+    # already invalidated. Since intake now clears the retry credentials on
+    # success, that caller has nothing left to recover with -- locked out of
+    # decisioning, and the obvious next move is to resubmit, which creates the
+    # duplicate application the retry contract exists to prevent.
+    #
+    # Checked second and with its own expiry, so it is a grace slot rather than
+    # a second permanent credential.
+    if row.get("prev_access_token_live") and access_token_matches(
+        row.get("prev_access_token_hash"), raw_token
+    ):
+        return True
+
+    return False
 
 
 def consume_access_token(cur, app_id: int) -> None:
@@ -397,7 +420,10 @@ def consume_access_token(cur, app_id: int) -> None:
 # is evaluated by Postgres's own now(), never Python's.
 ACCESS_TOKEN_FIELDS = (
     "access_token_hash, access_token_consumed_at, "
-    "(access_token_expires_at IS NOT NULL AND access_token_expires_at > now()) AS access_token_live"
+    "(access_token_expires_at IS NOT NULL AND access_token_expires_at > now()) AS access_token_live, "
+    "prev_access_token_hash, "
+    "(prev_access_token_expires_at IS NOT NULL AND prev_access_token_expires_at > now()) "
+    "  AS prev_access_token_live"
 )
 
 

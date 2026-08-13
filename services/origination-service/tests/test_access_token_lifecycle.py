@@ -72,7 +72,13 @@ def real_db(monkeypatch):
                 -- rebuilt from db/init, which is a larger change than this PR
                 -- should carry -- but the duplication is the reason this test
                 -- broke, not the migration.
-                request_fingerprint TEXT
+                request_fingerprint TEXT,
+                -- db/migrations/0039. Same hand-written-copy problem as the
+                -- line above: this block duplicates db/init/001_schema.sql and
+                -- has to be kept in step by hand, which is why adding a column
+                -- to the real schema breaks these tests rather than the code.
+                prev_access_token_hash TEXT,
+                prev_access_token_expires_at TIMESTAMPTZ
             );
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;

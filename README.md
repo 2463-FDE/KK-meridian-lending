@@ -1,16 +1,22 @@
 # Meridian Lending Platform
 
-> **Still NOT PCI-DSS compliant, but the capture path no longer stores card data.**
+> **No card data is stored. Still NOT PCI-DSS compliant.**
 > `payment-service` used to store the full PAN and CVV in plaintext
 > (`payments.pan`/`payments.cvv`, unencrypted `TEXT`) and log both at INFO — CVV/SAD
-> storage is an absolute PCI-DSS prohibition regardless of encryption. PR #8 tokenizes
-> capture in the browser (`adr/0008`, supersedes `adr/0003`): the service now receives a
-> processor token plus last4/brand and never a raw PAN, CVV or SSN. **What remains:**
-> `payments.pan`/`cvv` are still nullable columns holding whatever pre-tokenization rows
-> already wrote, and nothing purges them yet. A compliance claim needs that purge, a
-> QSA/SAQ assessment and a real processor — none of which exist here. Credit decisions
-> are audited (Week 3's append-only `decision_events`); the rest of the compliance banner
-> below is the original vendor's unverified claim, not a verified status.
+> storage is an absolute PCI-DSS prohibition regardless of encryption. Capture is
+> tokenized in the browser (`adr/0008`, supersedes `adr/0003`): the service receives a
+> processor token plus `last4`/`brand` and never a raw PAN, CVV or SSN. **The columns are
+> gone** — `db/migrations/0031` dropped them from existing databases and
+> `db/init/001_schema.sql` no longer creates them, so neither a migrated nor a freshly
+> initialised database has a `payments.pan` or a `payments.cvv` at all
+> (`docs/DEBT.md` D5b/D13).
+>
+> **That closes the defect and is not a compliance position.** A PCI-DSS claim needs a
+> QSA assessment, a real processor and a scoped cardholder-data environment. This build
+> has a *mocked* processor and no assessment of any kind, so the honest status is: the
+> specific violation is fixed, compliance is unevaluated. Credit decisions are audited
+> (Week 3's append-only `decision_events`); the rest of the compliance banner below is
+> the original vendor's unverified claim, not a verified status.
 
 The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
 Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,
@@ -108,17 +114,29 @@ and a borrower login `maria`.
 
 ## Compliance
 
-**Not PCI-DSS compliant** — the `payments` table still carries plaintext `pan` and `cvv`
-columns (`db/init/001_schema.sql`). Storing CVV/SAD post-authorization is a flat PCI-DSS
-violation independent of encryption; it predates the current engagement (vendor debt, see
-`adr/0003`) and the columns are still there — tracked as `docs/DEBT.md` D5b/D13.
+**Not PCI-DSS compliant, and no card data is stored.** Those are two separate statements
+and this section has been wrong about the second one, so both are made explicit.
 
-What is *no longer* true, and was corrected here rather than left to be re-reported: the
-seed scripts do **not** write card values any more (`002_seed.sql`, `003_seed_bulk.sql`
-insert `last4`/`brand` only), so a freshly initialised database does not contain card data.
-The columns are empty and unwritten, waiting to be dropped by the contract migration
-(`db/migrations/0031`). "The columns exist" and "there is card data in them" are different
-claims, and only the first one holds.
+**What is stored:** the processor's opaque token is used transiently and never persisted;
+the `payments` row keeps `last4` and `brand` for display, and nothing else about the
+instrument. **What is not stored:** there is no `payments.pan` and no `payments.cvv`.
+`db/migrations/0031` dropped both from existing databases and `db/init/001_schema.sql`
+never creates them, so a migrated database and a fresh one agree
+(`docs/DEBT.md` D5b/D13, both recorded Fixed). Storing CVV/SAD post-authorization is a
+flat PCI-DSS violation independent of encryption; it predated the current engagement
+(vendor debt, `adr/0003`) and it is closed.
+
+**Why that is still not compliance.** A PCI-DSS position requires a QSA assessment, a
+real acquirer or processor, and a defined cardholder-data environment with the scoping
+that follows. This build has a *mocked* processor and no assessment of any kind. Removing
+stored card data closes a specific, serious violation; it evaluates nothing else, and
+nothing in this repository should be read as a compliance claim.
+
+*This section previously said the columns were "still there ... waiting to be dropped".
+`0031` dropped them on 2026-08-10 and the sentence outlived it — the same defect the
+paragraph below describes, one release later. `db/tests/test_readme_schema_claims.py`
+now checks the schema claims here against the real schema, so the next drift fails a test
+instead of waiting for a reader to notice.*
 
 This section previously said that `payment-service` logs them at INFO and persists the PAN
 and CVV itself. Both claims are false against the current code, and were verified against
@@ -129,8 +147,9 @@ and `charge()` builds its log line through `redact_dict`, which masks sensitive 
 runs the PAN/SSN/CVV patterns over every other string value — so card data pushed through
 an *allowed* field (a PAN in `processor_token`, say) is redacted before it is logged, which
 the schema alone would not prevent.
-The remaining exposure is the schema and the seed data, not the application's write or log
-path — see `docs/DEBT.md` D5a for the per-call-site logging verification.
+Neither the schema nor the seed data is an exposure any more: the columns are dropped and
+the seeds insert `last4`/`brand` only — see `docs/DEBT.md` D5a for the per-call-site
+logging verification.
 
 Treat any prior claim of PCI-DSS compliance for this codebase as false.
 

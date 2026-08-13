@@ -1,7 +1,8 @@
 """Tests for POST /applications/{app_id}/review (db/migrations/0018, 0020).
 
 Feature: a staff tool to resolve a "refer" decision (policies/underwriting_
-guidelines.md's manual-review band, score 600-659 or DTI 43-50%), or to
+guidelines.md's manual-review band, model score 600-659 -- the DTI half of
+that band was retired, see adr/0007), or to
 record staff's own approve/deny outright. Requirement: once staff decides,
 that decision is FINAL -- no staff member (not even a different one) may
 change it afterward, a reason is required up front, and two simultaneous

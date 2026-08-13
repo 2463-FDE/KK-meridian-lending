@@ -23,7 +23,6 @@ interface LoanSummary {
   loan_amount: number;
   term_months: number;
   purpose: string;
-  risk_tier: "low" | "medium" | "high" | "decline";
   summary: string;
   flags: string[];
   // Optional in the type because an older response, or a provider that is off
@@ -31,12 +30,14 @@ interface LoanSummary {
   external_signals?: ExternalSignal[];
 }
 
-const RISK_TONE: Record<LoanSummary["risk_tier"], string> = {
-  low: "chip-green",
-  medium: "chip-amber",
-  high: "chip-red",
-  decline: "chip-red-muted",
-};
+// The coloured risk chip is gone with the field behind it.
+//
+// It rendered a model-generated low/medium/high/decline as a policy-looking
+// badge, and no published rule maps an application to a tier -- so a staff member
+// in manual review saw a red chip that carried the authority of a decision and
+// the provenance of a sentence. What belongs in that position is the
+// deterministic outcome and model score from decision-service, which the
+// underwriting screen already shows.
 
 function errMsg(err: unknown, fallback: string): string {
   if (err && typeof err === "object" && "detail" in err) {
@@ -98,7 +99,7 @@ export default function LoanSummaryCard({
           <p className="hint" style={{ margin: 0 }}>
             {summary
               ? REGENERATE_HINT
-              : "Generate a risk-tiered, plain-English summary of this application."}
+              : "Generate a plain-English summary of this application."}
           </p>
         </div>
         <button onClick={generate} disabled={busy} title={summary ? REGENERATE_HINT : undefined}>
@@ -120,9 +121,7 @@ export default function LoanSummaryCard({
       {summary ? (
         <div>
           <div className="spread" style={{ marginBottom: 10 }}>
-            <span className={`chip ${RISK_TONE[summary.risk_tier]}`}>
-              {summary.risk_tier.toUpperCase()}
-            </span>
+            <span className="hint">AI summary — not a decision</span>
             {generatedAt ? (
               <span className="hint">Generated {generatedAt.toLocaleString()}</span>
             ) : null}

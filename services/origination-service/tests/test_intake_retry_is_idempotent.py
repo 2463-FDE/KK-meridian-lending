@@ -412,11 +412,21 @@ def test_two_simultaneous_resumes_both_succeed_and_both_stay_recoverable(db):
     could never recover -- it had no credential left to try again with. A
     borrower double-submitting their browser needed support.
 
-    With a client-held secret the harm is gone rather than hidden. Both resumes
-    match the WHERE clause and both succeed. The access token still rotates, so
-    last-write-wins and one caller may hold a stale one -- but that caller
-    *still holds the secret*, so it resumes again and gets a live token. An
-    unrecoverable state became a retryable one.
+    With a client-held secret both resumes match the WHERE clause and both
+    succeed. The access token still rotates, so only one of the two is the
+    CURRENT hash -- which is what this test measures.
+
+    That used to be justified here on the grounds that the caller holding the
+    displaced token "still holds the secret, so it resumes again". That
+    reasoning was later invalidated by this same branch: intake now clears the
+    retry credentials the moment it succeeds, so a caller that received a 200
+    has nothing left to resume with.
+
+    Migration 0039 is what actually makes it safe -- the displaced token stays
+    valid until its own expiry, so BOTH callers hold something that works. That
+    property is asserted by test_two_concurrent_resumes_both_leave_a_working_token;
+    this test keeps measuring the rotation itself, which is still true and still
+    worth pinning.
 
     Two real connections, fired at a barrier, because the guarantee is a WHERE
     clause evaluated under a row lock and a single-threaded test cannot observe it.
@@ -828,3 +838,163 @@ def test_the_stored_fingerprint_is_a_digest_not_the_payload(db):
     assert stored and len(stored) == 64
     assert payload["ssn"] not in stored
     assert payload["name"].lower() not in stored.lower()
+
+
+# --- two overlapping resumes must both leave a usable credential --------------
+
+def _token_row(conn, app_id):
+    """The row shape verify_access_token expects, built by the same SQL the
+    router uses -- so this tests the real predicate, not a re-implementation."""
+    from app import decision_state
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(
+            f"SELECT {decision_state.ACCESS_TOKEN_FIELDS} FROM applications WHERE id = %s",
+            (app_id,),
+        )
+        return cur.fetchone()
+
+
+def test_a_rotation_leaves_the_previous_access_token_usable(db):
+    """The reported defect, in its simplest form.
+
+    Every authorised resume rotates the access token. Before migration 0039 the
+    token handed to the earlier caller was dead the moment a second resume ran
+    -- and because intake now clears the retry credentials on success, that
+    caller had nothing left to recover with. Locked out of decisioning, and the
+    obvious next move is to resubmit, which creates the duplicate application
+    this contract exists to prevent.
+    """
+    from app import decision_state, intake
+
+    key, secret = f"rotate-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    app_id, first_token, _ = intake.create_application(
+        _payload(key), resume_token=secret)
+
+    _, second_token, _ = intake.resume_application(key, secret)
+    assert second_token != first_token, "the access token was not rotated at all"
+
+    row = _token_row(db, app_id)
+    assert decision_state.verify_access_token(row, second_token), (
+        "the newest access token does not authenticate"
+    )
+    assert decision_state.verify_access_token(row, first_token), (
+        "the displaced access token was invalidated -- the caller that received "
+        "it has no way back to decisioning"
+    )
+
+
+def test_two_concurrent_resumes_both_leave_a_working_token(db):
+    """The real shape: a double-submitted browser, two connections, one barrier."""
+    import threading
+
+    from app import decision_state, intake
+
+    key, secret = f"concurrent2-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    app_id, _, _ = intake.create_application(_payload(key), resume_token=secret)
+
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+
+    def _resume():
+        try:
+            barrier.wait(timeout=10)
+            results.append(intake.resume_application(key, secret))
+        except Exception as e:                               # pragma: no cover
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=_resume) for _ in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=20)
+
+    assert errors == [], f"a concurrent resume failed: {errors}"
+    tokens = [r[1] for r in results if r]
+    assert len(tokens) == 2
+
+    row = _token_row(db, app_id)
+    working = [tok for tok in tokens if decision_state.verify_access_token(row, tok)]
+    assert len(working) == 2, (
+        f"{len(working)} of 2 concurrently-issued access tokens authenticate. "
+        "The caller holding the other one is locked out of decisioning with no "
+        "credentials left to recover with."
+    )
+
+
+def test_consuming_the_decision_kills_both_slots(db):
+    """Single use is a property of the DECISION, not of one credential.
+
+    The grace slot must not become a second bite at the apple: once a decision
+    has been authorised, neither token may authorise another.
+    """
+    from app import decision_state, intake
+
+    key, secret = f"consume-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    app_id, first_token, _ = intake.create_application(
+        _payload(key), resume_token=secret)
+    _, second_token, _ = intake.resume_application(key, secret)
+
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        decision_state.consume_access_token(cur, app_id)
+    db.commit()
+
+    row = _token_row(db, app_id)
+    assert not decision_state.verify_access_token(row, second_token)
+    assert not decision_state.verify_access_token(row, first_token), (
+        "the displaced token still authorises a decision after consumption -- "
+        "the grace slot has become a way to decide twice"
+    )
+
+
+def test_the_grace_slot_expires_on_its_own_schedule(db):
+    """It inherits the displaced token's expiry, not a fresh window.
+
+    Otherwise every rotation would silently extend the life of an old
+    credential, and a token could outlive its issued lifetime indefinitely.
+    """
+    from app import decision_state, intake
+
+    key, secret = f"graceexp-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    app_id, first_token, _ = intake.create_application(
+        _payload(key), resume_token=secret)
+
+    # Age the CURRENT token past its expiry, then rotate. The displaced copy
+    # must carry that expired timestamp across, not be given a new one.
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("UPDATE applications SET access_token_expires_at = now() - "
+                    "interval '1 second' WHERE id = %s", (app_id,))
+    db.commit()
+
+    _, second_token, _ = intake.resume_application(key, secret)
+
+    row = _token_row(db, app_id)
+    assert decision_state.verify_access_token(row, second_token)
+    assert not decision_state.verify_access_token(row, first_token), (
+        "an expired token became valid again by being displaced"
+    )
+
+
+def test_only_one_previous_token_is_kept(db):
+    """The bound, stated as a test rather than left implicit.
+
+    Three overlapping resumes still strand the oldest. Two is the case that
+    actually occurs -- a double-submitted browser -- and an unbounded chain of
+    live credentials would be a worse security position than the defect.
+    """
+    from app import decision_state, intake
+
+    key, secret = f"bound-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    app_id, t1, _ = intake.create_application(_payload(key), resume_token=secret)
+    _, t2, _ = intake.resume_application(key, secret)
+    _, t3, _ = intake.resume_application(key, secret)
+
+    row = _token_row(db, app_id)
+    assert decision_state.verify_access_token(row, t3)
+    assert decision_state.verify_access_token(row, t2)
+    assert not decision_state.verify_access_token(row, t1), (
+        "more than one previous token is live -- the grace slot is unbounded"
+    )

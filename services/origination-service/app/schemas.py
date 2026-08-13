@@ -136,8 +136,11 @@ class DecisionOut(BaseModel):
 
 class ReviewIn(BaseModel):
     # Feature: lets staff resolve a "refer" decision (policies/underwriting_
-    # guidelines.md's manual-review band, score 600-659 or DTI 43-50%) into a
-    # real approve/deny -- see routers/applications.py::review_application.
+    # guidelines.md's manual-review band, model score 600-659) into a real
+    # approve/deny -- see routers/applications.py::review_application.
+    #
+    # The DTI half of that band ("or DTI 43-50%") was retired from the policy,
+    # because nothing computes a DTI -- see adr/0007 Resolution.
     # Scoped to approve/deny only for now, no counteroffer.
     outcome: Literal["approve", "deny"]
     reason: str = Field(min_length=1, max_length=2000)

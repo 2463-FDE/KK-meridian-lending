@@ -67,6 +67,11 @@ def _full_schema_sql():
             access_token_hash TEXT,
             access_token_expires_at TIMESTAMPTZ,
             access_token_consumed_at TIMESTAMPTZ,
+            -- db/migrations/0039. Another hand-written copy of
+            -- db/init/001_schema.sql; ACCESS_TOKEN_FIELDS selects these,
+            -- so omitting them fails the read, not the feature.
+            prev_access_token_hash TEXT,
+            prev_access_token_expires_at TIMESTAMPTZ,
             accept_token_hash TEXT,
             accept_token_expires_at TIMESTAMPTZ,
             accept_token_consumed_at TIMESTAMPTZ,
