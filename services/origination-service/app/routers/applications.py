@@ -32,6 +32,12 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 # Mirrors the staff role set the gateway already enforces for /assistant/*.
 _STAFF_ROLES = {"csr", "underwriter", "admin"}
 
+#: Explicit, durable state for an application whose identity verification could
+#: not be completed because kyc-service rejected our credentials. Terminal until
+#: the applicant re-submits; run_decision refuses it. Plain TEXT column with no
+#: CHECK constraint, so this needs no migration.
+KYC_UNVERIFIED_STATUS = "kyc_unverified"
+
 # Bug fix: applications.status used to only ever move 'submitted' -> 'funded'
 # (see accept_offer below) -- run_decision never wrote the decision outcome
 # back onto it at all. The underwriting console's status filter/KPIs
@@ -172,12 +178,69 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
 
 
 @router.post("", response_model=ApplicationCreated)
-def submit_application(body: ApplicationIn):
+def submit_application(
+    body: ApplicationIn,
+    x_resume_token: str | None = Header(default=None, alias="X-Resume-Token"),
+):
     payload = body.model_dump()
     # creates applicant+application rows; intake logs app_id/applicant_id only
     # (tests/test_intake_pii_not_logged.py). This comment used to claim full-PII
     # logging here — it was stale, see DEBT.md D5c.
-    app_id, access_token = intake.create_application(payload)
+    # The resume token travels as a HEADER, never in the body or a query string:
+    # it is a credential, and the accept-token audit already established that a
+    # credential in a URL leaks into access logs, browser history and Referer.
+    try:
+        app_id, access_token, resume_token = intake.create_application(
+            payload, resume_token=x_resume_token
+        )
+    except intake.KeyedRequestNeedsResumeToken:
+        # Refused before anything was written. An idempotency key without its
+        # recovery secret produces a row nobody can resume: a later KYC failure
+        # hands back `resume_token: null`, and the retry finds the application
+        # with nothing to authorise it. A 400 the caller can act on beats a
+        # recorded application they can only escape through support.
+        #
+        # Safe to be specific here, unlike the 401 below: this says nothing
+        # about whether the key names an existing application, because the
+        # check runs before the lookup.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "resume_token_required",
+                "message": (
+                    "A submission carrying an idempotency key must also send "
+                    "the X-Resume-Token header. The key identifies the "
+                    "application; the token is what authorises recovering it. "
+                    "Send both, or send neither."
+                ),
+            },
+        )
+    except intake.RetryPayloadMismatch:
+        # Right credentials, different request. Not served the stored copy: the
+        # browser keeps the retry credentials so the borrower CAN correct a
+        # mistake, so this is the ordinary path for someone fixing a mistyped
+        # SSN or income -- and silently deciding on the old value is invisible
+        # to them.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "retry_payload_changed",
+                "message": (
+                    "This retry carries different applicant or loan details "
+                    "from the application it is retrying. Start a new "
+                    "application to submit changed information."
+                ),
+            },
+        )
+    except intake.ResumeNotAuthorized:
+        # Deliberately indistinguishable from "no such application". Saying
+        # "wrong token" confirms the idempotency key names a real application,
+        # which is the one thing an attacker holding a guessed key wants to learn.
+        # Same status, same body, for missing, wrong, expired and replayed.
+        raise HTTPException(
+            status_code=401,
+            detail="could not authorize this retry",
+        )
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:
@@ -194,28 +257,372 @@ def submit_application(body: ApplicationIn):
            "address_verified": False, "ssn_verified": False}
     is_entity = bool(payload.get("is_entity"))
     try:
+        # Identity fields are NOT sent. kyc-service grades the applicants row it
+        # reads for itself (review round 9): sending them made the CIP verdict a
+        # function of this request rather than of stored state, so any caller
+        # holding the internal token could manufacture passing evidence. They are
+        # redundant now, and not sending them keeps a second copy of the SSN off
+        # the wire and out of another service's request handling entirely.
         resp = clients.post(clients.KYC_URL, "/kyc/check", {
             "application_id": app_id,
             "applicant_id": applicant_id,
-            "name": payload.get("name"),
-            "dob": payload.get("dob"),
-            "ssn": payload.get("ssn"),
-            "address": payload.get("address"),
-            "entity_type": "llc" if is_entity else None,
-        })
-        passed = bool(resp.get("cip_passed"))
-        # Map kyc-service cip_passed -> the four KycOut booleans the frontend expects.
-        # CIP verifies name/dob/address/ssn that were provided; entity applicants have no
-        # dob/ssn so those stay false even on a pass (mirrors the old in-process stub).
+        }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+        # Review round 6 (medium): these four used to be RECONSTRUCTED from the
+        # single `cip_passed` flag -- `dob_verified = passed and not is_entity`
+        # and so on. That is a guess about another service's audit record, and it
+        # was wrong in both directions: an individual who passed on name and
+        # address alone was reported `ssn_verified: true` while the persisted
+        # `kyc_checks` row said false, and a partially-verified applicant was
+        # reported as verifying nothing. Support and audit read this response.
+        #
+        # kyc-service now returns the four factors it actually recorded, so they
+        # are passed through. The only remaining transformation is the fallback
+        # below, which is all-false and says so.
         cip = {
-            "name_verified": passed,
-            "dob_verified": passed and not is_entity,
-            "address_verified": passed,
-            "ssn_verified": passed and not is_entity,
+            "name_verified": bool(resp.get("name_verified")),
+            "dob_verified": bool(resp.get("dob_verified")),
+            "address_verified": bool(resp.get("address_verified")),
+            "ssn_verified": bool(resp.get("ssn_verified")),
         }
+    except httpx.HTTPStatusError as e:
+        # PR #18 review (high): a 401/403 from kyc-service is a CONFIGURATION
+        # failure, not the transient hiccup the fallback below exists for, and
+        # the two used to be indistinguishable. Every exception landed in one
+        # `except`, logged a warning, and returned 200 "submitted" with all four
+        # CIP booleans false -- so an unset or skewed INTERNAL_SERVICE_TOKEN
+        # silently switched identity verification off for every applicant while
+        # the flow looked entirely healthy and no kyc_checks row was written.
+        #
+        # An auth failure means we do not know who this applicant is and cannot
+        # find out. Returning success would be a lie, so intake fails -- but the
+        # applicant and application rows are already committed by
+        # intake.create_application above, and a 503 on top of a persisted row
+        # would leave an application that decisioning would happily pick up with
+        # no KYC behind it.
+        #
+        # So the row is marked, explicitly and durably, before the error is
+        # raised: `kyc_unverified` is a terminal-until-retried state that
+        # run_decision refuses (see _require_persisted_kyc). The application is
+        # visible for support, cannot advance, and re-submitting is safe.
+        status = e.response.status_code if e.response is not None else None
+        # 503 from kyc-service means it could not RECORD the result (review
+        # finding: it used to swallow that and return 200 with check_id=-1, so an
+        # applicant was told they were verified while no compliance row existed,
+        # and the decision gate then blocked them later with no explanation).
+        #
+        # Grouped with the credential failures because the consequence is
+        # identical and knowable: there is definitively no kyc_checks row, so the
+        # application cannot advance. Marking it says that now, where the
+        # applicant and support can see it, instead of at decision time.
+        if status in (401, 403, 503):
+            _mark_application_kyc_unverified(app_id, reason=f"kyc-service returned {status}")
+            if status == 503:
+                log.error(
+                    "kyc-service could not record the CIP result app_id=%s -- intake "
+                    "refused; the application has no compliance row and cannot proceed",
+                    app_id,
+                )
+            else:
+                log.error(
+                    "kyc-service rejected our credentials (%s) app_id=%s -- intake refused; "
+                    "check INTERNAL_SERVICE_TOKEN parity between origination and kyc-service",
+                    status, app_id,
+                )
+            # The handle goes back with the failure. Returning a bare 503 left the
+            # caller with nothing to retry WITH -- no app_id, no token -- so the
+            # only available action was a fresh POST, which created a second
+            # applicant and a second application and stranded this one.
+            #
+            # app_id alone would not be enough: it is a guessable integer and
+            # proves nothing, which is why run_decision requires the token. Both
+            # travel together or neither is useful.
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "identity_verification_unavailable",
+                    "message": ("This application was recorded but not verified, and "
+                                "cannot proceed until identity verification completes. "
+                                "Retry with the same idempotency_key, or request a "
+                                "decision with the access_token below once it is."),
+                    "app_id": app_id,
+                    "access_token": access_token,
+                    # BOTH are required to come back. The key says which
+                    # application; this token authorises the caller to recover it.
+                    # 0036 handed out an access token for the key alone, which
+                    # made a non-secret identifier into a credential.
+                    "resume_token": resume_token,
+                    "resume": ("POST /applications with the same idempotency_key "
+                               "and this value in the X-Resume-Token header"),
+                },
+            )
+        # Any other status -- a 5xx, or the 422 an OLD kyc-service returns for
+        # the identity-free payload this version sends. Both leave no CIP row,
+        # and the check after this block turns that into a resumable failure
+        # rather than a "submitted" the applicant cannot advance.
+        log.warning("kyc-service returned %s for app_id=%s: %s", status, app_id, e)
     except Exception as e:  # noqa
+        # Timeouts, connection errors, malformed responses -- transient by
+        # assumption, same fallback as before.
         log.warning("kyc-service call failed: %s", e)
-    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip), "access_token": access_token}
+    # The authoritative check: did a CIP row actually land for THIS application?
+    #
+    # Enumerating statuses is how the rolling-deploy hole got in. An old
+    # kyc-service answers the identity-free payload with 422, which is neither
+    # 401/403/503 nor a connection error, so it fell through to "submitted" with
+    # every CIP flag false -- an application nobody could advance, reported as
+    # accepted. The same is true of a 5xx, and of a 200 whose INSERT silently did
+    # nothing.
+    #
+    # So this asks the database instead of the exception type. Any outcome that
+    # leaves no row is the same outcome to the applicant, and it is resumable.
+    if not _kyc_rows_for(app_id):
+        _mark_application_kyc_unverified(app_id, reason="no CIP row persisted")
+        log.error("no kyc_checks row after intake app_id=%s -- refusing to report "
+                  "this application as submitted", app_id)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "identity_verification_unavailable",
+                "message": ("This application was recorded but not verified, and "
+                            "cannot proceed until identity verification completes. "
+                            "Retry with the same idempotency_key and the resume "
+                            "token below."),
+                "app_id": app_id,
+                "access_token": access_token,
+                "resume_token": resume_token,
+                "resume": ("POST /applications with the same idempotency_key "
+                           "and this value in the X-Resume-Token header"),
+            },
+        )
+
+    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip),
+            "access_token": access_token, "resume_token": resume_token}
+
+
+def _mark_application_kyc_unverified(app_id: int, reason: str) -> None:
+    """Record that this application has no usable KYC result.
+
+    Written as application status rather than a side table because every reader
+    that could advance the application already consults `status`, so a new table
+    would be one more thing each of them has to remember to check.
+    """
+    try:
+        db.query(
+            "UPDATE applications SET status = %s WHERE id = %s AND status = 'submitted'",
+            (KYC_UNVERIFIED_STATUS, app_id),
+        )
+    except Exception as e:  # noqa
+        # Best effort by necessity: if this write fails we still must not return
+        # success, and the decision gate below is keyed on the ABSENCE of a
+        # kyc_checks row rather than on this status, so it holds either way.
+        log.error("could not mark app_id=%s as %s (%s): %s",
+                  app_id, KYC_UNVERIFIED_STATUS, reason, e)
+
+
+def _clear_kyc_unverified_marker(app_id: int) -> None:
+    """Withdraw the `kyc_unverified` mark once identity evidence exists.
+
+    Review round 8 (high): the mark was set in one place and cleared in none.
+    Intake writes it when kyc-service answers 401/403/503, and
+    `decision_state.recheck_finality_locked` refuses to decide anything carrying
+    it. So the recheck added last round could obtain a passing CIP row, satisfy
+    this gate, and still be refused inside the lock a moment later by a status
+    describing an outage that was over -- an application that is verified and
+    permanently undecidable at the same time, needing manual database surgery.
+
+    My own live check missed it because I simulated the outage by stopping
+    kyc-service, which is a connection error and takes the transient branch that
+    never marks anything. Only the 503 branch sets the mark, and that is the
+    branch I did not exercise.
+
+    The mark means "we have no identity evidence for this application". Once we
+    do, it is false, and a false status is not a safe one to leave lying around:
+    everything that could advance the application reads `status`.
+
+    Guarded to that one value, so this can never move an application out of
+    `funded`, `denied` or a manual review. Idempotent: a no-op when the mark is
+    not there, which is the usual case.
+    """
+    try:
+        db.query(
+            "UPDATE applications SET status = 'submitted' "
+            "WHERE id = %s AND status = %s",
+            (app_id, KYC_UNVERIFIED_STATUS),
+        )
+    except Exception as e:  # noqa
+        # Not fatal: the gate has already established that CIP passed, and the
+        # worst case is the application stays marked and is refused, which is the
+        # behaviour before this function existed. Refusing to decide because the
+        # cleanup failed would trade a stuck application for a 500.
+        log.warning("could not clear %s on app_id=%s (%s)",
+                    KYC_UNVERIFIED_STATUS, app_id, type(e).__name__)
+
+
+def _kyc_rows_for(app_id: int):
+    """The CIP verdicts recorded for this application, best first."""
+    return db.query(
+        "SELECT cip_passed FROM kyc_checks WHERE application_id = %s "
+        "ORDER BY cip_passed DESC NULLS LAST, id DESC LIMIT 1",
+        (app_id,),
+    )
+
+
+def _attempt_kyc_recheck(app_id: int) -> None:
+    """Run CIP once for an application that has no result, and swallow failure.
+
+    Only for the MISSING case. A recorded failure is an answer, and re-running it
+    would just ask the same question again with the same data.
+
+    Failure here is deliberately silent: the caller re-reads the table and
+    refuses on its own if this did not produce a row, so an exception would only
+    replace a clear 409 about identity verification with a 500 about something
+    the applicant cannot act on. What must not happen is this succeeding quietly
+    while the row is still missing -- and it cannot, because nothing downstream
+    trusts this function's return; the gate trusts the table.
+    """
+    rows = db.query(
+        # applicant_id only: the recheck sends identifiers and kyc-service reads
+        # the identity columns itself. Selecting an SSN we do not use would be
+        # handling PII for no reason.
+        "SELECT a.applicant_id FROM applications a "
+        "JOIN applicants p ON p.id = a.applicant_id WHERE a.id = %s",
+        (app_id,),
+    )
+    if not rows:
+        return
+    r = rows[0]
+    try:
+        # Identifiers only. kyc-service reads the applicant itself (round 9), so
+        # re-sending the identity fields would put a second copy of the SSN on
+        # the wire to be ignored at the other end.
+        clients.post(clients.KYC_URL, "/kyc/check", {
+            "application_id": app_id,
+            "applicant_id": r["applicant_id"],
+        }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
+        log.info("kyc recheck completed at decision time app_id=%s", app_id)
+    except Exception as e:  # noqa
+        # The type, never the message: a kyc-service error string can carry the
+        # payload that produced it, and that payload is identity data.
+        log.warning("kyc recheck failed at decision time app_id=%s (%s)",
+                    app_id, type(e).__name__)
+
+
+def _require_persisted_kyc_locked(app_id: int, cur) -> None:
+    """The identity gate, read through an open transaction's cursor.
+
+    Same rule as `_require_persisted_kyc`: a passing CIP row for THIS
+    application. Separate because it must run inside a caller's transaction, on
+    the connection holding the row lock -- `db.query()` would read on a different,
+    autocommitted connection and could see a state the lock was taken to exclude.
+
+    No recheck here, deliberately. Recovery belongs where an applicant is waiting
+    on it (the decision gate); a staff member resolving a referral is not the
+    moment to make an outbound call to kyc-service from inside a transaction
+    holding a lock on the application row.
+    """
+    cur.execute(
+        "SELECT cip_passed FROM kyc_checks WHERE application_id = %s "
+        "ORDER BY cip_passed DESC NULLS LAST, id DESC LIMIT 1",
+        (app_id,),
+    )
+    rows = cur.fetchall()
+    if rows and rows[0]["cip_passed"] is True:
+        return
+    log.error("refusing a manual review on app_id=%s -- no passing CIP row", app_id)
+    raise HTTPException(
+        status_code=409,
+        detail=("identity verification has not completed for this application "
+                "yet, so it cannot be decided. Please try again shortly."),
+    )
+
+
+def _require_persisted_kyc(app_id: int) -> None:
+    """Refuse to decide an application that has no persisted KYC result.
+
+    PR #18 review: closing the intake hole is not enough on its own. An
+    application that reached the database before KYC failed must not be able to
+    walk into decisioning -- and decisioning is reachable directly at
+    `POST /applications/{id}/decision`, not only through the intake response, so
+    the gate has to live here rather than in the caller.
+
+    What counts is a row in `kyc_checks` for THIS APPLICATION whose recorded
+    verdict is a pass.
+
+    Review round 6: this used to accept any row, on the reasoning that "a failed
+    CIP is a real, recorded outcome the deny path is entitled to act on". No deny
+    path acted on it. Nothing outside kyc-service read the result at all, so a
+    recorded failure had exactly the same effect as a pass -- the application was
+    decided, and could be approved, for an applicant this system had recorded as
+    unidentified. A gate that admits a failure because something else will catch
+    it is a gate only if that something else exists.
+
+    Both cases it now refuses are the same case: we cannot show that this
+    application's applicant was identified. Either no CIP result was persisted
+    (KYC never ran, or could not be recorded), or one was and it did not pass, or
+    it predates `db/migrations/0033` and does not record a verdict. A NULL is not
+    a pass -- it is a row that does not say, which is not evidence of anything.
+
+    Not a policy change dressed as a gate: a failed CIP should end as an adverse
+    action with a reason, not a 409, and that path does not exist yet. Until it
+    does, refusing to underwrite is the fail-closed direction, and the response
+    says which of the two it is so support can tell them apart.
+
+    Review finding: this used to key on the applicant, joining through
+    `applications`, because `kyc_checks` had no `application_id`. That made the
+    gate answer "has this APPLICANT ever been verified?" -- so a repeat applicant
+    with an old check passed it even when this application's KYC call failed or
+    never ran, and the logs recorded a block that had not happened. The evidence a
+    regulator would ask for is the CIP result for this application, and the schema
+    could not express it. `db/migrations/0032` adds the column; this now reads it.
+
+    Historical rows may carry a NULL `application_id` where the link was never
+    recorded and could not be inferred. Those do not satisfy this gate, and that
+    is the correct direction: we cannot show CIP ran for that application, so we
+    do not underwrite on it.
+    """
+    if not _kyc_rows_for(app_id):
+        # Review round 7 (high): a KYC outage at intake time left a permanent
+        # dead end. A timeout, a connection error or a non-503 5xx all take the
+        # application -- deliberately, so an applicant is not turned away by our
+        # outage -- but no kyc_checks row is written, and this gate then refuses
+        # the application forever. The applicant sees "submitted", nothing
+        # retries, and the only exits were a resubmission or a manual fix.
+        #
+        # The outage is over by now, most likely: intake and decision are
+        # separate requests, usually minutes apart. So try once here before
+        # refusing. Recovery belongs at the gate because the gate is what knows
+        # the row is missing.
+        _attempt_kyc_recheck(app_id)
+
+    rows = db.query(
+        "SELECT cip_passed FROM kyc_checks WHERE application_id = %s "
+        # A passing row wins over a non-passing one for the same application:
+        # ordering by cip_passed DESC NULLS LAST means a re-run that succeeded
+        # settles it, rather than an earlier failure blocking forever.
+        "ORDER BY cip_passed DESC NULLS LAST, id DESC LIMIT 1",
+        (app_id,),
+    )
+    if rows and rows[0]["cip_passed"] is True:
+        _clear_kyc_unverified_marker(app_id)
+        return
+
+    if not rows:
+        log.error("refusing to decide app_id=%s -- no persisted kyc_checks row", app_id)
+        # "Re-submit" was the only advice that worked before the recheck above
+        # existed. It no longer is, and it is the expensive one: a resubmission
+        # is a second application, a second hard credit pull, and a support
+        # ticket to reconcile the two. Retrying is now the cheap fix and usually
+        # the working one, so it is what the message says.
+        detail = ("identity verification has not completed for this application "
+                  "yet, so it cannot be decided. Please try again shortly.")
+    else:
+        # Deliberately not logged with the factors that failed: which identity
+        # element did not verify is exactly the kind of detail the logging rules
+        # on this service keep out of log lines.
+        log.error("refusing to decide app_id=%s -- recorded CIP did not pass", app_id)
+        detail = ("identity verification did not pass for this application, so it "
+                  "cannot be decided.")
+    raise HTTPException(status_code=409, detail=detail)
 
 
 @router.get("", response_model=Page[ApplicationListItem])
@@ -289,10 +696,16 @@ def get_application(
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
     applicant = a.applicant
+    # Scoped to THIS application, not the applicant. Review finding: this read
+    # took the latest row for the applicant, so staff opening a repeat
+    # applicant's second application saw identity evidence from their first --
+    # the exact mixing db/migrations/0032 exists to stop, still happening on the
+    # screen a human actually looks at while the decision gate refused the same
+    # application as unverified.
     kyc_row = session.scalar(
-        select(models.KycCheck).where(models.KycCheck.applicant_id == a.applicant_id)
+        select(models.KycCheck).where(models.KycCheck.application_id == app_id)
         .order_by(models.KycCheck.id.desc())
-    ) if a.applicant_id else None
+    )
     dec = session.get(models.Decision, app_id)
     offer = session.scalar(
         select(models.Offer).where(models.Offer.app_id == app_id).order_by(models.Offer.id.desc())
@@ -430,6 +843,26 @@ def run_decision(
         if not is_staff and not is_owner:
             raise HTTPException(status_code=403, detail="not authorized to request a decision for this application")
         requested_by = x_user_role if is_staff else "borrower"
+
+    # PR #18 review: an application that reached the database before KYC failed
+    # must not walk into decisioning. Checked here rather than in the intake
+    # response because THIS route is directly reachable -- the gateway proxies
+    # /los/* anonymously by design, so a caller with an app_id can ask for a
+    # decision without ever seeing what intake returned.
+    #
+    # AFTER authorization, deliberately. It ran before it in the first version,
+    # which reintroduced an oracle this route had already closed: an anonymous
+    # caller guessing an app_id got 409 for a real application with no KYC row
+    # and 403 otherwise, so the response distinguished "this application exists"
+    # from "you may not ask" before the caller had proven anything. Every
+    # unauthorized path on this route collapses to one generic 403 on purpose
+    # (see the access-token comment above), and a check that runs earlier than
+    # the trust boundary undoes that no matter how correct the check itself is.
+    #
+    # Still before start_decision_attempt and the decision-service call, so an
+    # authorized-but-unverified application costs no bureau inquiry and leaves
+    # no attempt row.
+    _require_persisted_kyc(app_id)
 
     # PR #6 review (Finding 2): TXN A -- lock the application, recheck
     # funded/manual finality (the authoritative check -- everything above
@@ -790,6 +1223,20 @@ def review_application(
                 detail="cannot decide on an already-funded application",
             )
 
+        # Review round 10 (high): this path bypassed the identity gate entirely.
+        # run_decision refuses an application without a passing CIP row, and then
+        # a staff member could resolve any pre-existing 'refer' here -- write
+        # manual_reviews, flip decisions.outcome to approve, and be issued an
+        # accept token -- with identity never proven. Legacy rows are the reachable
+        # case: db/migrations/0032 leaves application_id NULL where the link could
+        # not be inferred, so those applications have no CIP result for THIS
+        # application and are exactly the ones sitting in 'refer'.
+        #
+        # Inside the lock and before anything is written, so a concurrent apply
+        # cannot land a decision this check would have refused. A manual review is
+        # a human overriding the MODEL, not a human overriding identification.
+        _require_persisted_kyc_locked(app_id, cur)
+
         # Audit fix: the current_outcome == 'refer' check above reads via
         # db.query() on a separate, autocommitted connection BEFORE this
         # transaction even opens -- a concurrent run_decision could change
@@ -1088,6 +1535,19 @@ def accept_offer(
             ok, status_code, message = decision_state.verify_accept_token(locked, x_offer_accept_token)
             if not ok:
                 raise HTTPException(status_code=status_code, detail=message)
+
+        # Review round 10: boarding is the step that creates the loan, so it is
+        # the one place identity absolutely has to be proven, and it was relying
+        # on the two paths upstream having proven it. That holds for anything
+        # decided after this PR and not for what is already on record: an
+        # application approved before the gate existed still carries a valid
+        # accept token, and boarding it would fund a loan for an applicant this
+        # system cannot show was identified.
+        #
+        # Checked here rather than trusted from upstream because this is the
+        # irreversible one. A duplicated check on the money step is the cheapest
+        # defence there is.
+        _require_persisted_kyc_locked(app_id, cur)
 
         # Re-read the offer fresh under the lock too -- there is no
         # offer-edit/cancel endpoint in this system today, so its rate

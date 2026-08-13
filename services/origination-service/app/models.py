@@ -54,10 +54,14 @@ class KycCheck(Base):
     # CIP only — no sanctions_screened / ubo_identified / ongoing_monitoring columns (debt).
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     applicant_id: Mapped[int | None] = mapped_column(ForeignKey("applicants.id"), nullable=True)
+    # Which application this CIP result was run for (db/migrations/0032).
+    application_id: Mapped[int | None] = mapped_column(ForeignKey("applications.id"), nullable=True)
     name_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     dob_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     address_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     ssn_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # The CIP verdict (db/migrations/0033). NULL on rows written before it.
+    cip_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

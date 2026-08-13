@@ -131,5 +131,3 @@ def _build_legacy_schema(conn, schema):
         INSERT INTO loans (id, app_id, applicant_name, principal, apr, term_months)
             VALUES (1, 1, 'Sam Okafor', 9000, 5.946, 24);
     """)
-
-

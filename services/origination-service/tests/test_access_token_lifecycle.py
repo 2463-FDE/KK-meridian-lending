@@ -60,7 +60,36 @@ def real_db(monkeypatch):
                 access_token_consumed_at TIMESTAMPTZ,
                 accept_token_hash TEXT,
                 accept_token_expires_at TIMESTAMPTZ,
-                accept_token_consumed_at TIMESTAMPTZ
+                accept_token_consumed_at TIMESTAMPTZ,
+                idempotency_key TEXT,
+                resume_token_hash TEXT,
+                resume_token_expires_at TIMESTAMPTZ,
+                resume_token_consumed_at TIMESTAMPTZ,
+                -- db/migrations/0038. This block is a hand-written copy of
+                -- db/init/001_schema.sql and drifts every time that file gains
+                -- a column: the write path then fails here with UndefinedColumn
+                -- while the real schema is fine. Kept in step rather than
+                -- rebuilt from db/init, which is a larger change than this PR
+                -- should carry -- but the duplication is the reason this test
+                -- broke, not the migration.
+                request_fingerprint TEXT,
+                -- db/migrations/0039. Same hand-written-copy problem as the
+                -- line above: this block duplicates db/init/001_schema.sql and
+                -- has to be kept in step by hand, which is why adding a column
+                -- to the real schema breaks these tests rather than the code.
+                prev_access_token_hash TEXT,
+                prev_access_token_expires_at TIMESTAMPTZ
+            );
+            CREATE UNIQUE INDEX applications_idempotency_key_uniq
+                ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
+            CREATE TABLE kyc_checks (
+                id SERIAL PRIMARY KEY,
+                applicant_id INTEGER REFERENCES applicants(id),
+                application_id INTEGER REFERENCES applications(id),
+                name_verified BOOLEAN, dob_verified BOOLEAN,
+                address_verified BOOLEAN, ssn_verified BOOLEAN,
+                cip_passed BOOLEAN,
+                created_at TIMESTAMPTZ DEFAULT now()
             );
             CREATE TABLE decisions (
                 app_id INTEGER PRIMARY KEY REFERENCES applications(id), outcome TEXT NOT NULL
@@ -132,6 +161,18 @@ def _seed(conn, app_id, raw=_RAW, expires="now() + interval '1 hour'", consumed=
             f"access_token_hash, access_token_expires_at, access_token_consumed_at) "
             f"VALUES (%s, %s, 9000, 24, 100000, %s, {expires}, %s)",
             (app_id, app_id, decision_state.hash_access_token(raw) if raw else None, consumed),
+        )
+        # The decision gate refuses an application with no persisted KYC result
+        # for THAT application (PR #18 + db/migrations/0032). These fixtures are
+        # about the access token, not identity verification, so each seeds one --
+        # after the applications row exists, since application_id is a real FK.
+        c.execute(
+            # cip_passed, not just the factors: the decision gate reads the
+            # VERDICT now (db/migrations/0033), because a row that merely
+            # existed used to satisfy it even when CIP had failed.
+            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified, "
+            "cip_passed) VALUES (%s, %s, true, true)",
+            (app_id, app_id),
         )
     conn.commit()
 
@@ -242,7 +283,7 @@ def test_plaintext_token_is_never_stored_in_the_database(real_db, monkeypatch):
         c.execute("INSERT INTO applicants (id, name) VALUES (900, 'Seed')")
     real_db.commit()
 
-    app_id, raw = intake.create_application({
+    app_id, raw, _resume = intake.create_application({
         "name": "Jane Borrower", "ssn": "123456782", "dob": "1990-01-01",
         "email": "j@example.com", "phone": "5551234567", "address": "1 Main St",
         "amount": 9000, "term_months": 24, "income": 100000,
