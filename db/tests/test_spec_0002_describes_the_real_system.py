@@ -199,7 +199,7 @@ def test_forged_headers_with_a_valid_service_token_are_covered():
 # --- proposal-side validity: the review's central finding ---------------------
 
 
-@pytest.mark.parametrize("requirement", [f"REQ-VAL-{n}" for n in range(1, 15)])
+@pytest.mark.parametrize("requirement", [f"REQ-VAL-{n}" for n in range(1, 16)])
 def test_the_proposal_validity_requirements_are_all_present(requirement):
     """Guarding only the approval step puts the whole control on one tired human.
 
@@ -215,12 +215,25 @@ def test_the_proposal_validity_requirements_are_all_present(requirement):
     )
 
 
-@pytest.mark.parametrize("criterion", [f"AC-{n}" for n in range(1, 29)])
+@pytest.mark.parametrize("criterion", [f"AC-{n}" for n in range(1, 30)])
 def test_every_acceptance_criterion_is_present(criterion):
     """A numbered criterion that vanishes takes its rejection path with it, and
     the gap is invisible: the remaining numbers still read as a complete list."""
     text = SPEC.read_text(encoding="utf-8")
     assert f"**{criterion}**" in text, f"{criterion} is missing from spec 0002"
+
+
+def test_resolution_revalidates_a_queued_proposals_complete_target():
+    text = SPEC.read_text(encoding="utf-8").lower()
+    for case in (
+        "queued proposal cannot execute after its loan closes",
+        "queued proposal cannot execute after servicing is removed",
+        "unrecognised status introduced while queued fails closed",
+    ):
+        assert case in text, f"missing queued-state acceptance scenario: {case}"
+    req = text[text.index("**req-val-15**"):text.index("**req-val-15**") + 900]
+    for invariant in ("loan still exists", "balances", "status", "target-authorization"):
+        assert invariant in req, f"resolution does not revalidate {invariant}"
 
 
 def test_the_spec_invents_no_threshold_amount():

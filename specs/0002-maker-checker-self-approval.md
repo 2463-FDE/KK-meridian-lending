@@ -302,6 +302,12 @@ be shown a request that the system was always going to refuse.
   What it SHALL NOT do is leave the requirement unaddressed, which is how
   "authorised for the target" becomes "authenticated at all" without anyone
   choosing it. Whichever is chosen, an unevaluable predicate SHALL refuse.
+- **REQ-VAL-15** — Approval SHALL re-read and revalidate the complete executable
+  target inside the resolution transaction: the loan still exists, still has a
+  `balances` row, its current status is still explicitly permitted, the movement
+  remains within the adopted target-authorization rule, and the component will
+  not become negative. A check performed when the proposal entered the queue is
+  not evidence about the state when money moves.
 
 **None of this weakens the approval step.** Every one of these checks runs again
 at approval where it can (REQ-VAL-9 says so explicitly), because a proposal that
@@ -394,6 +400,10 @@ raised — not at approval — and SHALL write no `pending_movements` row.
 - **AC-28** — WHEN servicing accepts a maker-checker action, THE recorded subject
   and role SHALL equal the independently verified assertion claims derived from
   the gateway's server-side session.
+- **AC-29** — IF a queued proposal's loan no longer exists, no longer has a
+  `balances` row, has moved to an unpermitted or unrecognised status, or is no
+  longer within the actor's adopted target scope, THEN resolution SHALL refuse
+  the proposal, write no ledger entry, and leave all balances unchanged.
 
 ### 4.2 Gherkin
 
@@ -566,6 +576,27 @@ Scenario: a proposal valid when raised is re-checked at approval
   Given a CSR "alice" raised a fee waiver of -80.00 when past_due was 80.00
   And past_due has since been paid down to 10.00
   When an underwriter "bob" approves it
+  Then the resolution is refused
+  And no ledger entry is written
+
+Scenario: a queued proposal cannot execute after its loan closes
+  Given a valid proposal was raised while loan 4471 was current
+  And loan 4471 is now closed
+  When an authorised different principal attempts to approve it
+  Then the resolution is refused against the current status
+  And no ledger entry is written
+
+Scenario: a queued proposal cannot execute after servicing is removed
+  Given a valid proposal exists for loan 4471
+  And loan 4471 no longer has a balances row
+  When an authorised different principal attempts to approve it
+  Then the resolution is refused
+  And no ledger entry is written
+
+Scenario: an unrecognised status introduced while queued fails closed
+  Given a valid proposal exists for loan 4471
+  And loan 4471 now has an unrecognised status
+  When an authorised different principal attempts to approve it
   Then the resolution is refused
   And no ledger entry is written
 
