@@ -29,29 +29,17 @@ during Week 4); those are marked where they occur.
 
 ## Status at a glance
 
-**Suite as of the 2026-08-11 audit** (`main` at `17dca05`, PRs #1–#17 all merged;
-re-run locally, not transcribed from an earlier record): disclosure 167,
-origination 210, servicing 96, gateway 83, payment 138, loan-assistant 153, kyc 12,
-decision 40 -- **899 service tests** (817 passed, 82 skipped locally because they
-are `skipif(not DATABASE_URL)` and no local Postgres was up; CI runs those against
-a real Postgres and the run on `17dca05` was 22/22 green) -- plus **231**
-database/migration tests and **38** Playwright tests across **12** spec files
-under `frontend/e2e/`. *Both suites were re-run against a real stack later the
-same day: `db/tests` **231 passed, 0 skipped** (it had been 19 passed / 212
-`DATABASE_URL`-gated), and all **38** browser specs passed. This paragraph
-previously reported those figures as gated or CI-only, "not run locally, no
-Docker daemon" — true when written, and worth correcting rather than leaving,
-because a skip reads as a pass and 212 of them did.* The disclosure figure
-previously read 166 and the spec-file count appeared as 7 further down this
-file; both were off by a re-count. The browser suite needs the
-documented rate-limit overlay (`docker-compose.e2e.yml`); without it later specs
-trip the shipped 120-request control and fail on unrelated assertions.
-
-Counts quoted further down this file are deliberately point-in-time ("41 tests at
-the time", "102 tests passing") and are left as written -- they record what was
-true when a week closed, which is the only thing that makes them useful. This
-block is the current number; those are history.
-
+> **Check PR and CI status live. This file does not carry it.**
+>
+> Pull-request numbers, open/merged states, CI run ids and per-suite test counts
+> expire the moment anyone merges or pushes, and a stale one reads exactly like a
+> current one. Run `gh pr list` and look at the latest CI run. Everything this
+> file measured on a particular day lives in **one** place — *Audit snapshot*
+> below — dated, fenced, and not to be trusted as current.
+>
+> The durable content is the rest: the Weeks 1–6 matrix and its acceptance
+> criteria, the grouped gap list, and the next action. Those describe what must be
+> true, which does not change when a branch does.
 
 | Week | Feature | Status |
 |---|---|---|
@@ -59,90 +47,27 @@ block is the current number; those are history.
 | 2 | RAG retrieval + corpus hygiene | ✅ Landed |
 | 3 | AI scorer wrapper + append-only decision memory | ✅ Landed |
 | 4 | Auto-disclosure on approval + KG traversal | ✅ Landed |
-| 5 | Card tokenization + payment reconciliation | ✅ Landed (PR #8, 2026-08-05). Column drop ✅ landed (PR #15) |
-| 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC landed; ledger + maker-checker open |
-| 7 | Trace ID + scoped reconciliation control | ⬜ Open (Prometheus/Grafana landed early) |
+| 5 | Card tokenization + payment reconciliation | ✅ Landed |
+| 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC landed; ledger and maker-checker open |
+| 7 | Trace ID + scoped reconciliation control | 🟡 Prometheus/Grafana landed early; the reconciliation control and the trace id are open |
 | 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
 | 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
 | — | **Not on any brief:** test + CI infrastructure, browser E2E, migration parity, the bureau/decision-attempt seams, this register | ✅ Landed |
 
-### Pull requests
-
-> **Observed at audit time — `17dca05`, 2026-08-11.** Everything in this section
-> and in the test counts above is a *measurement*, not guidance: PR numbers and
-> states, the CI run id, and per-suite counts all expire the moment someone
-> merges or pushes. They are recorded so a reader can reproduce the audit, not so
-> they can be trusted six weeks from now. The durable content of this file is the
-> Weeks 1–6 matrix's acceptance criteria and the gap list; **re-derive anything in
-> this box from `gh pr list` and a CI run before relying on it.** Review of this
-> file asked for that boundary to be explicit, having found the footer and this
-> section disagreeing about how many PRs were open — which is exactly the failure
-> mode an unlabelled volatile fact produces.
-
-Verified 2026-08-11 with `gh pr list --state all`: **#1 through #17 are all
-`MERGED`.** Local `main` is level with `origin/main` at `17dca05`, and that
-commit's CI run (`31419265200`) is **22/22 green** — every job, including
-`secrets`, `db-migrations`, `e2e` and all eight `backend` matrix legs.
-
-**Four PRs opened out of this audit and were open when it was written:**
-
-| PR | What it carries |
-|---|---|
-| **#18** | Closes the unauthenticated path to the CIP handler — both the `kyc-service` half and the gateway half |
-| **#19** | This file: the audit and the status rewrite |
-| **#20** | `adr/0010`, proposing the append-only ledger — **Proposed**, closes `G-ADR-0010` |
-| **#21** | The failing test proving `D3`, Week 6's own missing deliverable |
-
-The audit found no open PR when it ran; all four are its output, not a state it
-inherited. **This list is a measurement and will go stale as they merge** —
-anyone reading it for "what is in flight" should check GitHub rather than trust
-this paragraph. That is the whole lesson of the retraction note below it, and it
-already happened once here: this said "two PRs" until #20 and #21 opened.
-
-| PR | Concern | Merged | Base |
-|---|---|---|---|
-| #1 | LLM summarization service + PII guardrails | 2026-07-07 | `main` |
-| #2 | Week 2: AI summary feature, secrets hardening | 2026-07-14 | `main` |
-| #3 | Stop committing secrets, drop hardcoded key fallbacks | 2026-07-14 | `main` |
-| #4 | RAG retrieval eval harness + corpus hygiene gate | 2026-07-14 | `main` |
-| #5 | Week 3: AI scorer wrapper + append-only decision memory | 2026-07-30 | `main` |
-| #6 | Week 4: offer↔decision link, fee snapshot, auto-generate on approval | 2026-08-05 | `main` |
-| #7 | Phone/SSN validation, dropped intake fields, stale-session guard | 2026-07-30 | `kalab-week4-disclosure-automation` — **not `main`** |
-| #8 | Week 5: card tokenization, stop storing PAN/CVV/SSN | 2026-08-05 | `main` |
-| #9 | Repo hygiene: untrack runtime logs, commit roadmap + debt register | 2026-08-05 | `main` |
-| #10 | Actuarial APR + TILA box foots | 2026-08-10 | `main` |
-| #11 | `payments.pan`/`cvv` removal — expand half | 2026-08-07 | `main` |
-| #12 | Graph-store threshold answered by measurement (`adr/0009`) | 2026-08-10 | `main` |
-| #13 | One grounded external signal on the officer summary | 2026-08-10 | `main` |
-| #14 | Correct a wrong answer from the review screen | 2026-08-09 | `main` |
-| #15 | `payments.pan`/`cvv` removal — contract half (`DROP COLUMN`) | 2026-08-10 | `main` |
-| #16 | Four docstrings claiming a PII leak the code does not have | 2026-08-10 | `main` |
-| #17 | Status and citation pass | 2026-08-10 | `main` |
-
-*What this table used to say, kept because the reason matters.* It was headed
-"Open pull requests / Eight open", and its last row described **#17 as
-`🟠 Open, this PR`** — #17 merged at 18:28 UTC on 2026-08-10, so that row was the
-exact defect the section it sits in exists to prevent: a status marker outliving
-the merge it was waiting on (rule 4 at the foot of this file). Before that, every
-row read "🟠 CI green" or worse and two carried an explanation about a GitHub
-Actions outage from 2026-08-06. That was accurate when written; the outage ended
-and the runs completed. An `Additions` column went the same way — those line
-counts were measured at heads that no longer exist, and a stale diffstat is worse
-than no diffstat because it reads as precise. The whole merge-order discussion
-that followed (rules 1–4, and which of #10–#16 had to land before which) is gone
-for the same reason: every dependency in it is spent, and a merge-order
-instruction that outlives its reason is a constraint nothing enforces.
-
-**#7 is the one row worth a second look.** Its base is
-`kalab-week4-disclosure-automation`, not `main` — it reached `main` only when #6
-merged on 2026-08-05. That is the case `CLAUDE.md`'s scope check exists for: "if
-this is for a PR, what is the PR's real base branch — don't assume `main`."
+Counts quoted inside the weekly sections further down are deliberately
+point-in-time — "41 tests at the time", "102 tests passing" — and are left as
+written. They record what was true when a week closed, which is the only thing
+that makes them useful.
 
 ## Owed to the client
 
-Three answers outstanding from the Week 1–4 review, tracked here so they are
-not lost between weeks:
+The three answers the Week 1–4 review asked for. **All three are delivered** —
+this section is now a record of where each one lives, not a list of obligations.
+It said "three answers outstanding" while every row below already read ✅, which
+is the kind of heading that outlives the thing it counts; the rows are kept
+because the artefact each points at is the answer, and a reader owed one of them
+should be able to find it without reading the PR history.
 
 | Question | Status |
 |---|---|
@@ -152,33 +77,38 @@ not lost between weeks:
 
 ## Weeks 1–6 audit — traceability matrix
 
-**Last verified: 2026-08-11, against `main` at `17dca05`** (level with
-`origin/main`; CI run `31419265200`, 22/22 green).
+**Re-verified 2026-08-13 against `main` at `1528226`.** Every row was re-checked
+against the code on `main` — not against a PR title, a comment, or an earlier row
+of this file. `Done` requires all five: on `main`, acceptance criteria met,
+tested, reachable where applicable, documented.
 
-Every row below was checked against the code on `main`, not against a PR title, a
-comment, or an earlier row of this file. `Done` requires all five: on `main`,
-acceptance criteria met, tested, reachable where applicable, documented.
+**No row cites a pull request as evidence.** Work in flight is not evidence of
+anything, and a row that says "landing on #NN" becomes wrong twice — once when it
+merges and once when the number is reused in someone's memory. Where the audit
+found a gap closed, the row names the code and the test that close it; where it
+found one open, it says what remains. Check `gh pr list` for what is in flight.
 
 **Week numbering.** The week headings in this file are the curriculum's. Where a
 feature landed in a different week than its brief, both labels appear in the
 Week column as `brief → shipped`. No row is guessed: where the two disagree it is
 because a merged PR says so.
 
-**Counts (31 requirements): 20 Done · 7 Partial · 4 Not started · 0 Blocked ·
-0 Deferred.**
+**Counts (31 requirements): 24 Done · 5 Partial · 2 Not started · 0 Blocked ·
+0 Deferred.** Four rows moved to Done and two out of Not started since the
+2026-08-11 pass, all of them by work that has since merged to `main`.
 
 | Week | Feature/requirement | Acceptance criteria | Status | Code/commit evidence | Test/CI evidence | Remaining gap | Priority | Next action |
 |---|---|---|---|---|---|---|---|---|
 | 1 | PII redactor before any log or LLM call | PAN/CVV/SSN never reach a log line or a prompt | **Done** | `loan-assistant/app/redactor.py`; ported copy in `payment-service/app/redactor.py` | `payment-service/tests/test_redactor.py`, `test_cardholder_name_not_logged.py` (6 tests, mutation-verified), `test_kyc_pii_not_logged.py`, `test_intake_pii_not_logged.py` — all green locally + CI | None. Scope limit stated in `DEBT.md` D5a: application-level call sites only; no reverse-proxy or container-runtime logging was testable here | — | — |
 | 1 | Production LLM client (timeout, retry, cost guard, structured output) | Fail-closed on a missing/unreachable model | **Done** | `loan-assistant/app/llm_client.py` | `loan-assistant/tests/test_llm_client.py`; 153 tests green | None | — | — |
-| 1 | Secrets: no hardcoded keys, `.env` untracked | No key fallback in any `config.py`; `.env` not in `git ls-files`; CI scans history | **Done** | PR #3; `git ls-files .env` → empty; grep for fallback literals → 0 hits across 8 services | CI `secrets` job (gitleaks, full history) green on `17dca05` | None. `DEBT.md` D18 records why history was not rewritten and that the committed values are published test PANs, not real data | — | — |
+| 1 | Secrets: no hardcoded keys, `.env` untracked | No key fallback in any `config.py`; `.env` not in `git ls-files`; CI scans history | **Done** | `git ls-files .env` → empty; grep for fallback literals → 0 hits across 8 services | CI's `secrets` job runs gitleaks over the full history on every push and pull request | None. `DEBT.md` D18 records why history was not rewritten and that the committed values are published test PANs, not real data | — | — |
 | 1 | Money as `Decimal`, not `float` | Compute in Decimal; store `NUMERIC` | **Partial** | `db/migrations/0005` (14 columns → `NUMERIC`); `apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py` | `test_money.py`, `test_schedule.py`, `test_amount_financed_rounding.py`; `db/tests/test_schema_parity.py` (CI) | **D1** — the disclosure *read* path still coerces to `float` (`disclosure-service/app/routers/offers.py:459-490, 532-534`). Write path is exact; redisplay is not | Medium | Close D1: keep the read path in Decimal to the serializer boundary |
 | 1 → 5 | Stop storing PAN/CVV | Columns absent from a migrated *and* a fresh database | **Done** | `db/migrations/0031` (contract), `0029` (back-fill gate), `db/init/001_schema.sql` creates neither | `db/tests/test_0031_contract_gate.py`, `test_expand_contract_pan_cvv.py`, `db/tools/check_no_pan_readers.py`, `test_payments_sql_is_static.py`; CI `db-migrations` green | None for the defect (`DEBT.md` D5b/D13 closed). **`README.md` still says the opposite** — see the Medium gap below | Medium | Correct README (separate concern, separate PR) |
-| 1 | README states the real compliance position | No PCI-DSS claim; named gaps are gaps that exist | **Partial** | `README.md:3-13, 104-130` | `db/tests/test_docs_citations_resolve.py` (paths only), `payment-service/tests/test_docs_match_the_logging_code.py` (logging claims only) | README asserts in **three places** that `payments.pan`/`cvv` still exist and are unpurged. `0031` dropped them on 2026-08-10. Neither existing docs test covers a *content* claim about the schema | Medium | See Medium gap **G-README** |
+| 1 | README states the real compliance position | No PCI-DSS claim; named gaps are gaps that exist | **Done** | `README.md` states there is no `payments.pan` and no `payments.cvv`; the surviving mentions are in a clearly marked history block describing what the vendor delivery did | `db/tests/test_readme_schema_claims.py` — a README claim about the schema must match the schema, the way `test_docs_match_the_logging_code.py` holds the logging claims | None | — | — |
 | 2 | RAG corpus hygiene gate | SSN/PAN/DOB-bearing records blocked offline, before the embedder | **Done** | `loan-assistant/app/corpus.py`; `adr/0005` | `tests/test_corpus.py`, `test_embeddings.py`; 153 green | None | — | — |
 | 2 | Retrieval eval harness incl. the #6012 denial case | Graded on real retrieval output, no answer key as input | **Done** | `loan-assistant/app/rag_eval.py` | `tests/test_policy_chat.py`, `test_main.py`; CI `backend (loan-assistant)` green | None | — | — |
 | 2 | Policy chat declines what it cannot ground | `answerable:false` on out-of-corpus questions | **Done** | `loan-assistant/app/policy_chat.py`, `prompt_injection.py` | `tests/test_policy_chat.py` | None | — | — |
-| 2 | Policy and code agree on the underwriting rules | The assistant does not cite controls the code lacks | **Partial** | `adr/0007`; `origination-service/app/routers/applications.py:457` hardcodes `"monthly_debt": 0`; grep for a fraud check → 0 hits | No test — there is nothing to assert until the conflict is resolved | `underwriting_guidelines.md` publishes a DTI ≤43% cutoff and fraud-flag rules the code has never implemented. Retrieval is correct; the document is wrong, or the code is | High | **Needs a product decision** — implement DTI/fraud, or amend the policy. Not an engineering call |
+| 2 | Policy and code agree on the underwriting rules | The assistant does not cite controls the code lacks | **Done** | `policies/underwriting_guidelines.md` no longer publishes cutoffs the system never applied: the DTI section states it is **defined, not currently applied**, and says why a DTI computed from income alone would not be a DTI | `db/tests/test_policy_matches_implemented_cutoffs.py` — the policy may not publish a threshold no code evaluates | None. The product decision was to amend the policy rather than implement the cutoff; implementing a real DTI needs a debt figure the intake does not collect | — | — |
 | 3 | Specific adverse-action reason per denial | Reason derived from the real driving input, never a fixed string | **Done** | `decision-service/app/decision.py::_reason_codes`; `GENERIC_REASONS` absent | `tests/test_decision.py`, `test_decisions_router.py`; 40 green | Mapping picks between two categories only and has no fixture tests against known cases — tracked under Week 8, not Weeks 1–6 | — | — |
 | 3 | Append-only decision memory | Inputs, score, version, features, reasons persisted; not editable after the fact | **Done** | `db/init/004_decision_events.sql` — `reject_decision_events_mutation()` trigger raises on UPDATE/DELETE; `db/migrations/0004` | `db/tests/test_decision_attempt_lifecycle.py`, `test_decision_single_writer_concurrency.py` (CI, real Postgres) | None | — | — |
 | 3 | Decisioning chain non-blocking | No synchronous vendor hop on the request thread | **Done** | `decision.py` `async def` throughout, `httpx.AsyncClient` | `tests/test_bureau_idempotency.py`, `test_readiness.py` | Origination's call *into* decision-service is still sync — a different service's thread budget, out of this row's scope and stated as such | — | — |
@@ -187,17 +117,17 @@ because a merged PR says so.
 | 4 | Offer links to the decision + fee version that produced it | FK `offers.decision_id`; `fee_pct_used` snapshotted | **Done** | `db/init/001_schema.sql:115-116`; `db/migrations/0008`, `0009`, `0011` | `db/tests/test_0011_offers_backfill.py`, `test_offer_creation_concurrency.py`, `test_seed_offer_consistency.py` | None | — | — |
 | 4 | Disclosure auto-generates on approval | Offer exists the moment underwriting approves, with no manual step | **Done** | `origination-service/app/disclosure_graph.py` (two-node LangGraph), called from `run_decision()` | `frontend/e2e/approved-workflow.spec.ts`, `offer-disclosure-ui.spec.ts`, `regeneration-reprices-the-offer.spec.ts`; CI `e2e` green | None | — | — |
 | 4 | Loan-history traversal | applicant → application → decision → offers in one call, staff-only | **Done** | `origination-service/app/kg.py`; `GET /applications/{id}/history` | `test_staff_gated_routes_require_internal_token.py`; `adr/0009` + `db/bench/graph_traversal_benchmark.py` answer the graph-store question with a measurement | None | — | — |
-| 4 | Internal services not reachable around the gateway | No host port **and** `X-Internal-Token`, for every service with no auth of its own | **Partial** | Closed for decision, disclosure, payment, origination (PR #6). **`kyc-service` is closed for neither**: `docker-compose.yml:94` publishes `8003:8003`, and `services/kyc-service/` contains no `X-Internal-Token` check at all | `gateway/tests/test_decision_service_not_host_published.py` parametrizes exactly four services and omits `kyc-service`, so the invariant is untested where it is violated | `POST localhost:8003/kyc/check` is unauthenticated: it writes a `kyc_checks` row for any `applicant_id` and accepts name/DOB/SSN/address. `ARCHITECTURE.md:75-78` has recorded the gap since PR #6 and named PR #8 as its owner; PR #8 merged on 2026-08-05 and closed a different defect, so that ownership line no longer points anywhere | **Critical** | **See "Start next" below** |
+| 4 | Internal services not reachable around the gateway | No host port **and** `X-Internal-Token`, for every service with no auth of its own | **Done** | `docker-compose.yml` publishes no port for `kyc-service`; `kyc-service/app/routers/kyc.py:85-90` requires the token and refuses an unset one; `gateway/app/main.py:314-372` makes `/kyc/*` staff-only **and read-only** — a POST is refused with 405, so the gateway can no longer sign an anonymous caller's write | `gateway/tests/test_decision_service_not_host_published.py` (now including `kyc-service`), `kyc-service/tests/`, `gateway/tests/test_proxy_security.py`; CI green on `main` | None for reachability. What CIP actually checks is `DEBT.md` **D11**, a different and deliberately scoped gap belonging to Week 9 | — | — |
 | 4 | Intake validation and field persistence | Phone/SSN format-checked; every submitted field persisted | **Done** | PR #7 (base `kalab-week4-disclosure-automation`, reached `main` via #6) | `origination-service/tests/test_validation.py`; 210 tests | None | — | — |
 | 5 | Payment idempotency | A retried POST charges once; a same-key retry with different terms 409s | **Done** | `payment-service/app/payments.py::charge`; `db/migrations/0007`, `0010`, `0012`, `0013` | `tests/test_charge_flow.py`, `test_apply_payment_idempotency.py`, `test_reconcile_real_postgres.py` (CI, real Postgres) | None (`DEBT.md` D2 closed) | — | — |
 | 5 | Card tokenization / PCI scope reduction | Service receives a token + last4 + brand; never a PAN, CVV or SSN; token never persisted | **Done** | `frontend/lib/tokenize.ts`; `PaymentIn` with `extra="forbid"`; `db/migrations/0016`; `adr/0008` supersedes `adr/0003` | `test_charge_flow.py`, `test_charge_no_pan.py`, `test_docs_match_the_logging_code.py` | None for the defect. ⚠️ The tokenization boundary is **mocked** — no real processor. PCI-DSS compliance is *not* claimed and needs a QSA | — | — |
 | 5 | Captured-but-unapplied payments are recoverable | A durable, self-draining work item, not a hope that the client retries | **Done** | `payment-service/app/reconcile.py`; `db/migrations/0028` | `tests/test_reconciler_lifecycle.py`, `test_reconcile_real_postgres.py` | None | — | — |
 | 5 | Spec package committed before it is cited | The cited path resolves | **Done** | `specs/0001-online-payments-idempotency-tokenization.md` | `db/tests/test_docs_citations_resolve.py` | None. History: the original spec was cited for weeks and had never been committed on any branch | — | — |
-| 6 | Money-moving servicing actions are role-gated | Only csr/admin may adjust a balance or waive a fee, enforced server-side | **Partial** | `gateway/app/main.py:235-273` — `can_move_money()`, underwriter excluded. But `servicing-service/app/main.py:126-141` still accepts **any** caller and checks no `X-Internal-Token`; its own docstring says so | `gateway/tests/test_auth_and_routes.py`, `test_proxy_security.py` (83 green) prove the gateway path only | The gate is one hop deep. Servicing is not host-published, so this is defence-in-depth, not a live bypass — unlike the kyc row above | High | Add the `X-Internal-Token` check to servicing's money routes, matching its four siblings (`DEBT.md` D8) |
-| 6 | Append-only ledger; balance as a projection | "Show me every change and who made it" is answerable | **Not started** | Grep for a ledger table across `db/init`, `db/migrations`, `servicing-service/app` → **0 hits**; `balance.adjust_balance()` docstring: "No ledger entry; the prior value is gone forever" | None — nothing to test | The whole feature. `balances.balance` is still one mutable column | High | Needs a schema design decision first (event table + projection vs. running-total rows). `DEBT.md` D8 |
+| 6 | Money-moving servicing actions are role-gated | Only csr/admin may adjust a balance or waive a fee, enforced server-side | **Partial** | `gateway/app/main.py` — `can_move_money()`, underwriter excluded. `servicing-service/app/main.py` now calls `_require_internal()` on **all four** money routes: `apply-payment`, `adjust-balance`, `waive-fee`, `late-fee` | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py`; `gateway/tests/test_auth_and_routes.py`, `test_proxy_security.py` | The service-side **token** boundary is closed. The **role** boundary is not: servicing still reads no role of its own, so the csr/admin restriction is enforced at one hop only. `DEBT.md` **D8** stays open for that and for the missing second approver | High | Take the role from the authenticated principal server-side, never from a client-supplied header. A written specification for this arrives with `specs/0002-maker-checker-self-approval.md`, which does not exist on `main` |
+| 6 | Append-only ledger; balance as a projection | "Show me every change and who made it" is answerable | **Not started** | No ledger table on `main`: grep across `db/init`, `db/migrations` and `servicing-service/app` → 0 hits. `balance.adjust_balance()` docstring: "No ledger entry; the prior value is gone forever" | None — nothing on `main` to test | The whole feature. `balances.balance` is still one mutable column | High | The design decision is made and written; what remains is the schema and the write-path conversion. `DEBT.md` **D8** |
 | 6 | Maker-checker on money-affecting actions | No single account can move money unilaterally | **Not started** | Grep for maker-checker/second-approver across `services/` and `db/` → only the three comments recording its absence | None | The whole feature | High | Blocked on the ledger above — an approval record needs somewhere to live. `DEBT.md` D8 |
-| 6 | Lost-update proof on the shared column | One failing test pinning the real race | **Not started** | `balance.apply_payment()` is an unlocked read-modify-write (`balance.py:38-48`); `waive_fee()` likewise | No lost-update test exists in `servicing-service/tests/` or `db/tests/` — checked by grep | Week 6's brief asked for exactly this and it was never written. The brief's own repro (payment + waiver) is wrong — those touch different columns; the real pairing is two `apply_payment` calls, or `apply_payment` + `adjust_balance` | High | **The failing test is written, on PR #21** — two `xfail(strict=True)` cases against real Postgres, plus a passing one pinning that the brief's own repro does not collide. Status stays `Not started` because this row measures `main` at `17dca05` and the test is not there yet; a PR existing is not the same as work landing (rule 1). Then close **D3** — via the ledger on PR #20, or `SELECT … FOR UPDATE` if that ADR is rejected |
-| 6 | Legacy-comprehension ADR (RBAC + maker-checker + ledger) | An accepted ADR proposing the three | **Not started** | `adr/` holds 0001–0009; none covers servicing authz or the ledger | `db/tests/test_docs_citations_resolve.py` passes because nothing cites the missing ADR | Week 6's stated deliverable. The corrected concurrency analysis exists only as prose in this file | Medium | **Written, on PR #20** — `adr/0010`, Proposed: an append-only ledger with a trigger-maintained projection, maker-checker via a separate `pending_movements` table, and the corrected repro. Status stays `Not started` for the same reason as the row above: `adr/` on `17dca05` holds 0001–0009 |
+| 6 | Lost-update proof on the shared column | One failing test pinning the real race | **Done** | `balance.apply_payment()` is still an unlocked read-modify-write — the proof is the deliverable, not the fix | `servicing-service/tests/test_balance_lost_update_real_postgres.py` — `xfail(strict=True)` cases against real PostgreSQL, plus a passing one pinning that the brief's own repro (payment + waiver) does **not** collide, because those touch different columns | None for the proof. The defect it pins is `DEBT.md` **D3**, still open | High | Close D3 — via the ledger, or `SELECT … FOR UPDATE` if that design is rejected |
+| 6 | Legacy-comprehension ADR (RBAC + maker-checker + ledger) | An accepted ADR proposing the three | **Not started** | `adr/` on `main` holds 0001–0009; none covers servicing authz or the ledger | `db/tests/test_docs_citations_resolve.py` passes because nothing on `main` cites a missing ADR | Week 6's stated deliverable. The corrected concurrency analysis exists as prose in this file and as an executable proof in `test_balance_lost_update_real_postgres.py` | Medium | Land the ADR |
 | 6 | Payment waterfall (fees → interest → principal) | A payment is applied in the regulated order | **Partial** | `balance.py:38` applies straight off principal | `test_apply_payment_idempotency.py` pins today's behaviour, not the correct one | `DEBT.md` **D14**, open | Medium | Sequence after the ledger — a waterfall needs per-component rows |
 | 6 | `loans.apr` names what it holds | The column and the UI agree on which regulated rate is displayed | **Partial** | API renamed (`note_rate_pct` alias); three frontend views relabelled; seeds corrected | `db/tests/test_seed_offer_consistency.py::test_loans_apr_holds_the_note_rate_not_the_disclosed_apr` | `DEBT.md` **D19** — the column is still literally `loans.apr`; anyone reading SQL, a dump or `db/init/001_schema.sql` meets the wrong name | Medium | Rename via migration + every query/model/fixture that names it |
 
@@ -206,138 +136,137 @@ because a merged PR says so.
 Every acceptance criterion below is written so that meeting it is checkable by
 someone who did not write it.
 
-#### Critical
+**Closed since the 2026-08-11 pass**, with what closed each one, because a gap
+list that only ever grows stops being read:
 
-**G-KYC — `kyc-service` is reachable around the gateway, unauthenticated.**
-- *What remains:* **two routes to the same handler, not one.** `docker-compose.yml:94` publishes `8003:8003` and `POST /kyc/check` takes no `X-Internal-Token` — so an unauthenticated caller on the host can write a `kyc_checks` row against any `applicant_id`, fabricating CIP evidence in the record BSA/AML relies on. **And** the gateway's own `/kyc/{path}` route requires no session while stamping the trusted token itself, so the same write is reachable through port 8000 even once 8003 is gone. PR #18 closes the first and not the second.
-- *Acceptance criteria:* (1) the `kyc-service` block in `docker-compose.yml` has no `ports:` key; (2) `POST /kyc/check` returns 401 with no token and with a wrong token, and an unset `INTERNAL_SERVICE_TOKEN` never matches, so a deploy that forgets to set one fails closed; (3) the gateway and origination-service both forward the token, so intake still works end to end; (4) `test_decision_service_not_host_published.py` includes `kyc-service` in its parametrize list; (5) **the gateway's `/kyc/*` route requires a session, or the relay is removed — no frontend code calls it**; (6) **`_proxy` strips any inbound `x-internal-token` before stamping its own**, so a caller cannot substitute the header the downstream check reads.
-- *Evidence that will prove it:* the extended host-port test failing on today's compose file and passing after; new 401 tests in `kyc-service/tests/`; **an anonymous `POST localhost:8000/kyc/kyc/check` returning 401 rather than 200 — the check that was missing, and the one that found this**; a gateway test asserting the `/kyc/*` route forwards the token, which does not exist today; `frontend/e2e/approved-workflow.spec.ts` still green in CI (it drives a real intake through KYC).
-- *Dependency:* none, but it is **two concerns, not one** — a `kyc-service` change and a gateway authorization change. Bundling them is what let the second half go unnoticed.
-- *Next action:* **🟠 both halves are now on PR #18.** The first version closed only the `kyc-service` half and left the gateway relay open — see the history under "Start next", which is worth reading because the gap survived a fix that passed 22/22 CI. The gateway half (staff-only `/kyc/*`, and `_proxy` stripping an inbound `x-internal-token`) landed on the same PR after review. Verified live: anonymous now 401s with no row written, a borrower session 403s, and real intake through `/los/applications` still works. **Row stays Critical/Partial until #18 merges** — rule 1.
+| Gap | Closed by | Verify it stayed closed |
+|---|---|---|
+| **G-KYC** — the CIP handler was reachable unauthenticated, on two routes | `kyc-service` has no host port and `POST /kyc/check` requires `X-Internal-Token` and refuses an unset one; the gateway's `/kyc/*` relay is staff-only **and read-only**, so a POST is refused with 405 rather than signed on an anonymous caller's behalf | `gateway/tests/test_decision_service_not_host_published.py` (now parametrized over `kyc-service` too), `gateway/tests/test_proxy_security.py`, `kyc-service/tests/` |
+| **G-SERVICING-TOKEN** — servicing's money routes checked no token | `_require_internal()` on **all four**: `apply-payment`, `adjust-balance`, `waive-fee`, `late-fee` | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py` |
+| **G-D3-PROOF** — Week 6's failing lost-update test was never written | `servicing-service/tests/test_balance_lost_update_real_postgres.py` | The `xfail(strict=True)` cases fail the suite the day someone "fixes" the race without removing them |
+| **G-README** — the README claimed dropped columns still existed | README states the schema as it is | `db/tests/test_readme_schema_claims.py` |
+| **G-DTI** — the policy published cutoffs the code never applied | The DTI section is marked defined-but-not-applied | `db/tests/test_policy_matches_implemented_cutoffs.py` |
+
+**`apply-payment` belongs in that servicing-token list and was missing from it.**
+The earlier acceptance criteria named `adjust-balance`, `waive-fee` and
+`late-fee` only. `POST /accounts/{id}/apply-payment` reduces a loan balance
+directly and is intended for payment-service alone — leaving it out would have
+declared the service-side money boundary closed with its highest-traffic money
+route still open. All four are covered now, and the test parametrizes over all
+four so a fifth route added without a check fails it.
 
 #### High
 
-- **G-INTAKE-401** — a KYC authorization failure is indistinguishable from a timeout at intake. `submit_application` wraps the kyc-service call in `except Exception` so a hiccup cannot 500 an application, which is correct for a timeout and wrong for a 401: an unset or rotated `INTERNAL_SERVICE_TOKEN` would silently stop verifying identity on **every** application while intake still returns 200 with all four CIP flags false and no `kyc_checks` row. Found by review of #18; introduced by the token check that PR adds, so it did not exist before. *AC:* a 401/403 from kyc-service fails the request or raises an alarm, distinctly from a timeout; a test asserts the two are handled differently. *Evidence:* a test in `origination-service/tests/` that a 401 does not produce a 200 with all-false CIP. *Dependency:* none. *Next action:* one PR, after #18 merges.
-- **G-SERVICING-TOKEN** — servicing's money routes check no `X-Internal-Token` (`DEBT.md` D8). *AC:* `POST /accounts/{id}/adjust-balance|waive-fee|late-fee` 401 without the token; gateway forwards it; a test asserts it. *Evidence:* new tests in `servicing-service/tests/`. *Dependency:* none — do it after G-KYC, same pattern. *Next action:* one PR, mirroring G-KYC.
-- **G-LEDGER** — no append-only ledger; balance is one mutable column (`DEBT.md` D8). *AC:* every balance change writes an immutable row carrying actor, reason and prior/new value; the displayed balance is derived from those rows; a trigger rejects UPDATE/DELETE, as `decision_events` does. *Evidence:* a migration, a `db/tests` case proving the trigger, and a test that reconstructs a balance from the ledger alone. *Dependency:* **a schema decision is needed** — event rows plus a projection, or running-total rows. *Next action:* decide the shape, then `adr/0010`.
-- **G-MAKER-CHECKER** — no second approver on any money-affecting action (`DEBT.md` D8). *AC:* an adjustment or waiver above a threshold is recorded as pending until a second, different staff account approves it; the same account cannot do both. *Evidence:* a test proving self-approval is rejected. *Dependency:* **G-LEDGER** — the approval record needs somewhere to live.
-- **G-D3** — `apply_payment` is an unlocked read-modify-write; two concurrent calls lose one (`DEBT.md` D3). *AC:* a failing test pinning the correctly-paired race, then `SELECT … FOR UPDATE`, then the test passes. *Evidence:* a `db/tests` case against real Postgres, in the style of `test_decision_single_writer_concurrency.py`. *Dependency:* none.
-- **G-DTI** — `policies/underwriting_guidelines.md` publishes a DTI ≤43% cutoff and fraud-flag rules the code never implemented (`adr/0007`). *AC:* either the code enforces both, or the policy is amended and the ADR records which was wrong. *Dependency:* **a product decision — this is not an engineering call.** *Next action:* ask; do not pick a side silently.
+- **G-INTAKE-401** — a KYC authorization failure is indistinguishable from a timeout at intake. `submit_application` wraps the kyc-service call in `except Exception`, which is right for a timeout and wrong for a 401: an unset or rotated `INTERNAL_SERVICE_TOKEN` would silently stop verifying identity on **every** application while intake still returns 200 with all four CIP flags false and no `kyc_checks` row. *AC:* a 401/403 from kyc-service fails the request or raises an alarm, distinctly from a timeout; a test asserts the two are handled differently. *Evidence:* a test in `origination-service/tests/` that a 401 does not produce a 200 with all-false CIP. *Dependency:* none.
+- **G-SERVICING-ROLE** — servicing reads no role of its own, so the csr/admin restriction on money movement is enforced at the gateway hop only (`DEBT.md` D8). *AC:* the role comes from the authenticated server-side principal, never from a client-supplied header, and a caller holding the internal token cannot elevate itself by setting one. *Evidence:* a test asserting a spoofed `X-User-Role` does not grant authority. *Dependency:* none.
+- **G-LEDGER** — no append-only ledger; balance is one mutable column (`DEBT.md` D8). *AC:* every balance change writes an immutable row carrying actor, reason and a signed delta; the displayed balance is derived from those rows; a trigger rejects UPDATE/DELETE, as `decision_events` does. *Evidence:* a migration, a `db/tests` case proving the trigger, and a per-loan parity test that the projection equals the ledger sum. *Dependency:* none — the design decision is made.
+- **G-MAKER-CHECKER** — no second approver on any money-affecting action (`DEBT.md` D8). *AC:* an adjustment or waiver is recorded as a proposal until a second, different staff account approves it; the same account cannot do both, with no exception for an administrator; a rejected proposal is retained. *Evidence:* a test proving self-approval is rejected and one proving a rejected proposal survives. *Dependency:* **G-LEDGER** — the approval writes a ledger entry, so it needs somewhere to write.
+- **G-D3** — `apply_payment` is an unlocked read-modify-write; two concurrent calls lose one (`DEBT.md` D3). The failing test now exists; the fix does not. *AC:* the `xfail(strict=True)` cases in `test_balance_lost_update_real_postgres.py` pass, and the marker is removed in the same commit. *Dependency:* none — either the ledger or `SELECT … FOR UPDATE` closes it.
+- **G-D7** — reconciliation is not a control (`DEBT.md` D7). *AC:* it runs on a schedule, compares at transaction level rather than netting totals, records every run, and fails with a distinct code when it could not compare anything. *Evidence:* a run table, a non-zero exit on a break, and a test that a run over nothing is an error rather than a pass. *Dependency:* none.
 
 #### Medium
 
-- **G-README** — `README.md:3-13, 104-130` asserts in three places that `payments.pan`/`cvv` still exist and are unpurged; `db/migrations/0031` dropped them on 2026-08-10 and `DEBT.md` D5b/D13 say so. *AC:* README describes the schema as it is, and a test catches the next drift the way `test_docs_match_the_logging_code.py` catches logging drift. *Evidence:* the new test failing on today's README. *Dependency:* none.
-- **G-D1** — the disclosure read path rebuilds the display schedule in `float` (`DEBT.md` D1). *AC:* Decimal to the serializer boundary; a redisplay test asserting the schedule matches the disclosed payment exactly.
-- **G-ADR-0010** — Week 6's legacy-comprehension ADR was never written. *AC:* an accepted ADR covering servicing RBAC, maker-checker and the ledger, including the corrected concurrency repro. *Dependency:* G-LEDGER's schema decision.
-- **G-D19** — `loans.apr` holds the note rate (`DEBT.md` D19). API and UI are corrected; the column is not.
-- **G-D14** — no payment waterfall (`DEBT.md` D14). *Dependency:* G-LEDGER.
+- **G-D1** — the disclosure read path rebuilds the display schedule in `float` (`DEBT.md` D1, *Partly fixed*). *AC:* Decimal to the serializer boundary; a redisplay test asserting the schedule matches the disclosed payment exactly.
+- **G-ADR-0010** — Week 6's legacy-comprehension ADR is not on `main`. *AC:* an accepted ADR covering servicing RBAC, maker-checker and the ledger, including the corrected concurrency repro.
+- **G-D19** — `loans.apr` holds the note rate (`DEBT.md` D19). API and UI are corrected; the column is not. *AC:* rename via migration, plus every query, model and fixture that names it.
+- **G-D14** — no payment waterfall (`DEBT.md` D14). *Dependency:* G-LEDGER — a waterfall needs per-component rows.
 
 #### Debt
 
-Existing register entries in scope for Weeks 1–6 and still open, cited by their
-own IDs — no new numbers minted here: **D1** (float read path, partly fixed),
-**D3** (unlocked read-modify-write), **D7** (reconciliation is not a control),
-**D8** (no role check / no second approver / no ledger entry), **D14** (no
-waterfall), **D19** (column name, partly fixed), **D20** (bounded, not fixed —
-the static SQL premise is enforced by test instead). **D11** (KYC is CIP-only) is
-open by deliberate scope limit and belongs to Week 9, not here — G-KYC above is a
-*different* defect about reachability, not about what CIP checks.
+Register entries in scope for Weeks 1–6 and still open, cited by their own IDs —
+no new numbers minted here: **D1** (float read path, partly fixed), **D3**
+(unlocked read-modify-write), **D7** (reconciliation is not a control), **D8**
+(no role check / no second approver / no ledger entry), **D14** (no waterfall),
+**D19** (column name, partly fixed), **D20** (bounded, not fixed — the static-SQL
+premise is enforced by test instead).
 
-G-KYC has no `D` number. It is tracked at `ARCHITECTURE.md:75-78`, which named
-PR #8 as its owner; PR #8 merged without it. Rather than mint an ID for something
-being fixed in the next commit, the fix carries the record.
+**D11** (KYC is CIP-only) is open by deliberate scope limit and belongs to Week 9.
+G-KYC was a *different* defect — about reachability, not about what CIP checks —
+and closing it did not touch D11.
 
 ## Start next
 
-**G-KYC — close the unauthenticated path to the CIP handler.**
+**G-INTAKE-401 — a KYC authorization failure must not read as a hiccup.**
 
-It is first because it is the only Critical row, and because it is a live
-unauthenticated write path into an audit table rather than a design gap.
-Everything above it in severity is already closed; everything below it either
-needs a schema decision (G-LEDGER and everything that depends on it) or a product
-decision (G-DTI). Its acceptance criteria need no decision from anyone — four
-sibling services already implement the service-side pattern, and the regression
-test that would have caught it already exists and simply omitted this service.
+It is first because it is a live control failure with no dependency on anything
+else in this file. `submit_application` wraps the kyc-service call in
+`except Exception`, which is right for a timeout — a network blip must not 500 an
+application — and wrong for a 401. An unset or rotated `INTERNAL_SERVICE_TOKEN`
+would stop verifying identity on **every** application while intake kept
+returning 200 with all four CIP flags false and no `kyc_checks` row written.
+Identity verification would be off, and nothing would say so.
 
-*This section previously read "close the `kyc-service` gateway bypass. **One
-concern.**" It is two: a `kyc-service` change and a gateway authorization change,
-and calling it one is precisely what let half of it ship as though it were
-whole.* The gateway half — staff-only `/kyc/*`, and stripping the inbound
-`x-internal-token` in `_proxy` — has since landed on **#18** as well. It was
-going to be a separate PR; it stayed on #18 because the reviewer's finding was
-that the PR did not achieve its own stated goal without it, and splitting a fix
-from the defect it closes would have left #18 claiming something untrue.
+It needs no decision from anyone: the two cases are already distinguishable at the
+call site, and the fix is to treat them differently and assert that in a test.
 
-**Status: 🟠 both halves on PR #18. Not on `main`, so not ticked.**
+After it, in order:
 
-> **Correction, made the same day this audit was written, and left standing
-> because the sequence is the lesson.** An adversarial review and a live check
-> against a running stack found the bypass still open after the first fix. PR #18
-> removes the 8003 host port and adds the token check, but the **gateway's**
-> `/kyc/{path}` route requires no session and stamps the trusted
-> `X-Internal-Token` itself — so an anonymous caller reaches the same handler
-> through port 8000, the one port deliberately published to the host:
->
-> ```
-> curl -X POST localhost:8000/kyc/kyc/check \
->   -d '{"application_id":1,"applicant_id":1,"name":"Forged Owner", ... }'
-> → 200 {"check_id":92,"cip_passed":true, ... }
-> ```
->
-> That wrote a `kyc_checks` row for a real applicant with `name_verified=t`, with
-> no session and no token; the row was deleted after verification. Root cause is
-> **gateway authorization** (`services/gateway/app/main.py`), not `kyc-service`.
-> Two related defects came with it: `_proxy` kept a client-supplied
-> `x-internal-token` and the client's copy won, so any caller could force a 401
-> on every internal-token route; and the new 401 lands in intake's
-> `except Exception` swallow, silently disabling CIP while intake still returns
-> 200. **CI was 22/22 green on that branch and caught none of it**, because no
-> test exercised the gateway's `/kyc/*` route at all.
->
-> **Both are now fixed on #18** — `/kyc/*` is staff-only, `_proxy` strips the
-> inbound header, and six tests assert on what reaches `kyc-service` rather than
-> on the route's configuration. The intake-swallow defect (a 401 read as a
-> transient hiccup) is **still open** and is listed under High below.
+1. **G-D3** — the lost-update race. The failing test is on `main`; the fix is not.
+   Closing it removes the `xfail(strict=True)` markers in the same commit, which
+   is what stops the proof quietly becoming decoration.
+2. **G-D7** — reconciliation as a control that can fail.
+3. **G-LEDGER**, then **G-MAKER-CHECKER**, which depends on it — an approval
+   writes a ledger entry, so it needs somewhere to write.
 
-What PR #18 does contain: the host port removed from `docker-compose.yml`, the
-`X-Internal-Token` check on `POST /kyc/check`, the token forwarded from both
-legitimate callers (the gateway's `/kyc/*` proxy and origination's intake), and
-the host-port regression test extended to every backend service — plus a second
-test that derives that list from `services/` on disk, so the next service added
-is covered without anyone remembering to add it. Adding it surfaced a second
-omission immediately: `loan-assistant` was missing from the list too.
+### Historical note — G-KYC, and why it took two passes
 
-All eight service suites passed on that branch, and each guard was
-mutation-checked — reverting the token check fails 6 of the 7 new kyc tests,
-dropping the forwarded header fails the origination test, and restoring the
-`ports:` mapping fails the extended host-port test. **Verified against a real
-stack the same day:** `db/tests` 231 passed (was 212 skipped), origination 212,
-disclosure 166, payment 138, and all 38 Playwright specs — every
-`DATABASE_URL`-gated test genuinely run. *That verification is what produced the
-correction above; an earlier version of this paragraph read "built, open on PR
-#18 — inventory, not delivery" and presented the boundary as closed, with the
-Playwright and database suites listed as "not verified locally, for want of a
-Docker daemon."*
+Kept because the sequence is the lesson, not because the status is current.
+**G-KYC is closed**: `kyc-service` publishes no host port, `POST /kyc/check`
+requires the internal token and refuses an unset one, and the gateway's `/kyc/*`
+relay is staff-only and read-only.
 
-Per rule 1 at the foot of this file, none of that earns a ✅ here — and the
-correction is why rule 1 exists. A green CI run on a branch is evidence about
-what is tested, not about what is true.
+The first attempt closed the `kyc-service` half only. An adversarial review and a
+live check against a running stack then found the handler still reachable — the
+**gateway's** `/kyc/{path}` route required no session and stamped the trusted
+`X-Internal-Token` itself, so an anonymous caller reached the same handler through
+port 8000, the one port deliberately published to the host:
 
-## Verification baseline
+```
+curl -X POST localhost:8000/kyc/kyc/check   -d '{"application_id":1,"applicant_id":1,"name":"Forged Owner", ... }'
+→ 200 {"check_id":92,"cip_passed":true, ... }
+```
 
-Current figures are in **Status at a glance** above, re-measured at `17dca05` on
-2026-08-11. Reproduce with `python -m pytest -q` per service,
-`python -m pytest db/tests -q`, and `npm run test:e2e` in `frontend/`.
+That wrote a `kyc_checks` row for a real applicant with `name_verified=t`, with no
+session and no token. The row was deleted after verification. Root cause was
+**gateway authorization**, not `kyc-service`.
 
-*This section used to be the current baseline and is now history.* It carried
-**441** backend tests, **76** db migration tests and **5** Playwright specs,
-measured at `ca1dbf9` (the PR #6 merge, 2026-08-05), under a warning that PRs #8
-and #9 had merged after that commit so every figure was understated and
-"re-measurement pending". The re-measurement has happened — nine more PRs have
-merged since — so the warning is retired rather than carried forward.
+**CI was 22/22 green on that branch and caught none of it**, because no test
+exercised the gateway's `/kyc/*` route at all. Two related defects came with it:
+`_proxy` kept a client-supplied `x-internal-token` and the client's copy won, so
+any caller could force a 401 on every internal-token route; and the resulting 401
+landed in intake's `except Exception` swallow — which is **G-INTAKE-401** above,
+the one part of this that is still open.
 
-Per-week test counts appear below as they were at the time that week shipped;
-they are historical, not current, and are labelled as such.
+This section previously described the work as "one concern". It was two — a
+`kyc-service` change and a gateway authorization change — and calling it one is
+precisely what let half of it ship as though it were whole. Both halves landed
+together in the end, because splitting a fix from the defect it closes would have
+left the change claiming something untrue.
+
+## Audit snapshot — 2026-08-13
+
+**Everything in this section is a measurement, not guidance.** It expires the
+moment anyone merges or pushes, and it is fenced here so the rest of the file can
+be read without wondering which parts have gone stale. **Do not cite it as
+current status** — run the commands.
+
+- **Base:** `main` at `1528226`, level with `origin/main` when the audit ran.
+- **How to reproduce:** `python -m pytest -q` per service (with `DATABASE_URL`
+  set, or the real-PostgreSQL cases skip and a skip reads like a pass),
+  `python -m pytest db/tests -q`, and `npm run test:e2e` in `frontend/` with the
+  rate-limit overlay `docker-compose.e2e.yml` — without it, later browser specs
+  trip the shipped 120-request control and fail on unrelated assertions.
+- **Suites at that commit:** eight backend services, the `db/tests` migration and
+  documentation suite, and the Playwright specs under `frontend/e2e/`. Per-suite
+  counts are deliberately **not** transcribed here: they were wrong within a day
+  every previous time this file carried them, and the command above is both
+  shorter and correct.
+- **Pull requests and CI:** not recorded. `gh pr list` and the Actions tab are the
+  only accurate sources, and a number written down here is wrong as soon as
+  someone merges. The merged history is in `git log` and on GitHub.
+
+Per-week test counts appear inside the weekly sections below as they were when
+that week shipped. They are historical, labelled as such, and left alone.
 
 ---
 
@@ -345,13 +274,14 @@ they are historical, not current, and are labelled as such.
 
 8 backend services + Postgres + Redis + Next.js frontend, all behind one gateway (port 8000). Frontend on port 3000.
 
-⚠️ **The gateway is not the only host-reachable API.** `docker-compose.yml` also
-publishes `kyc-service` on host port **8003**, and that service checks no
-`X-Internal-Token`, so `POST localhost:8003/kyc/check` reaches the CIP handler
-with no authentication at all — see the Critical row in the Weeks 1–6 audit
-below, and `ARCHITECTURE.md`'s own boundary note, which has recorded this since
-PR #6. *This line previously read "port 8000, the only host-reachable API",
-which `ARCHITECTURE.md` has contradicted on `main` the whole time.*
+The gateway is the only host-reachable API. *This is worth stating carefully,
+because it was false for most of this engagement and the file claimed it anyway:
+`docker-compose.yml` also published `kyc-service` on host port 8003, and that
+service checked no `X-Internal-Token`, so `POST localhost:8003/kyc/check` reached
+the CIP handler with no authentication at all. `ARCHITECTURE.md` had recorded the
+gap since PR #6 while this file asserted the opposite.* The port is gone, the
+handler requires the token, and the gateway's own `/kyc/*` relay is staff-only and
+read-only — see the Weeks 1–6 audit above.
 
 **Services**
 | Service | Job |
@@ -789,7 +719,12 @@ noisy, we just adjust to the bank number."
 | 1 | Payments / Finance | `ledger_total()` sums **every row ever inserted into `payments`**, no date or loan filter; `settlement_total()` sums a fixed CSV covering one specific 7-day window across 3 loans — comparing an all-time, all-loan number to a 1-week, 3-loan number was never going to tie out | ⬜ Open | This isn't noise — the two numbers were never measuring the same population; a correctly-scoped comparison is required before "does it tie out" is even a meaningful question |
 | 2 | Finance | Whether the gap is random or a real, directional leak | ⬜ Open, but verified directional for the comparable slice: the seed data only carries payment rows through 06-03 while `settlement.csv` has captures for the same loans through 06-07 — settlement consistently shows *more* captures than the ledger has rows for | Directional, one-sided gaps are the signature of a real leak, not rounding noise — worth escalating, not writing off |
 | 3 | Payments | A real double-fund event exists in this exact month's data (loan 5582, two identical $410.50 charges 2 seconds apart) and nothing flags it | ⬜ Open | Confirmed: no trace ID or request ID connects the two `POST /payments` attempts — indistinguishable from two genuine charges without a human manually diffing rows by loan_id + amount + near-identical timestamp |
-| 4 | Payments | `payments` has **no `processor_ref` column at all** — even a correctly-scoped reconciliation could only match rows approximately (loan_id + amount + nearby date), never definitively by charge reference | ⬜ Open | This is itself part of why nobody can produce an exact break-report today, not just a missing job |
+| 4 | Payments | `payments` has **no `processor_ref` column at all** — even a correctly-scoped reconciliation could only match rows approximately (loan_id + amount + nearby date), never definitively by charge reference | ⬜ Open | This is itself part of why nobody can produce an exact break-report today, not just a missing job. Without the processor's own reference on the row there is no join key, so a comparison can only net totals per loan — and two wrong transactions on one loan then cancel, which is a control that reports success for having hidden its own findings |
+
+*The four rows above are measured against `main` at the audit base, and this is
+the table most likely to move first: `DEBT.md` **D7** is open and the work that
+closes it changes rows 1 and 4 together. Check `git log db/migrations` and
+`gh pr list` rather than reading a ⬜ here as current.*
 
 **This week's real deliverable, stated honestly:** **one** instrumented path
 (a shared trace/correlation ID connecting `payment-service`'s `charge()` to
@@ -1045,22 +980,28 @@ Four rules that this file has broken before, and which later passes fixed:
    the *correct* marker once the PR lands — the defect is the stale marker
    outliving the merge, not the tick replacing it.
 
-Last full accuracy pass: **2026-08-11**, against `main` at `17dca05`, at which point
-PRs #1–#17 were all merged and no PR was open. **Four PRs opened out of the pass —
-#18, #19 (this one), #20 and #21 — and all four were open when this line was
-written.** They will merge in some order; see the Pull requests section, and
-check GitHub rather than this sentence. The footer is the freshness marker for this file, so
-it names the base the PR table, the Weeks 1–6 matrix and the current test counts were
-actually checked against.
+5. **Never let this file carry a PR inventory.** Every previous version did, and
+   every one of them was wrong within a day — a footer saying "no PR open" above a
+   table listing four, a row marking a PR open that had merged hours earlier, a CI
+   run id cited as proof long after the branch moved. The rule that replaced them
+   is simpler than getting the inventory right: **the file does not carry PR or CI
+   status at all.** Volatile measurements live in *Audit snapshot*, dated and
+   fenced; everything else states what must be true, which does not change when a
+   branch does.
 
-*This sentence read "with PRs #1–#17 all merged and no PR open" while the Pull
-requests section above said two were open. Both could not be true. Review caught it,
-and it is the worst kind of error for this file specifically: a freshness marker
-contradicting the document it certifies undermines every other claim on the page,
-including the correct ones. The cause was writing the footer against the state the
-audit ran in and the table against the state it produced — the audit's own output
-changed the thing it was reporting on.*
+Last full accuracy pass: **2026-08-13**, against `main` at `1528226`. That is the
+base the Weeks 1–6 matrix and the gap list were re-checked against, and it is what
+the footer is for — a freshness marker naming the commit, and nothing about which
+pull requests happened to be open while it was written. **For what is in flight,
+run `gh pr list`.**
 
-*It previously also read 2026-08-10 against `e5f9d52`, describing #17 as "this pass" —
-#17 merged at 18:28 UTC that day, so the footer outlived its own PR, which is rule 4
-above failing on the line that states it.*
+*Two earlier versions of this footer are worth recording, because rule 5 is what
+they cost. One read "with PRs #1–#17 all merged and no PR open" while the section
+above it listed four open — a freshness marker contradicting the document it
+certifies, which undermines every other claim on the page including the correct
+ones. The cause was writing the footer against the state the audit ran in and the
+table against the state it produced: the audit's own output changed the thing it
+was reporting on. The other read 2026-08-10 against `e5f9d52` and described #17 as
+"this pass" — #17 merged at 18:28 UTC that day, so the footer outlived its own PR,
+rule 4 failing on the line that states it. Neither is possible now: the footer
+names a commit and says nothing about pull requests.*
