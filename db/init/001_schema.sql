@@ -710,7 +710,7 @@ BEGIN
          WHERE loan_id = NEW.loan_id;
         GET DIAGNOSTICS projected = ROW_COUNT;
     ELSIF NEW.component = 'fees' THEN
-        UPDATE balances SET past_due = past_due + NEW.amount, updated_at = now()
+        UPDATE balances SET past_due = COALESCE(past_due, 0) + NEW.amount, updated_at = now()
          WHERE loan_id = NEW.loan_id;
         GET DIAGNOSTICS projected = ROW_COUNT;
     ELSE

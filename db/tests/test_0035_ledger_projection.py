@@ -136,6 +136,16 @@ def test_past_due_is_projected_too(db):
     assert not wrong, f"past_due disagrees with the fees component for {wrong[:5]}"
 
 
+def test_fee_projection_moves_a_nullable_legacy_past_due(db):
+    loan = _a_loan(db)
+    _exec(db, "UPDATE balances SET past_due=NULL WHERE loan_id=%s", (loan,))
+    db.commit()
+    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type) "
+              "VALUES(%s,'fees',25,'fee_assessed')", (loan,))
+    db.commit()
+    assert _exec(db, "SELECT past_due FROM balances WHERE loan_id=%s", (loan,))[0]["past_due"] == 25
+
+
 def test_the_backfill_seeded_something(db):
     """Seeded state has one canonical meaning on fresh and migrated databases."""
     n = _exec(db, "SELECT count(*) AS n FROM ledger_entries "
