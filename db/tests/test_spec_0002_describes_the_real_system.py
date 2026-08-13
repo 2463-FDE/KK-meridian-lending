@@ -101,8 +101,7 @@ def test_the_spec_states_its_own_limit():
 # --- the identity trust boundary --------------------------------------------
 
 
-@pytest.mark.parametrize("requirement", ["REQ-ID-1", "REQ-ID-2", "REQ-ID-3",
-                                         "REQ-ID-4", "REQ-ID-5", "REQ-ID-6"])
+@pytest.mark.parametrize("requirement", [f"REQ-ID-{n}" for n in range(1, 11)])
 def test_the_identity_requirements_are_all_present(requirement):
     """The whole control reduces to "are these two the same person?".
 
@@ -165,6 +164,38 @@ def test_the_service_credential_is_not_treated_as_a_user_credential():
     )
 
 
+def test_the_spec_requires_a_non_forgeable_server_validated_principal():
+    text = SPEC.read_text(encoding="utf-8")
+    for phrase in (
+        "server-side Redis session",
+        "asymmetric private key",
+        "independently verify",
+        "audience",
+        "shared service token",
+        "SHALL NOT authenticate a human",
+    ):
+        assert phrase in text, f"identity boundary omits {phrase!r}"
+
+
+def test_the_spec_is_honest_that_the_principal_mechanism_is_not_implemented():
+    text = SPEC.read_text(encoding="utf-8")
+    assert "no signed principal assertion" in text
+    assert "does not claim the present headers satisfy it" in " ".join(text.split())
+
+
+def test_forged_headers_with_a_valid_service_token_are_covered():
+    text = SPEC.read_text(encoding="utf-8").lower()
+    for case in (
+        "backend cannot forge a human",
+        "forged role cannot override",
+        "forged identity cannot hide self-approval",
+        "missing human principal fails closed",
+        "invalid human principal fails closed",
+        "machine service remains a machine service",
+    ):
+        assert case in text, f"missing acceptance scenario: {case}"
+
+
 # --- proposal-side validity: the review's central finding ---------------------
 
 
@@ -184,7 +215,7 @@ def test_the_proposal_validity_requirements_are_all_present(requirement):
     )
 
 
-@pytest.mark.parametrize("criterion", [f"AC-{n}" for n in range(1, 23)])
+@pytest.mark.parametrize("criterion", [f"AC-{n}" for n in range(1, 29)])
 def test_every_acceptance_criterion_is_present(criterion):
     """A numbered criterion that vanishes takes its rejection path with it, and
     the gap is invisible: the remaining numbers still read as a complete list."""

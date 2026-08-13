@@ -150,12 +150,13 @@ string in a header", and maker-checker becomes a naming convention.
   proxying and re-stamp them from the resolved session. *(This already holds:
   `services/gateway/app/main.py::_proxy` filters `x-user-` and sets `X-User-Id` /
   `X-User-Role` from `user`.)*
-- **REQ-ID-3** — Servicing SHALL trust `X-User-Id` / `X-User-Role` **only** when
-  the request also carries a valid `X-Internal-Token`. Without it those headers
-  are anonymous client input. The token proves the request came through the
-  gateway; the headers carry what the gateway resolved. **Neither is sufficient
-  alone**, and treating the headers as trusted because they are "internal" is the
-  assumption this requirement exists to forbid.
+- **REQ-ID-3** — The canonical human principal SHALL be the account resolved by
+  the gateway from its server-side Redis session. The gateway SHALL convey that
+  principal in a short-lived, audience-bound assertion signed with a gateway-only
+  asymmetric private key. Servicing SHALL independently verify the signature,
+  issuer, `servicing-service` audience, issued-at/expiry bounds, subject and role
+  before using either identity or authority. The verification key may be shared;
+  the signing key SHALL NOT be available to any other backend.
 - **REQ-ID-4** — IF the principal cannot be resolved — no session, unknown user id,
   a role outside `_STAFF_ROLES` — THEN both proposing and resolving SHALL fail
   closed with `401`, and no `pending_movements` row SHALL be written and no
@@ -166,8 +167,27 @@ string in a header", and maker-checker becomes a naming convention.
 - **REQ-ID-6** — The proposal's `requested_by` SHALL be written from the principal
   at creation time and SHALL be immutable thereafter. A caller SHALL NOT be able
   to set, supply or amend it.
+- **REQ-ID-7** — `X-Internal-Token` SHALL authenticate only that the caller is a
+  recognised service. It SHALL NOT authenticate a human, SHALL NOT make
+  `X-User-Id` or `X-User-Role` trustworthy, and SHALL NOT substitute for a valid
+  signed principal assertion. Another backend possessing the shared token must
+  be unable to mint or alter the human principal.
+- **REQ-ID-8** — `X-User-Id`, `X-User-Role`, body fields and query parameters are
+  untrusted hints even when accompanied by a valid service token. If they differ
+  from the verified assertion they SHALL be ignored for identity and authority;
+  the action SHALL be refused as an attempted identity mismatch and write
+  nothing.
+- **REQ-ID-9** — A missing, malformed, expired, not-yet-valid, wrongly issued,
+  wrongly scoped or unverifiable assertion SHALL fail closed with `401` for both
+  proposal and resolution. The service SHALL NOT fall back to headers, the
+  shared token, a database lookup by caller-supplied id, or an anonymous/system
+  actor.
+- **REQ-ID-10** — A service-to-service request with no human principal MAY use the
+  existing shared token for machine endpoints, but SHALL NOT create or resolve a
+  staff maker-checker proposal. Machine-originated payments and fee assessments
+  remain outside this workflow as stated in §8.
 
-### Why REQ-ID-3 is the one that gets skipped
+### The required boundary does not exist yet
 
 Servicing's money routes take `x_user_role` as a header today and never read it.
 The tempting implementation is to start reading it — and that is a bypass, not a
@@ -176,14 +196,19 @@ approve. The token is a *service* credential shared by every backend, not a *use
 credential, so it authenticates the caller as "a service on this network" and says
 nothing about which human is acting.
 
-That is why the identity must be the gateway-resolved session and the token must
-be checked as well. One without the other is:
+The running repository has no signed principal assertion, gateway-only signing
+key, or servicing-side verifier today. `gateway::_proxy` strips and re-stamps
+headers, but every backend knows the same `X-Internal-Token`; another backend can
+therefore call servicing directly and forge those re-stamped values. This spec
+requires the signed assertion above for the future implementation and does not
+claim the present headers satisfy it.
 
 | Missing | Consequence |
 |---|---|
-| Token not checked | Anyone on the network sets `X-User-Id` to any staff account and approves |
+| Service token not checked | An unrecognised network caller reaches the endpoint |
 | Headers not stripped at the gateway | A browser client supplies its own `X-User-Id`, and the gateway forwards it |
-| Role read without the token | The role header becomes a privilege escalation primitive |
+| Signed principal not verified | Any backend with the shared token forges a human or claims `admin` |
+| Header disagrees with assertion | The header becomes a self-approval or privilege-escalation primitive unless the request refuses |
 
 ## 3b. What a proposal may say — validity at creation
 
@@ -350,6 +375,25 @@ raised — not at approval — and SHALL write no `pending_movements` row.
   (`503`) rather than evaluate it against an assumed limit.
 - **AC-22** — WHEN a resolution is recorded, THE SYSTEM SHALL record the threshold
   value it was judged against.
+- **AC-23** — IF forged `X-User-Id` or `X-User-Role` headers accompany a valid
+  shared service token but no valid signed principal assertion, THEN THE SYSTEM
+  SHALL refuse the proposal or resolution and write nothing.
+- **AC-24** — IF a forged identity or role header disagrees with a valid signed
+  principal assertion, THEN THE SYSTEM SHALL use neither value to broaden
+  authority, SHALL refuse the request, and SHALL write nothing.
+- **AC-25** — IF the same verified subject proposes and resolves a movement while
+  presenting different identity headers, THEN THE SYSTEM SHALL refuse it as
+  self-approval.
+- **AC-26** — IF the signed principal assertion is missing, malformed, expired,
+  wrongly issued, wrongly scoped or has an invalid signature, THEN THE SYSTEM
+  SHALL return `401` and SHALL NOT fall back to the service token or headers.
+- **AC-27** — WHEN a service calls servicing with a valid shared service token but
+  no validated human principal, THEN THE SYSTEM SHALL refuse maker-checker
+  proposal and resolution while leaving explicitly machine-only endpoints under
+  their separate authorization rules.
+- **AC-28** — WHEN servicing accepts a maker-checker action, THE recorded subject
+  and role SHALL equal the independently verified assertion claims derived from
+  the gateway's server-side session.
 
 ### 4.2 Gherkin
 
@@ -396,6 +440,46 @@ Scenario: a spoofed role header does not grant approval authority
   When "alice" sends the approval with header "X-User-Role: admin"
   Then the role is taken from her resolved session, not the header
   And the resolution is refused for insufficient authority
+
+Scenario: a backend cannot forge a human with the shared service token
+  Given payment-service possesses the valid shared internal token
+  And it has no gateway-signed human principal assertion
+  When it sends "X-User-Id: bob" and "X-User-Role: admin" to approve a proposal
+  Then the request is refused with 401
+  And the proposal remains unresolved
+  And no ledger entry is written
+
+Scenario: a forged role cannot override the signed principal
+  Given the gateway signed a principal assertion for CSR "alice"
+  When the request also supplies "X-User-Role: admin"
+  Then the identity mismatch is refused
+  And no approval is recorded
+
+Scenario: a forged identity cannot hide self-approval
+  Given the gateway signed a principal assertion for "alice"
+  And "alice" created the proposal
+  When she approves it with "X-User-Id: bob"
+  Then the request is refused as self-approval
+  And the proposal remains unresolved
+
+Scenario: a missing human principal fails closed
+  Given a request carries a valid shared internal token
+  And it carries no signed human principal assertion
+  When it attempts to create or resolve a proposal
+  Then the request is refused with 401
+  And nothing is written
+
+Scenario: an invalid human principal fails closed
+  Given a request carries an expired, wrongly scoped or invalidly signed assertion
+  When it attempts to create or resolve a proposal
+  Then the request is refused with 401
+  And no header or shared-token fallback is used
+
+Scenario: a machine service remains a machine service
+  Given payment-service calls with its valid shared token and no human principal
+  When it attempts a staff maker-checker action
+  Then the action is refused
+  And its separately authorised machine payment path is unaffected
 
 Scenario: identity that cannot be resolved fails closed
   Given a request carries a valid internal token
