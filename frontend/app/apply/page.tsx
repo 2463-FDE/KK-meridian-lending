@@ -446,6 +446,27 @@ export default function ApplyPage() {
       // Preserving it here is what makes the retry idempotent -- the key names
       // the draft, this authorises recovering it.
       const structured = (err as ApiError | undefined)?.data;
+
+      // ...but NOT when the server says the payload no longer matches.
+      //
+      // A 409 `retry_payload_changed` means the borrower corrected something --
+      // an SSN, an address, an income -- and the stored application is for the
+      // details they just fixed. Keeping the credentials made that a dead end:
+      // the message says "start a new application", and the next submit in the
+      // same tab presented the same key and secret, hit the same stored
+      // application, and got the same 409. sessionStorage survives a reload, so
+      // the only escape was closing the tab or clearing storage by hand -- and
+      // nothing on screen said so.
+      //
+      // Clearing them here is what makes the instruction true: the next submit
+      // mints a fresh key and secret and creates a new application carrying the
+      // corrected details. This is the one error that must NOT preserve them,
+      // which is why it is keyed off the server's own error code rather than
+      // the status -- a 409 from somewhere else should not silently discard a
+      // recoverable draft.
+      if (structured?.error === "retry_payload_changed") {
+        clearIntakeRetryCredentials();
+      }
       setApiError(errMsg(err, "Could not submit your application."));
     } finally {
       setBusy(false);

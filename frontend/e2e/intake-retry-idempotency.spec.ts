@@ -241,3 +241,112 @@ test("the credentials are gone from storage the moment intake succeeds", async (
   expect(after.key).toBeNull();
   expect(after.secret).toBeNull();
 });
+
+test("a corrected resubmission after a payload-mismatch 409 is not a dead end", async ({ page }) => {
+  // The escape hatch for the 409 this PR introduced.
+  //
+  // The server refuses a retry whose applicant or loan details changed, and
+  // tells the borrower to start a new application. The client kept the same
+  // key and secret for every error, so the next submit in the same tab
+  // presented them again, hit the same stored application, and got the same
+  // 409. sessionStorage survives a reload, so the only way out was closing the
+  // tab -- which nothing on screen said. The instruction was not actionable.
+  const applicant = fictionalApplicant("Mismatch", true, 100_000);
+
+  const keysSeen: string[] = [];
+  let attempts = 0;
+
+  await page.route("**/los/applications", async (route) => {
+    const body = route.request().postDataJSON() as { idempotency_key?: string };
+    keysSeen.push(body?.idempotency_key ?? "");
+    attempts += 1;
+    if (attempts === 1) {
+      // The borrower corrected a detail; the server refuses the retry.
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: {
+            error: "retry_payload_changed",
+            message:
+              "This retry carries different applicant or loan details from the "
+              + "application it is retrying. Start a new application to submit "
+              + "changed information.",
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        app_id: 7777, status: "submitted", access_token: "acc-tok",
+        kyc: { name_verified: true, dob_verified: true, address_verified: true, ssn_verified: true },
+      }),
+    });
+  });
+
+  await submitApplication(page, applicant, { stopAtReview: true });
+  await page.getByRole("button", { name: /submit application/i }).click();
+  await expect(page.locator(".alert-error").first()).toBeVisible();
+
+  // The borrower does what the message told them to: submit again.
+  await page.getByRole("button", { name: /submit application/i }).click();
+  await expect.poll(() => attempts).toBeGreaterThanOrEqual(2);
+
+  expect(keysSeen).toHaveLength(2);
+  expect(keysSeen[0]).toBeTruthy();
+  expect(keysSeen[1]).toBeTruthy();
+  expect(keysSeen[1]).not.toBe(keysSeen[0]);
+});
+
+test("a resumable 503 still keeps the credentials", async ({ page }) => {
+  // The other side of the rule above, and the one that must not regress.
+  //
+  // Clearing on every error would destroy the retry contract: an identity
+  // verification outage is exactly the case where the NEXT submit must present
+  // the SAME key and secret so it recovers the application already recorded,
+  // instead of creating a second one.
+  const applicant = fictionalApplicant("Resumable", true, 100_000);
+
+  const keysSeen: string[] = [];
+  let attempts = 0;
+
+  await page.route("**/los/applications", async (route) => {
+    const body = route.request().postDataJSON() as { idempotency_key?: string };
+    keysSeen.push(body?.idempotency_key ?? "");
+    attempts += 1;
+    if (attempts === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: {
+            error: "identity_verification_unavailable",
+            message: "This application was recorded but not verified.",
+            app_id: 4242,
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        app_id: 4242, status: "submitted", access_token: "acc-tok",
+        kyc: { name_verified: true, dob_verified: true, address_verified: true, ssn_verified: true },
+      }),
+    });
+  });
+
+  await submitApplication(page, applicant, { stopAtReview: true });
+  await page.getByRole("button", { name: /submit application/i }).click();
+  await expect(page.locator(".alert-error").first()).toBeVisible();
+
+  await page.getByRole("button", { name: /submit application/i }).click();
+  await expect.poll(() => attempts).toBeGreaterThanOrEqual(2);
+
+  expect(keysSeen[1]).toBe(keysSeen[0]);
+});
