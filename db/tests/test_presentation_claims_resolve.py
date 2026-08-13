@@ -321,3 +321,23 @@ def test_the_deck_does_not_claim_every_pr_maps_to_a_file():
     assert "no artifact at all" in text, (
         "the deck does not state that an open PR has no landed artifact"
     )
+
+
+def test_the_manifest_prose_does_not_overclaim_either():
+    """The manifest's own introduction is a claim on the same page as the table.
+
+    Correcting the deck left this behind: the manifest still said the resolver
+    "asserts every PR reference in the deck appears here with a resolvable
+    artifact", directly above a table whose #28 row has none. A reader trusting
+    the prose over the table would believe the open specification had landed
+    evidence -- which is the whole failure this file was written to stop, made
+    by the file itself.
+    """
+    text = MANIFEST.read_text(encoding="utf-8")
+    assert "with a resolvable artifact" not in text, (
+        "the manifest claims every cited PR has a resolvable artifact, which is "
+        "false for any open row"
+    )
+    assert "names **no artifact**" in text, (
+        "the manifest does not state that an open row has no artifact"
+    )

@@ -1,6 +1,6 @@
 # Evidence manifest — `2026-08-12-three-slides.md`
 
-Every `PR #NN` the deck cites, resolved to something that survives the PR.
+Every `PR #NN` the deck cites, resolved according to whether it has landed.
 
 A pull request is not durable evidence. It can be renumbered, reopened, closed
 without merging, or belong to a fork; a reader offline cannot check any of it;
@@ -9,9 +9,18 @@ validated backticked repository paths and let `PR #22`, `PR #23` and `PR #24`
 through unchecked, so a wrong number or a quietly reopened PR would still have
 passed green.
 
-So each row names **what landed in the repository**, which is what the audience
-can actually verify, and `test_presentation_claims_resolve.py` asserts every PR
-reference in the deck appears here with a resolvable artifact.
+So the two cases resolve differently, and conflating them is the overclaim this
+file exists to prevent:
+
+- a **merged** row names what landed in the repository — a file the audience can
+  open and check;
+- an **open** row names **no artifact**, because nothing has landed. It carries
+  the `open` label instead, on this page and on the slide, and that label is the
+  evidence. There is nothing else honest to point at.
+
+`test_presentation_claims_resolve.py` asserts every PR the deck cites appears
+here, that a merged row's artifact exists, that an open row has none and is
+labelled open on the slide, and that no other status is accepted.
 
 | PR | Status | Durable artifact in this repository | Merge commit |
 |---|---|---|---|
