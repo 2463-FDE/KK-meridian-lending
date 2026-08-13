@@ -50,6 +50,14 @@ CLASSIFICATIONS = [
     "Approval is not recommended.",
     "Credit risk is unacceptable.",
     "The loan should not be approved.",
+    # Review round 4: the adjective form, missed entirely by patterns built
+    # around the noun "risk".
+    "This borrower looks risky.",
+    "This is a risky application.",
+    "Too risky to approve.",
+    "The applicant appears risky.",
+    "Not suitable for approval.",
+    "A poor credit candidate.",
 ]
 
 # Descriptive, grounded observations. These are the whole point of the summary

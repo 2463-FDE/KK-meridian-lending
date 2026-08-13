@@ -569,6 +569,22 @@ _RISK_LABEL_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\b(?:is|are|was|were)\s+(?:not\s+)?recommend\w*",
     r"\b(?:should|must|ought\s+to)\s+(?:not\s+)?be\s+"
     r"(?:declined|denied|rejected|approved)\b",
+    # "risky", "too risky", "looks risky", "a risky application". The
+    # adjective form carries the same judgement as "high risk" and was missed
+    # entirely by patterns built around the noun.
+    #
+    # Round 4 of this guard. Rounds 1-3 each added the shapes the previous round
+    # had not thought of -- adjective-then-noun, then noun-then-copula, now the
+    # adjective on its own. That pattern is the finding: a blacklist of phrasings
+    # is never provably complete, and each round it reads as though it is. The
+    # honest position is that this scrub is defence in depth behind a prompt that
+    # forbids classification, not a proof that no phrasing can get through; the
+    # PR body says so rather than implying the list is closed.
+    r"\brisk(?:y|ier|iest)\b",
+    # Suitability phrasing: a recommendation with the verb removed.
+    r"\b(?:not\s+)?suitable\s+for\s+(?:approval|a\s+loan|lending|credit)\b",
+    r"\b(?:un)?suitable\s+(?:applicant|application|borrower|candidate)\b",
+    r"\b(?:good|bad|poor|strong|weak)\s+(?:credit\s+)?(?:candidate|prospect)\b",
 ))
 
 
