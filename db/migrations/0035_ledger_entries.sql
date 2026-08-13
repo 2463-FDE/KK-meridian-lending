@@ -392,9 +392,12 @@ BEGIN
         VALUES (NEW.loan_id, 'fees', NEW.past_due,
                 'legacy_direct_write',
                 'captured from a balances insert during ledger cutover');
-    ELSIF TG_OP = 'UPDATE' AND NEW.past_due IS DISTINCT FROM OLD.past_due THEN
+    ELSIF TG_OP = 'UPDATE'
+          AND NEW.past_due IS DISTINCT FROM OLD.past_due
+          AND COALESCE(NEW.past_due, 0) - COALESCE(OLD.past_due, 0) <> 0 THEN
         INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
-        VALUES (NEW.loan_id, 'fees', NEW.past_due - OLD.past_due,
+        VALUES (NEW.loan_id, 'fees',
+                COALESCE(NEW.past_due, 0) - COALESCE(OLD.past_due, 0),
                 'legacy_direct_write',
                 'captured from a direct balances update during ledger cutover');
     END IF;

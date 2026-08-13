@@ -463,6 +463,21 @@ def test_legacy_applied_payment_amount_is_immutable_during_cutover(db):
     assert _exec(db, "SELECT amount FROM payments WHERE id=%s", (pay,))[0]["amount"] == 10
 
 
+def test_nullable_legacy_past_due_transitions_are_captured_as_zero_based_deltas(db):
+    loan = _a_loan(db)
+    _exec(db, "UPDATE balances SET past_due=NULL WHERE loan_id=%s", (loan,))
+    db.commit()
+
+    _exec(db, "UPDATE balances SET past_due=25 WHERE loan_id=%s", (loan,))
+    _exec(db, "UPDATE balances SET past_due=NULL WHERE loan_id=%s", (loan,))
+    db.commit()
+
+    rows = _exec(db, "SELECT amount FROM ledger_entries WHERE loan_id=%s "
+                     "AND component='fees' AND entry_type='legacy_direct_write' "
+                     "ORDER BY id DESC LIMIT 2", (loan,))
+    assert [row["amount"] for row in reversed(rows)] == [25, -25]
+
+
 def test_a_loan_boarded_after_migration_gets_an_opening_delta(db):
     """Origination's live boarding path INSERTs loans then balances. The
     transitional bridge must cover that new row, not only updates to rows that
