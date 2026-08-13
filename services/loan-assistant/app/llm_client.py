@@ -676,8 +676,26 @@ _DTI_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     # "debt ratio", "ratio of debt", either order, within one clause
     r"\bdebt\w*\b[^.!?]{0,30}?\bratio\b",
     r"\bratio\b[^.!?]{0,30}?\bdebt\w*\b",
-    # The same claim spelled out: obligations measured against income.
-    r"\b(?:debt|obligation|liabilit|payment)\w*\b[^.!?]{0,40}?"
+    # The same claim spelled out: EXISTING obligations measured against income.
+    #
+    # `payment` was in this group and had to come out. It matched "The estimated
+    # monthly payment is manageable relative to stated income" -- a statement
+    # about the REQUESTED loan, computed from the amount, term and income the
+    # model is given, and explicitly invited by the system prompt. Scrubbing it
+    # deleted grounded repayment-capacity context and, in a one-sentence
+    # summary, would have failed the whole request closed. That is a worse
+    # outcome than the defect: the officer loses real information and the
+    # borrower's file will not render.
+    #
+    # So this matches only wording that refers to obligations the applicant
+    # ALREADY has, which is precisely what this system does not know. A payment
+    # on an existing debt still matches, via the debt/obligation/liability
+    # alternation.
+    r"\b(?:existing|current|outstanding|other|monthly)\s+"
+    r"(?:debt|obligation|liabilit)\w*\b[^.!?]{0,40}?"
+    r"\b(?:relative to|compared (?:to|with)|against|versus|vs\.?|as a "
+    r"(?:share|percentage|percent|proportion) of)\b[^.!?]{0,25}?\bincome\b",
+    r"\b(?:debt|obligation|liabilit)\w*\b[^.!?]{0,40}?"
     r"\b(?:relative to|compared (?:to|with)|against|versus|vs\.?|as a "
     r"(?:share|percentage|percent|proportion) of)\b[^.!?]{0,25}?\bincome\b",
 ))

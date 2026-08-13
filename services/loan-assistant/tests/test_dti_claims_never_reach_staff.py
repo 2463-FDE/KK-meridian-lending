@@ -36,6 +36,7 @@ DTI_CLAIMS = [
     "The income to debt relationship is weak.",
     "Their debt ratio suggests strain.",
     "Debt/income sits just under the threshold.",
+    "Outstanding liabilities compared with income are significant.",
 ]
 
 # Legitimate prose. Four of these mention debt, because `debt consolidation` is
@@ -51,6 +52,15 @@ LEGITIMATE = [
     "Stated income is $71,000 against a $24,000 request.",
     "Employment under one year.",
     "Payment history shows no late payments.",
+    # Review round 2 on this guard. `payment` was in the obligations pattern, so
+    # these were scrubbed -- statements about the REQUESTED loan, computed from
+    # the amount, term and income the model is given, and explicitly invited by
+    # the system prompt. A one-sentence summary of this shape failed the whole
+    # request closed, which is worse than the defect: the officer loses real
+    # repayment-capacity context and the borrower's file will not render.
+    "The estimated monthly payment is manageable relative to stated income.",
+    "The monthly payment is small compared to income.",
+    "The requested payment is modest against the stated income.",
 ]
 
 
@@ -176,3 +186,43 @@ def test_the_parametrized_guards_are_not_vacuous():
         "the keep-list must contain real debt prose, or it proves nothing about "
         "the false-positive risk that makes this guard hard"
     )
+
+
+def test_a_lone_repayment_capacity_sentence_does_not_fail_the_request(monkeypatch):
+    """The fail-closed path, reached by a false positive, is the worst outcome.
+
+    `_strip_dti_claims` raises when nothing survives. So a one-sentence summary
+    that the guard wrongly matched did not merely lose a sentence -- it turned a
+    good summary into an error and the officer saw no file at all. This asserts
+    the whole pipeline on exactly that shape.
+    """
+    payload = {
+        "loan_amount": 24000.0,
+        "term_months": 48,
+        "purpose": "debt consolidation",
+        "summary": "The estimated monthly payment is manageable relative to stated income.",
+        "flags": [],
+    }
+
+    monkeypatch.setattr(llm_client, "make_client", lambda: object())
+    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt: json.dumps(payload))
+    monkeypatch.setattr(llm_client, "_fetch_signal", lambda *a, **k: None, raising=False)
+
+    result = llm_client.summarize_application({
+        "id": 1, "applicant": {"name": "Robin Fictional"},
+        "amount": 24000, "term_months": 48, "purpose": "debt consolidation",
+        "income": 71000, "employment_years": 6,
+    })
+    assert "manageable relative to stated income" in result.summary
+
+
+def test_a_payment_on_an_existing_debt_is_still_a_dti_claim():
+    """Narrowing must not have opened the real hole.
+
+    "monthly payments on existing debts relative to income" IS the fabricated
+    ratio; it survives the narrowing via the debt/obligation alternation.
+    """
+    assert _is_a_dti_claim(
+        "Monthly payments on existing debts are high relative to income.")
+    assert _is_a_dti_claim(
+        "Outstanding obligations as a percentage of income are elevated.")
