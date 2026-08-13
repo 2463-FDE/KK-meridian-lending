@@ -631,6 +631,90 @@ def _strip_risk_classifications(summary: str, flags: list):
     return cleaned, kept_flags, dropped
 
 
+# Debt-to-income claims, for the post-parse scrub below.
+#
+# The prompt already tells the model not to reason about debt-to-income, and a
+# prompt cannot prevent anything -- the same reason _strip_contradicting_macro_
+# claims and _strip_risk_classifications exist. A response of
+# `flags: ["Debt-to-income near the policy limit"]` validated, survived both
+# existing scrubs, and reached the officer. That is the exact criterion this
+# branch retired, back in front of staff during manual review.
+#
+# It is not a threshold question. Nothing in this system carries the applicant's
+# existing debt obligations (adr/0007), so any ratio in the output was computed
+# from data the model was never given.
+#
+# The hard constraint is `debt consolidation`. It is a real, common loan purpose
+# that the summary SHOULD discuss, and it contains the word "debt". So none of
+# these patterns match "debt" alone: every one requires debt to be related to
+# income or expressed as a ratio. "Loan amount is large relative to stated
+# income" must also survive -- that is amount-to-income, grounded in two figures
+# the model is actually given, and it is the example the system prompt itself
+# offers.
+_DTI_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # DTI, D.T.I., dti ratio
+    r"\bd\.?\s?t\.?\s?i\.?\b",
+    # debt-to-income, debt to income, debt/income
+    r"\bdebt[\s\-/]*(?:to[\s\-/]*)?income\b",
+    r"\bincome[\s\-/]*(?:to[\s\-/]*)?debt\b",
+    # "debt ratio", "ratio of debt", either order, within one clause
+    r"\bdebt\w*\b[^.!?]{0,30}?\bratio\b",
+    r"\bratio\b[^.!?]{0,30}?\bdebt\w*\b",
+    # The same claim spelled out: obligations measured against income.
+    r"\b(?:debt|obligation|liabilit|payment)\w*\b[^.!?]{0,40}?"
+    r"\b(?:relative to|compared (?:to|with)|against|versus|vs\.?|as a "
+    r"(?:share|percentage|percent|proportion) of)\b[^.!?]{0,25}?\bincome\b",
+))
+
+
+def _is_a_dti_claim(text: str) -> bool:
+    return any(p.search(text or "") for p in _DTI_PATTERNS)
+
+
+def _strip_dti_claims(summary: str, flags: list):
+    """Remove model prose asserting a debt-to-income relationship.
+
+    Same shape as the two scrubs beside it: drop the sentence, keep the rest,
+    log that it happened, and fail closed if nothing survives. Removal rather
+    than rewriting, because editing a ratio out of the middle of a sentence
+    would make this service the author of a claim it cannot stand behind.
+
+    No threshold is introduced and no lending rule is added. The rule is that
+    Meridian does not evaluate debt-to-income at all, so there is no number to
+    compare against and nothing here to configure.
+    """
+    dropped = 0
+    kept_sentences = []
+    for sentence in _split_sentences(summary):
+        if sentence and _is_a_dti_claim(sentence):
+            dropped += 1
+            continue
+        kept_sentences.append(sentence)
+
+    kept_flags = []
+    for flag in flags:
+        if isinstance(flag, str) and _is_a_dti_claim(flag):
+            dropped += 1
+            continue
+        kept_flags.append(flag)
+
+    cleaned = " ".join(s for s in kept_sentences if s).strip()
+    if dropped:
+        # The claim itself is not logged: it is a fabricated statement about a
+        # real applicant's finances, and a log line makes it durable.
+        log.warning(
+            "removed %d debt-to-income claim(s) from the summary -- this system "
+            "holds no debt obligations, so any such ratio was fabricated",
+            dropped,
+        )
+    if not cleaned:
+        raise LLMResponseError(
+            "the model's summary consisted entirely of debt-to-income claims, "
+            "which this system has no data to support"
+        )
+    return cleaned, kept_flags, dropped
+
+
 def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     """
     Summarize a loan application for a loan officer.
@@ -747,6 +831,14 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     # into `summary` or "High risk" into `flags`, and staff read that the same
     # way. Runs after the macro scrub so both operate on sentences.
     fields["summary"], fields["flags"], _ = _strip_risk_classifications(
+        fields["summary"], fields["flags"],
+    )
+
+    # The debt-to-income half. G-DTI removed the published cutoff and the prompt
+    # instruction; this is what holds when the model writes one anyway. Nothing
+    # in this system carries the applicant's debt obligations, so a DTI claim in
+    # the summary is invented, and staff read it during manual review.
+    fields["summary"], fields["flags"], _ = _strip_dti_claims(
         fields["summary"], fields["flags"],
     )
 
