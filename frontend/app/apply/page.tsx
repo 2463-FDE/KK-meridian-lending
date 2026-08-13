@@ -4,7 +4,14 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
-import { apiGet, apiPost, ApiError } from "../../lib/api";
+import {
+  apiGet,
+  apiPost,
+  ApiError,
+  clearIntakeRetryCredentials,
+  intakeIdempotencyKey,
+  intakeResumeToken,
+} from "../../lib/api";
 import { usd, pct, paymentPlanText } from "../../lib/format";
 
 const STEPS: Step[] = [
@@ -78,6 +85,9 @@ interface Kyc {
 }
 
 interface AppResult {
+  /** Server-issued, required with the idempotency key to recover this
+   * application if intake failed. Never logged, never in a URL. */
+  resume_token?: string;
   app_id: string | number;
   status?: string;
   kyc?: Kyc;
@@ -133,7 +143,16 @@ interface Disclosure {
 
 function errMsg(err: unknown, fallback: string): string {
   if (err && typeof err === "object" && "detail" in err) {
-    return String((err as { detail: unknown }).detail) || fallback;
+    const detail = (err as { detail: unknown }).detail;
+    // A structured detail carries the borrower-facing text in `message`. The
+    // resumable-intake failure returns an object (app_id, tokens, message), and
+    // String()-ing it rendered "[object Object]" into the alert -- the borrower
+    // saw nothing usable at the exact moment they need to know they can retry.
+    if (detail && typeof detail === "object") {
+      const message = (detail as { message?: unknown }).message;
+      return typeof message === "string" && message ? message : fallback;
+    }
+    return String(detail) || fallback;
   }
   if (err instanceof Error) return err.message;
   return fallback;
@@ -354,6 +373,12 @@ export default function ApplyPage() {
     setReturnFocusStep(editOriginStep);
   }
 
+  /** The resume token as a header -- never a query string, never a body field. */
+  function resumeHeader(): Record<string, string> {
+    const token = intakeResumeToken();
+    return token ? { "X-Resume-Token": token } : {};
+  }
+
   async function submitApplication() {
     // Snapshot FIRST, synchronously, and build the request body from the
     // snapshot rather than from `form`. Reading `form` field by field across
@@ -365,6 +390,9 @@ export default function ApplyPage() {
     setApiError(null);
     try {
       const res = (await apiPost("/los/applications", {
+        // Stable across retries of THIS draft. Without it a retry after a KYC
+        // failure creates a second applicant and a second application.
+        idempotency_key: intakeIdempotencyKey(),
         name: sent.name,
         dob: sent.dob,
         ssn: sent.ssn,
@@ -379,7 +407,28 @@ export default function ApplyPage() {
         amount: sent.amount,
         term_months: parseInt(sent.term_months, 10),
         purpose: sent.purpose,
-      })) as AppResult;
+      }, resumeHeader())) as AppResult;
+      // Intake succeeded, so the retry credentials have done their job and must
+      // go NOW -- not at offer acceptance, which most applications never reach.
+      //
+      // They exist for exactly one purpose: proving this browser owns an
+      // application whose submission may have failed. Once the POST returns,
+      // the application exists and the client holds `app_id` and an access
+      // token, which identify it far better. Keeping the key past this point
+      // does not enable anything; it only creates a way to collide.
+      //
+      // Leaving them until acceptance was a real defect. A denied or referred
+      // applicant -- or anyone who just refreshes -- kept a live key in the tab,
+      // and the NEXT application submitted there reused it. The server then
+      // took the matching key and secret as proof of ownership, returned the
+      // FIRST application, and discarded the second person's data entirely.
+      //
+      // Reproduced against a running stack before fixing: a second submission
+      // with different name, DOB, SSN, address and amount returned the first
+      // applicant's `app_id` plus a live access token for it, and no second
+      // applicant row was ever created. On a shared or kiosk browser that is
+      // one person handed another person's application, not a duplicate.
+      clearIntakeRetryCredentials();
       setApp(res);
       setStep(5);
     } catch (err) {
@@ -392,6 +441,32 @@ export default function ApplyPage() {
       // retry path work; the success path never reaches this branch, so the
       // in-flight race the snapshot closes stays closed.
       setSubmitted(null);
+      // A resumable failure (identity verification unavailable) carries the
+      // handle needed to retry THIS application rather than start a new one.
+      // Preserving it here is what makes the retry idempotent -- the key names
+      // the draft, this authorises recovering it.
+      const structured = (err as ApiError | undefined)?.data;
+
+      // ...but NOT when the server says the payload no longer matches.
+      //
+      // A 409 `retry_payload_changed` means the borrower corrected something --
+      // an SSN, an address, an income -- and the stored application is for the
+      // details they just fixed. Keeping the credentials made that a dead end:
+      // the message says "start a new application", and the next submit in the
+      // same tab presented the same key and secret, hit the same stored
+      // application, and got the same 409. sessionStorage survives a reload, so
+      // the only escape was closing the tab or clearing storage by hand -- and
+      // nothing on screen said so.
+      //
+      // Clearing them here is what makes the instruction true: the next submit
+      // mints a fresh key and secret and creates a new application carrying the
+      // corrected details. This is the one error that must NOT preserve them,
+      // which is why it is keyed off the server's own error code rather than
+      // the status -- a 409 from somewhere else should not silently discard a
+      // recoverable draft.
+      if (structured?.error === "retry_payload_changed") {
+        clearIntakeRetryCredentials();
+      }
       setApiError(errMsg(err, "Could not submit your application."));
     } finally {
       setBusy(false);
@@ -531,6 +606,16 @@ export default function ApplyPage() {
         { "X-Offer-Accept-Token": decision?.accept_token || "" },
       )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
+      // Belt and braces. The credentials are already cleared the moment intake
+      // succeeds, which every accepted offer has passed through, so this is
+      // normally a no-op on empty storage.
+      //
+      // It used to be the ONLY place they were cleared, which meant every
+      // application that did not reach acceptance -- denied, referred, or
+      // simply abandoned -- left a live key in the tab for the next applicant
+      // to collide with. Kept rather than deleted so that any future path
+      // reaching acceptance by another route still ends with clean storage.
+      clearIntakeRetryCredentials();
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));
     } finally {

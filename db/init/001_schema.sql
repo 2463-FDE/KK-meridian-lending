@@ -76,7 +76,34 @@ CREATE TABLE IF NOT EXISTS applications (
     accept_token_hash          TEXT,
     accept_token_expires_at    TIMESTAMPTZ,
     accept_token_consumed_at   TIMESTAMPTZ,
-    created_at        TIMESTAMPTZ DEFAULT now()
+    created_at        TIMESTAMPTZ DEFAULT now(),
+    -- Client-supplied key making intake safe to retry (db/migrations/0036).
+    -- Intake commits this row BEFORE calling kyc-service, so a KYC failure used
+    -- to leave the caller with a 503 and no identifier -- and a retry created a
+    -- second applicant and a second application. A retry with the same key
+    -- resumes this one instead.
+    idempotency_key TEXT,
+    -- Recovery of an INCOMPLETE application needs the key AND this token
+    -- (db/migrations/0037). The key identifies which application; the token
+    -- authorises the caller. Only the sha256 hash is stored.
+    resume_token_hash        TEXT,
+    resume_token_expires_at  TIMESTAMPTZ,
+    resume_token_consumed_at TIMESTAMPTZ,
+    -- sha256 of the canonical identity + underwriting payload that created this
+    -- application (db/migrations/0038). The key says WHICH application a retry
+    -- belongs to and the token says the caller MAY recover it; neither says the
+    -- retry is the SAME request. A retry with matching credentials and a
+    -- different fingerprint is refused with 409 rather than being served the
+    -- stored data, because the borrower can see the value they corrected and a
+    -- decision made against the old one is invisible to them.
+    request_fingerprint      TEXT,
+    -- The access token displaced by the most recent resume rotation
+    -- (db/migrations/0039). Accepted until its own expiry so two overlapping
+    -- retries both leave a usable credential; killed by
+    -- access_token_consumed_at along with the current slot, so single use
+    -- still means single use.
+    prev_access_token_hash       TEXT,
+    prev_access_token_expires_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_applications_accept_token_hash
@@ -91,10 +118,21 @@ CREATE INDEX IF NOT EXISTS idx_applications_applicant ON applications(applicant_
 CREATE TABLE IF NOT EXISTS kyc_checks (
     id              SERIAL PRIMARY KEY,
     applicant_id    INTEGER REFERENCES applicants(id),
+    -- Which application this CIP result was run for (db/migrations/0032).
+    -- Without it the only answerable question was "has this APPLICANT ever been
+    -- verified?", which passes a repeat applicant whose current application's
+    -- KYC never ran. Nullable: rows predating 0032 genuinely do not know.
+    application_id  INTEGER REFERENCES applications(id),
     name_verified   BOOLEAN,
     dob_verified    BOOLEAN,
     address_verified BOOLEAN,
     ssn_verified    BOOLEAN,
+    -- The CIP verdict as kyc-service reached it (db/migrations/0033). Stored
+    -- rather than recomputed by each reader: the pass rule is applicant-type
+    -- aware, and a second copy of it would be a second thing to keep in step.
+    -- NULL means the row does not say, which the decision gate treats as not
+    -- established.
+    cip_passed      BOOLEAN,
     -- no sanctions_screened, no ubo_identified, no ongoing_monitoring columns
     created_at      TIMESTAMPTZ DEFAULT now()
 );
@@ -352,6 +390,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 -- A few indexes added over time for the servicing dashboard. (No reason/driver
 -- columns on decisions.)
+CREATE UNIQUE INDEX IF NOT EXISTS applications_idempotency_key_uniq
+    ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
+
+CREATE INDEX IF NOT EXISTS idx_kyc_checks_application_id ON kyc_checks(application_id);

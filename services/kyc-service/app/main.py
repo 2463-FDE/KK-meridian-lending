@@ -12,11 +12,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
+from . import config
 from .logging_config import get_logger
 from .routers import kyc
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("kyc")
+
+# Fail at boot rather than per-request if the internal token is unusable
+# (PR #18 review). Import-time so an unusable deployment never serves traffic.
+config.validate_internal_token()
 
 app = FastAPI(title="Meridian KYC Service", version="2.0.0")
 app.include_router(kyc.router)

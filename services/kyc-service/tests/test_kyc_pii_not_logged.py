@@ -18,6 +18,23 @@ from app import db
 from app.main import app
 from fastapi.testclient import TestClient
 
+from .conftest import AUTH_HEADERS
+
+
+def _db_row(sql, params=None):
+    """One stub for both reads the handler makes.
+
+    Round 9: the linkage read returns the STORED applicant, because the CIP
+    verdict is computed from those columns instead of the request body. A stub
+    that answered every query with the same insert row let the handler read
+    nothing real while the tests still passed.
+    """
+    if "FROM applications" in sql:
+        return [{"name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789", "address": "42 Main St, Springfield", "is_entity": False}]
+    if "FROM applications" in sql:
+        return [{"name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789", "address": "42 Main St, Springfield", "is_entity": False}]
+    return [{"id": 77}]
+
 client = TestClient(app)
 
 _CANARY = {
@@ -29,12 +46,12 @@ _CANARY = {
 
 
 def test_kyc_check_logs_no_applicant_pii(monkeypatch, caplog):
-    monkeypatch.setattr(db, "query", lambda sql, params=None: [{"id": 77}])
+    monkeypatch.setattr(db, "query", _db_row)
     caplog.set_level(logging.DEBUG)
 
     resp = client.post("/kyc/check", json={
         "application_id": 4242, "applicant_id": 99, **_CANARY,
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     for field, value in _CANARY.items():
@@ -42,10 +59,14 @@ def test_kyc_check_logs_no_applicant_pii(monkeypatch, caplog):
 
 
 def test_kyc_check_still_logs_correlating_identifiers(monkeypatch, caplog):
-    monkeypatch.setattr(db, "query", lambda sql, params=None: [{"id": 77}])
+    monkeypatch.setattr(db, "query", _db_row)
     caplog.set_level(logging.INFO)
 
-    client.post("/kyc/check", json={"application_id": 4242, "applicant_id": 99, **_CANARY})
+    client.post(
+        "/kyc/check",
+        json={"application_id": 4242, "applicant_id": 99, **_CANARY},
+        headers=AUTH_HEADERS,
+    )
 
     assert "application_id=4242" in caplog.text
     assert "applicant_id=99" in caplog.text
@@ -56,21 +77,30 @@ def test_kyc_check_still_returns_and_persists_the_verification_result(monkeypatc
     captured = {}
 
     def _fake_query(sql, params=None):
-        captured["sql"] = sql
-        captured["params"] = params
+        # The handler now verifies the application/applicant linkage before
+        # inserting, so only the INSERT is the audit record under test.
+        if "INSERT INTO kyc_checks" in sql:
+            captured["sql"] = sql
+            captured["params"] = params
+        if "FROM applications" in sql:
+            return [{"name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789", "address": "42 Main St, Springfield", "is_entity": False}]
+        if "FROM applications" in sql:
+            return [{"name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789", "address": "42 Main St, Springfield", "is_entity": False}]
         return [{"id": 77}]
 
     monkeypatch.setattr(db, "query", _fake_query)
 
     resp = client.post("/kyc/check", json={
         "application_id": 4242, "applicant_id": 99, **_CANARY,
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["check_id"] == 77
     assert body["application_id"] == 4242
     assert "INSERT INTO kyc_checks" in captured["sql"]
-    # Only the applicant id and four booleans are persisted -- no identity data.
+    # Only identifiers and the four booleans are persisted -- no identity data.
+    # applicant_id, then application_id (db/migrations/0032), then the booleans.
     assert captured["params"][0] == 99
-    assert all(isinstance(p, bool) for p in captured["params"][1:])
+    assert captured["params"][1] == 4242
+    assert all(isinstance(p, bool) for p in captured["params"][2:])

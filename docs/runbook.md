@@ -41,15 +41,32 @@ All seeded with password `password`:
 
 ## Health checks
 
+The gateway is the only backend port published to the host:
+
 ```bash
 curl localhost:8000/health     # gateway
-curl localhost:8001/health     # origination (LOS, intake + boarding orchestrator)
-curl localhost:8002/health     # servicing (LSS)
-curl localhost:8003/health     # kyc-service
-curl localhost:8004/health     # decision-service
-curl localhost:8005/health     # disclosure-service
-curl localhost:8006/health     # payment-service
 ```
+
+Every other backend service is on the compose network only, so reach its health
+endpoint through the container rather than the host:
+
+```bash
+docker compose exec origination-service  python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8001/health').read())"
+docker compose exec servicing-service    python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8002/health').read())"
+docker compose exec kyc-service          python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8003/health').read())"
+docker compose exec decision-service     python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8004/health').read())"
+docker compose exec disclosure-service   python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8005/health').read())"
+docker compose exec payment-service      python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8006/health').read())"
+```
+
+Or read them all at once from `docker compose ps` — each service's compose
+healthcheck already probes exactly these URLs.
+
+*This block previously listed `curl localhost:8001`–`8006` directly.* Those had
+not worked since PR #6 un-published 8001, 8002 and 8004–8006; 8003 followed when
+the `kyc-service` bypass was closed. An operator following the old version got
+`Connection refused` on six of seven lines and had no way to tell that from a
+service being genuinely down — which is the failure a runbook exists to prevent.
 
 Ports 8003–8006 are the four services extracted from the old origination monolith
 (ADR 0004). `.env` carries their base URLs as `KYC_URL` / `DECISION_URL` /
@@ -114,9 +131,81 @@ orchestrates the LOS flow and calls them over HTTP.
   container-runtime and deployment-platform logging were not available in this
   repository and were not tested, so confirm those before shipping logs to a
   third-party aggregator. See `docs/DEBT.md` D5a.
-- **Secrets are in the repo.** `.env` is committed and the services' `config.py` hardcode
-  fallbacks — including Experian/core-banking keys in `decision-service` and the processor
-  key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)
+- **Provider keys have no rotation procedure.** `.env` is untracked and the hardcoded
+  fallbacks are gone from all seven services, so this bullet no longer describes secrets
+  sitting in the repository — it used to say `.env` is committed, which stopped being true
+  and stayed on the page. The bureau, core-banking and processor keys are still supplied
+  by environment alone with no rotation runbook and no expiry, which is the part that
+  remains open. See `docs/ROADMAP.md` for why the historical values were placeholders
+  rather than live credentials.
+
+## Deployment order: kyc-service first
+
+**kyc-service, then origination-service, then the frontend.** Not alphabetical, not
+all at once.
+
+Origination sends kyc-service only `application_id` and `applicant_id` -- the CIP
+verdict is computed from the applicant row kyc-service reads for itself, so the
+identity fields are redundant and sending them would put a second copy of the
+applicant's SSN on the wire (review round 9).
+
+An **old** kyc-service still requires `name`, `dob`, `ssn` and `address` as
+strings and answers **422** to the identity-free payload. So deploying origination
+first breaks every intake until kyc-service catches up.
+
+It breaks *safely*: intake verifies a `kyc_checks` row landed for the application
+and, when none did, returns the resumable 503 with the app id, access token and
+resume token. The borrower retries with the same idempotency key and recovers the
+same application -- no duplicate applicant, no application stuck at "submitted"
+that nobody can advance. But every intake fails for the length of the window,
+which is why the order matters rather than merely being tidy.
+
+**Do not "fix" this by sending the identity fields again.** That undoes a
+deliberate change and puts an SSN back on a wire that does not need it. The order
+is the fix.
+
+New kyc-service accepts **both** payload shapes -- its identity fields are
+optional and ignored -- so old origination talking to new kyc-service works
+throughout. Only the reverse combination is degraded, and only until the second
+deploy lands.
+
+## Rotating `INTERNAL_SERVICE_TOKEN`
+
+The shared secret every service checks on internal calls. Read this before rotating,
+because the current design **cannot** rotate without a brief outage window and pretending
+otherwise is how a rotation turns into an incident.
+
+**Why there is a window.** Each service compares the caller's `X-Internal-Token` against
+its own single configured value with `secrets.compare_digest`. There is no
+accept-old-and-new period. So between the first restarted service and the last, a caller
+holding one value talks to a service expecting the other and gets a 401. Money-moving
+routes fail closed during that gap, which is the correct direction and still an outage.
+
+**Procedure.**
+
+1. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"`. At least 32
+   characters and no placeholder words, or startup validation refuses it outside a
+   development `ENVIRONMENT`.
+2. Put it in the deployment's secret store and in your local gitignored `.env`. Never in
+   this repository — a value committed here is not a secret, which is exactly the failure
+   the token defends against.
+3. Restart **all** services together rather than rolling. Rolling makes the window longer,
+   not shorter, because every pair that disagrees fails for the whole roll.
+4. Quiesce first if you can pick the moment: no in-flight card authorization means no
+   payment can be captured against a servicing call that 401s mid-flight.
+5. Verify after: `POST /kyc/check` with the OLD token returns 401, with the new one 200;
+   an intake through `/los/applications` completes; a servicing money route 401s without a
+   token. All three, because each covers a different service's copy of the value.
+
+**If a zero-downtime rotation is ever required**, the change is to accept a list of valid
+tokens rather than one — old and new both valid for the length of the rollout, then the
+old one dropped. That is a code change to every service's `config.py` and its comparison,
+not a runbook step, and it is not implemented today. Stated so nobody plans a
+zero-downtime rotation against a system that cannot do one.
+
+**If the token is believed compromised**, rotate immediately and accept the window: the
+alternative is leaving a value that authorises money movement in an attacker's hands for
+the length of a code change.
 
 ## Tests
 

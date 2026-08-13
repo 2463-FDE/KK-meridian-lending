@@ -67,9 +67,29 @@ def _full_schema_sql():
             access_token_hash TEXT,
             access_token_expires_at TIMESTAMPTZ,
             access_token_consumed_at TIMESTAMPTZ,
+            -- db/migrations/0039. Another hand-written copy of
+            -- db/init/001_schema.sql; ACCESS_TOKEN_FIELDS selects these,
+            -- so omitting them fails the read, not the feature.
+            prev_access_token_hash TEXT,
+            prev_access_token_expires_at TIMESTAMPTZ,
             accept_token_hash TEXT,
             accept_token_expires_at TIMESTAMPTZ,
-            accept_token_consumed_at TIMESTAMPTZ
+            accept_token_consumed_at TIMESTAMPTZ,
+            idempotency_key TEXT,
+                resume_token_hash TEXT,
+                resume_token_expires_at TIMESTAMPTZ,
+                resume_token_consumed_at TIMESTAMPTZ
+        );
+            CREATE UNIQUE INDEX applications_idempotency_key_uniq
+                ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
+        CREATE TABLE kyc_checks (
+            id SERIAL PRIMARY KEY,
+            applicant_id INTEGER REFERENCES applicants(id),
+                application_id INTEGER REFERENCES applications(id),
+            name_verified BOOLEAN, dob_verified BOOLEAN,
+            address_verified BOOLEAN, ssn_verified BOOLEAN,
+                cip_passed BOOLEAN,
+            created_at TIMESTAMPTZ DEFAULT now()
         );
         CREATE TABLE decisions (
             app_id INTEGER PRIMARY KEY REFERENCES applications(id),
@@ -228,6 +248,17 @@ def _seed_application(conn, app_id, amount=9000, term_months=24, income=40000,
             "VALUES (%s, %s, %s, %s, %s, %s, now() + interval '1 hour', %s)",
             (app_id, app_id, amount, term_months, income,
              decision_state.hash_access_token(access_token), status),
+        )
+        # PR #18: run_decision refuses an application with no persisted KYC
+        # result. These fixtures exercise the decision-attempt lease, not
+        # identity verification, so they get a recorded result.
+        c.execute(
+            # cip_passed, not just the factors: the decision gate reads the
+            # VERDICT now (db/migrations/0033), because a row that merely
+            # existed used to satisfy it even when CIP had failed.
+            "INSERT INTO kyc_checks (applicant_id, application_id, name_verified, "
+            "cip_passed) VALUES (%s, %s, true, true)",
+            (app_id, app_id),
         )
     conn.commit()
 

@@ -70,6 +70,13 @@ def sanitize_failure_detail(failure_code: str) -> str:
     return _FAILURE_DETAIL[failure_code][:MAX_FAILURE_DETAIL_LEN]
 
 
+#: Mirrors routers/applications.KYC_UNVERIFIED_STATUS. Duplicated rather than
+#: imported because routers/applications imports this module, and importing back
+#: would be a cycle. Asserted equal by
+#: tests/test_decision_requires_persisted_kyc.py so the two cannot drift.
+KYC_UNVERIFIED_STATUS = "kyc_unverified"
+
+
 def recheck_finality_locked(cur, app_id: int) -> tuple[bool, dict | None]:
     """Must be called with `cur` already holding this app_id's row lock
     (SELECT ... FOR UPDATE issued by the caller's own transaction, or
@@ -81,7 +88,30 @@ def recheck_finality_locked(cur, app_id: int) -> tuple[bool, dict | None]:
     rows = cur.fetchall()
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
-    funded = rows[0]["status"] == "funded"
+    status = rows[0]["status"]
+
+    # PR #18 review: an application marked kyc_unverified must not be able to
+    # reach a decision, and the check belongs HERE rather than only at the top of
+    # run_decision -- inside the lock, on the same authoritative read as funded
+    # and manual-review finality.
+    #
+    # The unlocked pre-check can go stale: intake can mark the application
+    # kyc_unverified while a decision attempt is already in flight, and without
+    # this the attempt would persist a decision for an application whose identity
+    # evidence had since been withdrawn. Status and evidence would then disagree,
+    # with the decision row being the one anybody downstream reads.
+    if status == KYC_UNVERIFIED_STATUS:
+        raise HTTPException(
+            status_code=409,
+            # Same wording as the gate's own refusal, and for the same reason:
+            # "re-submit" costs the applicant a second application and a second
+            # hard credit pull, and since the gate now clears this mark the
+            # moment identity evidence exists, retrying is the fix.
+            detail=("identity verification has not completed for this application "
+                    "yet, so it cannot be decided. Please try again shortly."),
+        )
+
+    funded = status == "funded"
     cur.execute(
         "SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
         "FROM manual_reviews WHERE app_id = %s",
@@ -283,6 +313,46 @@ def new_access_token() -> tuple[str, str]:
     return raw, hash_access_token(raw)
 
 
+def new_resume_token() -> tuple[str, str]:
+    """Mint a resume token. Returns (raw, hash).
+
+    Separate from the access token because it authorises a different thing: the
+    access token proves the borrower may act on a COMPLETE application; the resume
+    token proves a caller may recover an INCOMPLETE one. Conflating them is how
+    the idempotency key became a credential -- the key identified the application
+    and the system then handed out an access token to whoever named it.
+
+    Same shape as new_access_token: 32 bytes of `secrets`, stored as a sha256
+    hash, raw value returned exactly once.
+    """
+    raw = secrets.token_urlsafe(32)
+    return raw, hash_access_token(raw)
+
+
+def resume_token_matches(stored_hash: str | None, raw_token: str | None,
+                         expires_at=None, consumed_at=None) -> bool:
+    """Constant-time comparison, plus expiry and single-use.
+
+    Returns False for every failure mode rather than distinguishing them, because
+    the caller must answer identically to a wrong token, a missing one, an expired
+    one and a replayed one -- telling them apart tells an attacker which of those
+    they achieved.
+    """
+    import datetime
+
+    if not stored_hash or not raw_token:
+        return False
+    if consumed_at is not None:
+        return False
+    if expires_at is not None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if getattr(expires_at, "tzinfo", None) is None:
+            expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+        if expires_at <= now:
+            return False
+    return secrets.compare_digest(stored_hash, hash_access_token(raw_token))
+
+
 def access_token_matches(stored_hash: str | None, raw_token: str | None) -> bool:
     """Constant-time hash comparison. Never `==` on the raw value."""
     if not stored_hash or not raw_token:
@@ -303,11 +373,34 @@ def verify_access_token(row: dict, raw_token: str | None) -> bool:
     cannot distinguish "wrong token" from "expired" from "already used" from
     "no such application" (see run_decision).
     """
+    # Consumption covers BOTH slots. Single use is a property of the decision,
+    # not of a particular credential, so a consumed application accepts
+    # neither the current token nor the displaced one.
     if row.get("access_token_consumed_at") is not None:
         return False
-    if not row.get("access_token_hash") or not row.get("access_token_live"):
-        return False
-    return access_token_matches(row["access_token_hash"], raw_token)
+
+    if row.get("access_token_live") and access_token_matches(
+        row.get("access_token_hash"), raw_token
+    ):
+        return True
+
+    # The token displaced by the most recent resume rotation (migration 0039).
+    #
+    # Two overlapping retries both authorise, both rotate, and without this the
+    # caller whose response came back FIRST holds a token the second rotation
+    # already invalidated. Since intake now clears the retry credentials on
+    # success, that caller has nothing left to recover with -- locked out of
+    # decisioning, and the obvious next move is to resubmit, which creates the
+    # duplicate application the retry contract exists to prevent.
+    #
+    # Checked second and with its own expiry, so it is a grace slot rather than
+    # a second permanent credential.
+    if row.get("prev_access_token_live") and access_token_matches(
+        row.get("prev_access_token_hash"), raw_token
+    ):
+        return True
+
+    return False
 
 
 def consume_access_token(cur, app_id: int) -> None:
@@ -327,7 +420,10 @@ def consume_access_token(cur, app_id: int) -> None:
 # is evaluated by Postgres's own now(), never Python's.
 ACCESS_TOKEN_FIELDS = (
     "access_token_hash, access_token_consumed_at, "
-    "(access_token_expires_at IS NOT NULL AND access_token_expires_at > now()) AS access_token_live"
+    "(access_token_expires_at IS NOT NULL AND access_token_expires_at > now()) AS access_token_live, "
+    "prev_access_token_hash, "
+    "(prev_access_token_expires_at IS NOT NULL AND prev_access_token_expires_at > now()) "
+    "  AS prev_access_token_live"
 )
 
 
