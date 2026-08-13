@@ -101,13 +101,16 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
 
 def adjust_balance(loan_id: int, new_value: float) -> float:
     """Set the balance directly. No ledger entry; the prior value is gone forever."""
-    current = get_balance(loan_id)
     new_balance = float(_to_decimal(new_value))
-    delta = _to_decimal(new_balance) - _to_decimal(current)
-    if delta:
-        db.query(
-            "UPDATE balances SET balance = balance + %s, updated_at = now() WHERE loan_id = %s",
-            (delta, loan_id),
+    with db.transaction() as cur:
+        cur.execute("SELECT balance FROM balances WHERE loan_id = %s FOR UPDATE", (loan_id,))
+        rows = cur.fetchall()
+        if not rows:
+            raise LookupError(f"no balances row for loan_id={loan_id}")
+        current = rows[0]["balance"]
+        cur.execute(
+            "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
+            (new_balance, loan_id),
         )
     log.info("adjusted balance loan_id=%s %s -> %s", loan_id, current, new_value)
     return new_balance

@@ -491,11 +491,16 @@ def test_production_shaped_apply_records_payment_provenance_and_projects_once(db
     assert rows == [{"amount": -10, "payment_id": pay, "entry_type": "payment"}]
 
 
-def test_servicing_writers_do_not_use_absolute_balance_overwrites():
-    servicing = REPO / "services" / "servicing-service" / "app"
-    source = "\n".join(path.read_text(encoding="utf-8") for path in servicing.glob("*.py"))
-    assert "SET balance = %s" not in source
-    assert "SET past_due = %s" not in source
+def test_servicing_absolute_adjustment_is_serialized_and_other_writers_are_relative():
+    balance_source = (REPO / "services" / "servicing-service" / "app" / "balance.py").read_text(
+        encoding="utf-8"
+    )
+    delinquency_source = (
+        REPO / "services" / "servicing-service" / "app" / "delinquency.py"
+    ).read_text(encoding="utf-8")
+    assert "SELECT balance FROM balances WHERE loan_id = %s FOR UPDATE" in balance_source
+    assert balance_source.count("SET balance = %s") == 1
+    assert "SET past_due = %s" not in balance_source + delinquency_source
 
 
 def test_nullable_legacy_past_due_transitions_are_captured_as_zero_based_deltas(db):

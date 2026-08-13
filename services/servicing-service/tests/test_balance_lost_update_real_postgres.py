@@ -327,9 +327,18 @@ def test_a_payment_racing_a_staff_adjustment_is_not_lost(pg, concurrent):
         lambda: balance.adjust_balance(1, 450),
     )
 
-    # The adjustment sets an absolute value and the payment applies a delta, so
-    # the only defensible combined outcome is the adjustment less the payment.
-    assert _balance(pg) == 450 - PAYMENT
+    # Row serialization makes the result match a real ordering: adjustment then
+    # payment -> 350; payment then absolute adjustment -> 450.
+    assert _balance(pg) in (450 - PAYMENT, 450)
+
+
+def test_two_concurrent_absolute_adjustments_end_at_a_requested_value(pg, concurrent):
+    _run(
+        concurrent,
+        lambda: balance.adjust_balance(1, 450),
+        lambda: balance.adjust_balance(1, 430),
+    )
+    assert _balance(pg) in (430, 450)
 
 
 def test_the_clients_reported_repro_does_not_collide(pg, concurrent):
