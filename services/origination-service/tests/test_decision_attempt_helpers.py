@@ -24,6 +24,11 @@ _APPLICATION_ROW = {
     "access_token_hash": decision_state.hash_access_token(_ACCESS_TOKEN),
     "access_token_consumed_at": None,
     "access_token_live": True,
+    # The `_fake_query` stubs here are catch-alls returning this row for every
+    # query but the decisions lookup, the KYC gate's read included -- so it has to
+    # state what it claims. These tests are about attempt handling, not the gate;
+    # the gate's own tests are in test_decision_requires_persisted_kyc.py.
+    "cip_passed": True,
 }
 
 
@@ -89,7 +94,13 @@ class _FakeRunDecisionTxCursor:
     def execute(self, sql, params=None):
         self.calls.append(sql.strip())
         stmt = sql.strip()
-        if stmt.startswith("SELECT status FROM applications"):
+        if stmt.startswith("SELECT cip_passed FROM kyc_checks"):
+            # Round 10: the manual-review and boarding paths read the identity
+            # gate through this cursor. Passing by default so the tests here stay
+            # about what they are about; the gate's own refusals are covered in
+            # test_manual_review_requires_kyc.py.
+            self._last = [{"cip_passed": getattr(self, "cip_passed", True)}]
+        elif stmt.startswith("SELECT status FROM applications"):
             self._last = [{"status": self.locked_status}] if self.locked_status is not None else []
         elif stmt.startswith("SELECT outcome, reason, reviewer_name, reviewer_role, reviewed_at "
                               "FROM manual_reviews"):

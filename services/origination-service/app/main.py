@@ -11,11 +11,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
+from . import config
 from .logging_config import get_logger
 from .routers import applications, offers
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("origination")
+
+# Fail at boot rather than per-request if the internal token is unusable
+# (PR #18 review). Import-time so an unusable deployment never serves traffic.
+config.validate_internal_token()
 
 app = FastAPI(title="Meridian Origination Service (LOS)", version="2.0.0")
 app.include_router(applications.router)

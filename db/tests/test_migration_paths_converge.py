@@ -56,8 +56,17 @@ SCHEMAS = {
 }
 
 
-def _all_migrations():
-    return sorted(MIGRATIONS_DIR.glob("*.sql"), key=lambda p: p.name)
+from migration_paths import (  # the one real implementation -- see that module
+    INIT_DIR,
+    INIT_SCHEMA_FILES,
+    MIGRATIONS_DIR,
+    _all_migrations,
+    _apply_all_migrations,
+    _build_fresh_init,
+    _build_legacy_schema,
+    _has_executable_sql,
+    _run_sql,
+)
 
 
 @pytest.fixture
@@ -77,113 +86,38 @@ def conn():
     connection.close()
 
 
-def _run_sql(conn, schema, sql):
-    with conn.cursor() as cur:
-        cur.execute(f"SET search_path TO {schema}")
-        # 0031 refuses to run without this acknowledgement -- it destroys data
-        # and can break servicing instances still reading payments.pan. A test
-        # harness IS the operator here, so it acknowledges explicitly rather
-        # than the gate being weakened to let automation through. Set on every
-        # statement because a GUC set with SET is session-scoped and these
-        # helpers do not assume one long-lived session.
-        cur.execute("SET meridian.pan_drop_acknowledged = 'yes'")
-        cur.execute(sql)
-    conn.commit()
-
-
-def _build_fresh_init(conn, schema):
-    for name in INIT_SCHEMA_FILES:
-        _run_sql(conn, schema, (INIT_DIR / name).read_text())
-
-
-def _has_executable_sql(sql: str) -> bool:
-    """0001_initial.sql is three comment lines and no DDL (the migration chain
-    has never had a reproducible baseline -- db/init is the baseline). psql
-    treats such a file as a no-op; psycopg2's execute() raises on an empty
-    query, so skip it explicitly rather than let a documentation-only file
-    fail the run."""
-    stripped = "\n".join(
-        line for line in sql.splitlines() if line.strip() and not line.strip().startswith("--")
-    )
-    return bool(stripped.strip())
-
-
-def _apply_all_migrations(conn, schema):
-    """Every migration, in filename order -- the real upgrade sequence."""
-    for path in _all_migrations():
-        sql = path.read_text()
-        if not _has_executable_sql(sql):
-            continue
-        _run_sql(conn, schema, sql)
-
-
-def _build_legacy_schema(conn, schema):
-    """A representative PRE-migration database: the shape that existed before
-    0008, with the uniqueness the migrations are responsible for adding still
-    ABSENT, plus real history rows that must survive."""
-    _run_sql(conn, schema, """
-        CREATE TABLE users (id SERIAL PRIMARY KEY, username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'csr',
-            display_name TEXT, applicant_id INTEGER, is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE applicants (id SERIAL PRIMARY KEY, name TEXT NOT NULL, dob DATE,
-            ssn TEXT, ein TEXT, is_entity BOOLEAN DEFAULT FALSE, email TEXT,
-            phone TEXT, address TEXT, created_at TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE applications (id SERIAL PRIMARY KEY,
-            applicant_id INTEGER REFERENCES applicants(id),
-            amount NUMERIC(14,2) NOT NULL, term_months INTEGER NOT NULL, purpose TEXT,
-            income NUMERIC(14,2), employer TEXT, job_title TEXT,
-            employment_years DOUBLE PRECISION, status TEXT DEFAULT 'submitted',
-            created_at TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE kyc_checks (id SERIAL PRIMARY KEY,
-            applicant_id INTEGER REFERENCES applicants(id), name_verified BOOLEAN,
-            dob_verified BOOLEAN, address_verified BOOLEAN, ssn_verified BOOLEAN,
-            created_at TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE decisions (app_id INTEGER PRIMARY KEY REFERENCES applications(id),
-            outcome TEXT NOT NULL);
-        -- no UNIQUE on app_id/decision_id yet: 0009/0011 add them
-        CREATE TABLE offers (id SERIAL PRIMARY KEY,
-            app_id INTEGER REFERENCES applications(id),
-            apr NUMERIC(7,3), finance_charge NUMERIC(14,2), monthly_payment NUMERIC(14,2),
-            amount_financed NUMERIC(14,2), total_of_payments NUMERIC(14,2),
-            created_at TIMESTAMPTZ DEFAULT now());
-        -- no UNIQUE on app_id yet: 0015 adds it
-        CREATE TABLE loans (id SERIAL PRIMARY KEY, app_id INTEGER, applicant_name TEXT,
-            principal NUMERIC(14,2) NOT NULL, apr NUMERIC(7,3) NOT NULL,
-            term_months INTEGER NOT NULL, status TEXT DEFAULT 'current',
-            opened_at TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE balances (loan_id INTEGER PRIMARY KEY REFERENCES loans(id),
-            balance NUMERIC(14,2) NOT NULL, past_due NUMERIC(14,2) DEFAULT 0,
-            updated_at TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE payments (id SERIAL PRIMARY KEY,
-            loan_id INTEGER REFERENCES loans(id), pan TEXT,
-            amount NUMERIC(14,2) NOT NULL, method TEXT DEFAULT 'card',
-            created_at TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE audit_logs (id SERIAL PRIMARY KEY, actor TEXT, action TEXT,
-            detail TEXT, deleted_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
-
-        INSERT INTO applicants (id, name) VALUES (1, 'Sam Okafor');
-        INSERT INTO applications (id, applicant_id, amount, term_months)
-            VALUES (1, 1, 9000, 24);
-        INSERT INTO decisions (app_id, outcome) VALUES (1, 'refer');
-        INSERT INTO offers (app_id, apr, finance_charge, monthly_payment,
-                            amount_financed, total_of_payments)
-            VALUES (1, 5.946, 768.11, 407.0, 8730.0, 9768.11);
-        INSERT INTO loans (id, app_id, applicant_name, principal, apr, term_months)
-            VALUES (1, 1, 'Sam Okafor', 9000, 5.946, 24);
-    """)
-
 
 # --- helpers to compare shapes ------------------------------------------------
 
 def _columns(conn, schema, table):
+    """Column name -> (fully qualified type, nullability).
+
+    `format_type(atttypid, atttypmod)` rather than information_schema's
+    `data_type`, because that view reports both `NUMERIC(14,2)` and
+    unconstrained `NUMERIC` as plain "numeric" -- the precision and scale live
+    in `numeric_precision`/`numeric_scale`, which the old comparison never read.
+    Two schemas could therefore "converge" while one enforced money to the cent
+    and the other accepted arbitrary precision.
+
+    In a lending schema that typmod is the data-integrity contract, not
+    cosmetic metadata: it is what stops a rate or a balance being stored at a
+    precision the rest of the system does not expect. The same call also covers
+    `varchar(n)` length and timestamp precision, which had the same blind spot.
+    """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-            "WHERE table_schema = %s AND table_name = %s ORDER BY column_name",
+            "SELECT a.attname AS column_name, "
+            "       format_type(a.atttypid, a.atttypmod) AS full_type, "
+            "       CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable "
+            "  FROM pg_attribute a "
+            "  JOIN pg_class c ON c.oid = a.attrelid "
+            "  JOIN pg_namespace n ON n.oid = c.relnamespace "
+            " WHERE n.nspname = %s AND c.relname = %s "
+            "   AND a.attnum > 0 AND NOT a.attisdropped "
+            " ORDER BY a.attname",
             (schema, table),
         )
-        return {r["column_name"]: (r["data_type"], r["is_nullable"]) for r in cur.fetchall()}
+        return {r["column_name"]: (r["full_type"], r["is_nullable"]) for r in cur.fetchall()}
 
 
 def _unique_columns(conn, schema, table):
@@ -456,3 +390,29 @@ def test_the_four_previously_colliding_constraints_are_guarded(conn):
         assert column in _unique_columns(conn, schema, table), (
             f"{table}.{column} lost its uniqueness across the replay"
         )
+
+
+def test_the_column_comparison_actually_sees_numeric_precision(conn):
+    """Proof that the convergence assertions can fail on precision.
+
+    Every path test above passes, which is only meaningful if the comparison
+    could have failed. It could not before: information_schema reports both
+    NUMERIC(14,2) and unconstrained NUMERIC as "numeric", so a legacy upgrade
+    enforcing money to the cent and a fresh install accepting arbitrary
+    precision compared equal -- and in a lending schema that typmod is the
+    data-integrity contract.
+
+    Two tables, one difference, asserted visible.
+    """
+    schema = SCHEMAS["fresh"]
+    _run_sql(conn, schema, "CREATE TABLE precise_money (m NUMERIC(14,2));")
+    _run_sql(conn, schema, "CREATE TABLE loose_money (m NUMERIC);")
+
+    precise = _columns(conn, schema, "precise_money")
+    loose = _columns(conn, schema, "loose_money")
+
+    assert precise["m"] != loose["m"], (
+        f"NUMERIC(14,2) and NUMERIC compare equal ({precise['m']}), so the "
+        "convergence tests cannot detect a money-precision divergence"
+    )
+    assert "14,2" in precise["m"][0].replace(" ", "")
