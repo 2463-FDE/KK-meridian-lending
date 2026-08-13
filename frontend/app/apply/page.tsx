@@ -408,8 +408,27 @@ export default function ApplyPage() {
         term_months: parseInt(sent.term_months, 10),
         purpose: sent.purpose,
       }, resumeHeader())) as AppResult;
-      // Keep the server's resume token: it is what authorises recovering this
-      // application if the next attempt fails. The key alone cannot.
+      // Intake succeeded, so the retry credentials have done their job and must
+      // go NOW -- not at offer acceptance, which most applications never reach.
+      //
+      // They exist for exactly one purpose: proving this browser owns an
+      // application whose submission may have failed. Once the POST returns,
+      // the application exists and the client holds `app_id` and an access
+      // token, which identify it far better. Keeping the key past this point
+      // does not enable anything; it only creates a way to collide.
+      //
+      // Leaving them until acceptance was a real defect. A denied or referred
+      // applicant -- or anyone who just refreshes -- kept a live key in the tab,
+      // and the NEXT application submitted there reused it. The server then
+      // took the matching key and secret as proof of ownership, returned the
+      // FIRST application, and discarded the second person's data entirely.
+      //
+      // Reproduced against a running stack before fixing: a second submission
+      // with different name, DOB, SSN, address and amount returned the first
+      // applicant's `app_id` plus a live access token for it, and no second
+      // applicant row was ever created. On a shared or kiosk browser that is
+      // one person handed another person's application, not a duplicate.
+      clearIntakeRetryCredentials();
       setApp(res);
       setStep(5);
     } catch (err) {
@@ -566,10 +585,15 @@ export default function ApplyPage() {
         { "X-Offer-Accept-Token": decision?.accept_token || "" },
       )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
-      // The draft is now a loan. Clearing the retry credentials stops the NEXT
-      // application in this tab resuming this one -- a borrower would otherwise
-      // fill in a new form and be handed back the application they just
-      // finished.
+      // Belt and braces. The credentials are already cleared the moment intake
+      // succeeds, which every accepted offer has passed through, so this is
+      // normally a no-op on empty storage.
+      //
+      // It used to be the ONLY place they were cleared, which meant every
+      // application that did not reach acceptance -- denied, referred, or
+      // simply abandoned -- left a live key in the tab for the next applicant
+      // to collide with. Kept rather than deleted so that any future path
+      // reaching acceptance by another route still ends with clean storage.
       clearIntakeRetryCredentials();
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));

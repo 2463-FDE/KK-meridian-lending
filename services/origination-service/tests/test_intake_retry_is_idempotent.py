@@ -558,3 +558,66 @@ def test_the_server_does_not_mint_resume_tokens_anywhere(db):
         f"{minting}. A credential invented by the server is one the client "
         "does not have when the response is lost."
     )
+
+
+# --- what a stale credential actually costs -----------------------------------
+
+def test_a_reused_key_returns_the_first_application_and_drops_the_second(db):
+    """Documents the server-side consequence of a stale client credential.
+
+    This is not a defect in `resume_application` -- returning the first
+    application is exactly what a matching key and secret are DEFINED to mean.
+    It is here because the severity of the frontend lifecycle bug is only
+    visible from this end, and a reviewer reading the client fix alone would
+    reasonably think the cost was a duplicate KYC check.
+
+    It is not. The second person's payload is discarded in full and they are
+    handed the first person's application plus a live access token for it. On a
+    shared or kiosk browser that is one applicant reading another's file.
+
+    The fix is that the client clears the credentials the moment intake
+    succeeds, so this pairing can no longer arise from an abandoned draft. The
+    server behaviour is correct and unchanged, and this test pins the blast
+    radius so nobody has to re-derive it.
+    """
+    from app import intake
+
+    key, secret = f"stale-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+
+    alice = _payload(key)
+    alice["name"] = "Alice Applicant"
+    alice["email"] = "alice@example.test"
+    alice["amount"] = 9000
+    first_id, _, _ = intake.create_application(alice, resume_token=secret)
+
+    bob = _payload(key)
+    bob["name"] = "Bob Different"
+    bob["email"] = "bob@example.test"
+    bob["ssn"] = "999-00-0099"
+    bob["dob"] = "1990-07-04"
+    bob["amount"] = 31000
+    second_id, bob_access, _ = intake.create_application(bob, resume_token=secret)
+
+    # Same application, and Bob holds a working token for it.
+    assert second_id == first_id
+
+    stored = _query(
+        db,
+        "SELECT ap.name, ap.email, a.amount FROM applications a "
+        "JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
+        (first_id,),
+    )[0]
+    assert stored["name"] == "Alice Applicant"
+    assert stored["email"] == "alice@example.test"
+    assert stored["amount"] == 9000
+
+    # Bob's record was never created at all.
+    bobs = _query(db, "SELECT id FROM applicants WHERE name = %s", ("Bob Different",))
+    assert bobs == [], "a second applicant row exists; the blast radius has changed"
+
+    from app import decision_state
+    row = _row(db, first_id)
+    assert row["access_token_hash"] == decision_state.hash_access_token(bob_access), (
+        "the second caller was handed a token that does not authenticate -- the "
+        "exposure this test documents has changed shape"
+    )
