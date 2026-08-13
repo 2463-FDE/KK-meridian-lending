@@ -216,10 +216,13 @@ service and evaluated every 30s; the rules are visible at
   established are `'unknown'` and treated the same way. That the legacy route
   moves a balance with no processor behind it at all is D2, and this control does
   not close it.
-- **A settlement row whose type is not `capture` or `refund`, or whose amount is
-  not a positive number, fails the run** (`MalformedSettlementRows`). The sign
-  comes from the type; a parser that guessed at a row it could not read would
-  turn a feed-integrity problem into a money finding.
+- **A settlement row whose type is not `capture` or `refund`, whose amount is not
+  a positive number, or whose amount carries sub-cent precision, fails the run**
+  (`MalformedSettlementRows`). The sign comes from the type; a parser that
+  guessed at a row it could not read would turn a feed-integrity problem into a
+  money finding. And every amount is compared against `payments.amount`, which is
+  `NUMERIC(14,2)` -- a row of `10.004` would round into a clean match against a
+  `10.00` capture and report agreement on money this system cannot hold.
 - **Captures written before migration 0041 cannot be matched.** `processor_ref` is
   persisted on every capture from that migration onward, but there was nothing to
   back-fill historical rows FROM -- `authorization_id` is minted by our own

@@ -361,6 +361,9 @@ def _raw_settlement(tmp_path, body, name="settlement.csv"):
     ("2026-06-01,PR-1,4471,-250.00,refund\n", "a negative amount under a refund type"),
     ("2026-06-01,PR-1,4471,0.00,capture\n", "a zero amount"),
     ("2026-06-01,PR-1,4471,not-a-number,capture\n", "an unparseable amount"),
+    ("2026-06-01,PR-1,4471,10.004,capture\n", "sub-cent precision, rounding into a match"),
+    ("2026-06-01,PR-1,4471,10.005,refund\n", "sub-cent precision on a refund"),
+    ("2026-06-01,PR-1,4471,0.001,capture\n", "an amount smaller than a cent"),
 ])
 def test_a_row_whose_direction_cannot_be_established_fails_the_run(
         monkeypatch, tmp_path, row, why):
@@ -432,3 +435,40 @@ def test_the_type_is_matched_case_insensitively_and_trimmed(monkeypatch, tmp_pat
 
     assert identity["malformed_rows"] == 0
     assert settlement[(4471, "PR-1")] == Decimal("250.00")
+
+
+def test_a_sub_cent_amount_does_not_round_into_a_clean_match(monkeypatch, tmp_path):
+    """The reported defect, stated as the match it used to produce.
+
+    Every amount here is compared against `payments.amount`, which is
+    NUMERIC(14,2). A settlement row of 10.004 was accepted, rounded to 10.00,
+    and matched a 10.00 capture -- so the run recorded `ok` while the file
+    carried four tenths of a cent this system cannot represent and cannot
+    therefore have agreed with. Across a day's file that rounding is real money,
+    and it is invisible precisely because the control reports success.
+    """
+    db = _Db([{"loan_id": 4471, "processor_ref": "PR-1", "total": Decimal("10.00")}])
+    _install(monkeypatch, _raw_settlement(
+        tmp_path, "2026-06-01,PR-1,4471,10.004,capture\n"), db)
+
+    result = reconciliation.run_and_record()
+
+    assert result["outcome"] != "ok", (
+        "a settlement amount of 10.004 was rounded to 10.00 and matched a 10.00 "
+        "capture, so the run reported agreement on money it cannot hold"
+    )
+    assert result["error_code"] == "MalformedSettlementRows"
+
+
+@pytest.mark.parametrize("amount", ["10", "10.0", "10.00", "10.000"])
+def test_amounts_that_hold_exactly_in_cents_are_accepted(monkeypatch, tmp_path, amount):
+    """Guard the guard. The question is whether the value is representable in
+    cents, not how the feed spells it -- 10.000 is a formatting variance and
+    rejecting it would fail every file from a processor that pads."""
+    db = _Db([])
+    _install(monkeypatch, _raw_settlement(
+        tmp_path, "2026-06-01,PR-1,4471,%s,capture\n" % amount), db)
+
+    _settlement, _window, identity = reconciliation._settlement_by_ref()
+
+    assert identity["malformed_rows"] == 0, "%r was rejected" % amount

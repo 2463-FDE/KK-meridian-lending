@@ -451,7 +451,21 @@ def _settlement_by_ref(path=None):
             amount = Decimal(row["amount"])
         except (InvalidOperation, TypeError, ValueError):
             amount = None
-        if sign is None or amount is None or amount <= 0:
+        # And the amount has to be money this system can hold exactly.
+        #
+        # Every amount here is compared against `payments.amount`, which is
+        # NUMERIC(14,2). A settlement row of 10.004 was accepted, rounded to
+        # 10.00 by the quantize below, and matched a 10.00 capture -- so the run
+        # recorded `ok` while the file carried four tenths of a cent this system
+        # cannot represent, and cannot therefore have agreed with. Repeated
+        # across a day's file that rounding is real money, and it is invisible
+        # precisely because the control reports success.
+        #
+        # `amount != amount.quantize(CENT)` and not an exponent test: 10.000 is
+        # a formatting variance and holds exactly in cents, while 10.004 does
+        # not. The question is representability, not how the feed spells it.
+        if (sign is None or amount is None or amount <= 0
+                or amount != amount.quantize(CENT)):
             malformed += 1
             continue
         signed = amount * sign
@@ -620,8 +634,9 @@ _VACUITY_CHECKS = (
         "MalformedSettlementRows",
         lambda r: (r.get("source") or {}).get("malformed_rows", 0) > 0,
         "some settlement rows carry a transaction type this control does not "
-        "recognise, or an amount that is not a positive number, so their "
-        "direction cannot be established",
+        "recognise, an amount that is not a positive number, or an amount with "
+        "sub-cent precision this system cannot hold exactly -- so their "
+        "direction or their value cannot be established",
     ),
     (
         # The netting defect's own guard rail. This control's whole correction
