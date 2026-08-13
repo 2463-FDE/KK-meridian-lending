@@ -264,6 +264,10 @@ def test_the_spec_invents_no_threshold_amount():
             f"the spec states a dollar figure for a limit it does not own: "
             f"{line.strip()!r}"
         )
+        assert not re.search(r"\b\d+\.\d+\b", line), (
+            f"the spec states a bare numeric figure for a limit it does not own: "
+            f"{line.strip()!r}"
+        )
 
 
 def test_the_limits_fail_closed_when_missing():

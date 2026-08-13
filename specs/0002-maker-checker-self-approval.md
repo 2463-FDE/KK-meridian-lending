@@ -431,8 +431,9 @@ Scenario: a rejection keeps the evidence and moves nothing
   And the past_due of loan 4471 is unchanged
 
 Scenario: a large movement needs an admin
-  Given a CSR "alice" has raised an adjustment of -5000.00 on loan 4471
-  And MAKER_CHECKER_ADMIN_THRESHOLD is 500.00
+  Given a CSR "alice" has raised an adjustment of amount A on loan 4471
+  And MAKER_CHECKER_ADMIN_THRESHOLD is T
+  And ABS(A) is greater than T
   When an underwriter "bob" attempts to approve it
   Then the resolution is refused for insufficient authority
   When an admin "carol" approves it
@@ -446,7 +447,7 @@ Scenario: a spoofed requester header is ignored
 
 Scenario: a spoofed role header does not grant approval authority
   Given a CSR "alice" is authenticated through the gateway
-  And a proposal of -5000.00 exists that requires an admin
+  And a proposal whose absolute amount exceeds threshold T requires an admin
   When "alice" sends the approval with header "X-User-Role: admin"
   Then the role is taken from her resolved session, not the header
   And the resolution is refused for insufficient authority
