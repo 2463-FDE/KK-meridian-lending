@@ -193,6 +193,45 @@ def submit_application(
         app_id, access_token, resume_token = intake.create_application(
             payload, resume_token=x_resume_token
         )
+    except intake.KeyedRequestNeedsResumeToken:
+        # Refused before anything was written. An idempotency key without its
+        # recovery secret produces a row nobody can resume: a later KYC failure
+        # hands back `resume_token: null`, and the retry finds the application
+        # with nothing to authorise it. A 400 the caller can act on beats a
+        # recorded application they can only escape through support.
+        #
+        # Safe to be specific here, unlike the 401 below: this says nothing
+        # about whether the key names an existing application, because the
+        # check runs before the lookup.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "resume_token_required",
+                "message": (
+                    "A submission carrying an idempotency key must also send "
+                    "the X-Resume-Token header. The key identifies the "
+                    "application; the token is what authorises recovering it. "
+                    "Send both, or send neither."
+                ),
+            },
+        )
+    except intake.RetryPayloadMismatch:
+        # Right credentials, different request. Not served the stored copy: the
+        # browser keeps the retry credentials so the borrower CAN correct a
+        # mistake, so this is the ordinary path for someone fixing a mistyped
+        # SSN or income -- and silently deciding on the old value is invisible
+        # to them.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "retry_payload_changed",
+                "message": (
+                    "This retry carries different applicant or loan details "
+                    "from the application it is retrying. Start a new "
+                    "application to submit changed information."
+                ),
+            },
+        )
     except intake.ResumeNotAuthorized:
         # Deliberately indistinguishable from "no such application". Saying
         # "wrong token" confirms the idempotency key names a real application,

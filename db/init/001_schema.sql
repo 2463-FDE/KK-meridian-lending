@@ -88,7 +88,15 @@ CREATE TABLE IF NOT EXISTS applications (
     -- authorises the caller. Only the sha256 hash is stored.
     resume_token_hash        TEXT,
     resume_token_expires_at  TIMESTAMPTZ,
-    resume_token_consumed_at TIMESTAMPTZ
+    resume_token_consumed_at TIMESTAMPTZ,
+    -- sha256 of the canonical identity + underwriting payload that created this
+    -- application (db/migrations/0038). The key says WHICH application a retry
+    -- belongs to and the token says the caller MAY recover it; neither says the
+    -- retry is the SAME request. A retry with matching credentials and a
+    -- different fingerprint is refused with 409 rather than being served the
+    -- stored data, because the borrower can see the value they corrected and a
+    -- decision made against the old one is invisible to them.
+    request_fingerprint      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_applications_accept_token_hash

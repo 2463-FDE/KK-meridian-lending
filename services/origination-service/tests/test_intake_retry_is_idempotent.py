@@ -158,8 +158,8 @@ def test_a_different_key_is_a_different_application(db):
     be catastrophically wrong."""
     from app import intake
 
-    intake.create_application(_payload(f"a-{uuid.uuid4()}"))
-    intake.create_application(_payload(f"b-{uuid.uuid4()}"))
+    intake.create_application(_payload(f"a-{uuid.uuid4()}"), resume_token=f"client-{uuid.uuid4()}")
+    intake.create_application(_payload(f"b-{uuid.uuid4()}"), resume_token=f"client-{uuid.uuid4()}")
 
     assert _count(db, "applications") == 2
 
@@ -175,26 +175,61 @@ def test_the_key_alone_cannot_recover_an_application(db):
     from app import intake
 
     key = f"takeover-{uuid.uuid4()}"
-    intake.create_application(_payload(key))
+    # The legitimate client creates the draft with its own secret. That is now
+    # required -- see test_a_key_without_a_resume_token_is_refused... -- so the
+    # setup supplies one. The attack below is unchanged: someone who learned
+    # the key, and only the key.
+    intake.create_application(_payload(key), resume_token=f"client-{uuid.uuid4()}")
 
-    with pytest.raises(intake.ResumeNotAuthorized):
+    with pytest.raises(intake.KeyedRequestNeedsResumeToken):
         intake.create_application(_payload(key))          # no resume token
+
+    # And a guessed token is refused without revealing whether the key is real.
+    with pytest.raises(intake.ResumeNotAuthorized):
+        intake.create_application(_payload(key), resume_token="guessed-value")
 
 
 @pytest.mark.parametrize("bad, why", [
-    (None, "missing"),
-    ("", "empty"),
     ("guessed-token-value", "guessed"),
     ("x" * 43, "right shape, wrong value"),
+    ("almost-right", "plausible but wrong"),
 ])
-def test_a_wrong_or_missing_token_is_refused(db, bad, why):
+def test_a_wrong_token_is_refused(db, bad, why):
+    """A token that is present and wrong. Uniform 401 for every reason.
+
+    `None` and `""` used to be in this matrix. They are now refused one step
+    earlier and by a different exception, because a keyed request with no token
+    would create a row nobody can resume -- so it never reaches the comparison.
+    That is a stricter outcome, not a weaker one, and it leaks nothing extra:
+    the check runs BEFORE the key is looked up, so the response is identical
+    whether or not the key names a real application.
+    """
     from app import intake
 
     key = f"wrong-{uuid.uuid4()}"
-    intake.create_application(_payload(key))
+    intake.create_application(_payload(key), resume_token=f"client-{uuid.uuid4()}")
 
     with pytest.raises(intake.ResumeNotAuthorized):
         intake.create_application(_payload(key), resume_token=bad)
+
+
+@pytest.mark.parametrize("missing", [None, ""])
+def test_an_absent_token_is_refused_before_the_key_is_looked_up(db, missing):
+    """The absent-token half, and the property that keeps it safe.
+
+    Refusing early could have leaked existence -- "400 if the key is new, 401 if
+    it exists" would confirm a guessed key. It does not: the same exception is
+    raised for a key that exists and a key that does not.
+    """
+    from app import intake
+
+    known = f"known-{uuid.uuid4()}"
+    intake.create_application(_payload(known), resume_token=f"client-{uuid.uuid4()}")
+    unknown = f"unknown-{uuid.uuid4()}"
+
+    for key in (known, unknown):
+        with pytest.raises(intake.KeyedRequestNeedsResumeToken):
+            intake.create_application(_payload(key), resume_token=missing)
 
 
 def test_the_secret_is_reusable_but_the_access_token_is_not(db):
@@ -228,7 +263,7 @@ def test_an_expired_token_is_refused(db):
     from app import intake
 
     key = f"expired-{uuid.uuid4()}"
-    app_id, _, resume = intake.create_application(_payload(key))
+    app_id, _, resume = intake.create_application(_payload(key), resume_token=f"client-{uuid.uuid4()}")
     with db.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("UPDATE applications SET resume_token_expires_at = now() - "
@@ -245,7 +280,7 @@ def test_a_refused_recovery_mints_no_access_token_and_changes_nothing(db):
     from app import intake
 
     key = f"nochange-{uuid.uuid4()}"
-    app_id, _, _ = intake.create_application(_payload(key))
+    app_id, _, _ = intake.create_application(_payload(key), resume_token=f"client-{uuid.uuid4()}")
     before = _row(db, app_id)
 
     with pytest.raises(intake.ResumeNotAuthorized):
@@ -280,18 +315,23 @@ def test_only_the_hash_of_the_resume_token_is_stored(db):
 
 
 def test_the_failure_does_not_distinguish_its_reasons(db):
-    """Missing, wrong, expired and replayed must be indistinguishable.
+    """Wrong and expired must be indistinguishable.
 
     Telling them apart tells an attacker which one they achieved -- and
     "expired" in particular confirms the application exists.
+
+    `None` used to be in this set. A keyed request with no token is now refused
+    before the key is looked up, so it cannot distinguish anything by
+    construction; test_an_absent_token_is_refused_before_the_key_is_looked_up
+    asserts that directly, against a key that exists and one that does not.
     """
     from app import intake
 
     key = f"opaque-{uuid.uuid4()}"
-    app_id, _, resume = intake.create_application(_payload(key))
+    app_id, _, resume = intake.create_application(_payload(key), resume_token=f"client-{uuid.uuid4()}")
 
     errors = []
-    for bad in (None, "wrong-value"):
+    for bad in ("wrong-value", "another-wrong-value"):
         try:
             intake.create_application(_payload(key), resume_token=bad)
         except intake.ResumeNotAuthorized as e:
@@ -323,20 +363,20 @@ def test_a_lost_race_leaves_no_orphan_applicant(db):
     from app import intake
 
     key = f"race-{uuid.uuid4()}"
-    intake.create_application(_payload(key))
+    intake.create_application(_payload(key), resume_token=f"client-{uuid.uuid4()}")
     applicants_after_first = _count(db, "applicants")
 
     real_resume = intake.resume_application
     calls = {"n": 0}
 
-    def _miss_once(k, token=None):
+    def _miss_once(k, token=None, fingerprint=None):
         calls["n"] += 1
-        return None if calls["n"] == 1 else real_resume(k, token)
+        return None if calls["n"] == 1 else real_resume(k, token, fingerprint)
 
     intake.resume_application = _miss_once
     try:
         with pytest.raises(intake.ResumeNotAuthorized):
-            intake.create_application(_payload(key))
+            intake.create_application(_payload(key), resume_token=f"client-{uuid.uuid4()}")
     finally:
         intake.resume_application = real_resume
 
@@ -354,7 +394,7 @@ def test_an_unverified_application_cannot_be_decided(db):
     from app import intake
     from app.routers import applications as router
 
-    app_id, _, _ = intake.create_application(_payload(f"undecidable-{uuid.uuid4()}"))
+    app_id, _, _ = intake.create_application(_payload(f"undecidable-{uuid.uuid4()}"), resume_token=f"client-{uuid.uuid4()}")
 
     with pytest.raises(HTTPException) as excinfo:
         router._require_persisted_kyc(app_id)
@@ -562,23 +602,20 @@ def test_the_server_does_not_mint_resume_tokens_anywhere(db):
 
 # --- what a stale credential actually costs -----------------------------------
 
-def test_a_reused_key_returns_the_first_application_and_drops_the_second(db):
-    """Documents the server-side consequence of a stale client credential.
+def test_a_stale_credential_from_another_applicant_is_now_refused(db):
+    """The cross-applicant exposure, closed a second time.
 
-    This is not a defect in `resume_application` -- returning the first
-    application is exactly what a matching key and secret are DEFINED to mean.
-    It is here because the severity of the frontend lifecycle bug is only
-    visible from this end, and a reviewer reading the client fix alone would
-    reasonably think the cost was a duplicate KYC check.
+    This test used to DOCUMENT the blast radius: with a stale key and secret
+    left in a shared browser, a second person's submission returned the first
+    person's application and a live access token for it, and their own payload
+    was discarded. The frontend fix cleared the credentials on intake success so
+    the pairing could not arise.
 
-    It is not. The second person's payload is discarded in full and they are
-    handed the first person's application plus a live access token for it. On a
-    shared or kiosk browser that is one applicant reading another's file.
-
-    The fix is that the client clears the credentials the moment intake
-    succeeds, so this pairing can no longer arise from an abandoned draft. The
-    server behaviour is correct and unchanged, and this test pins the blast
-    radius so nobody has to re-derive it.
+    The fingerprint closes it from the server side as well, which matters
+    because the client fix depends on the client. A different applicant is a
+    different payload, so the retry is refused outright -- no application, no
+    token, nothing to leak. Defence in depth: either fix alone would do, and
+    neither has to be trusted on its own.
     """
     from app import intake
 
@@ -596,11 +633,11 @@ def test_a_reused_key_returns_the_first_application_and_drops_the_second(db):
     bob["ssn"] = "999-00-0099"
     bob["dob"] = "1990-07-04"
     bob["amount"] = 31000
-    second_id, bob_access, _ = intake.create_application(bob, resume_token=secret)
 
-    # Same application, and Bob holds a working token for it.
-    assert second_id == first_id
+    with pytest.raises(intake.RetryPayloadMismatch):
+        intake.create_application(bob, resume_token=secret)
 
+    # Alice's application is untouched, and Bob got nothing at all.
     stored = _query(
         db,
         "SELECT ap.name, ap.email, a.amount FROM applications a "
@@ -608,16 +645,186 @@ def test_a_reused_key_returns_the_first_application_and_drops_the_second(db):
         (first_id,),
     )[0]
     assert stored["name"] == "Alice Applicant"
-    assert stored["email"] == "alice@example.test"
     assert stored["amount"] == 9000
+    assert _query(db, "SELECT id FROM applicants WHERE name = %s",
+                  ("Bob Different",)) == []
 
-    # Bob's record was never created at all.
-    bobs = _query(db, "SELECT id FROM applicants WHERE name = %s", ("Bob Different",))
-    assert bobs == [], "a second applicant row exists; the blast radius has changed"
 
-    from app import decision_state
-    row = _row(db, first_id)
-    assert row["access_token_hash"] == decision_state.hash_access_token(bob_access), (
-        "the second caller was handed a token that does not authenticate -- the "
-        "exposure this test documents has changed shape"
+# --- a keyed request must carry its recovery secret ---------------------------
+
+def test_a_key_without_a_resume_token_is_refused_before_anything_is_written(db):
+    """The unrecoverable row, refused at the door.
+
+    `idempotency_key` and `X-Resume-Token` were independently optional, so a key
+    with no token stored `resume_token_hash = NULL`. If KYC then failed, the 503
+    handed back `resume_token: null`, the retry found the application, had
+    nothing to authorise with, and was refused -- leaving a recorded application
+    reachable only through support or a database repair.
+
+    The assertion that matters is the second one: nothing was written.
+    """
+    from app import intake
+
+    key = f"nokey-{uuid.uuid4()}"
+    before_applicants = _count(db, "applicants")
+    before_applications = _count(db, "applications")
+
+    with pytest.raises(intake.KeyedRequestNeedsResumeToken):
+        intake.create_application(_payload(key), resume_token=None)
+
+    assert _count(db, "applicants") == before_applicants, (
+        "an applicant row was written for a request that was refused"
     )
+    assert _count(db, "applications") == before_applications
+    assert _query(db, "SELECT id FROM applications WHERE idempotency_key = %s",
+                  (key,)) == []
+
+
+def test_a_request_with_no_key_at_all_is_still_allowed(db):
+    """The rule is that the two travel together, not that a token is mandatory.
+
+    An unkeyed submission has no retry contract to honour and must keep working
+    -- otherwise this fix breaks every caller that never opted in.
+    """
+    from app import intake
+
+    app_id, access, resume = intake.create_application(_payload(None), resume_token=None)
+    assert app_id and access
+    assert resume is None
+
+
+# --- a retry may not quietly change the applicant -----------------------------
+
+def _changed(key, **overrides):
+    payload = _payload(key)
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ssn", "999-00-1234"),
+    ("dob", "1979-01-02"),
+    ("name", "Someone Else"),
+    ("address", "9 Different Road"),
+    ("zip_code", "10001"),
+    ("income", 250000),
+    ("amount", 45000),
+    ("term_months", 60),
+])
+def test_a_retry_that_changes_identity_or_underwriting_is_refused(db, field, value):
+    """409, not the stored copy.
+
+    The browser deliberately keeps the retry credentials after a failed
+    submission so the borrower CAN correct a mistake. So this is the ordinary
+    path for someone fixing a mistyped SSN or income -- and the old behaviour
+    returned the original application, then ran KYC and decisioning against the
+    value they had just corrected. The corrected number is visible in their own
+    form and absent from the decision.
+    """
+    from app import intake
+
+    key, secret = f"changed-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    intake.create_application(_payload(key), resume_token=secret)
+
+    with pytest.raises(intake.RetryPayloadMismatch):
+        intake.create_application(_changed(key, **{field: value}), resume_token=secret)
+
+
+def test_an_identical_retry_is_still_accepted(db):
+    """The other direction, and the one that would break the product.
+
+    A borrower retrying the identical form must not be told their details
+    changed. If this fails, every legitimate retry now 409s.
+    """
+    from app import intake
+
+    key, secret = f"same-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    first_id, _, _ = intake.create_application(_payload(key), resume_token=secret)
+    again_id, _, _ = intake.create_application(_payload(key), resume_token=secret)
+
+    assert again_id == first_id
+    assert _count(db, "applicants") == 1
+
+
+def test_cosmetic_differences_do_not_count_as_a_changed_request(db):
+    """Whitespace and case are not a different applicant.
+
+    A fingerprint over raw values would 409 a borrower whose browser trimmed a
+    trailing space -- a false rejection on the retry path, which is worse than
+    the bug being fixed because it has no workaround.
+    """
+    from app import intake
+
+    key, secret = f"cosmetic-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    first_id, _, _ = intake.create_application(_payload(key), resume_token=secret)
+
+    noisy = _payload(key)
+    noisy["name"] = f"  {noisy['name'].upper()}  "
+    noisy["email"] = noisy["email"].upper()
+    again_id, _, _ = intake.create_application(noisy, resume_token=secret)
+
+    assert again_id == first_id
+
+
+def test_a_row_written_before_the_fingerprint_existed_stays_resumable(db):
+    """The upgrade path.
+
+    Rows created before migration 0038 have request_fingerprint = NULL. They
+    must remain recoverable -- an in-flight application must not be stranded by
+    a deploy. NULL means "cannot verify", which is exactly the pre-migration
+    behaviour and no worse than it.
+    """
+    from app import intake
+
+    key, secret = f"legacy-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    app_id, _, _ = intake.create_application(_payload(key), resume_token=secret)
+
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("UPDATE applications SET request_fingerprint = NULL WHERE id = %s",
+                    (app_id,))
+
+    # Even a CHANGED payload is accepted, because there is nothing to compare
+    # against. Asserted explicitly so the compatibility rule is visible rather
+    # than incidental.
+    again_id, _, _ = intake.create_application(
+        _changed(key, income=999999), resume_token=secret)
+    assert again_id == app_id
+
+
+def test_the_fingerprint_covers_every_identity_and_underwriting_field(db):
+    """Derived, not hand-checked.
+
+    A field left out of the tuple is a field a retry can change silently, and
+    that omission is invisible in a test that only exercises the fields someone
+    remembered. This enumerates the tuple itself.
+    """
+    from app import intake
+
+    base = _payload("fp")
+    baseline = intake._request_fingerprint(base)
+
+    for field in intake._FINGERPRINTED_FIELDS:
+        mutated = dict(base)
+        current = mutated.get(field)
+        mutated[field] = "ZZ-different" if not isinstance(current, (int, float)) else (current or 0) + 7
+        assert intake._request_fingerprint(mutated) != baseline, (
+            f"changing {field!r} does not change the fingerprint, so a retry "
+            f"could alter it without detection"
+        )
+
+
+def test_the_stored_fingerprint_is_a_digest_not_the_payload(db):
+    """It is computed over the SSN, so it must not be reversible to it."""
+    from app import intake
+
+    key, secret = f"digest-{uuid.uuid4()}", f"client-{uuid.uuid4()}"
+    payload = _payload(key)
+    intake.create_application(payload, resume_token=secret)
+
+    row = _query(db, "SELECT request_fingerprint FROM applications "
+                     "WHERE idempotency_key = %s", (key,))[0]
+    stored = row["request_fingerprint"]
+    assert stored and len(stored) == 64
+    assert payload["ssn"] not in stored
+    assert payload["name"].lower() not in stored.lower()

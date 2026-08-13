@@ -64,7 +64,15 @@ def real_db(monkeypatch):
                 idempotency_key TEXT,
                 resume_token_hash TEXT,
                 resume_token_expires_at TIMESTAMPTZ,
-                resume_token_consumed_at TIMESTAMPTZ
+                resume_token_consumed_at TIMESTAMPTZ,
+                -- db/migrations/0038. This block is a hand-written copy of
+                -- db/init/001_schema.sql and drifts every time that file gains
+                -- a column: the write path then fails here with UndefinedColumn
+                -- while the real schema is fine. Kept in step rather than
+                -- rebuilt from db/init, which is a larger change than this PR
+                -- should carry -- but the duplication is the reason this test
+                -- broke, not the migration.
+                request_fingerprint TEXT
             );
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
