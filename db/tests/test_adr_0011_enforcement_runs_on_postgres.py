@@ -50,8 +50,9 @@ EXPECTED_BLOCKS = [
     "1-pending-movements",
     "2-ledger-entries-link",
     "3-single-transition",
-    "4-resolution-complete",
-    "5-entry-matches-proposal",
+    "4-retention",
+    "5-resolution-complete",
+    "6-entry-matches-proposal",
 ]
 
 MAKER, CHECKER = 7001, 7002
@@ -566,3 +567,92 @@ def test_the_resolve_function_is_still_only_a_signature():
     assert "RETURNS BIGINT;" in text, (
         "resolve_pending_movement() is no longer a signature-only declaration"
     )
+
+
+# --- retention: the invariant that was a sentence -----------------------------
+
+def test_a_rejected_proposal_cannot_be_deleted(conn):
+    """Invariant 7 promises rejected proposals are retained as D8 evidence.
+
+    Nothing enforced it: the transition trigger is BEFORE UPDATE, so it governs
+    what may change and says nothing about what may be removed, and a rejected
+    proposal has no ledger entry -- so the foreign key does not hold it down
+    either. Anything with the application database role could erase the record of
+    a refused money movement, which is the one record a control exists to leave.
+    """
+    with conn.cursor() as cur:
+        movement_id = _propose(cur)
+        cur.execute(
+            "UPDATE pending_movements SET resolution = 'rejected', resolved_by = %s, "
+            "resolved_role = 'underwriter', resolved_at = now() WHERE id = %s",
+            (CHECKER, movement_id),
+        )
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        with pytest.raises(psycopg2.errors.RaiseException) as excinfo:
+            cur.execute("DELETE FROM pending_movements WHERE resolution = 'rejected'")
+        assert "may not be deleted" in str(excinfo.value)
+    conn.rollback()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) FROM pending_movements WHERE resolution = 'rejected'")
+        assert cur.fetchone()[0] == 1, "the rejected proposal did not survive"
+    conn.rollback()
+
+
+def test_an_approved_proposal_cannot_be_deleted(conn):
+    """The other resolution. An approved proposal is the authorisation behind a
+    ledger entry that cannot be updated or deleted; removing it would leave an
+    immutable money movement pointing at nothing."""
+    with conn.cursor() as cur:
+        movement_id = _propose(cur)
+        _approve(cur, movement_id)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        with pytest.raises(psycopg2.errors.RaiseException):
+            cur.execute("DELETE FROM pending_movements WHERE id = %s", (movement_id,))
+    conn.rollback()
+
+
+def test_an_unresolved_proposal_cannot_be_deleted_either(conn):
+    """A request raised and then removed before anyone answered it is the same
+    evidence gap as one rejected and then removed -- and it is the record most
+    worth removing, because nobody has looked at it yet.
+
+    Withdrawal, if it is ever wanted, is a third resolution recorded in the
+    table. It is not a DELETE.
+    """
+    with conn.cursor() as cur:
+        movement_id = _propose(cur)
+        with pytest.raises(psycopg2.errors.RaiseException) as excinfo:
+            cur.execute("DELETE FROM pending_movements WHERE id = %s", (movement_id,))
+        assert "pending" in str(excinfo.value)
+    conn.rollback()
+
+
+def test_a_bulk_delete_cannot_slip_past_the_row_trigger(conn):
+    """FOR EACH ROW, so a statement touching many rows raises on the first one
+    and the whole statement rolls back. A STATEMENT-level trigger reading OLD
+    would not have fired at all."""
+    with conn.cursor() as cur:
+        first = _propose(cur)
+        second = _propose(cur, reason="a second request")
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        with pytest.raises(psycopg2.errors.RaiseException):
+            cur.execute("DELETE FROM pending_movements")
+    conn.rollback()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute("SELECT count(*) FROM pending_movements")
+        assert cur.fetchone()[0] == 2
+        assert first != second
+    conn.rollback()

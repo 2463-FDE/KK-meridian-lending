@@ -29,7 +29,11 @@ What must hold for an implementation to be this decision.
    the id would leave half the attribution caller-supplied on the entry whose
    whole purpose is to record who authorised the movement. The requester and
    their role survive on the proposal.
-7. **A rejected proposal is retained.** It is the evidence D8 says is missing.
+7. **A rejected proposal is retained**, and so is an unresolved one. It is the
+   evidence D8 says is missing. Enforced by a `BEFORE DELETE` trigger, not by
+   convention -- a `REVOKE DELETE` does not stick when every service connects as
+   the schema owner, and until that trigger existed this invariant was a
+   sentence.
 8. **A proposal must describe a movement the ledger can represent.** A
    `fee_waived` proposal targets the `fees` component and nothing else, refused
    at insert rather than at approval — an approver should never be asked to sign
@@ -327,6 +331,55 @@ CREATE TRIGGER pending_movements_one_way
     FOR EACH ROW EXECUTE FUNCTION pending_movements_single_transition();
 ```
 
+### Retention is a delete guard, not a promise
+
+Invariant 7 says a rejected proposal is retained -- it is the evidence D8 says is
+missing, and the whole reason proposals live in their own table rather than as
+columns on a ledger entry that was never written.
+
+**Nothing enforced it.** The transition trigger is `BEFORE UPDATE`, so it says
+what may CHANGE and nothing about what may be REMOVED. A rejected proposal has no
+ledger entry by design, so `ledger_entries.pending_movement_id` does not hold it
+down either, and anything with the application database role could delete the
+row. The invariant was a sentence.
+
+That is the same shape as the finding above and the two before it: a rule stated
+in prose, enforced nowhere, and invisible because the surrounding rules are
+enforced. It is also why the ADR's claim about privileges matters here --
+`REVOKE DELETE` does not stick when every service connects as the schema owner
+(ADR 0002, ADR 0006), so this has to be a trigger for the same reason
+append-only does.
+
+**Every delete is refused, not only resolved ones.** A proposal that was raised
+and then vanished is the same evidence gap as one that was rejected and then
+vanished: the question D8 asks is *what did staff ask for*, and a request removed
+before anyone answered it is exactly the record that would be worth removing.
+Withdrawal, if it is ever wanted, is a third `resolution` -- a decision recorded
+in the table -- and not a `DELETE`.
+
+<!-- executable: 4-retention -->
+
+```sql
+CREATE FUNCTION pending_movements_are_retained() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION
+        'pending movement % may not be deleted: proposals are retained as the '
+        'evidence of what staff asked for (%)',
+        OLD.id, COALESCE(OLD.resolution, 'pending');
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER pending_movements_no_delete
+    BEFORE DELETE ON pending_movements
+    FOR EACH ROW EXECUTE FUNCTION pending_movements_are_retained();
+```
+
+This makes `pending_movements` append-and-resolve-only: rows are inserted, one
+terminal transition is permitted, the ledger link may be filled once, and nothing
+is ever removed. The ledger's own guarantee is stricter still -- no UPDATE at all
+-- and the difference is deliberate: resolving a proposal is the one legitimate
+mutation in this design, confined to this table precisely so the ledger's
+guarantee stays absolute.
+
 ### The commit-time rule, and why it must re-read the row
 
 Approval implies exactly one entry; rejection implies none. This cannot be an
@@ -347,7 +400,7 @@ right in isolation and unsatisfiable next to the ones already there. So the
 trigger re-selects the proposal's **current** state at firing time, which is the
 only state the transaction is actually committing:
 
-<!-- executable: 4-resolution-complete -->
+<!-- executable: 5-resolution-complete -->
 
 ```sql
 CREATE FUNCTION pending_movement_resolution_is_complete() RETURNS trigger AS $$
@@ -514,7 +567,7 @@ And one thing it **overwrites** rather than validates: `actor_id` is set to the
 proposal's approver, so a direct INSERT cannot misattribute who authorised the
 movement even while reproducing everything else correctly.
 
-<!-- executable: 5-entry-matches-proposal -->
+<!-- executable: 6-entry-matches-proposal -->
 
 ```sql
 CREATE FUNCTION ledger_entry_matches_its_proposal() RETURNS trigger AS $$
@@ -640,8 +693,10 @@ corrects elsewhere.
 - **Two people are needed for an adjustment.** That is the point, and it is also
   the cost: a single-CSR shop cannot approve its own corrections, and an
   after-hours fix waits for a second person.
-- **A rejected proposal is kept.** `pending_movements` accumulates rows that
-  never became money, which is exactly the evidence D8 says is missing today.
+- **A rejected proposal is kept**, and cannot be deleted. `pending_movements`
+  accumulates rows that never became money, which is exactly the evidence D8 says
+  is missing today. The cost is that the table only grows, on the same footing as
+  `ledger_entries`; archival is a separate decision for both.
 - **`adjust-balance` and `waive-fee` change shape for their callers.** They stop
   returning a new balance, because there is not one yet. The frontend has to
   show "submitted for approval" and a queue, which is UI work this ADR does not

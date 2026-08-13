@@ -311,3 +311,28 @@ def test_the_deferred_check_does_not_validate_the_queued_row():
         "the commit-time check reads NEW.ledger_entry_id -- the queued event's "
         "value, not the row being committed"
     )
+
+
+def test_the_retention_invariant_names_what_enforces_it():
+    """Invariant 7 promised rejected proposals are retained and nothing enforced
+    it: the transition trigger is BEFORE UPDATE, and a rejected proposal has no
+    ledger entry for a foreign key to hold down.
+
+    A stated invariant with no mechanism is the defect this pair of documents
+    keeps producing, so the invariant has to name its own enforcement.
+    """
+    text = _text(A11)
+    assert "BEFORE DELETE ON pending_movements" in text, (
+        "ADR 0011 has no delete guard, so a rejected proposal -- the evidence D8 "
+        "says is missing -- can be erased by anything holding the application "
+        "database role"
+    )
+    invariant = next(
+        line for line in text.splitlines()
+        if line.strip().startswith("7. **A rejected proposal is retained")
+    )
+    block = text[text.index(invariant):text.index(invariant) + 400]
+    assert "DELETE" in block, (
+        "invariant 7 does not say what enforces it, which is how it stayed a "
+        "sentence through fifteen review rounds"
+    )
