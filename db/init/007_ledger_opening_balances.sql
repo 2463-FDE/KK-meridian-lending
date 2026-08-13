@@ -68,7 +68,7 @@ UPDATE ledger_control SET initialization_open = FALSE
 -- as legacy_direct_write until application writers move to the ledger.
 CREATE OR REPLACE FUNCTION capture_legacy_balance_delta() RETURNS trigger AS $$
 BEGIN
-    IF current_setting('meridian.projecting', true) = 'on' THEN
+    IF pg_trigger_depth() > 1 THEN
         RETURN NEW;
     END IF;
     IF TG_OP = 'INSERT' AND NEW.balance <> 0 THEN

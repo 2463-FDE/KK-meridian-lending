@@ -233,9 +233,9 @@ def test_two_entries_compose_rather_than_racing(db):
 def test_interest_projects_nowhere(db):
     loan = _a_loan(db)
     b = _exec(db, "SELECT balance, past_due FROM balances WHERE loan_id = %s", (loan,))[0]
-
-    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-              "VALUES (%s, 'interest', 5.00, 'fee_assessed')", (loan,))
+    pay = _a_payment(db, loan, "5.00")
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, payment_id) "
+              "VALUES (%s, 'interest', -5.00, 'payment', %s)", (loan, pay))
     db.commit()
 
     after = _exec(db, "SELECT balance, past_due FROM balances WHERE loan_id = %s", (loan,))[0]
@@ -386,6 +386,7 @@ def test_direct_writes_still_work_and_gain_an_immutable_delta(db):
     loan = _a_loan(db)
     before = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id=%s "
                        "AND entry_type='legacy_direct_write'", (loan,))[0]["n"]
+    _exec(db, "SELECT set_config('meridian.projecting','on',true)")
     _exec(db, "UPDATE balances SET balance = balance - 7 WHERE loan_id = %s", (loan,))
     db.commit()
     rows = _exec(db, "SELECT amount, component FROM ledger_entries WHERE loan_id=%s "
@@ -395,6 +396,31 @@ def test_direct_writes_still_work_and_gain_an_immutable_delta(db):
     after = _exec(db, "SELECT count(*) AS n FROM ledger_entries WHERE loan_id=%s "
                       "AND entry_type='legacy_direct_write'", (loan,))[0]["n"]
     assert after == before + 1
+
+
+@pytest.mark.parametrize("entry_type,component,amount", [
+    ("fee_assessed", "principal", 10),
+    ("fee_assessed", "interest", 10),
+    ("fee_waived", "principal", -10),
+    ("disbursement", "fees", 10),
+    ("adjustment", "interest", 10),
+])
+def test_entry_type_must_match_its_component(db, entry_type, component, amount):
+    loan = _a_loan(db)
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,actor_id,actor_role) "
+                  "VALUES(%s,%s,%s,%s,1,'admin')", (loan, component, amount, entry_type))
+    db.rollback()
+
+
+def test_payment_allocation_must_equal_the_captured_amount(db):
+    loan = _a_loan(db)
+    pay = _a_payment(db, loan, "10.00")
+    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,payment_id) "
+              "VALUES(%s,'principal',-100,'payment',%s)", (loan, pay))
+    with pytest.raises(psycopg2.errors.RaiseException):
+        db.commit()
+    db.rollback()
 
 
 def test_a_loan_boarded_after_migration_gets_an_opening_delta(db):
@@ -610,8 +636,9 @@ def test_an_interest_entry_is_still_accepted(db):
     reject it -- the ELSE branch exists precisely so a correct no-op is not
     mistaken for a failed projection."""
     loan = _a_loan(db)
-    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-              "VALUES (%s, 'interest', 7.50, 'fee_assessed')", (loan,))
+    pay = _a_payment(db, loan, "7.50")
+    _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, payment_id) "
+              "VALUES (%s, 'interest', -7.50, 'payment', %s)", (loan, pay))
     db.commit()
 
 

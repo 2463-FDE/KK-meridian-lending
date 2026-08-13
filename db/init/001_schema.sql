@@ -620,6 +620,33 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
     OR (entry_type = 'adjustment')
 );
 
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_type_matches_component;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_type_matches_component CHECK (
+       (entry_type IN ('opening_balance','legacy_direct_write','adjustment')
+        AND component IN ('principal','fees'))
+    OR (entry_type = 'disbursement' AND component = 'principal')
+    OR (entry_type = 'payment' AND component IN ('principal','fees','interest'))
+    OR (entry_type IN ('fee_assessed','fee_waived') AND component = 'fees')
+);
+
+CREATE OR REPLACE FUNCTION ledger_payment_allocation_matches_capture() RETURNS trigger AS $$
+DECLARE captured NUMERIC(14,2); allocated NUMERIC(14,2);
+BEGIN
+    IF NEW.payment_id IS NULL THEN RETURN NULL; END IF;
+    SELECT amount INTO captured FROM payments WHERE id = NEW.payment_id;
+    SELECT COALESCE(-SUM(amount), 0) INTO allocated
+      FROM ledger_entries WHERE payment_id = NEW.payment_id;
+    IF allocated <> captured THEN
+        RAISE EXCEPTION 'ledger allocation % does not equal captured payment % for payment %',
+                        allocated, captured, NEW.payment_id;
+    END IF;
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS ledger_payment_allocation_exact ON ledger_entries;
+CREATE CONSTRAINT TRIGGER ledger_payment_allocation_exact
+    AFTER INSERT ON ledger_entries DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION ledger_payment_allocation_matches_capture();
+
 -- Invariant 5: a human-directed entry names the human.
 -- 'payment' is exempt: servicing's apply-payment receives an amount and a
 -- payment_id and no actor, because the borrower is not "acting" on the balance
@@ -711,7 +738,7 @@ CREATE TRIGGER ledger_entries_project
 -- statement too.
 CREATE OR REPLACE FUNCTION balances_are_trigger_maintained() RETURNS trigger AS $$
 BEGIN
-    IF current_setting('meridian.projecting', true) IS DISTINCT FROM 'on' THEN
+    IF pg_trigger_depth() < 2 THEN
         RAISE EXCEPTION 'balances is maintained by the ledger projection; '
                         'write a ledger entry instead';
     END IF;
