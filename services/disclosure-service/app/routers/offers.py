@@ -1,9 +1,17 @@
 """Offer / Truth-in-Lending disclosure generation (disclosure-service).
 
-Write path (POST /offers) builds the offer + amortization schedule with float math and
-persists an offers row via raw psycopg2 (matches the LOS write path). Read path
+Write path (POST /offers) builds the offer + amortization schedule and persists an
+offers row via raw psycopg2 (matches the LOS write path). Read path
 (GET /applications/{id}/offer) goes through SQLAlchemy.
+
+Money is Decimal from the database read to the serializer boundary (D1). The
+`Disclosure` and `ScheduleRow` models declare their fields as float, so that is
+where the single conversion happens and the wire format is unchanged; what used
+to happen was a cast to binary float on the way IN, before the Decimal
+arithmetic that was supposed to keep the cents exact.
 """
+from decimal import Decimal
+
 import psycopg2.errors
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
@@ -15,6 +23,33 @@ from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferIn, OfferResponse, ScheduleRow
 
 log = get_logger("offers")
+
+#: Half a cent, exactly. The threshold for "this disclosure does not
+#: amortize" -- expressed as a Decimal because 0.005 is not 0.005 in
+#: binary floating point, and this is the check that decides whether a
+#: signed disclosure is internally consistent.
+HALF_CENT = Decimal("0.005")
+
+
+def _dec(value):
+    """A stored money value as an exact Decimal, whatever the driver handed us.
+
+    The ORM read path is the awkward one. `models.py` maps money with
+    `asdecimal=False` -- a deliberate choice, so a storage-layer fix did not
+    ripple Decimal typing through every caller -- which means SQLAlchemy returns
+    these columns as float no matter what the column type is. psycopg2 returns
+    Decimal for the same columns.
+
+    Decimal(str(x)) recovers the shortest decimal representation, which for a
+    value stored as NUMERIC(14,2) is the exact cent amount. So this is lossless
+    for money that came from the database, and it is where the exactness starts
+    on this path -- not before it. The float lives for one attribute access
+    (D1's remaining boundary, and the reason `asdecimal=False` is worth
+    revisiting separately).
+    """
+    if value is None:
+        return None
+    return value if isinstance(value, Decimal) else Decimal(str(value))
 router = APIRouter(tags=["offers"])
 
 # The five amounts that make a row a TILA disclosure. A row missing any of them
@@ -455,10 +490,13 @@ def create_offer(
     if all(row.get(f) is not None for f in ("principal", "term_months",
                                             "monthly_payment", "final_payment",
                                             "note_rate_pct")):
+        # D1: no float() on the way in. These columns are NUMERIC, psycopg2
+        # hands them back as Decimal, and casting to binary float here threw the
+        # exactness away before the Decimal arithmetic inside could preserve it.
         rows = schedule.amortization_from_contract(
-            float(row["principal"]), float(row["note_rate_pct"]), int(row["term_months"]),
-            regular_payment=float(row["monthly_payment"]),
-            final_payment=float(row["final_payment"]),
+            row["principal"], row["note_rate_pct"], int(row["term_months"]),
+            regular_payment=row["monthly_payment"],
+            final_payment=row["final_payment"],
         )
     else:
         # An offer returned without stored terms -- a legacy row this call did
@@ -528,10 +566,14 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
 
     # Rebuild the display schedule from the persisted offer (Offer ORM only). Recover the
     # principal/term from the stored disclosure box and reuse the stored APR as the schedule
-    # rate — the same shortcut the LOS read path takes. Float math throughout (D1).
-    monthly_payment = float(offer.monthly_payment)
-    total_of_payments = float(offer.total_of_payments)
-    amount_financed = float(offer.amount_financed)
+    # rate — the same shortcut the LOS read path takes.
+    #
+    # D1: Decimal from here on. These come off the ORM as float (asdecimal=False),
+    # so `_dec` is where exactness begins on this path -- see its docstring for
+    # why that is lossless and where the remaining boundary is.
+    monthly_payment = _dec(offer.monthly_payment)
+    total_of_payments = _dec(offer.total_of_payments)
+    amount_financed = _dec(offer.amount_financed)
     # W4 review fix: use the fee rule actually snapshotted on THIS row, not
     # whatever ORIGINATION_FEE_PCT happens to be right now -- reading the live
     # constant here instead of the stored snapshot was exactly the drift this
@@ -594,9 +636,14 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     # so every borrower viewing an auto-generated offer got the inferred one.
     # Review finding on PR #10.
     if offer.principal is not None:
-        principal = float(offer.principal)
+        principal = _dec(offer.principal)
     else:
-        principal = round(amount_financed / (1 - fee_pct), 2) if amount_financed else 0.0
+        # Decimal division and quantize, not round() on a float: this recovered
+        # principal is what the whole redisplayed schedule is built on.
+        principal = (
+            (amount_financed / (Decimal("1") - _dec(fee_pct))).quantize(Decimal("0.01"))
+            if amount_financed else Decimal("0.00")
+        )
     # Review fix: this used to build the schedule at `offer.apr`. The APR and
     # the note rate are not interchangeable once a prepaid fee exists -- the APR
     # is solved against the amount financed, the payments run on the full
@@ -612,11 +659,14 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
     # test_stored_note_rate_is_preferred_over_recovery (normal rows never reach
     # the recovery) and test_a_legacy_offer_without_a_stored_note_rate_recovers.
     if offer.note_rate_pct is not None:
-        note_rate = float(offer.note_rate_pct)
+        note_rate = _dec(offer.note_rate_pct)
     elif term_months and monthly_payment:
-        note_rate = apr.note_rate_from_payment(principal, monthly_payment, term_months)
+        # Legacy recovery only, and it returns a float by contract -- an inference
+        # from an already-rounded payment, so there is no exactness to preserve.
+        note_rate = _dec(apr.note_rate_from_payment(
+            float(principal), float(monthly_payment), term_months))
     else:
-        note_rate = 0.0
+        note_rate = Decimal("0")
     if schedule_is_stored and term_months:
         # Expanded from the STORED contract, not re-solved. Regenerating and
         # then patching the final row back left every regular row -- and the
@@ -625,16 +675,21 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         # to make impossible. Review finding on PR #10.
         rows = schedule.amortization_from_contract(
             principal, note_rate, term_months,
-            regular_payment=monthly_payment, final_payment=float(offer.final_payment),
+            regular_payment=monthly_payment, final_payment=_dec(offer.final_payment),
         )
-        residue = rows[-1]["balance"] if rows else 0.0
-        if abs(residue) >= 0.005:
+        # D1: the residue is compared in Decimal against half a cent exactly.
+        # `abs(residue) >= 0.005` on a binary float compares against a value that
+        # is not 0.005, so a schedule sitting exactly on the boundary could be
+        # judged either way depending on representation -- on the check whose
+        # whole job is to notice a disclosure that does not amortize.
+        residue = rows[-1]["balance"] if rows else Decimal("0")
+        if abs(residue) >= HALF_CENT:
             # The stored amounts do not amortize the stored principal. That is a
             # real inconsistency in a signed disclosure, so it is logged rather
             # than smoothed away; the rows still show what was actually agreed.
             log.error(
                 "stored contract does not amortize to zero offer_id=%s "
-                "application_id=%s residue=%.2f schedule_version=%s",
+                "application_id=%s residue=%s schedule_version=%s",
                 offer.id, application_id, residue, offer.schedule_version,
             )
         schedule_source, schedule_note = "contract", None

@@ -7,19 +7,23 @@ implementation and accept ANY authenticated caller — no role check, no maker-c
 """
 import logging
 import os
+import secrets
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-from . import balance, delinquency, payments, reconciliation
+from . import balance, config, db, delinquency, payments, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("servicing")
+
+# Fail at boot rather than per-request on an unusable token (PR #22 review).
+config.validate_internal_token()
 
 app = FastAPI(title="Meridian Servicing Service (LSS)", version="2.0.0")
 app.include_router(loans.router)
@@ -37,6 +41,180 @@ async def unhandled(request: Request, exc: Exception):
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "servicing"}
+
+
+def _require_internal(x_internal_token: Optional[str]) -> None:
+    """Defense in depth on every money-moving route.
+
+    servicing-service publishes no host port, so the network boundary was the
+    only thing standing between a caller and these endpoints -- and it was the
+    ONLY control, because none of them checks anything itself. That is the same
+    position kyc-service was in when it turned out to be reachable anyway,
+    first through its own published port and then through an anonymous gateway
+    relay that signed requests on the caller's behalf. Both times the topology
+    was assumed to be the guarantee, and both times it was not.
+
+    Network topology is not an application-level check. A container that can
+    resolve `servicing-service:8002` can move money on any loan: set a balance
+    to zero, waive a fee, or post a payment that never happened.
+
+    An unset config token can never match, so a deploy that forgets to set one
+    refuses every money-moving call rather than accepting every one -- the same
+    fail-closed contract the five sibling services already use.
+    """
+    expected = config.INTERNAL_SERVICE_TOKEN
+    # An unset server-side token can never match -- checked first, because
+    # compare_digest("", "") is True and would otherwise admit every caller on a
+    # deployment that forgot to configure one. Startup validation should have
+    # stopped that already; this is the second line of the same defence.
+    if not expected or not x_internal_token:
+        raise HTTPException(status_code=401, detail="not authorized")
+    # Constant-time: `!=` on str short-circuits at the first differing byte, so
+    # response timing leaks how much of the secret a guess got right, one byte at
+    # a time. compare_digest does not. The values are ASCII by construction
+    # (an env var and an HTTP header), so the str overload is safe here.
+    if not secrets.compare_digest(x_internal_token, expected):
+        raise HTTPException(status_code=401, detail="not authorized")
+
+
+# The tables the preflight below must write to, because they are the tables the
+# real apply-payment writes to. Asserted against `balance.apply_payment_once`'s
+# source rather than maintained by hand: a hand-kept list of protected things
+# reads as complete while missing one, which is how the probe came to write to a
+# table the money path never touches.
+_PREFLIGHT_WRITE_TABLES = ("payment_applications", "balances")
+
+# And the columns of `balances` the probe must write, for the same reason: the
+# real apply sets `balance`, and a probe that set only `updated_at` proved
+# nothing about a column-level grant, trigger or constraint on `balance`. Also
+# asserted against `apply_payment_once`'s source.
+_PREFLIGHT_BALANCE_COLUMNS = ("balance", "updated_at")
+
+
+@app.get("/internal/auth-check")
+def internal_auth_check(
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+    loan_id: Optional[int] = None,
+):
+    """Can this service accept AND PERSIST an apply-payment right now?
+
+    That is the contract, and it is deliberately stronger than "our tokens
+    match". Review round 5: this used to authenticate and return, touching no
+    database at all -- and I documented that as a feature ("no database access,
+    no state, so a 200 means exactly the token you sent is the token I expect").
+    It was the defect. payment-service reads a 200 as permission to capture a
+    card, so a servicing process that is up with its database down answered 200,
+    the card was charged, and the follow-up apply-payment failed: a real charge
+    with no credit on the loan, which is the outcome the whole preflight exists
+    to prevent.
+
+    So the check exercises what apply-payment exercises: an INSERT into
+    `payment_applications` and an UPDATE of `balances`, the two tables
+    `balance.apply_payment_once` writes, through the same connection helper, in
+    one transaction that is always rolled back. It proves the path, not the
+    credential and not a stand-in for the path.
+
+    Kept cheap on purpose: two statements, no commit, and SKIP LOCKED so it can
+    never wait on a real apply. It runs before every card authorization, so it
+    must not become the reason payments are slow. Empty tables are fine -- what
+    matters is that the statements execute.
+    """
+    _require_internal(x_internal_token)
+    try:
+        # A WRITE, rolled back. Two SELECTs were not enough: a read-only replica,
+        # a revoked INSERT grant, a read-only transaction or a full disk all let
+        # reads pass while apply_payment_once's INSERT INTO payment_applications
+        # and UPDATE balances fail -- so a 200 still greenlit a capture that could
+        # not be credited. Reads prove reachability; only a write proves the
+        # thing this endpoint claims.
+        #
+        # Same connection helper and therefore the same role and transaction
+        # semantics as the real apply, because a preflight on a different
+        # connection proves nothing about the one that matters.
+        #
+        # Review round 7: the write used to land in `preflight_writes`, a table
+        # that existed only to be written to. That was the same defect one level
+        # down -- it proved *a* write, not *this* write. Per-table grant drift, a
+        # constraint or trigger failure, or bloat on `payment_applications` or
+        # `balances` specifically all left the probe table healthy, so the
+        # preflight answered 200 and the card was captured against an apply that
+        # could not land. A proxy for the thing is not the thing.
+        #
+        # So the probe now runs the statements `balance.apply_payment_once`
+        # runs, against the tables it writes. `_PREFLIGHT_WRITE_TABLES` is
+        # asserted against that function's source, so a future write path that
+        # touches a third table fails the test rather than silently escaping the
+        # probe.
+        with db.transaction() as cur:
+            if loan_id is not None:
+                # Existence is proven by a plain read, separately from
+                # writability, because the locking probe below uses SKIP LOCKED
+                # and therefore cannot tell "no such row" from "someone else has
+                # it". Conflating the two would make a busy loan look missing.
+                #
+                # A missing row is not a nuance: apply_payment_once UPDATEs
+                # `WHERE loan_id = %s`, so with no row the update matches nothing,
+                # raises nothing, and the payment is recorded as applied while the
+                # borrower is credited nothing. Verified live -- before this check
+                # the preflight answered 200 for a loan_id that does not exist.
+                cur.execute("SELECT 1 FROM balances WHERE loan_id = %s", (loan_id,))
+                if not cur.fetchall():
+                    raise LookupError(f"no balances row for loan_id={loan_id}")
+            # Same statement shape as the real apply, including ON CONFLICT, so
+            # the unique index is exercised too. The sentinel is negative and
+            # random: `payments.id` is a positive SERIAL, so it cannot collide
+            # with a real payment, and two concurrent preflights cannot block
+            # each other on the primary key.
+            sentinel = -secrets.randbelow(2_000_000_000) - 1
+            cur.execute(
+                "INSERT INTO payment_applications (payment_id, loan_id, amount) "
+                "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING "
+                "RETURNING payment_id",
+                (sentinel, sentinel, 0),
+            )
+            cur.fetchall()
+            # Review round 8: this wrote `updated_at` only. The real apply writes
+            # `balance` -- so a column-level grant, a trigger attached to
+            # `balance`, or a constraint on it could fail while the probe passed,
+            # and the capture went ahead against an apply that could not land.
+            # Probing the same TABLE as the money path is not the same as probing
+            # the same WRITE; the column list is part of the statement.
+            #
+            # `SET balance = balance` is a no-op in value and a real write in
+            # every way Postgres checks: privileges, triggers, constraints, and
+            # the read-only transaction test all apply to the column named here.
+            # `_PREFLIGHT_BALANCE_COLUMNS` is asserted against
+            # `apply_payment_once`'s own UPDATE, so this cannot drift from it.
+            #
+            # The loan being charged when the caller names one, because a probe
+            # of some other loan's row does not prove this loan's row exists.
+            # SKIP LOCKED so it never waits behind an apply-payment mid-flight on
+            # that same loan: this runs before every card authorization and must
+            # not be the reason a payment is slow, or the reason one blocks. No
+            # lockable row degrades to a zero-row UPDATE, which still requires
+            # the write privilege and still fails in a read-only transaction.
+            cur.execute(
+                "UPDATE balances SET balance = balance, updated_at = now() "
+                "WHERE loan_id = (SELECT loan_id FROM balances "
+                "WHERE (%s::int IS NULL OR loan_id = %s) "
+                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED)",
+                (loan_id, loan_id),
+            )
+            # Never committed. Both writes exist only long enough to prove the
+            # path works, so this leaves no data to clean up.
+            cur.execute("ROLLBACK")
+    except Exception as e:  # noqa
+        log.error(
+            "auth-check could not complete a write against the apply-payment path "
+            "(%s) -- reporting unavailable so no card is captured that we could "
+            "not credit",
+            type(e).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="servicing cannot persist an apply-payment right now",
+        )
+    return {"status": "ok", "auth": "ok"}
 
 
 class PaymentIn(BaseModel):
@@ -79,7 +257,9 @@ class PaymentIn(BaseModel):
 
 
 @app.post("/payments")
-def post_payment(body: PaymentIn):
+def post_payment(body: PaymentIn,
+                 x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2,
     # unrelated to the PCI/D5 fix above -- left as-is, same scope boundary
     # payment-service's own idempotency fix drew.)
@@ -94,7 +274,9 @@ class ApplyPaymentIn(BaseModel):
 
 
 @app.post("/accounts/{loan_id}/apply-payment")
-def apply_payment(loan_id: int, body: ApplyPaymentIn):
+def apply_payment(loan_id: int, body: ApplyPaymentIn,
+                  x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # This is the apply path called by payment-service AFTER it captures the charge (the
     # LSS half of the split payment flow). It still does the unlocked read-modify-write
     # (D3) straight off principal with no waterfall (D14) — preserved exactly as-is.
@@ -125,7 +307,9 @@ class AdjustIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/adjust-balance")
 def adjust_balance(loan_id: int, body: AdjustIn,
-                   x_user_role: Optional[str] = Header(None)):
+                   x_user_role: Optional[str] = Header(None),
+                   x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # ANY authenticated user. No role check, no second approver, no ledger entry. (debt D8)
     return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
 
@@ -136,13 +320,17 @@ class WaiveIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/waive-fee")
 def waive_fee(loan_id: int, body: WaiveIn,
-              x_user_role: Optional[str] = Header(None)):
+              x_user_role: Optional[str] = Header(None),
+              x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     # ANY authenticated user can waive a fee. No maker-checker. (debt D8)
     return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}
 
 
 @app.post("/accounts/{loan_id}/late-fee")
-def late_fee(loan_id: int):
+def late_fee(loan_id: int,
+             x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    _require_internal(x_internal_token)
     return {"loan_id": loan_id, "past_due": delinquency.assess_late_fee(loan_id)}
 
 

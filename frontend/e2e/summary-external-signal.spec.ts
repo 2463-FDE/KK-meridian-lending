@@ -31,7 +31,6 @@ const STUB_SUMMARY = {
   loan_amount: 18000,
   term_months: 48,
   purpose: "debt consolidation",
-  risk_tier: "medium",
   summary: "Stable employment and adequate income for the requested amount.",
   flags: ["Debt-to-income near the policy limit"],
   external_signals: [

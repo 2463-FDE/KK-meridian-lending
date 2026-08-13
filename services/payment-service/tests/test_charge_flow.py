@@ -803,3 +803,267 @@ def test_a_nonfinite_amount_is_still_reported_rather_than_crashing_the_response(
     assert "amount" in resp.text
     for e in resp.json()["detail"]:
         assert isinstance(e["loc"], list)
+
+
+# --- review round 2: never capture money we cannot credit ---------------------
+
+def test_a_charge_is_refused_when_servicing_will_not_accept_our_token(monkeypatch):
+    """Token skew must stop the charge, not strand it.
+
+    Review round 2 (high): the token reaches servicing only AFTER the processor
+    has authorized. If payment-service and servicing-service hold different
+    values -- a rotation applied to one and not the other -- the borrower is
+    charged and every apply is rejected, so the money sits captured and
+    uncredited until a human reconciles it.
+
+    An uncharged customer retries. A charged customer with no credit has to be
+    found first.
+    """
+    from app import payments as payments_mod
+
+    authorized = []
+
+    class _Db:
+        """Just enough to reach the preflight: the insert returns a payments row."""
+        def query(self, sql, params=None):
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return [{"id": 1, "loan_id": 42, "amount": 10.0}]
+            return []
+
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
+    monkeypatch.setattr(payments_mod.processor, "authorize_charge",
+                        lambda *a, **k: authorized.append(a) or "auth_x")
+
+    with pytest.raises(payments_mod.ServicingAuthUnavailable):
+        payments_mod.charge(42, "tok_x", "1111", 10.0, "preflight-key-1")
+
+    assert not authorized, (
+        "the card was authorized even though servicing had already rejected our "
+        "credentials -- that is the capture-without-credit this check prevents"
+    )
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("connection reset"),
+    TimeoutError("servicing timed out"),
+    OSError("name resolution failed"),
+])
+@pytest.mark.real_servicing_preflight
+def test_an_unreachable_servicing_blocks_the_charge(monkeypatch, failure):
+    """Fails CLOSED. This test previously asserted the opposite.
+
+    It pinned "unknown is not known-bad" -- that a timeout, DNS failure or TLS
+    error let the charge proceed, on the reasoning that refusing payments during
+    every servicing blip trades a rare accounting error for a common outage.
+
+    Review round 4 rejected that, correctly. The argument contradicts what the
+    guard is for: letting an unreachable servicing through meant the preflight
+    only caught an explicit 401 -- the narrow case -- while the broad case,
+    servicing being down, sailed past it. And "the reconciler will fix it" only
+    holds once servicing returns; until then real money has left a real card
+    while the balance has not moved.
+    """
+    from app import payments as payments_mod
+
+    def _boom(*a, **k):
+        raise failure
+
+    monkeypatch.setattr(payments_mod.httpx, "get", _boom)
+    assert payments_mod._servicing_auth_ok() is False
+
+
+@pytest.mark.parametrize("body", [{"status": "ok"}, {"auth": "no"}, {}, "not-json"])
+@pytest.mark.real_servicing_preflight
+def test_a_200_that_is_not_the_auth_check_is_not_authorization(monkeypatch, body):
+    """A proxy error page or a misrouted health endpoint can return 200.
+
+    Reading any 200 as permission to charge would let an infrastructure
+    misconfiguration stand in for the check itself.
+    """
+    from app import payments as payments_mod
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            if body == "not-json":
+                raise ValueError("no json")
+            return body
+
+    monkeypatch.setattr(payments_mod.httpx, "get", lambda *a, **k: _Resp())
+    assert payments_mod._servicing_auth_ok() is False
+
+
+@pytest.mark.real_servicing_preflight
+def test_a_healthy_servicing_permits_the_charge(monkeypatch):
+    """The guard must not refuse when servicing is genuinely fine."""
+    from app import payments as payments_mod
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"status": "ok", "auth": "ok"}
+
+    monkeypatch.setattr(payments_mod.httpx, "get", lambda *a, **k: _Resp())
+    assert payments_mod._servicing_auth_ok() is True
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.real_servicing_preflight
+def test_the_preflight_reports_an_auth_rejection(monkeypatch, status):
+    from app import payments as payments_mod
+
+    class _Resp:
+        status_code = status
+
+    monkeypatch.setattr(payments_mod.httpx, "get", lambda *a, **k: _Resp())
+    assert payments_mod._servicing_auth_ok() is False
+
+
+# --- review round 3: the guard must cover the retry path too ------------------
+
+def test_a_pending_retry_is_also_guarded(monkeypatch):
+    """The hole this PR was built around, reachable by the likeliest path.
+
+    Review round 3: the pending-duplicate branch called authorize_charge()
+    directly with no servicing check. A retry of a request whose authorization
+    never confirmed therefore re-charged the card while servicing was rejecting
+    our credentials -- the exact charged-but-uncredited case the preflight
+    exists to prevent, on the branch an incident actually exercises, because a
+    client retry is what lands there.
+    """
+    from app import payments as payments_mod
+
+    authorized = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return []                       # ON CONFLICT DO NOTHING -> duplicate
+            if "SELECT" in sql.upper():
+                return [{"id": 7, "loan_id": 42, "amount": 10.0,
+                         "auth_status": "pending", "applied_at": None}]
+            return []
+
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
+    monkeypatch.setattr(payments_mod.processor, "get_authorization", lambda k: None)
+    monkeypatch.setattr(payments_mod.processor, "authorize_charge",
+                        lambda *a, **k: authorized.append(a) or "auth_x")
+
+    with pytest.raises(payments_mod.ServicingAuthUnavailable):
+        payments_mod.charge(42, "tok_x", "1111", 10.0, "retry-key-1")
+
+    assert not authorized, (
+        "the retry re-authorized the card while servicing was rejecting our "
+        "credentials -- the capture-without-credit this guard exists to prevent"
+    )
+
+
+def test_a_preflight_failure_leaves_the_key_retryable(monkeypatch):
+    """An infrastructure blip must not strand the borrower permanently.
+
+    Review round 3: the row was inserted and then marked auth_status='failed'
+    even though no card was ever charged. The router returns 503 "no charge
+    made, retry later" -- but that retry hit the duplicate-FAILED branch and got
+    a permanent failure, so following the advice in the error made things worse.
+
+    The row now stays 'pending', which is a retryable state that re-runs the
+    check on the same key: the duplicate branch re-preflights and proceeds once
+    the token skew is fixed.
+    """
+    from app import payments as payments_mod
+
+    statements = []
+
+    class _Db:
+        def query(self, sql, params=None):
+            statements.append(" ".join(sql.split()))
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return [{"id": 8, "loan_id": 42, "amount": 10.0}]
+            return []
+
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod, "_servicing_auth_ok", lambda *a: False)
+
+    with pytest.raises(payments_mod.ServicingAuthUnavailable):
+        payments_mod.charge(42, "tok_x", "1111", 10.0, "retryable-key-1")
+
+    failed_writes = [s for s in statements if "auth_status = 'failed'" in s]
+    assert not failed_writes, (
+        "a preflight failure marked the payment failed, burning the idempotency "
+        f"key even though no card was charged: {failed_writes}"
+    )
+
+
+def test_the_guard_covers_every_authorize_charge_call_site(monkeypatch):
+    """Derived, not listed -- a new charge path must not skip the preflight.
+
+    Two call sites exist today (first attempt, pending retry) and both are
+    covered above. This asserts the count, so a third path added later fails
+    here rather than silently charging cards without the check.
+    """
+    import inspect
+    import re
+
+    from app import payments as payments_mod
+
+    src = inspect.getsource(payments_mod.charge)
+    authorize_calls = src.count("processor.authorize_charge(")
+    # Match the call however it is written. This counted `_require_servicing_auth()`
+    # as a literal, so passing the guard an argument -- the loan being charged,
+    # added in round 8 -- silently dropped the count to zero. A derived check that
+    # depends on an exact spelling is a hand-maintained list wearing a regex.
+    guard_calls = len(re.findall(r"_require_servicing_auth\(", src))
+
+    assert guard_calls >= authorize_calls, (
+        f"{authorize_calls} authorize_charge() call sites but only {guard_calls} "
+        "preflight guards -- every path that can charge a card must check first"
+    )
+
+
+@pytest.mark.real_servicing_preflight
+def test_the_route_returns_503_and_never_charges_when_servicing_is_unreachable(monkeypatch):
+    """End to end through the API: an outage refuses, and the card is untouched.
+
+    The unit tests above prove `_servicing_auth_ok()` returns False. This proves
+    the consequence a borrower actually experiences -- a 503, and no
+    authorization attempt -- because a guard that returns False and is then
+    ignored by the caller would satisfy the unit tests and still capture money.
+    """
+    import os
+
+    from fastapi.testclient import TestClient
+    from app import payments as payments_mod
+    from app.main import app
+
+    authorized = []
+
+    def _boom(*a, **k):
+        raise RuntimeError("connection reset")
+
+    class _Db:
+        def query(self, sql, params=None):
+            if sql.strip().upper().startswith("INSERT INTO PAYMENTS"):
+                return [{"id": 99, "loan_id": 42, "amount": 10.0}]
+            return []
+
+    monkeypatch.setattr(payments_mod.httpx, "get", _boom)          # servicing unreachable
+    monkeypatch.setattr(payments_mod, "db", _Db())
+    monkeypatch.setattr(payments_mod.processor, "authorize_charge",
+                        lambda *a, **k: authorized.append(a) or "auth_x")
+
+    resp = TestClient(app).post("/payments", json={
+        "loan_id": 42, "processor_token": "tok_x", "last4": "1111", "brand": "visa",
+        "amount": 10.0, "method": "card", "idempotency_key": "outage-key-1",
+    # The configured token, not a literal. conftest sets it with setdefault, so a
+    # developer or runner with INTERNAL_SERVICE_TOKEN already exported got a 401
+    # here and a failure that read like "the outage path is broken" when the only
+    # thing wrong was the header this test sent itself.
+    }, headers={"X-Internal-Token": os.environ["INTERNAL_SERVICE_TOKEN"]})
+
+    assert resp.status_code == 503, f"expected 503, got {resp.status_code}: {resp.text[:200]}"
+    assert not authorized, (
+        "the card was authorized while servicing was unreachable -- a capture that "
+        "could not be credited, which is the outcome this guard exists to prevent"
+    )

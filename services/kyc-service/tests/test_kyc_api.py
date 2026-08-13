@@ -14,19 +14,50 @@ from app.kyc import run_cip
 from app.main import app
 from app.routers import kyc as kyc_router
 
+from .conftest import AUTH_HEADERS
+
 client = TestClient(app)
 
 
+#: A fully identified natural person, as the applicants table would hold one.
+FULL_APPLICANT = {
+    "name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
+    "address": "42 Main St, Springfield", "is_entity": False,
+}
+
+
+def stored_applicant(**overrides):
+    """The applicant row this service will grade. Tests vary THIS, not the body.
+
+    Round 9: the CIP verdict is computed from the stored applicant, so a test
+    that wants a sparse or entity applicant has to change the database row. A
+    test that changed the request body instead would now be asserting nothing --
+    which is the whole point of the fix, and worth making awkward to get wrong.
+    """
+    return {**FULL_APPLICANT, **overrides}
+
+
 class _FakeDb:
-    def __init__(self):
+    def __init__(self, applicant=None):
         self.calls = []
         self._next_id = 1
+        self.applicant = applicant or dict(FULL_APPLICANT)
 
     def query(self, sql, params=None):
         self.calls.append((sql, params))
+        # Review round 2: the handler verifies the application/applicant linkage
+        # before inserting, so this fake answers two different questions. Round 9:
+        # that read also supplies the identity fields CIP is computed from, so a
+        # bare truthy row would let every test pass while the handler read nothing.
+        if "FROM applications" in sql:
+            return [self.applicant]
         row = {"id": self._next_id}
         self._next_id += 1
         return [row]
+
+    @property
+    def inserts(self):
+        return [(s, p) for s, p in self.calls if "INSERT INTO kyc_checks" in s]
 
 
 @pytest.fixture
@@ -67,7 +98,7 @@ def test_kyc_check_individual_applicant_passes(fake_db):
         "application_id": 1, "applicant_id": 1,
         "name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
         "address": "42 Main St, Springfield",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -87,7 +118,7 @@ def test_kyc_check_entity_applicant_with_no_ssn_or_dob_still_passes(fake_db):
         "application_id": 2, "applicant_id": 2,
         "name": "Acme Holdings LLC", "dob": "", "ssn": "",
         "address": "1 Corporate Way", "entity_type": "LLC",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -97,10 +128,14 @@ def test_kyc_check_entity_applicant_with_no_ssn_or_dob_still_passes(fake_db):
 
 
 def test_kyc_check_failing_applicant_missing_name_and_address(fake_db):
+    # Round 9: the applicants row is what CIP grades, so a failing applicant is
+    # one with nothing STORED. Sending empty strings in the body would now prove
+    # nothing at all -- the body is not read.
+    fake_db.applicant = stored_applicant(name="", address="")
+
     resp = client.post("/kyc/check", json={
         "application_id": 3, "applicant_id": 3,
-        "name": "", "dob": "1990-04-12", "ssn": "123-45-6789", "address": "",
-    })
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -113,19 +148,39 @@ def test_kyc_check_persists_all_four_cip_flags(fake_db):
         "application_id": 4, "applicant_id": 4,
         "name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
         "address": "42 Main St, Springfield",
-    })
+    }, headers=AUTH_HEADERS)
 
-    assert len(fake_db.calls) == 1
-    _, params = fake_db.calls[0]
-    assert params == (4, True, True, True, True)
+    assert len(fake_db.inserts) == 1
+    _, params = fake_db.inserts[0]
+    # (applicant_id, application_id, the four CIP booleans, then the verdict).
+    # application_id was added by db/migrations/0032 so the decision gate can ask
+    # "was THIS application verified" rather than "has this applicant ever been
+    # verified", which a repeat applicant's old row used to satisfy.
+    #
+    # cip_passed was added by 0033. The factors alone did not say whether CIP
+    # passed -- the rule that turns them into a verdict is applicant-type aware
+    # and lives in this service, so every other reader had to either duplicate it
+    # or, as the decision gate actually did, skip the question entirely.
+    assert params == (4, 4, True, True, True, True, True)
 
 
-def test_kyc_check_survives_db_failure_and_returns_check_id_negative_one(fake_db, monkeypatch):
-    # Characterizes the current swallow-and-continue behavior: a persistence
-    # failure is logged, not raised -- the caller still gets a 200 with
-    # check_id=-1 rather than an error surfaced back to them.
+def test_kyc_check_reports_a_persistence_failure_instead_of_faking_success(fake_db, monkeypatch):
+    """Review round 2 changed this behaviour, and the test with it.
+
+    This used to characterize swallow-and-continue: a persistence failure was
+    logged, not raised, and the caller got 200 with check_id=-1. That is a
+    "verified" answer with no compliance record behind it -- and once the
+    decision gate began requiring a persisted kyc_checks row, it also produced an
+    applicant who was told they were submitted and then blocked later with no
+    explanation. The old expectation is kept here as history rather than deleted,
+    because it was deliberate behaviour and its removal is the fix.
+    """
     def _boom(sql, params=None):
-        raise RuntimeError("db unavailable")
+        if "FROM applications" in sql:
+            return [dict(FULL_APPLICANT)]
+        if "INSERT INTO kyc_checks" in sql:
+            raise RuntimeError("db unavailable")
+        return [{"1": 1}]
 
     monkeypatch.setattr(kyc_router.db, "query", _boom)
 
@@ -133,7 +188,228 @@ def test_kyc_check_survives_db_failure_and_returns_check_id_negative_one(fake_db
         "application_id": 5, "applicant_id": 5,
         "name": "Jane Borrower", "dob": "1990-04-12", "ssn": "123-45-6789",
         "address": "42 Main St, Springfield",
-    })
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 503
+    assert "record" in resp.json()["detail"].lower()
+
+
+def test_an_entity_applicant_is_accepted_without_dob_or_ssn(fake_db):
+    """An LLC has no DOB or SSN, and this API must not require them.
+
+    Review finding: dob/ssn/address were required strings here while
+    origination's ApplicationIn has all three Optional. So an entity applicant --
+    which this service's own CIP logic explicitly clears on name and address
+    alone -- produced a 422, no kyc_checks row was written, intake still reported
+    "submitted", and the decision gate later refused the application. Every
+    entity application, every time.
+    """
+    resp = client.post("/kyc/check", json={
+        "application_id": 7, "applicant_id": 7,
+        "name": "Northgate Holdings LLC", "address": "1 Corporate Way",
+        "entity_type": "llc",
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200, f"entity applicant rejected: {resp.text[:200]}"
+    body = resp.json()
+    assert body["cip_passed"] is True
+    assert body["check_id"] > 0, "no CIP row was persisted, so decisioning will refuse it"
+    assert len(fake_db.inserts) == 1
+
+
+def test_a_sparse_individual_application_still_persists_a_result(fake_db):
+    """A missing field verifies as False -- it does not abort the check.
+
+    `run_cip` treats each field as possibly absent, so a sparse APPLICANT ROW
+    changes no verification behaviour; it only stops the check being rejected
+    before that logic runs. Round 9: sparse now means sparse in the database,
+    since that is what is graded.
+    """
+    fake_db.applicant = stored_applicant(address=None, dob=None, ssn=None)
+
+    resp = client.post("/kyc/check", json={
+        "application_id": 8, "applicant_id": 8,
+    }, headers=AUTH_HEADERS)
 
     assert resp.status_code == 200
-    assert resp.json()["check_id"] == -1
+    assert resp.json()["cip_passed"] is False, "no address, so CIP must not pass"
+    assert resp.json()["check_id"] > 0, "a failed CIP is still a recorded result"
+
+
+# --- review round 6: the pass rule must know who it is identifying ------------
+
+
+def test_an_individual_without_dob_or_ssn_does_not_pass_cip(fake_db):
+    """The hole round 5 opened, closed.
+
+    Making dob/ssn optional was right -- an entity has neither by design and was
+    getting a 422. But `cip_passed` was `name and address` for EVERYONE, and that
+    was only ever survivable because the schema forced individuals to send the
+    other two. The 422 was doing the work the predicate looked like it was doing.
+
+    Remove the 422 and a natural person with a name and an address alone gets a
+    durable `pass`. Everything downstream trusts that one boolean, so they reach
+    decisioning and can be approved as identified.
+    """
+    fake_db.applicant = stored_applicant(dob=None, ssn=None)
+
+    resp = client.post("/kyc/check", json={
+        "application_id": 4001, "applicant_id": 4001,
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cip_passed"] is False, (
+        "an individual with no date of birth and no SSN was recorded as having "
+        "passed CIP"
+    )
+    assert body["status"] == "fail"
+    # And it is still RECORDED. A failed CIP is an outcome, not an error.
+    assert body["check_id"] > 0
+
+
+def test_an_individual_with_all_four_factors_passes(fake_db):
+    """The tightened rule must not refuse a properly identified person."""
+    resp = client.post("/kyc/check", json={
+        "application_id": 4002, "applicant_id": 4002,
+        "name": "Dana Fictional", "address": "1 Elm St",
+        "dob": "1990-01-01", "ssn": "999-00-0000",
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json()["cip_passed"] is True
+
+
+def test_an_entity_still_passes_on_name_and_address(fake_db):
+    """Debt D11 is preserved deliberately, not extended.
+
+    An LLC clears with no natural person verified and no beneficial owner
+    captured. That gap is tracked and is not this PR's to close -- but it is also
+    not a reason to apply the entity rule to people, which is what the old
+    predicate did.
+    """
+    fake_db.applicant = stored_applicant(
+        name="Northgate Holdings LLC", address="1 Corporate Way",
+        dob=None, ssn=None, is_entity=True)
+
+    resp = client.post("/kyc/check", json={
+        "application_id": 4003, "applicant_id": 4003,
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cip_passed"] is True
+    assert body["dob_verified"] is False and body["ssn_verified"] is False
+
+
+def test_the_response_reports_the_factors_it_recorded(fake_db):
+    """The four booleans must be the recorded ones, not a reconstruction.
+
+    Origination used to rebuild them from `cip_passed` alone, so the intake
+    response could report `ssn_verified: true` while the persisted row said
+    false. This service knows the answer; it should say it.
+    """
+    fake_db.applicant = stored_applicant(ssn=None)
+
+    resp = client.post("/kyc/check", json={
+        "application_id": 4004, "applicant_id": 4004,
+    }, headers=AUTH_HEADERS)
+
+    body = resp.json()
+    assert body["name_verified"] is True
+    assert body["address_verified"] is True
+    assert body["dob_verified"] is True
+    assert body["ssn_verified"] is False, "no SSN is stored, so it cannot be verified"
+    assert body["cip_passed"] is False
+
+
+# --- review round 9: the evidence must come from the database ----------------
+
+
+def test_fabricated_pii_does_not_become_passing_evidence(fake_db):
+    """The forgery the linkage check did not actually stop.
+
+    `_require_matching_application` proved the application belonged to the
+    applicant, and then CIP was computed over the REQUEST BODY. So anyone holding
+    the shared internal token could post invented identity attributes against a
+    real application and this service would persist a passing compliance record
+    for them -- evidence in the record BSA/AML relies on, manufactured by the
+    caller. The IDs were verified; the thing being recorded was not.
+
+    Here the stored applicant is missing an SSN and an address. The request
+    supplies both, convincingly. The verdict must follow the database.
+    """
+    fake_db.applicant = stored_applicant(ssn=None, address=None)
+
+    resp = client.post("/kyc/check", json={
+        "application_id": 9001, "applicant_id": 9001,
+        "name": "Jane Borrower",
+        "dob": "1990-04-12",
+        "ssn": "999-99-9999",                       # invented
+        "address": "1 Fabricated Way, Nowhere",     # invented
+    }, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ssn_verified"] is False, (
+        "an SSN supplied in the request body was recorded as verified -- the "
+        "caller can manufacture identity evidence"
+    )
+    assert body["address_verified"] is False, (
+        "an address supplied in the request body was recorded as verified"
+    )
+    assert body["cip_passed"] is False, "fabricated PII produced a passing CIP record"
+
+    # And the persisted row agrees with the response, so the audit trail is not
+    # merely a different lie.
+    _, params = fake_db.inserts[0]
+    assert params[2:7] == (True, True, False, False, False), (
+        f"persisted factors {params[2:7]} do not match the stored applicant"
+    )
+
+
+def test_the_entity_rule_cannot_be_claimed_by_the_caller(fake_db):
+    """`entity_type` in the body must not select the weaker rule.
+
+    An entity clears CIP on name and address alone (D11). If the caller could
+    assert entity-ness, a natural person with no DOB and no SSN would be graded
+    as a company by setting one string -- turning a deliberate, tracked gap into
+    a general bypass.
+    """
+    fake_db.applicant = stored_applicant(dob=None, ssn=None, is_entity=False)
+
+    resp = client.post("/kyc/check", json={
+        "application_id": 9002, "applicant_id": 9002,
+        "entity_type": "llc",                        # the caller's claim
+    }, headers=AUTH_HEADERS)
+
+    assert resp.json()["cip_passed"] is False, (
+        "the caller selected the entity rule for a natural person and passed CIP "
+        "without a date of birth or an SSN"
+    )
+
+
+def test_the_verdict_is_unchanged_when_the_body_carries_no_pii_at_all(fake_db):
+    """The body's identity fields are unused, so omitting them must change nothing.
+
+    This is the positive half: if the two calls disagreed, some part of the
+    verdict would still be reading the request.
+    """
+    fake_db.applicant = stored_applicant()
+    with_pii = client.post("/kyc/check", json={
+        "application_id": 9003, "applicant_id": 9003,
+        "name": "Someone Else", "dob": "1900-01-01", "ssn": "000-00-0000",
+        "address": "Elsewhere",
+    }, headers=AUTH_HEADERS).json()
+
+    fake_db.applicant = stored_applicant()
+    without = client.post("/kyc/check", json={
+        "application_id": 9003, "applicant_id": 9003,
+    }, headers=AUTH_HEADERS).json()
+
+    for field in ("name_verified", "dob_verified", "address_verified",
+                  "ssn_verified", "cip_passed", "status"):
+        assert with_pii[field] == without[field], (
+            f"{field} changed when identity fields were added to the request, so "
+            f"the body still influences the verdict"
+        )
