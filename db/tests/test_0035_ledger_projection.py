@@ -471,6 +471,20 @@ def test_posted_payment_amount_cannot_invalidate_immutable_allocation(db):
     assert _exec(db, "SELECT amount FROM payments WHERE id=%s", (pay,))[0]["amount"] == 10
 
 
+@pytest.mark.parametrize("status", ["failed", "pending"])
+def test_posted_payment_capture_status_cannot_invalidate_immutable_credit(db, status):
+    loan = _a_loan(db)
+    pay = _a_payment(db, loan, "10.00")
+    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,payment_id) "
+              "VALUES(%s,'principal',-10,'payment',%s)", (loan, pay))
+    db.commit()
+
+    with pytest.raises(psycopg2.errors.RaiseException, match="capture status"):
+        _exec(db, "UPDATE payments SET auth_status=%s WHERE id=%s", (status, pay))
+    db.rollback()
+    assert _exec(db, "SELECT auth_status FROM payments WHERE id=%s", (pay,))[0]["auth_status"] == "captured"
+
+
 def test_legacy_applied_payment_amount_is_immutable_during_cutover(db):
     """Match servicing's current transaction: claim payment application, then
     update balances. The bridge entry has no payment_id, so the durable

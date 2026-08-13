@@ -249,10 +249,11 @@ CREATE CONSTRAINT TRIGGER ledger_payment_allocation_exact
 -- that immutable audit fact too. Prevent later edits from invalidating it.
 CREATE OR REPLACE FUNCTION reject_posted_payment_amount_change() RETURNS trigger AS $$
 BEGIN
-    IF NEW.amount IS DISTINCT FROM OLD.amount
+    IF (NEW.amount IS DISTINCT FROM OLD.amount
+        OR NEW.auth_status IS DISTINCT FROM OLD.auth_status)
        AND (EXISTS (SELECT 1 FROM ledger_entries WHERE payment_id = OLD.id)
             OR EXISTS (SELECT 1 FROM payment_applications WHERE payment_id = OLD.id)) THEN
-        RAISE EXCEPTION 'cannot change amount for posted payment %', OLD.id;
+        RAISE EXCEPTION 'cannot change amount or capture status for posted payment %', OLD.id;
     END IF;
     RETURN NEW;
 END $$ LANGUAGE plpgsql;
