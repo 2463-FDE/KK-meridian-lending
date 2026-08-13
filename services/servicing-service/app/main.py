@@ -30,6 +30,10 @@ app.include_router(loans.router)
 # W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
 # comment for why this exists across all 8 services now.
 Instrumentator().instrument(app).expose(app)
+# D7: reconciliation state is published by reading `reconciliation_runs`, because
+# the job that produces it runs in a separate process and its own gauges would
+# never reach this registry -- see reconciliation._ReconciliationCollector.
+reconciliation.register_metrics()
 
 
 @app.exception_handler(Exception)
@@ -336,8 +340,29 @@ def late_fee(loan_id: int,
 
 @app.get("/reconciliation/peek")
 def reconciliation_peek():
-    # Not a real control — just exposes the two totals. They don't tie out. (debt D7)
+    """The two totals, plus whether the control that compares them is running.
+
+    D7: this used to return the totals alone, which cannot distinguish "these
+    agree" from "nothing has checked since March". `last_successful_run` being
+    null is the honest answer for a system that has never run the job, and it is
+    the answer an operator needs before trusting the two numbers above it.
+    """
+    last_ok = reconciliation.last_successful_run()
     return {
         "ledger_total": reconciliation.ledger_total(),
         "settlement_total": reconciliation.settlement_total(),
+        # Not a control by itself -- see app/reconcile_job.py. These fields say
+        # whether the control has run, so a reader cannot mistake two equal
+        # numbers for a reconciliation that happened.
+        "last_successful_run": (
+            {"id": last_ok["id"], "at": str(last_ok["started_at"]),
+             "loans_compared": last_ok["loans_compared"]} if last_ok else None
+        ),
+        "recent_failures": [
+            {"id": r["id"], "at": str(r["started_at"]), "outcome": r["outcome"],
+             "breaks_found": r["breaks_found"], "break_value": str(r["break_value"]),
+             "error_code": r["error_code"]}
+            for r in reconciliation.recent_failures(limit=5)
+        ],
     }
+

@@ -331,12 +331,39 @@ CREATE TABLE IF NOT EXISTS payments (
     -- rows (before this column existed) default to 'captured' -- they really
     -- were, just without a formal record of it.
     auth_status TEXT NOT NULL DEFAULT 'captured',
+    -- When the processor CONFIRMED the capture (db/migrations/0040), written in
+    -- the same UPDATE that sets auth_status. Reconciliation scopes its window on
+    -- this rather than created_at: created_at is stamped at INSERT while the row
+    -- is still pending, so an authorization crossing midnight would put the
+    -- capture in the previous day's window and report a false break.
+    captured_at TIMESTAMPTZ,
     -- Review fix (db/migrations/0019): the processor's own authorization id,
     -- persisted in the SAME UPDATE that flips auth_status to 'captured' --
     -- a pending retry asks the processor for this via get_authorization()
     -- before ever calling authorize_charge() again, instead of blindly
     -- re-charging. See services/payment-service/app/payments.py.
     authorization_id TEXT,
+    -- The PROCESSOR's own settlement reference for this capture, e.g. PR-100231
+    -- (db/migrations/0041), written in the same UPDATE that sets auth_status.
+    -- This is the join key to the settlement file: authorization_id above is a
+    -- DIFFERENT identifier minted by our own authorization call and appears in
+    -- no settlement file, which is why reconciliation could only compare
+    -- per-loan totals and could therefore net two offsetting defects to zero.
+    -- NULL on rows captured before 0041; reconciliation reports those as
+    -- unreferenced_capture breaks rather than skipping them.
+    processor_ref TEXT,
+    -- Who captured this payment (db/migrations/0042). 'processor' means
+    -- payment-service obtained a real authorization and the row must appear in a
+    -- settlement file -- these are the only rows reconciliation compares.
+    -- 'servicing_legacy' is servicing-service's prototype POST /payments (D2),
+    -- which calls no processor, so no settlement line exists for it and
+    -- comparing it against one is a category error rather than a strict control.
+    -- 'unknown' is the default and covers rows written before the column:
+    -- counted by reconciliation, excluded from the comparison, because admitting
+    -- them would manufacture breaks out of missing evidence.
+    capture_source TEXT NOT NULL DEFAULT 'unknown'
+        CONSTRAINT payments_capture_source_known
+        CHECK (capture_source IN ('processor', 'servicing_legacy', 'unknown')),
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
@@ -398,3 +425,53 @@ CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
 CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
 
 CREATE INDEX IF NOT EXISTS idx_kyc_checks_application_id ON kyc_checks(application_id);
+
+-- Mirrors db/migrations/0040. Reconciliation's window predicate reads this on
+-- every run; without it here a fresh install and a migrated one would differ,
+-- which test_migration_paths_converge catches -- and did.
+CREATE INDEX IF NOT EXISTS idx_payments_captured_at
+    ON payments (capture_source, captured_at)
+ WHERE auth_status = 'captured';
+
+-- Mirrors db/migrations/0041. One settlement line, one capture: two payment
+-- rows claiming the same processor reference is either a double-recorded
+-- capture or a mis-keyed one, and either makes the transaction-level
+-- comparison ambiguous exactly where it has to be exact. Partial so the
+-- unreferenced legacy rows do not collide with each other.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_processor_ref
+    ON payments (processor_ref)
+ WHERE processor_ref IS NOT NULL;
+
+-- D7: one row per reconciliation run (db/migrations/0034). Counts and totals
+-- only -- no card data, no applicant identifiers, no processor references. A
+-- control that leaves no trace is indistinguishable from one that never ran.
+CREATE TABLE IF NOT EXISTS reconciliation_runs (
+    id              BIGSERIAL   PRIMARY KEY,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ,
+    outcome         TEXT        NOT NULL CHECK (outcome IN ('ok','breach','error')),
+    loans_compared  INTEGER     NOT NULL DEFAULT 0,
+    -- How fine the comparison was: it is keyed on (loan_id, processor_ref), and
+    -- a run matching many loans but few references compared coarse per-loan
+    -- totals, which is the state this control was fixed out of. Captures with no
+    -- reference cannot be matched at all and are counted separately AND reported
+    -- as breaks (db/migrations/0034, 0041).
+    references_compared   INTEGER NOT NULL DEFAULT 0,
+    unreferenced_captures INTEGER NOT NULL DEFAULT 0,
+    -- Captures excluded from the comparison entirely -- the legacy servicing
+    -- writer and rows of unestablished provenance (db/migrations/0042).
+    out_of_scope_captures INTEGER NOT NULL DEFAULT 0,
+    breaks_found    INTEGER     NOT NULL DEFAULT 0,
+    break_value     NUMERIC(14,2) NOT NULL DEFAULT 0,
+    threshold_value NUMERIC(14,2) NOT NULL DEFAULT 0,
+    breaks          JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    -- The period covered and the file read (db/migrations/0034). A result is not
+    -- interpretable without them.
+    window_start    DATE,
+    window_end      DATE,
+    source          JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    error_code      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_outcome_time
+    ON reconciliation_runs (outcome, started_at DESC);

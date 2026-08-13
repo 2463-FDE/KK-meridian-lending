@@ -4,6 +4,14 @@
 # LangSmith only ever covered the LLM calls in loan-assistant.
 global:
   scrape_interval: 15s
+  evaluation_interval: 30s
+
+# Reconciliation alerting (D7). These rules are EVALUATED by this Prometheus and
+# visible at /alerts. There is no Alertmanager in this compose file, so nothing
+# is routed anywhere -- see the header of alerts.yml and docs/runbook.md, which
+# say so in the same words.
+rule_files:
+  - /etc/prometheus/alerts.yml
 
 scrape_configs:
   - job_name: meridian-services
