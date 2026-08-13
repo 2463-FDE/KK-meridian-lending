@@ -163,3 +163,149 @@ def test_the_service_credential_is_not_treated_as_a_user_credential():
         "the spec does not distinguish the shared service token from a user "
         "credential, which is the escalation path an implementer would take"
     )
+
+
+# --- proposal-side validity: the review's central finding ---------------------
+
+
+@pytest.mark.parametrize("requirement", [f"REQ-VAL-{n}" for n in range(1, 15)])
+def test_the_proposal_validity_requirements_are_all_present(requirement):
+    """Guarding only the approval step puts the whole control on one tired human.
+
+    The role matrix lets a CSR raise a proposal, and approval copies the
+    proposal's fields straight into the ledger -- so an unconstrained proposal
+    that gets rubber-stamped under queue pressure becomes a real, irreversible
+    money movement. These requirements are what stop a bad request entering the
+    queue at all.
+    """
+    assert requirement in SPEC.read_text(encoding="utf-8"), (
+        f"{requirement} is gone from spec 0002, so proposal creation is "
+        "unconstrained in whatever it governed"
+    )
+
+
+@pytest.mark.parametrize("criterion", [f"AC-{n}" for n in range(1, 23)])
+def test_every_acceptance_criterion_is_present(criterion):
+    """A numbered criterion that vanishes takes its rejection path with it, and
+    the gap is invisible: the remaining numbers still read as a complete list."""
+    text = SPEC.read_text(encoding="utf-8")
+    assert f"**{criterion}**" in text, f"{criterion} is missing from spec 0002"
+
+
+def test_the_spec_invents_no_threshold_amount():
+    """The reported finding, and the one most likely to come back.
+
+    An earlier draft set MAKER_CHECKER_ADMIN_THRESHOLD to $500.00. Nobody chose
+    that number -- it is in no policy document and no stakeholder stated it. A
+    specification that invents a monetary control limit and writes it in the tone
+    of a requirement is what `policies/underwriting_guidelines.md` already had to
+    be corrected for, where published DTI cutoffs described nothing the code
+    evaluated.
+    """
+    text = SPEC.read_text(encoding="utf-8")
+    threshold_lines = [
+        line for line in text.splitlines()
+        if "MAKER_CHECKER_ADMIN_THRESHOLD" in line or "MAKER_CHECKER_MAX_DELTA" in line
+    ]
+    assert threshold_lines, "the spec no longer names a configured threshold at all"
+    for line in threshold_lines:
+        if "default" not in line.lower():
+            continue
+        assert "no default" in line.lower(), (
+            f"the spec gives a configured money limit a default: {line.strip()!r}"
+        )
+    # No bare dollar figure may be attached to either limit.
+    for line in threshold_lines:
+        assert not re.search(r"\$\s?\d", line), (
+            f"the spec states a dollar figure for a limit it does not own: "
+            f"{line.strip()!r}"
+        )
+
+
+def test_the_limits_fail_closed_when_missing():
+    text = SPEC.read_text(encoding="utf-8")
+    assert "REQ-CFG-2" in text and "refuse to start" in text, (
+        "the spec does not require the service to fail closed on a missing "
+        "control limit, so an unset variable silently becomes 'no threshold'"
+    )
+
+
+def test_the_spec_does_not_claim_the_control_is_implemented():
+    """This document specifies a control. Merging it changes nothing about what
+    the running system permits, and saying so is the point: this codebase has
+    twice shipped a document that read as a description of a working control and
+    was a description of an intention.
+    """
+    text = SPEC.read_text(encoding="utf-8")
+    assert "does not implement it" in text.lower(), (
+        "the spec does not state that nothing in it is implemented yet"
+    )
+    assert "Draft" in text, "the spec is no longer marked as a draft"
+
+
+def test_the_spec_agrees_with_adr_0011_on_what_is_frozen():
+    """The two documents describe one control. ADR 0011's transition trigger
+    freezes `reason` and `requested_at`; a spec whose immutability criterion
+    omitted them would have an implementer building a weaker control and passing
+    their own acceptance tests.
+    """
+    text = SPEC.read_text(encoding="utf-8")
+    ac12 = next(line for line in text.splitlines() if line.startswith("- **AC-12**"))
+    block = text[text.index(ac12):text.index(ac12) + 900]
+    for column in ("reason", "requested_at", "requested_role", "resolved_role"):
+        assert column in block, (
+            f"AC-12 does not require {column!r} to be immutable, while ADR 0011's "
+            "transition trigger freezes it"
+        )
+
+
+def test_the_role_the_ledger_records_is_specified():
+    """ADR 0011 overwrites both actor_id AND actor_role from the proposal.
+    A spec that only tracked the ids would leave the role caller-supplied on the
+    entry whose purpose is recording who authorised the movement."""
+    text = SPEC.read_text(encoding="utf-8")
+    assert "resolved_role" in text and "actor_role" in text, (
+        "the spec does not say where the ledger entry's actor_role comes from"
+    )
+
+
+# --- and once ADR 0011 is on the same branch, agreement is checked directly ---
+
+ADR_0011 = REPO / "adr" / "0011-maker-checker-for-servicing-adjustments.md"
+
+adr_present = pytest.mark.skipif(
+    not ADR_0011.is_file(),
+    reason="ADR 0011 is on PR #20's branch, not this one",
+)
+
+
+@adr_present
+@pytest.mark.parametrize("column", ["reason", "requested_at", "requested_role",
+                                    "resolved_role"])
+def test_the_spec_and_the_adr_freeze_the_same_fields(column):
+    """Checked against the ADR itself, not against the spec's own restatement.
+
+    Two documents describing one control drift silently, and this pair is the
+    likeliest to: the ADR states what the database enforces and the spec states
+    what the API must do about it. Skipped while they live on different branches;
+    binding the moment both are on one.
+    """
+    adr = ADR_0011.read_text(encoding="utf-8")
+    start = adr.index("CREATE FUNCTION pending_movements_single_transition")
+    frozen = adr[start:adr.index("$$ LANGUAGE plpgsql;", start)]
+    assert f"NEW.{column}" in frozen, (
+        f"ADR 0011 no longer freezes {column!r}, so spec 0002's AC-12 requires "
+        "an immutability the database does not provide"
+    )
+    assert column in SPEC.read_text(encoding="utf-8")
+
+
+@adr_present
+def test_the_spec_does_not_contradict_the_adr_on_self_approval():
+    adr = ADR_0011.read_text(encoding="utf-8")
+    assert "no_self_approval" in adr
+    spec = SPEC.read_text(encoding="utf-8")
+    assert "including admin" in spec, (
+        "the spec no longer says the no-self-approval rule has no exception, "
+        "while the ADR enforces it with a table constraint that has none"
+    )
