@@ -99,11 +99,20 @@ class _FakeDb:
             return [self._by_key[idempotency_key]]
         if stmt.startswith("UPDATE"):
             if "auth_status = 'captured'" in stmt:
-                # Review fix: auth_status and authorization_id are now written
-                # in the same UPDATE -- params carries both.
-                auth_id, payment_id = params
+                # Review fix: auth_status and authorization_id are written in
+                # the same UPDATE. The recovery path also carries the
+                # processor's own capture time (db/migrations/0040), so that
+                # statement has three parameters and the fresh-capture one has
+                # two -- distinguished by the SQL, not by the count, so a
+                # future third form cannot be silently mis-parsed here.
+                if "COALESCE" in stmt:
+                    auth_id, captured_at, payment_id = params
+                else:
+                    auth_id, payment_id = params
+                    captured_at = None
                 self._by_id[payment_id]["auth_status"] = "captured"
                 self._by_id[payment_id]["authorization_id"] = auth_id
+                self._by_id[payment_id]["captured_at"] = captured_at
             elif "auth_status = 'failed'" in stmt:
                 (payment_id,) = params
                 self._by_id[payment_id]["auth_status"] = "failed"

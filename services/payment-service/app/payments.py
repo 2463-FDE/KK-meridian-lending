@@ -317,6 +317,20 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                     "re-charging", safe_key, payment_id,
                 )
                 auth_id = existing_auth_id
+                # The PROCESSOR's capture time, not ours.
+                #
+                # The money was taken when the processor took it -- possibly
+                # yesterday, before the crash that left this row pending. Since
+                # reconciliation windows on `captured_at`, stamping now() here
+                # would place the capture on the retry date while the settlement
+                # file has it on the original one: a settlement-only break on
+                # day N and a ledger-only break on day N+1, two false findings
+                # out of one crash.
+                #
+                # None when the processor reports no timestamp, and the SQL
+                # below then falls back to now() -- the previous behaviour and
+                # the best estimate available, but a fallback, not the default.
+                captured_at = processor.get_authorization_captured_at(idempotency_key)
             else:
                 # This retry's own processor_token since the token itself is
                 # never persisted (ADR 0008); idempotency_key is passed along
@@ -338,16 +352,15 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                         "payment_id": payment_id, "loan_id": row["loan_id"],
                         "status": "failed", "applied_amount": float(row["amount"]),
                     }
+                # This branch charged just now, so our clock IS the capture time.
+                captured_at = None
             db.query(
                 "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
-                # captured_at travels with auth_status, never separately.
-                # Reconciliation scopes its window on it; created_at is
-                # stamped at INSERT while the row is still pending, so an
-                # authorization that crosses midnight lands the capture in
-                # the previous day's window and reports a false break
-                # (db/migrations/0040).
-                "captured_at = now() WHERE id = %s",
-                (auth_id, payment_id),
+                # captured_at travels with auth_status, never separately
+                # (db/migrations/0040). COALESCE so a recovered capture keeps
+                # the processor's own timestamp and a fresh one uses ours.
+                "captured_at = COALESCE(%s::timestamptz, now()) WHERE id = %s",
+                (auth_id, captured_at, payment_id),
             )
 
         if row["applied_at"] is None:

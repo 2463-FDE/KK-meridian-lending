@@ -70,6 +70,9 @@ class ChargeDeclinedError(RuntimeError):
 # call instead of charging again. Keyed on idempotency_key, not token/amount,
 # since a key is the thing a retry is guaranteed to repeat.
 _stub_authorizations: dict[str, str] = {}
+# Capture timestamps for the stub processor, so the recovery path can be
+# exercised across a date boundary without a real processor.
+_stub_captured_at: dict[str, str] = {}
 
 
 def _stub_authorize(processor_token: str, amount: float, idempotency_key: str = None) -> str:
@@ -128,6 +131,55 @@ def get_authorization(idempotency_key: str) -> str | None:
     if not body.get("approved"):
         return None
     return body["authorization_id"]
+
+
+def get_authorization_captured_at(idempotency_key: str) -> str | None:
+    """The processor's OWN capture timestamp for an existing authorization.
+
+    Used by the pending-row recovery path. `get_authorization()` proves the
+    processor already has the charge; this says WHEN it took it.
+
+    Why it matters: a service that died after processor approval leaves the row
+    'pending'. The borrower retries -- possibly the next morning -- and recording
+    `captured_at = now()` would place the capture on the retry date while the
+    processor's settlement file has it on the original one. Since reconciliation
+    windows on `captured_at`, that manufactures a settlement-only break on day N
+    and a ledger-only break on day N+1: two false findings from one crash.
+
+    Returns None when the processor does not report a timestamp, or in a stub
+    configuration that never recorded one. The caller then falls back to
+    `now()`, which is the previous behaviour and the best available estimate --
+    but it is a fallback, not the default.
+    """
+    if not idempotency_key:
+        return None
+    if not PROCESSOR_API_KEY:
+        if not ALLOW_PAYMENT_STUB:
+            raise ProcessorUnavailableError(
+                f"PROCESSOR_API_KEY is not set (ENVIRONMENT={ENVIRONMENT!r}) -- refusing "
+                "to read a capture timestamp from a fake processor outside development/test."
+            )
+        return _stub_captured_at.get(idempotency_key)
+
+    try:
+        resp = httpx.get(
+            f"{PROCESSOR_BASE_URL}/charges",
+            params={"idempotency_key": idempotency_key},
+            headers={"Authorization": f"Bearer {PROCESSOR_API_KEY}"},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:
+        if not ALLOW_PAYMENT_STUB:
+            raise ProcessorUnavailableError(f"processor lookup call failed: {exc}") from exc
+        log.warning("processor capture-time lookup failed (%s) -- using stub", exc)
+        return _stub_captured_at.get(idempotency_key)
+
+    if not body.get("approved"):
+        return None
+    # Named for what the processor calls it; absent on older stubs.
+    return body.get("captured_at") or body.get("created")
 
 
 def authorize_charge(processor_token: str, amount: float, idempotency_key: str = None) -> str:

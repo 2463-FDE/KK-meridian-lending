@@ -42,6 +42,7 @@ exit code, a `reconciliation_runs` row, and Prometheus gauges on the existing
 being fixed for.
 """
 import csv
+import datetime as dt
 import hashlib
 import io
 import json
@@ -262,19 +263,41 @@ def _settlement_by_loan(path=None):
     totals: dict[int, Decimal] = {}
     dates: list[str] = []
     rows_read = 0
+    undated = 0
     for row in csv.DictReader(io.StringIO(raw.decode("utf-8"))):
         rows_read += 1
         loan_id = int(row["loan_id"])
         amount = Decimal(row["amount"])
         signed = amount if row["type"] == "capture" else -amount
         totals[loan_id] = (totals.get(loan_id, Decimal("0")) + signed).quantize(CENT)
-        if row.get("settlement_date"):
-            dates.append(row["settlement_date"])
+
+        # A row with no usable settlement_date is COUNTED but cannot be SCOPED.
+        #
+        # Undated rows used to be added to `totals` and skipped for the window,
+        # so a file with one dated row and one undated row compared both rows'
+        # money against a window derived from the dated one alone. An
+        # unknown-period capture or refund could then invent a break or hide a
+        # real one -- and the run still recorded a completed comparison, which
+        # is the vacuous-success defect in a subtler form: partially scoped
+        # evidence presented as whole evidence.
+        settlement_date = (row.get("settlement_date") or "").strip()
+        if not settlement_date:
+            undated += 1
+            continue
+        try:
+            dt.date.fromisoformat(settlement_date)
+        except ValueError:
+            undated += 1
+            continue
+        dates.append(settlement_date)
 
     window = (min(dates), max(dates)) if dates else (None, None)
     identity = {
         "file": os.path.basename(path),
         "rows": rows_read,
+        # Surfaced so the vacuity check can fail the run rather than silently
+        # comparing money it cannot place in a period.
+        "undated_rows": undated,
         "sha256": hashlib.sha256(raw).hexdigest()[:16],
     }
     return totals, window, identity
@@ -355,6 +378,12 @@ _VACUITY_CHECKS = (
         "NothingCompared",
         lambda r: r.get("loans_compared", 0) == 0,
         "no loan appeared on either side of the comparison",
+    ),
+    (
+        "PartiallyDatedSettlementFile",
+        lambda r: (r.get("source") or {}).get("undated_rows", 0) > 0,
+        "some settlement rows have no usable settlement_date, so their money "
+        "cannot be placed in the window the rest of the file defines",
     ),
 )
 
