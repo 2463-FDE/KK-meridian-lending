@@ -596,6 +596,7 @@ is not recoverable.
 | **PR-2** | `ledger_entries` (no approval columns — see ADR 0011), the triggers, and the back-fill | Parity green PER LOAN, not in aggregate, and **excluding `interest`**, for every loan with no balance movement since its opening entry. Loans that did move are expected to differ — see the delta pass |
 | **PR-3** | The three MACHINE writers move to the ledger — `apply_payment`, `apply_payment_once` and `delinquency.assess_late_fee` outside the balance module, and the legacy `POST /payments` path converted to `INSERT ... RETURNING id` + `apply_payment_once()` so its entries carry a real `payment_id` | PR-1's test now passes. **D3 closes.** Gate: `grep 'UPDATE balances'` across `services/` returns the projection trigger's own statement **and the two staff paths** (`adjust_balance`, `waive_fee`), which are still direct writers until PR-5. The zero-direct-writer form of this check belongs to PR-5 alone -- requiring it at PR-3 would either block PR-3 for ever or force the staff paths to convert before an approval path exists, which is the unapproved-movement risk this ADR is avoiding |
 | **PR-4** | *(ADR 0011)* `pending_movements`, `ledger_entries.pending_movement_id` and the `ALTER` closing the cycle, `resolve_pending_movement()`, maker-checker on adjust and waive | Tests: self-approval refused; a resolved proposal cannot be re-resolved; an approval writes exactly one ledger entry whose loan, component, amount and entry_type match the proposal; a rejection writes none; two concurrent approvers produce one entry |
+| **PR-5** | The two STAFF writers move to the ledger — `balance.py::adjust_balance` and `balance.py::waive_fee`, each now raising a `pending_movements` proposal and writing its entry only on approval (PR-4) — then the direct-write guard is attached to `balances` | Gate: `grep 'UPDATE balances'` across `services/` now returns the projection trigger's statement and **nothing else**; a direct `UPDATE balances` raises; invariant 3 becomes true here and not before; per-loan parity green after the cutover freeze is released (G4, G5) |
 | **PR-6** | *(separate change, not this ADR)* the payment waterfall — D14 | Allocation tests: order, short payments, partial periods |
 
 **The back-fill is the risky step, and it is lossy in one direction that must be
@@ -650,11 +651,20 @@ decided differently without contradicting anything here. The single exception is
 the one above: **enabling the write-guard requires ADR 0011.** Optional to the
 decision, required for the last step of the rollout.
 
-**PR-2 ships no maker-checker columns at all.** Not
-`pending_movement_id`, not `approved_required`, not `approved_at`. Every one of
-them exists to serve an approval workflow this ADR does not decide, and ADR 0011
-adds all three together with the table that gives them meaning and the trigger
-that enforces them.
+**PR-2 ships no maker-checker columns at all.** Not `pending_movement_id`, and
+not the `approved_required` / `approved_at` pair that an earlier draft of this
+plan proposed.
+
+ADR 0011 adds **`pending_movement_id` only**, together with the
+`pending_movements` table that gives it meaning and the trigger that enforces
+it. It deliberately does **not** add `approved_required` or `approved_at` --
+approval state lives on the proposal, so there is no denormalised copy on
+`ledger_entries` that can drift out of step with it.
+
+An earlier revision of this paragraph listed all three columns as arriving with
+ADR 0011. That contradicted 0011 -- which says the other two exist in neither
+document -- and would have led an implementer to build exactly the duplicated
+state both ADRs reject.
 
 The rule that keeps this honest: a column belongs in the migration that can
 enforce its invariant. `approved_required` in a ledger-only schema is a boolean
@@ -699,6 +709,7 @@ Not in this ADR, and not in whatever PR implements its first step:
 | **PR-2** | Ledger schema + projection trigger migration | Runnable DDL belongs where it executes and can be tested | Parity per loan, seeded and back-filled, with `interest` excluded (it projects nowhere) |
 | **PR-3** | Write-path conversion, machine paths only — the staff pair waits for PR-4 | Independently revertible; this is the step that touches live money | PR-1's test now passes. **D3 closes** |
 | **PR-4** | Maker-checker: `pending_movements`, `resolve_pending_movement()`, adjust and waive | Its own design decision (see above), reviewable on its own merits | Every numbered requirement above, each failing when removed |
+| **PR-5** | Staff-path conversion + write-guard | Cannot precede PR-4: converting `adjust_balance` and `waive_fee` before an approval path exists would write unapproved staff money movements into a table that cannot be corrected | A direct `UPDATE balances` raises; zero direct writers remain outside the projection; parity green per loan |
 | **PR-6** | Payment waterfall | The allocation algorithm is unrelated to how balances are stored | Allocation tests: order, short payments, partial periods |
 
 Explicitly **not** goals of any of the above:

@@ -203,3 +203,56 @@ def test_the_pr3_gate_does_not_require_the_pr5_invariant():
         "says are still direct until PR-5."
     )
     assert "PR-5" in row, "the PR-3 gate does not say where the strict check belongs"
+
+
+def test_the_migration_plan_lists_every_step_from_1_to_6():
+    """A step named in the prose but absent from the plan cannot be executed.
+
+    The tables jumped PR-4 -> PR-6, so PR-5 -- the step where the money-table
+    write boundary is actually enforced -- had no row, no gate and no
+    deliverable, while the surrounding text kept referring to it.
+    """
+    text = _text(A10)
+    for table_header in ("| Step | ", "| PR | "):
+        pass
+    rows = [l for l in text.splitlines() if l.startswith("| **PR-")]
+    assert rows, "no PR rows found at all"
+    labels = [re.match(r"\| \*\*(PR-\d)\*\*", r).group(1) for r in rows]
+    for n in range(1, 7):
+        assert f"PR-{n}" in labels, (
+            f"PR-{n} is described in the text but has no row in any plan table"
+        )
+
+
+def test_no_adr_says_0011_ships_approved_required_or_approved_at():
+    """0010 said ADR 0011 adds `pending_movement_id`, `approved_required` and
+    `approved_at`; 0011 says the last two exist in neither.
+
+    Approval state lives on the proposal precisely so no denormalised copy on
+    `ledger_entries` can drift. An implementer following the contradiction would
+    build the duplicated state both ADRs reject.
+    """
+    for path in (A10, A11):
+        text = _text(path)
+        for line in text.splitlines():
+            if re.search(r"\b0011\b", line) and re.search(r"adds all three", line):
+                raise AssertionError(f"{path.name}: {line.strip()!r}")
+
+
+def test_a_resolved_proposal_can_still_gain_its_ledger_entry_link():
+    """ADR 0011's own approval order requires one post-resolution UPDATE.
+
+    The transition trigger refused every UPDATE once `resolution` was set, so
+    step 3 -- writing `ledger_entry_id` back -- would raise and no staff
+    adjustment could ever complete. The trigger must allow that one write.
+    """
+    text = _text(A11)
+    fn_start = text.index("CREATE FUNCTION pending_movements_single_transition")
+    fn = text[fn_start:text.index("$$ LANGUAGE plpgsql;", fn_start)]
+    assert "ledger_entry_id" in fn, (
+        "the transition trigger never mentions ledger_entry_id, so it refuses "
+        "the linkage its own approval sequence requires"
+    )
+    assert "OLD.ledger_entry_id IS NOT NULL" in fn, (
+        "the trigger does not prevent the link being overwritten once set"
+    )

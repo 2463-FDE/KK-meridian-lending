@@ -156,22 +156,68 @@ CREATE TABLE pending_movements (
 -- question about the latest writer rather than about a decision.
 CREATE FUNCTION pending_movements_single_transition() RETURNS trigger AS $$
 BEGIN
-    IF OLD.resolution IS NOT NULL THEN
-        RAISE EXCEPTION 'pending movement % is already %', OLD.id, OLD.resolution;
-    END IF;
-    IF NEW.loan_id     IS DISTINCT FROM OLD.loan_id
-    OR NEW.component   IS DISTINCT FROM OLD.component
-    OR NEW.amount      IS DISTINCT FROM OLD.amount
-    OR NEW.entry_type  IS DISTINCT FROM OLD.entry_type
+    -- The substance never changes, resolved or not. Checked first so it applies
+    -- to both branches below.
+    IF NEW.loan_id      IS DISTINCT FROM OLD.loan_id
+    OR NEW.component    IS DISTINCT FROM OLD.component
+    OR NEW.amount       IS DISTINCT FROM OLD.amount
+    OR NEW.entry_type   IS DISTINCT FROM OLD.entry_type
     OR NEW.requested_by IS DISTINCT FROM OLD.requested_by THEN
         RAISE EXCEPTION 'the substance of a pending movement is immutable';
     END IF;
+
+    IF OLD.resolution IS NOT NULL THEN
+        -- Already resolved. Exactly ONE further write is legal: attaching the
+        -- ledger entry this approval produced, once, from NULL.
+        --
+        -- An earlier revision of this ADR refused every post-resolution UPDATE
+        -- outright, which made its own approval order impossible: mark
+        -- approved, insert the entry, then write ledger_entry_id back. That
+        -- third step hit this trigger and raised, so no staff adjustment or fee
+        -- waiver could ever complete. The rule was right and the exception was
+        -- missing.
+        --
+        -- Narrow on purpose. The resolution, the resolver and the substance are
+        -- all still frozen; only a NULL link may be filled, and only once, so
+        -- an entry cannot be swapped for a different one afterwards.
+        IF OLD.ledger_entry_id IS NOT NULL THEN
+            RAISE EXCEPTION 'pending movement % is already linked to entry %',
+                OLD.id, OLD.ledger_entry_id;
+        END IF;
+        IF NEW.ledger_entry_id IS NULL THEN
+            RAISE EXCEPTION 'pending movement % is already %', OLD.id, OLD.resolution;
+        END IF;
+        IF NEW.resolution  IS DISTINCT FROM OLD.resolution
+        OR NEW.resolved_by IS DISTINCT FROM OLD.resolved_by
+        OR NEW.resolved_at IS DISTINCT FROM OLD.resolved_at THEN
+            RAISE EXCEPTION 'a resolved movement may only gain its ledger entry link';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     RETURN NEW;
 END $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER pending_movements_one_way
     BEFORE UPDATE ON pending_movements
     FOR EACH ROW EXECUTE FUNCTION pending_movements_single_transition();
+
+**The approval sequence this permits, stated explicitly because the trigger is
+what enforces it:**
+
+1. `UPDATE pending_movements SET resolution='approved', resolved_by=…,
+   resolved_at=now() WHERE id=… AND resolution IS NULL` — the compare-and-swap
+   that decides who approved it. Zero rows means somebody else already resolved
+   it, and the caller stops.
+2. `INSERT INTO ledger_entries (…, pending_movement_id) VALUES (…)` — the entry,
+   carrying the proposal it came from.
+3. `UPDATE pending_movements SET ledger_entry_id=… WHERE id=…` — the link back.
+   This is the one post-resolution write the trigger allows, and only from NULL.
+
+All three run in one transaction, so a crash between them leaves no approved
+proposal without its entry. Step 3 is separate only because the entry's id does
+not exist until step 2 has run; a single statement would need the id before it
+was generated.
 
 -- The approved entry must BE the movement that was approved. A unique link, so
 -- one approval can never yield two entries and an entry cannot be attributed to
