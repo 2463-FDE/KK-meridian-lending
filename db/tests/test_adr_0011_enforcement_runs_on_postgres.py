@@ -289,7 +289,16 @@ def test_an_approval_with_no_entry_still_fails_at_commit(conn):
 
 
 def test_a_rejection_cannot_carry_an_entry(conn):
-    """The reverse direction of the same rule."""
+    """The reverse direction of the same rule, and it is now unreachable twice
+    over.
+
+    An entry belonging to a rejected proposal cannot exist -- the validation
+    trigger on `ledger_entries` refuses to create one for a proposal that is not
+    approved -- so the only entry available to attach here belongs to somebody
+    else, and the ownership check refuses it first. The refusal is more specific
+    than it used to be, which is the point: "that entry is not yours" says more
+    than "a rejection may not have one".
+    """
     with conn.cursor() as cur:
         movement_id = _propose(cur)
         _approve(cur, movement_id)
@@ -309,7 +318,7 @@ def test_a_rejection_cannot_carry_an_entry(conn):
                 "UPDATE pending_movements SET ledger_entry_id = "
                 "(SELECT min(id) FROM ledger_entries) WHERE id = %s", (other,)
             )
-        assert "produces no ledger entry" in str(excinfo.value)
+        assert "does not belong to pending movement" in str(excinfo.value)
     conn.rollback()
 
 
@@ -655,4 +664,98 @@ def test_a_bulk_delete_cannot_slip_past_the_row_trigger(conn):
         cur.execute("SELECT count(*) FROM pending_movements")
         assert cur.fetchone()[0] == 2
         assert first != second
+    conn.rollback()
+
+
+# --- both directions of the link, not one -------------------------------------
+
+def test_a_proposal_cannot_be_resolved_and_linked_in_one_statement(conn):
+    """The reported bypass.
+
+    The strict `ledger_entry_id` rules ran only once `OLD.resolution IS NOT
+    NULL`, so a single UPDATE could set `resolution = 'approved'` together with
+    `ledger_entry_id = <any existing row>` and pass the transition trigger
+    entirely -- and the commit-time check, which asks only whether an approved
+    proposal has *an* entry, would then agree.
+
+    The entry cannot exist yet in any case: the validation trigger on
+    `ledger_entries` requires the proposal to be approved already, so the entry is
+    written after this statement, never before it.
+    """
+    with conn.cursor() as cur:
+        first = _propose(cur)
+        entry_id = _approve(cur, first)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        second = _propose(cur, reason="a second request")
+        with pytest.raises(psycopg2.errors.RaiseException) as excinfo:
+            cur.execute(
+                "UPDATE pending_movements SET resolution = 'approved', "
+                "resolved_by = %s, resolved_role = 'underwriter', "
+                "resolved_at = now(), ledger_entry_id = %s WHERE id = %s",
+                (CHECKER, entry_id, second),
+            )
+        assert "does not belong to pending movement" in str(excinfo.value)
+    conn.rollback()
+
+
+def test_an_approval_cannot_point_at_another_proposals_entry(conn):
+    """The two tables link in both directions and only one was checked.
+
+    `ledger_entries.pending_movement_id` is UNIQUE and the validation trigger
+    makes an entry name an approved proposal it matches -- but nothing made the
+    proposal's own pointer agree with that. An audit record pointing at the wrong
+    movement is worse than one pointing at none: it reads as evidence.
+    """
+    with conn.cursor() as cur:
+        first = _propose(cur)
+        entry_id = _approve(cur, first)
+        second = _propose(cur, reason="a second request")
+        _approve(cur, second)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        # `second` is already linked, so the "already linked" rule fires first.
+        # A proposal resolved without its link is the case that reaches the new
+        # check, so build one the only way the trigger allows: reject it, then
+        # try to attach an entry belonging to someone else.
+        third = _propose(cur, reason="a third request")
+        cur.execute(
+            "UPDATE pending_movements SET resolution = 'rejected', resolved_by = %s, "
+            "resolved_role = 'underwriter', resolved_at = now() WHERE id = %s",
+            (CHECKER, third),
+        )
+        with pytest.raises(psycopg2.errors.RaiseException) as excinfo:
+            cur.execute(
+                "UPDATE pending_movements SET ledger_entry_id = %s WHERE id = %s",
+                (entry_id, third),
+            )
+        assert "does not belong to pending movement" in str(excinfo.value)
+    conn.rollback()
+
+
+def test_the_documented_sequence_is_still_the_one_that_works(conn):
+    """Guard the guard.
+
+    A rule that refused every link would satisfy both tests above and block every
+    approval -- which is the failure this file was created for in the first
+    place.
+    """
+    with conn.cursor() as cur:
+        movement_id = _propose(cur)
+        entry_id = _approve(cur, movement_id)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(
+            "SELECT le.pending_movement_id FROM ledger_entries le "
+            "JOIN pending_movements pm ON pm.ledger_entry_id = le.id "
+            "WHERE pm.id = %s", (movement_id,)
+        )
+        assert cur.fetchone()[0] == movement_id, (
+            "the two pointers do not agree with each other"
+        )
     conn.rollback()

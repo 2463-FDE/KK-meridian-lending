@@ -20,8 +20,12 @@ What must hold for an implementation to be this decision.
    after approval is a note rather than evidence.
 3. **No self-approval.** The requester may not be the approver, enforced at the
    database and inside the resolving function.
-4. **An approval produces exactly one ledger entry; a rejection produces none.**
-   Checked at COMMIT, because the resolving transaction is legitimately mid-state.
+4. **An approval produces exactly one ledger entry; a rejection produces none**,
+   and the entry the proposal points at must be the entry that points back at it.
+   Checked at COMMIT, because the resolving transaction is legitimately
+   mid-state. Both directions of the link are checked: an approval that named
+   somebody else's entry would satisfy every constraint on the ledger side and
+   still be an audit record pointing at the wrong movement.
 5. **The entry matches the proposal field-for-field** — loan, component, amount,
    type — so an approval cannot authorise different terms than the ones reviewed.
 6. **The ledger actor is the approver** — both `actor_id` and `actor_role`,
@@ -285,6 +289,43 @@ BEGIN
         RAISE EXCEPTION 'the substance of a pending movement is immutable';
     END IF;
 
+    -- The link must always point at an entry that names THIS proposal.
+    --
+    -- Checked before the branch below, so it covers every UPDATE rather than
+    -- only the post-resolution ones. Review found that the strict
+    -- `ledger_entry_id` rules ran only once `OLD.resolution IS NOT NULL`, so a
+    -- single statement could set `resolution = 'approved'` and
+    -- `ledger_entry_id = <any existing row>` together and pass: an approval
+    -- committing with no entry of its own, or pointing at someone else's.
+    --
+    -- The two tables link in both directions and only one direction was
+    -- checked. `ledger_entries.pending_movement_id` is UNIQUE and the validation
+    -- trigger makes an entry name an approved proposal it matches -- but nothing
+    -- made the proposal's own pointer agree with that. An audit record that
+    -- points at the wrong movement is worse than one that points at none: it
+    -- reads as evidence.
+    IF NEW.ledger_entry_id IS NOT NULL THEN
+        PERFORM 1 FROM ledger_entries
+         WHERE id = NEW.ledger_entry_id AND pending_movement_id = NEW.id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'ledger entry % does not belong to pending movement %',
+                NEW.ledger_entry_id, NEW.id;
+        END IF;
+    END IF;
+
+    IF OLD.resolution IS NULL THEN
+        -- The resolving update. It may not carry the link, because the entry
+        -- cannot exist yet: the validation trigger on `ledger_entries` requires
+        -- the proposal to be approved ALREADY, so the entry is written after
+        -- this statement, never before it. Refusing it here is what forces the
+        -- documented sequence rather than merely describing it.
+        IF NEW.ledger_entry_id IS NOT NULL THEN
+            RAISE EXCEPTION 'pending movement % cannot be resolved and linked in '
+                            'one statement: the entry does not exist yet', OLD.id;
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF OLD.resolution IS NOT NULL THEN
         -- Already resolved. Exactly ONE further write is legal: attaching the
         -- ledger entry this approval produced, once, from NULL.
@@ -325,6 +366,11 @@ BEGIN
 
     RETURN NEW;
 END $$ LANGUAGE plpgsql;
+
+-- Reading the branches in order: the substance is frozen on every update; a link,
+-- whenever present, must name an entry that names this proposal back; the
+-- resolving update may not carry a link at all; and after resolution the only
+-- legal write is filling that link, once, from NULL.
 
 CREATE TRIGGER pending_movements_one_way
     BEFORE UPDATE ON pending_movements
