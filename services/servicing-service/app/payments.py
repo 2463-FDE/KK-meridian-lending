@@ -29,9 +29,23 @@ def charge(loan_id: int, processor_token: str, last4: str, brand: str, amount: f
         loan_id, amount, method,
     )
     # No idempotency check. No unique charge reference. Every POST inserts a row.
+    #
+    # `capture_source` is written explicitly (db/migrations/0042), and it is the
+    # one honest thing this route can say about itself: it calls NO processor, so
+    # the row it writes will never appear in a settlement file. Before the column
+    # existed the insert took `auth_status`'s default of 'captured' and left
+    # `processor_ref` NULL, which meant reconciliation -- which had just learned
+    # to report unreferenced captures -- reported every payment this route made,
+    # permanently, as money it could not corroborate. It never could have: there
+    # is nothing on the other side to corroborate it against.
+    #
+    # Labelled rather than excluded by inference. Reconciliation counts these and
+    # reports the count; what it does not do is compare them against a file that
+    # cannot contain them. That this route moves a balance with no processor
+    # behind it at all is D2, and it is not this control's to fix.
     db.query(
-        "INSERT INTO payments (loan_id, last4, brand, amount, method) "
-        "VALUES (%s, %s, %s, %s, %s)",
+        "INSERT INTO payments (loan_id, last4, brand, amount, method, capture_source) "
+        "VALUES (%s, %s, %s, %s, %s, 'servicing_legacy')",
         (loan_id, last4, brand, float(amount), method),
     )
     new_balance = balance.apply_payment(loan_id, amount)

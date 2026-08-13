@@ -62,9 +62,9 @@ def db(monkeypatch):
         # The one capture we did record, keyed by the processor's reference.
         cur.execute(
             "INSERT INTO payments (loan_id, amount, method, auth_status, "
-            "captured_at, processor_ref) "
+            "captured_at, processor_ref, capture_source) "
             "VALUES (4471, 250.00, 'card', 'captured', %s::date + TIME '10:00', "
-            "'PR-100231')",
+            "'PR-100231', 'processor')",
             (SETTLEMENT_DAY,),
         )
 
@@ -96,8 +96,8 @@ def _runs(conn):
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute(
             "SELECT outcome, error_code, loans_compared, references_compared, "
-            "unreferenced_captures, breaks_found, break_value, breaks "
-            "FROM reconciliation_runs ORDER BY id"
+            "unreferenced_captures, out_of_scope_captures, breaks_found, "
+            "break_value, breaks FROM reconciliation_runs ORDER BY id"
         )
         return cur.fetchall()
 
@@ -172,8 +172,10 @@ def test_a_capture_without_a_reference_is_returned_for_reporting(db, settlement)
     with db.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute(
-            "INSERT INTO payments (loan_id, amount, method, auth_status, captured_at) "
-            "VALUES (4471, 75.00, 'card', 'captured', %s::date + TIME '11:00')",
+            "INSERT INTO payments (loan_id, amount, method, auth_status, captured_at, "
+            "capture_source) "
+            "VALUES (4471, 75.00, 'card', 'captured', %s::date + TIME '11:00', "
+            "'processor')",
             (SETTLEMENT_DAY,),
         )
 
@@ -196,8 +198,9 @@ def test_two_payments_cannot_claim_the_same_settlement_reference(db):
         cur.execute(f"SET search_path TO {SCHEMA}")
         with pytest.raises(psycopg2.errors.UniqueViolation):
             cur.execute(
-                "INSERT INTO payments (loan_id, amount, method, auth_status, processor_ref) "
-                "VALUES (4471, 10.00, 'card', 'captured', 'PR-100231')"
+                "INSERT INTO payments (loan_id, amount, method, auth_status, "
+                "processor_ref, capture_source) "
+                "VALUES (4471, 10.00, 'card', 'captured', 'PR-100231', 'processor')"
             )
 
 
@@ -213,3 +216,93 @@ def test_unreferenced_rows_do_not_collide_with_each_other(db):
         )
         cur.execute("SELECT count(*) FROM payments WHERE processor_ref IS NULL")
         assert cur.fetchone()[0] == 2
+
+
+# --- the control must not breach on our own non-processor writes -------------
+
+def test_a_servicing_legacy_payment_is_not_reported_as_a_break(db, settlement):
+    """The reported defect.
+
+    servicing-service's legacy `POST /payments` inserts with no `auth_status`, so
+    the column default made every one of its rows a 'captured' payment with no
+    `processor_ref` -- and once unreferenced captures became breaks, the control
+    breached on our own writes permanently. It could never have matched them:
+    that route calls no processor, so no settlement file contains a line for it.
+    """
+    from app import reconciliation
+
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        # created_at inside the window, and captured_at left NULL, because that
+        # is exactly what the legacy route writes: it sets neither column, so the
+        # window predicate falls back to created_at.
+        cur.execute(
+            "INSERT INTO payments (loan_id, last4, brand, amount, method, "
+            "capture_source, created_at) "
+            "VALUES (4471, '4242', 'visa', 88.00, 'card', 'servicing_legacy', "
+            "%s::date + TIME '09:00')",
+            (SETTLEMENT_DAY,),
+        )
+        cur.execute(
+            "SELECT auth_status, processor_ref, captured_at FROM payments "
+            "WHERE capture_source = 'servicing_legacy'"
+        )
+        row = cur.fetchone()
+        assert row[0] == "captured" and row[1] is None and row[2] is None, (
+            "this test no longer reproduces the reported shape -- the legacy "
+            "insert must still land as a captured row with no reference"
+        )
+
+    result = reconciliation.compare()
+
+    assert not [b for b in result["breaks"] if b["kind"] == "unreferenced_capture"], (
+        "a payment written by the legacy servicing route was reported as an "
+        "unreferenced capture. No settlement file can contain it, so this break "
+        "would fire on every run for ever"
+    )
+    assert result["out_of_scope_captures"] == 1, (
+        "the excluded row was not counted -- an exclusion nobody can see is how "
+        "a comparison quietly narrows until it compares nothing"
+    )
+
+
+def test_a_capture_of_unestablished_provenance_is_excluded_and_counted(db, settlement):
+    """The default is 'unknown' rather than 'processor'. Rows written before
+    db/migrations/0042 may or may not have been processor-backed, and admitting
+    them to a money comparison on the strength of missing evidence would
+    manufacture breaks."""
+    from app import reconciliation
+
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(
+            "INSERT INTO payments (loan_id, amount, method, auth_status, captured_at) "
+            "VALUES (4471, 12.00, 'card', 'captured', %s::date + TIME '12:00')",
+            (SETTLEMENT_DAY,),
+        )
+        cur.execute("SELECT capture_source FROM payments WHERE amount = 12.00")
+        assert cur.fetchone()[0] == "unknown", (
+            "the column default is no longer 'unknown', so a writer that forgets "
+            "this column is admitted to the comparison as processor-backed"
+        )
+
+    result = reconciliation.compare()
+
+    assert result["out_of_scope_captures"] == 1
+    assert not [b for b in result["breaks"] if b["kind"] == "unreferenced_capture"]
+
+
+def test_the_run_records_what_it_excluded(db, settlement):
+    from app import reconcile_job
+
+    with db.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(
+            "INSERT INTO payments (loan_id, amount, method, capture_source, created_at) "
+            "VALUES (4471, 5.00, 'card', 'servicing_legacy', %s::date + TIME '09:00')",
+            (SETTLEMENT_DAY,),
+        )
+
+    reconcile_job.main([])
+
+    assert _runs(db)[-1]["out_of_scope_captures"] == 1

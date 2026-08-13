@@ -20,6 +20,7 @@ really are equal (so the old aggregation really would have passed), and that the
 run is nonetheless a breach.
 """
 import csv
+import re
 from decimal import Decimal
 
 import pytest
@@ -56,13 +57,36 @@ class _Db:
             self._next_id += 1
             return [row]
         if flat.startswith("UPDATE reconciliation_runs"):
-            self.finished.append(params)
+            self.finished.append((flat, params))
             return []
         if "FROM reconciliation_runs" in flat:
             return []
+        if "COUNT(*)" in flat and "FROM payments" in flat:
+            # `_out_of_scope_captures`: captures the comparison excludes because
+            # no processor was involved. These fakes model the processor-backed
+            # ledger only, so the answer is zero -- and answering it explicitly
+            # keeps this fake from handing the count query a list of ledger rows.
+            return [{"n": 0}]
         if "FROM payments" in flat:
             return self.ledger_rows
         return []
+
+
+def _recorded(db):
+    """The last finish UPDATE as {column: value}.
+
+    By NAME, not by position. An earlier version of this assertion indexed the
+    parameter tuple from the end, and adding one column to the statement moved it
+    silently onto a different value -- a test that keeps passing while checking
+    something else is worse than one that fails.
+    """
+    sql, params = db.finished[-1]
+    columns = re.findall(r"(\w+)\s*=\s*%s", sql)
+    assert len(columns) == len(params), (
+        f"parsed {len(columns)} columns from the finish statement but got "
+        f"{len(params)} parameters"
+    )
+    return dict(zip(columns, params))
 
 
 def _install(monkeypatch, settlement, db):
@@ -156,12 +180,15 @@ def test_the_recorded_run_carries_the_transaction_level_counts(offsetting):
     one: a run over many loans and no references compared totals."""
     reconciliation.run_and_record()
 
-    recorded = offsetting.finished[-1]
-    assert recorded[0] == "breach"
-    # references_compared and unreferenced_captures are the last two parameters
-    # before the row id -- see reconciliation._finish_run.
-    assert recorded[-3] == 2, "the run did not record how many references it compared"
-    assert recorded[-2] == 0
+    recorded = _recorded(offsetting)
+    assert recorded["outcome"] == "breach"
+    assert recorded["references_compared"] == 2, (
+        "the run did not record how many references it compared, so a later "
+        "reader cannot tell a transaction-level run from the per-loan one it "
+        "replaced"
+    )
+    assert recorded["unreferenced_captures"] == 0
+    assert recorded["out_of_scope_captures"] == 0
 
 
 # --- legitimate netting must survive -----------------------------------------
@@ -314,3 +341,94 @@ def test_an_empty_file_is_still_reported_as_empty(monkeypatch, tmp_path):
     result = reconciliation.run_and_record()
 
     assert result["error_code"] == "EmptySettlementFile"
+
+
+# --- a row this parser cannot read is bad evidence, not money ----------------
+
+def _raw_settlement(tmp_path, body, name="settlement.csv"):
+    path = tmp_path / name
+    path.write_text(
+        "settlement_date,processor_ref,loan_id,amount,type\n" + body,
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+@pytest.mark.parametrize("row,why", [
+    ("2026-06-01,PR-1,4471,250.00,chargeback\n", "a type nobody taught this code about"),
+    ("2026-06-01,PR-1,4471,250.00,\n", "a blank type"),
+    ("2026-06-01,PR-1,4471,250.00,CAPTURE ADJUSTMENT\n", "a feed schema change"),
+    ("2026-06-01,PR-1,4471,-250.00,refund\n", "a negative amount under a refund type"),
+    ("2026-06-01,PR-1,4471,0.00,capture\n", "a zero amount"),
+    ("2026-06-01,PR-1,4471,not-a-number,capture\n", "an unparseable amount"),
+])
+def test_a_row_whose_direction_cannot_be_established_fails_the_run(
+        monkeypatch, tmp_path, row, why):
+    """The reported defect: the sign came from `type == 'capture'` with
+    EVERYTHING else treated as a refund.
+
+    So each of these became negative money, flowed into `break_value`, and the
+    threshold judged a number the parser had invented -- turning a feed-integrity
+    problem into a money finding, in whichever direction the bad row happened to
+    point.
+    """
+    db = _Db([{"loan_id": 4471, "processor_ref": "PR-1", "total": Decimal("250.00")}])
+    _install(monkeypatch, _raw_settlement(tmp_path, row), db)
+
+    result = reconciliation.run_and_record()
+
+    assert result["outcome"] == "error", (
+        f"{why} was interpreted rather than refused, and the run reported "
+        f"{result['outcome']!r} on money whose direction is unknown"
+    )
+    assert result["error_code"] == "MalformedSettlementRows"
+    assert main() == EXIT_ERROR
+
+
+def test_a_malformed_row_contributes_no_money_at_all(monkeypatch, tmp_path):
+    """Not merely flagged: its amount must not reach any total. A run that failed
+    the file AND accumulated the row would still be carrying an invented sign in
+    the numbers a human then reads off the failed run."""
+    db = _Db([])
+    _install(monkeypatch, _raw_settlement(
+        tmp_path,
+        "2026-06-01,PR-1,4471,250.00,capture\n"
+        "2026-06-01,PR-2,4471,999.00,chargeback\n",
+    ), db)
+
+    settlement, _window, identity = reconciliation._settlement_by_ref()
+
+    assert identity["malformed_rows"] == 1
+    assert identity["rows"] == 2, "the malformed row must still be counted as read"
+    assert (4471, "PR-2") not in settlement
+    assert settlement[(4471, "PR-1")] == Decimal("250.00")
+
+
+def test_a_well_formed_refund_still_subtracts(monkeypatch, tmp_path):
+    """Guard the guard. An allowlist that rejected refunds would pass every test
+    above and break the one legitimate negative the file carries."""
+    db = _Db([])
+    _install(monkeypatch, _raw_settlement(
+        tmp_path,
+        "2026-06-01,PR-1,4471,250.00,capture\n"
+        "2026-06-01,PR-1,4471,100.00,refund\n",
+    ), db)
+
+    settlement, _window, identity = reconciliation._settlement_by_ref()
+
+    assert identity["malformed_rows"] == 0
+    assert settlement[(4471, "PR-1")] == Decimal("150.00")
+
+
+def test_the_type_is_matched_case_insensitively_and_trimmed(monkeypatch, tmp_path):
+    """A feed that starts sending `Capture ` is a formatting change, not a new
+    transaction kind, and failing the run on it would be the strictness that
+    teaches operators to disable the control."""
+    db = _Db([])
+    _install(monkeypatch, _raw_settlement(
+        tmp_path, "2026-06-01,PR-1,4471, 250.00 , Capture \n"), db)
+
+    settlement, _window, identity = reconciliation._settlement_by_ref()
+
+    assert identity["malformed_rows"] == 0
+    assert settlement[(4471, "PR-1")] == Decimal("250.00")

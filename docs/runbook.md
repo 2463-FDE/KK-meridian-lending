@@ -207,6 +207,19 @@ service and evaluated every 30s; the rules are visible at
 
   Wiring an Alertmanager is a deployment decision -- where pages go, who is on
   call, what the escalation path is -- and is not one this repository can make.
+- **Only processor-backed captures are compared.** `payments` has a second live
+  writer -- servicing-service's legacy `POST /payments` -- which calls no
+  processor, so no settlement file can contain a line for it. Those rows are
+  labelled `capture_source = 'servicing_legacy'` (migration `0042`), excluded
+  from the comparison and **counted** on the run as `out_of_scope_captures`, so
+  the narrowing is visible. Rows written before `0042` whose provenance cannot be
+  established are `'unknown'` and treated the same way. That the legacy route
+  moves a balance with no processor behind it at all is D2, and this control does
+  not close it.
+- **A settlement row whose type is not `capture` or `refund`, or whose amount is
+  not a positive number, fails the run** (`MalformedSettlementRows`). The sign
+  comes from the type; a parser that guessed at a row it could not read would
+  turn a feed-integrity problem into a money finding.
 - **Captures written before migration 0041 cannot be matched.** `processor_ref` is
   persisted on every capture from that migration onward, but there was nothing to
   back-fill historical rows FROM -- `authorization_id` is minted by our own

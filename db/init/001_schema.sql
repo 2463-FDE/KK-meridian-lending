@@ -352,6 +352,18 @@ CREATE TABLE IF NOT EXISTS payments (
     -- NULL on rows captured before 0041; reconciliation reports those as
     -- unreferenced_capture breaks rather than skipping them.
     processor_ref TEXT,
+    -- Who captured this payment (db/migrations/0042). 'processor' means
+    -- payment-service obtained a real authorization and the row must appear in a
+    -- settlement file -- these are the only rows reconciliation compares.
+    -- 'servicing_legacy' is servicing-service's prototype POST /payments (D2),
+    -- which calls no processor, so no settlement line exists for it and
+    -- comparing it against one is a category error rather than a strict control.
+    -- 'unknown' is the default and covers rows written before the column:
+    -- counted by reconciliation, excluded from the comparison, because admitting
+    -- them would manufacture breaks out of missing evidence.
+    capture_source TEXT NOT NULL DEFAULT 'unknown'
+        CONSTRAINT payments_capture_source_known
+        CHECK (capture_source IN ('processor', 'servicing_legacy', 'unknown')),
     -- Review fix: a timeout retry or a double-click on submit used to insert a
     -- second row and apply the balance twice (no idempotency key at all).
     -- Caller-supplied; NULL only for pre-fix legacy rows, which the partial
@@ -418,7 +430,7 @@ CREATE INDEX IF NOT EXISTS idx_kyc_checks_application_id ON kyc_checks(applicati
 -- every run; without it here a fresh install and a migrated one would differ,
 -- which test_migration_paths_converge catches -- and did.
 CREATE INDEX IF NOT EXISTS idx_payments_captured_at
-    ON payments (captured_at)
+    ON payments (capture_source, captured_at)
  WHERE auth_status = 'captured';
 
 -- Mirrors db/migrations/0041. One settlement line, one capture: two payment
@@ -446,6 +458,9 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
     -- as breaks (db/migrations/0034, 0041).
     references_compared   INTEGER NOT NULL DEFAULT 0,
     unreferenced_captures INTEGER NOT NULL DEFAULT 0,
+    -- Captures excluded from the comparison entirely -- the legacy servicing
+    -- writer and rows of unestablished provenance (db/migrations/0042).
+    out_of_scope_captures INTEGER NOT NULL DEFAULT 0,
     breaks_found    INTEGER     NOT NULL DEFAULT 0,
     break_value     NUMERIC(14,2) NOT NULL DEFAULT 0,
     threshold_value NUMERIC(14,2) NOT NULL DEFAULT 0,

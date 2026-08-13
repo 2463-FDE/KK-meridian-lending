@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
     -- understate our own side of the comparison.
     unreferenced_captures INTEGER NOT NULL DEFAULT 0,
 
+    -- Captures in the window this control did not compare at all: rows written
+    -- by servicing-service's legacy POST /payments, which calls no processor and
+    -- so can appear in no settlement file, and rows whose provenance predates
+    -- db/migrations/0042. Recorded because an exclusion nobody can see is how a
+    -- comparison quietly narrows until it is comparing nothing.
+    out_of_scope_captures INTEGER NOT NULL DEFAULT 0,
+
     breaks_found    INTEGER     NOT NULL DEFAULT 0,
 
     -- Sum of |ledger - settlement| across breaking references. Signed totals per
@@ -82,9 +89,9 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
     window_start    DATE,
     window_end      DATE,
     -- {"file": "settlement.csv", "rows": 12, "undated_rows": 0,
-    --  "unreferenced_rows": 0, "sha256": "..."} -- identity, not contents. A
-    -- digest makes a re-run of the same file recognisable; the two counts are
-    -- what the vacuity checks fail the run on.
+    --  "unreferenced_rows": 0, "malformed_rows": 0, "sha256": "..."} -- identity,
+    -- not contents. A digest makes a re-run of the same file recognisable; the
+    -- three counts are what the vacuity checks fail the run on.
     source          JSONB       NOT NULL DEFAULT '{}'::jsonb,
 
     -- Exception TYPE only on an error, never the message: a psycopg2 error string

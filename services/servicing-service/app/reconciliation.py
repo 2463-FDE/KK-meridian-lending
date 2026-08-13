@@ -18,11 +18,10 @@ What a control needs, and what this now has:
 - **a record of every run** -- `reconciliation_runs` (db/migrations/0034), so
   "when did this last agree?" has an answer.
 
-**Per loan, never one total.** A global sum is the check that reports "in balance"
-while two loans are wrong by equal and opposite amounts. The same reasoning as
-the ledger parity check in ADR 0010, for the same reason.
-
-**Per TRANSACTION, never per loan.** Comparing net totals per loan was the
+**Per TRANSACTION, never per loan.** A global sum is the check that reports "in
+balance" while two loans are wrong by equal and opposite amounts, and a per-loan
+sum is the same check one level down.
+ Comparing net totals per loan was the
 previous behaviour and it was a hole in the middle of the control: two wrong
 transactions on one loan cancel. An unrecorded capture of 99.99 and a missing
 refund of 99.99 on loan 4471 produce exactly the totals a correct day produces,
@@ -42,6 +41,16 @@ line can corroborate. It is NOT silently excluded, because excluding it would
 understate our own side and hide a real difference. Those breaks are finite and
 self-clearing: the window moves, and every capture written after 0041 carries the
 reference.
+
+**Only processor-backed captures are compared.** `payments` has a second live
+writer -- servicing-service's legacy `POST /payments` -- which calls no processor
+and therefore produces rows no settlement file can contain. Comparing them was a
+category error that made this control breach on our own writes, permanently.
+`capture_source` (db/migrations/0042) makes the provenance a stored fact, the
+comparison reads `capture_source = 'processor'`, and everything excluded is
+COUNTED on the run (`out_of_scope_captures`) so the narrowing is visible rather
+than silent. That the legacy route moves a balance with no processor behind it at
+all is D2, and it is not this control's to fix.
 
 **A settlement file with no usable reference column cannot be reconciled at all,
 and the run fails rather than falling back.** Per-loan netting is what this
@@ -65,7 +74,7 @@ import json
 import pathlib
 import logging
 import os
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from . import db
 from .config import SETTLEMENT_FILE
@@ -73,6 +82,16 @@ from .config import SETTLEMENT_FILE
 log = logging.getLogger("servicing.reconciliation")
 
 CENT = Decimal("0.01")
+
+#: The settlement row types this control understands, and the sign each one
+#: contributes. An allowlist rather than "capture, else negative": every value
+#: that is not exactly one of these is a row whose meaning is unknown, and a
+#: money control must not guess the direction of money it cannot read.
+_SETTLEMENT_SIGNS = {
+    "capture": Decimal("1"),
+    "refund": Decimal("-1"),
+}
+
 
 def threshold_from_env(env=None) -> Decimal:
     """Total absolute break value tolerated before a run is a breach.
@@ -244,9 +263,26 @@ def _ledger_rows(window=(None, None)) -> list[dict]:
     `unreferenced_capture` breaks -- see `_ledger_by_ref`.
     """
     since, until = window
+    # `capture_source = 'processor'` is the scope of this control, and leaving it
+    # out was a real defect rather than a refinement.
+    #
+    # `payments` has a second live writer: servicing-service's legacy
+    # `POST /payments`, which inserts with no `auth_status` at all and therefore
+    # takes the column default of 'captured'. It calls no processor, so no
+    # settlement file has ever contained a line for it -- and the previous
+    # version of this query swept every one of those rows in and reported it as
+    # an `unreferenced_capture` break. The control breached on our own writes,
+    # permanently, over money it could not have corroborated under any
+    # implementation.
+    #
+    # 'unknown' rows are excluded for the same reason and a weaker one: we cannot
+    # show a processor was involved, and admitting a row to a money comparison on
+    # the strength of missing evidence manufactures breaks. They are counted by
+    # `_out_of_scope_captures` so the exclusion is reported rather than silent.
     sql = ("SELECT loan_id, processor_ref, COALESCE(SUM(amount), 0) AS total "
            "FROM payments "
-           "WHERE auth_status = 'captured' AND loan_id IS NOT NULL")
+           "WHERE auth_status = 'captured' AND loan_id IS NOT NULL "
+           "AND capture_source = 'processor'")
     params: list = []
     # COALESCE for one reason only: rows captured before migration 0040 were
     # back-filled from created_at, and a row that somehow escaped the back-fill
@@ -261,6 +297,32 @@ def _ledger_rows(window=(None, None)) -> list[dict]:
         params.append(until)
     sql += " GROUP BY loan_id, processor_ref"
     return db.query(sql, tuple(params))
+
+
+def _out_of_scope_captures(window=(None, None)) -> int:
+    """Captures in the window that this control does not compare, counted.
+
+    The rows `_ledger_rows` excludes: servicing-service's legacy `POST /payments`
+    (no processor was called, so no settlement line can exist) and rows whose
+    provenance predates db/migrations/0042 and cannot be established.
+
+    Counted rather than ignored. An exclusion nobody can see is how a comparison
+    quietly narrows until it is comparing nothing -- the same failure the vacuity
+    checks exist for, arriving through the WHERE clause instead of the file.
+    """
+    since, until = window
+    sql = ("SELECT COUNT(*) AS n FROM payments "
+           "WHERE auth_status = 'captured' AND loan_id IS NOT NULL "
+           "AND capture_source <> 'processor'")
+    params: list = []
+    if since:
+        sql += " AND COALESCE(captured_at, created_at) >= %s::date"
+        params.append(since)
+    if until:
+        sql += " AND COALESCE(captured_at, created_at) < (%s::date + INTERVAL '1 day')"
+        params.append(until)
+    rows = db.query(sql, tuple(params))
+    return int(rows[0]["n"]) if rows else 0
 
 
 def _ledger_by_ref(window=(None, None)):
@@ -334,21 +396,14 @@ def _settlement_by_ref(path=None):
     rows_read = 0
     undated = 0
     unreferenced = 0
+    malformed = 0
     for row in csv.DictReader(io.StringIO(raw.decode("utf-8"))):
         rows_read += 1
         loan_id = int(row["loan_id"])
-        amount = Decimal(row["amount"])
-        signed = amount if row["type"] == "capture" else -amount
 
-        ref = (row.get("processor_ref") or "").strip()
-        if ref:
-            key = (loan_id, ref)
-            totals[key] = (totals.get(key, Decimal("0")) + signed).quantize(CENT)
-        else:
-            unreferenced += 1
-
-        # A row with no usable settlement_date is COUNTED but cannot be SCOPED.
+        # The date FIRST, and independently of everything below.
         #
+        # A row with no usable settlement_date is COUNTED but cannot be SCOPED.
         # Undated rows used to be added to `totals` and skipped for the window,
         # so a file with one dated row and one undated row compared both rows'
         # money against a window derived from the dated one alone. An
@@ -356,16 +411,57 @@ def _settlement_by_ref(path=None):
         # real one -- and the run still recorded a completed comparison, which
         # is the vacuous-success defect in a subtler form: partially scoped
         # evidence presented as whole evidence.
+        #
+        # Read before the money checks below, not after, because the date is a
+        # property of the row whether or not its amount can be interpreted. When
+        # this came last, a file whose only row had an unreadable type never
+        # reached it, so the window came back empty and the run blamed
+        # `IncompleteSettlementWindow` -- naming the wrong problem to the wrong
+        # person while the actual defect was the type.
         settlement_date = (row.get("settlement_date") or "").strip()
         if not settlement_date:
             undated += 1
-            continue
+        else:
+            try:
+                dt.date.fromisoformat(settlement_date)
+            except ValueError:
+                undated += 1
+            else:
+                dates.append(settlement_date)
+
+        # The sign comes from the row's TYPE, and the type has to be one this
+        # control understands.
+        #
+        # This read `amount if row["type"] == "capture" else -amount`, so every
+        # value that was not exactly 'capture' became a refund: a feed schema
+        # change, a typo, a blank cell, a transaction kind nobody has taught this
+        # code about. A feed-integrity problem was silently converted into
+        # negative money, which then flowed into `break_value` and into the
+        # comparison the threshold judges -- a fake break in one direction, and
+        # in the other a real capture cancelling a real refund because the parser
+        # inverted one of them.
+        #
+        # A row this cannot interpret is not money, it is bad evidence, and bad
+        # evidence fails the run (`MalformedSettlementRows`). The amount must
+        # also be positive, because the sign is the type's job: a negative amount
+        # on a refund line would double-negate into a capture.
+        kind = (row.get("type") or "").strip().lower()
+        sign = _SETTLEMENT_SIGNS.get(kind)
         try:
-            dt.date.fromisoformat(settlement_date)
-        except ValueError:
-            undated += 1
+            amount = Decimal(row["amount"])
+        except (InvalidOperation, TypeError, ValueError):
+            amount = None
+        if sign is None or amount is None or amount <= 0:
+            malformed += 1
             continue
-        dates.append(settlement_date)
+        signed = amount * sign
+
+        ref = (row.get("processor_ref") or "").strip()
+        if ref:
+            key = (loan_id, ref)
+            totals[key] = (totals.get(key, Decimal("0")) + signed).quantize(CENT)
+        else:
+            unreferenced += 1
 
     window = (min(dates), max(dates)) if dates else (None, None)
     identity = {
@@ -378,6 +474,11 @@ def _settlement_by_ref(path=None):
         # transaction. A run that met this and fell back to per-loan totals
         # would silently restore the netting defect.
         "unreferenced_rows": unreferenced,
+        # Rows whose type is not in the allowlist, or whose amount is not a
+        # positive number. Their money is accumulated nowhere -- the run fails
+        # instead, because a parser that guesses at a row it cannot read turns a
+        # feed problem into a money finding.
+        "malformed_rows": malformed,
         "sha256": hashlib.sha256(raw).hexdigest()[:16],
     }
     return totals, window, identity
@@ -400,6 +501,7 @@ def compare() -> dict:
     """
     settlement, window, identity = _settlement_by_ref()
     ledger, unreferenced = _ledger_by_ref(window)
+    out_of_scope = _out_of_scope_captures(window)
 
     breaks = []
     for loan_id, ref in sorted(set(ledger) | set(settlement)):
@@ -450,6 +552,10 @@ def compare() -> dict:
         # transaction level, which is what the vacuity check looks for.
         "references_compared": len(set(ledger) | set(settlement)),
         "unreferenced_captures": len(unreferenced),
+        # Captures this control did not compare, because no processor was
+        # involved or none can be shown to have been. Reported so the scope of
+        # the comparison is legible next to its result.
+        "out_of_scope_captures": out_of_scope,
         "breaks_found": len(breaks),
         "break_value": break_value,
         "breaks": breaks,
@@ -502,6 +608,20 @@ _VACUITY_CHECKS = (
         lambda r: (r.get("source") or {}).get("undated_rows", 0) > 0,
         "some settlement rows have no usable settlement_date, so their money "
         "cannot be placed in the window the rest of the file defines",
+    ),
+    (
+        # A row this parser cannot read is not money, it is bad evidence.
+        #
+        # The sign used to come from `type == 'capture'` with everything else
+        # treated as a refund, so a feed schema change, a typo or a blank cell
+        # became negative money -- and flowed into `break_value`, the number the
+        # threshold judges. Guessing the direction of money it cannot read is the
+        # one thing a money control must not do, so the run fails instead.
+        "MalformedSettlementRows",
+        lambda r: (r.get("source") or {}).get("malformed_rows", 0) > 0,
+        "some settlement rows carry a transaction type this control does not "
+        "recognise, or an amount that is not a positive number, so their "
+        "direction cannot be established",
     ),
     (
         # The netting defect's own guard rail. This control's whole correction
@@ -583,6 +703,7 @@ def run_and_record() -> dict:
             loans_compared=result["loans_compared"],
             references_compared=result["references_compared"],
             unreferenced_captures=result["unreferenced_captures"],
+            out_of_scope_captures=result["out_of_scope_captures"],
             window=(result["window_start"], result["window_end"]),
             source=result["source"],
         )
@@ -598,6 +719,7 @@ def run_and_record() -> dict:
         loans_compared=result["loans_compared"],
         references_compared=result["references_compared"],
         unreferenced_captures=result["unreferenced_captures"],
+        out_of_scope_captures=result["out_of_scope_captures"],
         breaks_found=result["breaks_found"],
         break_value=result["break_value"],
         breaks=result["breaks"][:MAX_RECORDED_BREAKS],
@@ -615,8 +737,9 @@ def run_and_record() -> dict:
     # registry dies with it -- the durable record IS the metric, and the API
     # derives the gauges from it at scrape time (see _ReconciliationCollector).
     if outcome == "ok":
-        log.info("reconciliation ok loans=%s refs=%s",
-                 result["loans_compared"], result["references_compared"])
+        log.info("reconciliation ok loans=%s refs=%s out_of_scope=%s",
+                 result["loans_compared"], result["references_compared"],
+                 result["out_of_scope_captures"])
     else:
         # Loan ids, settlement references and amounts only. That is what a break
         # IS; there is nothing about the cardholder here to leak.
@@ -654,7 +777,8 @@ def _start_run() -> int | None:
 def _finish_run(run_id, *, outcome, loans_compared=0, breaks_found=0,
                 break_value=Decimal("0.00"), breaks=(), error_code=None,
                 window=(None, None), source=None,
-                references_compared=0, unreferenced_captures=0) -> bool:
+                references_compared=0, unreferenced_captures=0,
+                out_of_scope_captures=0) -> bool:
     """Record the result. Returns whether it was durably written.
 
     The caller turns a False into a non-zero exit: a run whose RESULT could not
@@ -676,12 +800,14 @@ def _finish_run(run_id, *, outcome, loans_compared=0, breaks_found=0,
             "loans_compared = %s, breaks_found = %s, break_value = %s, "
             "breaks = %s::jsonb, error_code = %s, "
             "window_start = %s::date, window_end = %s::date, source = %s::jsonb, "
-            "references_compared = %s, unreferenced_captures = %s "
+            "references_compared = %s, unreferenced_captures = %s, "
+            "out_of_scope_captures = %s "
             "WHERE id = %s",
             (outcome, loans_compared, breaks_found, break_value,
              json.dumps(list(breaks)), error_code,
              window[0], window[1], json.dumps(source or {}),
-             references_compared, unreferenced_captures, run_id),
+             references_compared, unreferenced_captures, out_of_scope_captures,
+             run_id),
         )
         return True
     except Exception as e:  # noqa

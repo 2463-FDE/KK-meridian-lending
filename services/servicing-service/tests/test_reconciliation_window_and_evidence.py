@@ -54,6 +54,12 @@ class _WindowDb:
             return []
         if "FROM reconciliation_runs" in flat:
             return []
+        if "COUNT(*)" in flat and "FROM payments" in flat:
+            # `_out_of_scope_captures`: captures the comparison excludes because
+            # no processor was involved. These fakes model the processor-backed
+            # ledger only, so the answer is zero -- and answering it explicitly
+            # keeps this fake from handing the count query a list of ledger rows.
+            return [{"n": 0}]
         if "FROM payments" in flat:
             since = params[0] if params and len(params) > 0 else None
             until = params[1] if params and len(params) > 1 else None

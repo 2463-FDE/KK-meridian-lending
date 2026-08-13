@@ -56,8 +56,9 @@ def db(monkeypatch):
             "VALUES (4471, 'Sam Okafor', 9000, 5.946, 24)"
         )
         cur.execute(
-            "INSERT INTO payments (loan_id, amount, method, auth_status, created_at, captured_at) "
-            "VALUES (4471, 250.00, 'card', 'captured', %s, %s)",
+            "INSERT INTO payments (loan_id, amount, method, auth_status, created_at, "
+            "captured_at, capture_source) "
+            "VALUES (4471, 250.00, 'card', 'captured', %s, %s, 'processor')",
             (CREATED, CAPTURED),
         )
 
