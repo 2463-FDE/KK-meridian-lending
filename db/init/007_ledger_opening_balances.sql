@@ -16,7 +16,6 @@ DECLARE
     zero_bal INTEGER;
 BEGIN
     LOCK TABLE balances IN SHARE ROW EXCLUSIVE MODE;
-    PERFORM set_config('meridian.suppress_projection', 'on', true);
 
     INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
     SELECT b.loan_id, 'principal', b.balance, 'opening_balance',
@@ -42,8 +41,6 @@ BEGIN
                     WHERE le.loan_id = b.loan_id AND le.component = 'principal');
     SELECT count(*) INTO zero_bal FROM balances WHERE balance = 0;
 
-    PERFORM set_config('meridian.suppress_projection', 'off', true);
-
     IF EXISTS (
         SELECT 1
           FROM balances b
@@ -62,4 +59,40 @@ BEGIN
                  'amount 0 is not a movement and the CHECK forbids it)',
                  seeded, skipped, zero_bal;
 END $$;
+
+-- Attach the compatibility bridge only after seeded balances have canonical
+-- opening_balance entries. New loans boarded after initialization are captured
+-- as legacy_direct_write until application writers move to the ledger.
+CREATE OR REPLACE FUNCTION capture_legacy_balance_delta() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('meridian.projecting', true) = 'on' THEN
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'INSERT' AND NEW.balance <> 0 THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'principal', NEW.balance, 'legacy_direct_write',
+                'captured from a balances insert during ledger cutover');
+    ELSIF TG_OP = 'UPDATE' AND NEW.balance IS DISTINCT FROM OLD.balance THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'principal', NEW.balance - OLD.balance,
+                'legacy_direct_write',
+                'captured from a direct balances update during ledger cutover');
+    END IF;
+    IF TG_OP = 'INSERT' AND COALESCE(NEW.past_due, 0) <> 0 THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'fees', NEW.past_due, 'legacy_direct_write',
+                'captured from a balances insert during ledger cutover');
+    ELSIF TG_OP = 'UPDATE' AND NEW.past_due IS DISTINCT FROM OLD.past_due THEN
+        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+        VALUES (NEW.loan_id, 'fees', NEW.past_due - OLD.past_due,
+                'legacy_direct_write',
+                'captured from a direct balances update during ledger cutover');
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS balances_capture_legacy_delta ON balances;
+CREATE TRIGGER balances_capture_legacy_delta
+    AFTER INSERT OR UPDATE ON balances
+    FOR EACH ROW EXECUTE FUNCTION capture_legacy_balance_delta();
 

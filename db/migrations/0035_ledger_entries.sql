@@ -200,16 +200,15 @@ CREATE TRIGGER ledger_entries_immutable
 
 -- Invariant 3: `balances` is a projection. This trigger is what maintains it.
 --
--- The session flag is how the back-fill below, and step 4's delta pass, write
--- entries WITHOUT applying them -- because `balances` already holds those
--- amounts. Transaction-local (the `true`), so it cannot leak to a later
--- statement on a pooled connection, which is how this kind of guard usually
--- fails open.
+-- Opening-state and legacy-capture entries describe a balance mutation that has
+-- already happened, so those two explicit types do not project. No session flag
+-- can suppress a normal entry: a caller-controlled GUC would be a permanent
+-- ledger/projection bypass.
 CREATE OR REPLACE FUNCTION project_ledger_entry() RETURNS trigger AS $$
 DECLARE
     projected INTEGER;
 BEGIN
-    IF current_setting('meridian.suppress_projection', true) = 'on' THEN
+    IF NEW.entry_type IN ('opening_balance', 'legacy_direct_write') THEN
         RETURN NEW;
     END IF;
 
@@ -287,15 +286,10 @@ COMMENT ON FUNCTION balances_are_trigger_maintained() IS
 -- database trigger can prove what changed and in which transaction; it cannot
 -- invent a payment id or human actor the legacy UPDATE did not carry.
 CREATE OR REPLACE FUNCTION capture_legacy_balance_delta() RETURNS trigger AS $$
-DECLARE
-    prior_suppression TEXT;
 BEGIN
     IF current_setting('meridian.projecting', true) = 'on' THEN
         RETURN NEW;
     END IF;
-
-    prior_suppression := current_setting('meridian.suppress_projection', true);
-    PERFORM set_config('meridian.suppress_projection', 'on', true);
 
     IF TG_OP = 'INSERT' AND NEW.balance <> 0 THEN
         INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
@@ -320,20 +314,12 @@ BEGIN
                 'captured from a direct balances update during ledger cutover');
     END IF;
 
-    PERFORM set_config('meridian.suppress_projection',
-                       COALESCE(prior_suppression, 'off'), true);
     RETURN NEW;
 END $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS balances_capture_legacy_delta ON balances;
-CREATE TRIGGER balances_capture_legacy_delta
-    AFTER INSERT OR UPDATE ON balances
-    FOR EACH ROW EXECUTE FUNCTION capture_legacy_balance_delta();
-
 -- Blocks every current UPDATE/INSERT/DELETE writer before the snapshot. The
--- lock is held through parity validation and COMMIT. CREATE TRIGGER above takes
--- a stronger lock on a first run; this explicit mode documents and preserves
--- the cutover guarantee on idempotent replays too.
+-- lock is held through trigger installation, parity validation and COMMIT.
 LOCK TABLE balances IN SHARE ROW EXCLUSIVE MODE;
 
 -- --------------------------------------------------------------------------
@@ -355,8 +341,6 @@ DECLARE
     skipped  INTEGER;
     zero_bal INTEGER;
 BEGIN
-    PERFORM set_config('meridian.suppress_projection', 'on', true);
-
     INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
     SELECT b.loan_id, 'principal', b.balance, 'opening_balance',
            'balance as it stood when the ledger began (db/migrations/0035)'
@@ -381,8 +365,6 @@ BEGIN
                     WHERE le.loan_id = b.loan_id AND le.component = 'principal');
     SELECT count(*) INTO zero_bal FROM balances WHERE balance = 0;
 
-    PERFORM set_config('meridian.suppress_projection', 'off', true);
-
     -- A migration that silently seeds nothing looks identical to one that seeded
     -- everything, so both counts are reported.
     RAISE NOTICE '0035: opened % principal entry(ies); % loan(s) now have an '
@@ -390,6 +372,13 @@ BEGIN
                  'amount 0 is not a movement and the CHECK forbids it)',
                  seeded, skipped, zero_bal;
 END $$;
+
+-- Installed after the snapshot, before the transaction commits. A writer that
+-- was already in flight has waited behind the lock and resumes through this
+-- trigger; there is no gap between snapshot and delta capture.
+CREATE TRIGGER balances_capture_legacy_delta
+    AFTER INSERT OR UPDATE ON balances
+    FOR EACH ROW EXECUTE FUNCTION capture_legacy_balance_delta();
 
 -- Do not publish a ledger born out of balance. This is per loan/component so
 -- equal and opposite errors on different borrowers cannot net to zero.

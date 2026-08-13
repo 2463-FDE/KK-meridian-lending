@@ -137,12 +137,21 @@ def test_past_due_is_projected_too(db):
 
 
 def test_the_backfill_seeded_something(db):
-    """Guards the guard. On a migrated database these are opening_balance rows;
-    on a fresh schema the INSERT bridge sees seed boarding first and records the
-    same initial state as legacy_direct_write rows, so either honest path counts."""
+    """Seeded state has one canonical meaning on fresh and migrated databases."""
     n = _exec(db, "SELECT count(*) AS n FROM ledger_entries "
-                  "WHERE entry_type IN ('opening_balance','legacy_direct_write')")[0]["n"]
-    assert n > 0, "ledger initialization produced no entries -- nothing was verified"
+                  "WHERE entry_type = 'opening_balance'")[0]["n"]
+    assert n > 0, "ledger initialization produced no opening entries"
+
+
+def test_a_session_flag_cannot_suppress_a_normal_projection(db):
+    loan = _a_loan(db)
+    before = _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"]
+    _exec(db, "SELECT set_config('meridian.suppress_projection','on',true)")
+    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,actor_id,actor_role) "
+              "VALUES(%s,'principal',9,'adjustment',1,'admin')", (loan,))
+    after = _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"]
+    assert after == before + 9
+    db.rollback()
 
 
 def test_running_the_migration_again_does_not_double_anything(db):
@@ -466,7 +475,7 @@ def test_a_payment_racing_the_backfill_is_captured_once_and_converges():
             assert cur.fetchone()["balance"] == opening - 10
             cur.execute("SELECT amount FROM ledger_entries WHERE loan_id=%s "
                         "AND entry_type='legacy_direct_write'", (loan,))
-            assert [r["amount"] for r in cur.fetchall()] == [opening, -10]
+            assert [r["amount"] for r in cur.fetchall()] == [-10]
             cur.execute("SELECT COALESCE(SUM(amount),0) AS total FROM ledger_entries "
                         "WHERE loan_id=%s AND component='principal'", (loan,))
             assert cur.fetchone()["total"] == opening - 10
@@ -476,7 +485,7 @@ def test_a_payment_racing_the_backfill_is_captured_once_and_converges():
             cur.execute(_migration_without_transaction_wrappers())
             cur.execute("SELECT count(*) FROM ledger_entries WHERE loan_id=%s "
                         "AND entry_type='legacy_direct_write'", (loan,))
-            assert cur.fetchone()[0] == 2, "migration replay duplicated an initial or captured delta"
+            assert cur.fetchone()[0] == 1, "migration replay duplicated the captured delta"
         check.commit()
     finally:
         for conn in (writer, check, migrator):

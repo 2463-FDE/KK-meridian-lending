@@ -613,16 +613,14 @@ CREATE TRIGGER ledger_entries_immutable
 
 -- Invariant 3: `balances` is a projection. This trigger is what maintains it.
 --
--- The session flag is how the back-fill below, and step 4's delta pass, write
--- entries WITHOUT applying them -- because `balances` already holds those
--- amounts. Transaction-local (the `true`), so it cannot leak to a later
--- statement on a pooled connection, which is how this kind of guard usually
--- fails open.
+-- Opening-state and legacy-capture entries describe a mutation already present
+-- in balances and do not project. Normal entries cannot be suppressed by a
+-- caller-controlled session setting.
 CREATE OR REPLACE FUNCTION project_ledger_entry() RETURNS trigger AS $$
 DECLARE
     projected INTEGER;
 BEGIN
-    IF current_setting('meridian.suppress_projection', true) = 'on' THEN
+    IF NEW.entry_type IN ('opening_balance', 'legacy_direct_write') THEN
         RETURN NEW;
     END IF;
 
@@ -688,50 +686,6 @@ COMMENT ON FUNCTION balances_are_trigger_maintained() IS
     'converted first, or the guard turns working code into exceptions. Enable '
     'with: CREATE TRIGGER balances_guard BEFORE UPDATE OR DELETE ON balances '
     'FOR EACH ROW EXECUTE FUNCTION balances_are_trigger_maintained();';
-
--- Transitional expand/cutover bridge, mirrored from migration 0035. Until the
--- application writers insert ledger entries directly, every legacy UPDATE is
--- captured as an immutable delta. Projection-originated UPDATEs are skipped.
-CREATE OR REPLACE FUNCTION capture_legacy_balance_delta() RETURNS trigger AS $$
-DECLARE
-    prior_suppression TEXT;
-BEGIN
-    IF current_setting('meridian.projecting', true) = 'on' THEN
-        RETURN NEW;
-    END IF;
-    prior_suppression := current_setting('meridian.suppress_projection', true);
-    PERFORM set_config('meridian.suppress_projection', 'on', true);
-    IF TG_OP = 'INSERT' AND NEW.balance <> 0 THEN
-        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
-        VALUES (NEW.loan_id, 'principal', NEW.balance,
-                'legacy_direct_write',
-                'captured from a balances insert during ledger cutover');
-    ELSIF TG_OP = 'UPDATE' AND NEW.balance IS DISTINCT FROM OLD.balance THEN
-        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
-        VALUES (NEW.loan_id, 'principal', NEW.balance - OLD.balance,
-                'legacy_direct_write',
-                'captured from a direct balances update during ledger cutover');
-    END IF;
-    IF TG_OP = 'INSERT' AND COALESCE(NEW.past_due, 0) <> 0 THEN
-        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
-        VALUES (NEW.loan_id, 'fees', NEW.past_due,
-                'legacy_direct_write',
-                'captured from a balances insert during ledger cutover');
-    ELSIF TG_OP = 'UPDATE' AND NEW.past_due IS DISTINCT FROM OLD.past_due THEN
-        INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
-        VALUES (NEW.loan_id, 'fees', NEW.past_due - OLD.past_due,
-                'legacy_direct_write',
-                'captured from a direct balances update during ledger cutover');
-    END IF;
-    PERFORM set_config('meridian.suppress_projection',
-                       COALESCE(prior_suppression, 'off'), true);
-    RETURN NEW;
-END $$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS balances_capture_legacy_delta ON balances;
-CREATE TRIGGER balances_capture_legacy_delta
-    AFTER INSERT OR UPDATE ON balances
-    FOR EACH ROW EXECUTE FUNCTION capture_legacy_balance_delta();
 
 -- Mirrors db/migrations/0040. Reconciliation's window predicate reads this on
 -- every run; without it here a fresh install and a migrated one would differ,
