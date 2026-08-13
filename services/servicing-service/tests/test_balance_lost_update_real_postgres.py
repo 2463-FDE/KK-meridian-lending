@@ -197,7 +197,39 @@ def pg():
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE payments (
+                id INTEGER PRIMARY KEY,
+                loan_id INTEGER NOT NULL,
+                amount NUMERIC(14,2) NOT NULL,
+                UNIQUE (id, loan_id)
+            );
+            CREATE TABLE ledger_entries (
+                id SERIAL PRIMARY KEY,
+                loan_id INTEGER NOT NULL,
+                component TEXT NOT NULL,
+                amount NUMERIC(14,2) NOT NULL,
+                entry_type TEXT NOT NULL,
+                payment_id INTEGER,
+                UNIQUE (payment_id, component),
+                FOREIGN KEY (payment_id, loan_id) REFERENCES payments(id, loan_id)
+            );
+            CREATE FUNCTION project_test_ledger() RETURNS trigger AS $$
+            BEGIN
+                UPDATE balances SET balance = balance + NEW.amount
+                 WHERE loan_id = NEW.loan_id;
+                RETURN NEW;
+            END $$ LANGUAGE plpgsql;
+            CREATE TRIGGER ledger_project AFTER INSERT ON ledger_entries
+                FOR EACH ROW EXECUTE FUNCTION project_test_ledger();
+            """
+        )
         cur.execute("INSERT INTO balances (loan_id, balance) VALUES (1, %s)", (OPENING_BALANCE,))
+        cur.execute(
+            "INSERT INTO payments(id,loan_id,amount) VALUES (%s,1,%s),(%s,1,%s)",
+            (PAYMENT_A, PAYMENT, PAYMENT_B, PAYMENT),
+        )
     yield admin
     with admin.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
@@ -256,11 +288,6 @@ def _markers(pg):
 
 # ------------------------------------------------------------------- the proof
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEBT.md D3: apply_payment_once reads then writes the balance with no "
-           "lock. When this XPASSes, D3 is fixed -- delete the marker, keep the test.",
-)
 def test_two_concurrent_payments_both_reach_the_balance(pg, concurrent):
     """The production path, and the form of the defect that costs money.
 
@@ -286,11 +313,6 @@ def test_two_concurrent_payments_both_reach_the_balance(pg, concurrent):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEBT.md D3: the same unlocked read-modify-write, reached through "
-           "adjust_balance -- the production staff path.",
-)
 def test_a_payment_racing_a_staff_adjustment_is_not_lost(pg, concurrent):
     """Both production paths: `apply_payment_once` against `adjust_balance`.
 

@@ -86,7 +86,7 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
 # source rather than maintained by hand: a hand-kept list of protected things
 # reads as complete while missing one, which is how the probe came to write to a
 # table the money path never touches.
-_PREFLIGHT_WRITE_TABLES = ("payment_applications", "ledger_entries")
+_PREFLIGHT_WRITE_TABLES = ("payments", "payment_applications", "ledger_entries")
 
 
 @app.get("/internal/auth-check")
@@ -165,10 +165,27 @@ def internal_auth_check(
             # each other on the primary key.
             sentinel = -secrets.randbelow(2_000_000_000) - 1
             cur.execute(
+                "SELECT loan_id FROM balances "
+                "WHERE (%s::int IS NULL OR loan_id = %s) "
+                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                (loan_id, loan_id),
+            )
+            target_rows = cur.fetchall()
+            if not target_rows:
+                raise LookupError("no unlocked balances row available for payment-path preflight")
+            target_loan = loan_id if loan_id is not None else target_rows[0].get(
+                "loan_id", next(iter(target_rows[0].values()))
+            )
+            cur.execute(
+                "INSERT INTO payments (id, loan_id, amount, auth_status, capture_source) "
+                "VALUES (%s, %s, 0.01, 'captured', 'unknown')",
+                (sentinel, target_loan),
+            )
+            cur.execute(
                 "INSERT INTO payment_applications (payment_id, loan_id, amount) "
                 "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING "
                 "RETURNING payment_id",
-                (sentinel, sentinel, 0),
+                (sentinel, target_loan, 0.01),
             )
             cur.fetchall()
             # Review round 8: this wrote `updated_at` only. The real apply writes
@@ -193,11 +210,9 @@ def internal_auth_check(
             # the write privilege and still fails in a read-only transaction.
             cur.execute(
                 "INSERT INTO ledger_entries "
-                "(loan_id, component, amount, entry_type, actor_id, actor_role) "
-                "SELECT loan_id, 'principal', 0.01, 'adjustment', 0, 'preflight' "
-                "FROM balances WHERE (%s::int IS NULL OR loan_id = %s) "
-                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED",
-                (loan_id, loan_id),
+                "(loan_id, component, amount, entry_type, payment_id) "
+                "VALUES (%s, 'principal', -0.01, 'payment', %s)",
+                (target_loan, sentinel),
             )
             # Never committed. Both writes exist only long enough to prove the
             # path works, so this leaves no data to clean up.

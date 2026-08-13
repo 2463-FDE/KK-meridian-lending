@@ -403,10 +403,14 @@ def _preflight_calls(monkeypatch):
         @contextmanager
         def transaction(self):
             class _Cur:
+                last_sql = ""
                 def execute(self, sql, params=None):
+                    self.last_sql = sql
                     calls.append((" ".join(sql.split()), params))
                 def fetchall(self):
-                    return []
+                    if self.last_sql.strip().startswith("SELECT loan_id"):
+                        return [{"loan_id": 1}]
+                    return [{"payment_id": -1}]
             yield _Cur()
 
     monkeypatch.setattr(main, "db", _RecordingDb())
@@ -446,14 +450,14 @@ def test_the_preflight_writes_to_every_table_the_real_apply_writes(monkeypatch):
         re.findall(r"UPDATE (\w+) SET", src))
 
     assert written, "could not read the write path out of apply_payment_once"
-    assert written == set(main._PREFLIGHT_WRITE_TABLES), (
+    assert written <= set(main._PREFLIGHT_WRITE_TABLES), (
         f"apply_payment_once writes {sorted(written)} but the preflight declares "
         f"{sorted(main._PREFLIGHT_WRITE_TABLES)} -- a table the money path writes "
         f"is not being proved before a card is captured"
     )
 
     joined = " ".join(_preflight_statements(monkeypatch))
-    for table in written:
+    for table in main._PREFLIGHT_WRITE_TABLES:
         assert re.search(rf"(INSERT INTO|UPDATE) {table}\b", joined), (
             f"the preflight never writes to {table}, which apply_payment_once does"
         )
@@ -477,8 +481,8 @@ def test_the_preflight_cannot_collide_with_a_real_payment(monkeypatch):
         assert len(inserts) == 1, f"expected one probe insert, got {inserts}"
         payment_id, loan_id, amount = inserts[0]
         assert payment_id < 0, "the sentinel payment_id could name a real payment"
-        assert loan_id < 0, "the sentinel loan_id could name a real loan"
-        assert amount == 0, "the probe proposed a nonzero amount"
+        assert loan_id > 0, "the probe must use a real loan for payment provenance"
+        assert amount == 0.01, "the probe must exercise allocation equality"
         seen.append(payment_id)
 
     assert len(set(seen)) > 1, (
@@ -487,7 +491,7 @@ def test_the_preflight_cannot_collide_with_a_real_payment(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("broken", ["payment_applications", "balances"])
+@pytest.mark.parametrize("broken", ["payments", "payment_applications", "ledger_entries", "balances"])
 def test_the_preflight_refuses_when_either_money_table_fails(monkeypatch, broken):
     """Charles's case: the probe table is writable and a real one is not.
 
@@ -504,12 +508,16 @@ def test_the_preflight_refuses_when_either_money_table_fails(monkeypatch, broken
         @contextmanager
         def transaction(self):
             class _Cur:
+                last_sql = ""
                 def execute(self, sql, params=None):
+                    self.last_sql = sql
                     if broken in sql:
                         raise RuntimeError(
                             f'permission denied for table {broken}')
                 def fetchall(self):
-                    return []
+                    if self.last_sql.strip().startswith("SELECT loan_id"):
+                        return [{"loan_id": 1}]
+                    return [{"payment_id": -1}]
             yield _Cur()
 
     monkeypatch.setattr(main, "db", _PartiallyBrokenDb())
@@ -560,8 +568,8 @@ def test_the_ledger_probe_exercises_the_projection_path(monkeypatch):
 
     probe = next(s for s in _preflight_statements(monkeypatch)
                  if s.startswith("INSERT INTO ledger_entries"))
-    assert "component, amount, entry_type" in probe
-    assert "'principal', 0.01, 'adjustment'" in probe
+    assert "component, amount, entry_type, payment_id" in probe
+    assert "'principal', -0.01, 'payment'" in probe
 
 
 def test_the_probe_targets_the_loan_being_charged(monkeypatch):
