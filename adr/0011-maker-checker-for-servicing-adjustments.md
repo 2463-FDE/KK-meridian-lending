@@ -2,7 +2,7 @@
 
 - **Status:** Proposed — depends on ADR 0010
 - **Date:** 2026-08-12
-- **Bears on:** `DEBT.md` D8 (any authenticated user can adjust a balance or
+- **Bears on:** `docs/DEBT.md` D8 (any authenticated user can adjust a balance or
   waive a fee, with no second approver and no record of who asked)
 
 ## Required invariants
@@ -44,6 +44,22 @@ could not approve the ledger without also approving this. They are different
 decisions with different risks. The ledger changes how a number is stored; this
 changes who is allowed to move money and what evidence that leaves. A reviewer
 who accepts the first and wants to argue about the second should be able to.
+
+**Where this lands in 0010's sequence, stated in both documents so they cannot
+drift apart.** This ADR is **PR-4**, and it comes *before* the staff paths move
+to the ledger:
+
+| Step | What happens |
+|---|---|
+| PR-3 | The three machine writers convert. `adjust_balance` and `waive_fee` still write `balances` directly. |
+| **PR-4** | **This ADR.** `pending_movements`, `resolve_pending_movement()`, maker-checker on adjust and waive. |
+| PR-5 | `adjust_balance` and `waive_fee` convert to ledger entries, then the direct-write guard is attached. |
+
+The order is not interchangeable. Converting the staff paths first would write
+unapproved staff money movements into an append-only table that cannot be
+corrected -- a worse permanent record than the mutable column they write today.
+And 0010's "the projection is the only writer of `balances`" is not true until
+PR-5 completes, which is why 0010 does not claim it before then.
 
 **What ADR 0010 already settles, and this ADR inherits rather than reopens:**
 
