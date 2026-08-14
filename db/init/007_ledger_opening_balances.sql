@@ -111,3 +111,9 @@ CREATE TRIGGER balances_reject_delete_during_cutover
     BEFORE DELETE ON balances
     FOR EACH ROW EXECUTE FUNCTION balances_cannot_be_deleted_during_cutover();
 
+DROP TRIGGER IF EXISTS balances_ledger_parity ON balances;
+CREATE CONSTRAINT TRIGGER balances_ledger_parity
+    AFTER INSERT OR UPDATE OR DELETE ON balances
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION balances_must_match_ledger();
+

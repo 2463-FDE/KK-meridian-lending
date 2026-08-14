@@ -354,7 +354,7 @@ CREATE TRIGGER ledger_entries_project
 -- statement too.
 CREATE OR REPLACE FUNCTION balances_are_trigger_maintained() RETURNS trigger AS $$
 BEGIN
-    IF pg_trigger_depth() < 2 THEN
+    IF current_setting('meridian.projecting', true) IS DISTINCT FROM 'on' THEN
         RAISE EXCEPTION 'balances is maintained by the ledger projection; '
                         'write a ledger entry instead';
     END IF;
@@ -410,6 +410,36 @@ BEGIN
     END IF;
 
     RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+-- A custom GUC identifies the legitimate projection for an immediate, useful
+-- error, but it is not authorization: callers can set custom GUCs. This
+-- deferred invariant is the non-bypassable boundary. Any balance mutation that
+-- does not have matching immutable ledger state fails at COMMIT even if a
+-- caller spoofs meridian.projecting or arrives through another trigger.
+CREATE OR REPLACE FUNCTION balances_must_match_ledger() RETURNS trigger AS $$
+DECLARE
+    target_loan INTEGER := COALESCE(NEW.loan_id, OLD.loan_id);
+    actual_principal NUMERIC(14,2);
+    actual_fees NUMERIC(14,2);
+    ledger_principal NUMERIC(14,2);
+    ledger_fees NUMERIC(14,2);
+BEGIN
+    SELECT balance, COALESCE(past_due, 0)
+      INTO actual_principal, actual_fees
+      FROM balances WHERE loan_id = target_loan;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'balance projection row for loan % cannot be removed', target_loan;
+    END IF;
+    SELECT COALESCE(SUM(amount) FILTER (WHERE component = 'principal'), 0),
+           COALESCE(SUM(amount) FILTER (WHERE component = 'fees'), 0)
+      INTO ledger_principal, ledger_fees
+      FROM ledger_entries WHERE loan_id = target_loan;
+    IF actual_principal IS DISTINCT FROM ledger_principal
+       OR actual_fees IS DISTINCT FROM ledger_fees THEN
+        RAISE EXCEPTION 'balance/ledger parity violation for loan %', target_loan;
+    END IF;
+    RETURN NULL;
 END $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS balances_capture_legacy_delta ON balances;
@@ -510,6 +540,12 @@ BEGIN
                         mismatch.past_due, mismatch.fees_ledger;
     END IF;
 END $$;
+
+DROP TRIGGER IF EXISTS balances_ledger_parity ON balances;
+CREATE CONSTRAINT TRIGGER balances_ledger_parity
+    AFTER INSERT OR UPDATE OR DELETE ON balances
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION balances_must_match_ledger();
 
 COMMENT ON TABLE ledger_entries IS
     'ADR 0010: append-only record of every balance movement. balances is a '

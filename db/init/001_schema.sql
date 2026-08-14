@@ -760,11 +760,38 @@ CREATE TRIGGER ledger_entries_project
 -- statement too.
 CREATE OR REPLACE FUNCTION balances_are_trigger_maintained() RETURNS trigger AS $$
 BEGIN
-    IF pg_trigger_depth() < 2 THEN
+    IF current_setting('meridian.projecting', true) IS DISTINCT FROM 'on' THEN
         RAISE EXCEPTION 'balances is maintained by the ledger projection; '
                         'write a ledger entry instead';
     END IF;
     RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+-- Immediate guard provenance is backed by a deferred parity invariant because
+-- custom GUCs are caller-settable and therefore cannot be authorization alone.
+CREATE OR REPLACE FUNCTION balances_must_match_ledger() RETURNS trigger AS $$
+DECLARE
+    target_loan INTEGER := COALESCE(NEW.loan_id, OLD.loan_id);
+    actual_principal NUMERIC(14,2);
+    actual_fees NUMERIC(14,2);
+    ledger_principal NUMERIC(14,2);
+    ledger_fees NUMERIC(14,2);
+BEGIN
+    SELECT balance, COALESCE(past_due, 0)
+      INTO actual_principal, actual_fees
+      FROM balances WHERE loan_id = target_loan;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'balance projection row for loan % cannot be removed', target_loan;
+    END IF;
+    SELECT COALESCE(SUM(amount) FILTER (WHERE component = 'principal'), 0),
+           COALESCE(SUM(amount) FILTER (WHERE component = 'fees'), 0)
+      INTO ledger_principal, ledger_fees
+      FROM ledger_entries WHERE loan_id = target_loan;
+    IF actual_principal IS DISTINCT FROM ledger_principal
+       OR actual_fees IS DISTINCT FROM ledger_fees THEN
+        RAISE EXCEPTION 'balance/ledger parity violation for loan %', target_loan;
+    END IF;
+    RETURN NULL;
 END $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION balances_are_trigger_maintained() IS

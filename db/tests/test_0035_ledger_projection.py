@@ -164,6 +164,38 @@ def test_a_session_flag_cannot_suppress_a_normal_projection(db):
     db.rollback()
 
 
+def _enable_step_five_guard(db):
+    _exec(db, "DROP TRIGGER balances_capture_legacy_delta ON balances")
+    _exec(db, "CREATE TRIGGER balances_guard BEFORE UPDATE OR DELETE ON balances "
+              "FOR EACH ROW EXECUTE FUNCTION balances_are_trigger_maintained()")
+
+
+def test_unrelated_nested_trigger_cannot_impersonate_ledger_projection(db):
+    loan = _a_loan(db)
+    _enable_step_five_guard(db)
+    _exec(db, "CREATE TABLE unrelated_balance_source(loan_id integer)")
+    _exec(db, "CREATE FUNCTION unrelated_balance_write() RETURNS trigger AS $$ "
+              "BEGIN UPDATE balances SET balance=balance+1 WHERE loan_id=NEW.loan_id; "
+              "RETURN NEW; END $$ LANGUAGE plpgsql")
+    _exec(db, "CREATE TRIGGER unrelated_write AFTER INSERT ON unrelated_balance_source "
+              "FOR EACH ROW EXECUTE FUNCTION unrelated_balance_write()")
+
+    with pytest.raises(psycopg2.errors.RaiseException, match="ledger projection"):
+        _exec(db, "INSERT INTO unrelated_balance_source VALUES(%s)", (loan,))
+    db.rollback()
+
+
+def test_spoofed_projection_flag_still_cannot_commit_ledger_drift(db):
+    loan = _a_loan(db)
+    _enable_step_five_guard(db)
+    _exec(db, "SELECT set_config('meridian.projecting','on',true)")
+    _exec(db, "UPDATE balances SET balance=balance+1 WHERE loan_id=%s", (loan,))
+
+    with pytest.raises(psycopg2.errors.RaiseException, match="parity violation"):
+        db.commit()
+    db.rollback()
+
+
 @pytest.mark.parametrize("entry_type", ["opening_balance", "legacy_direct_write"])
 def test_system_only_entry_types_cannot_be_inserted_directly(db, entry_type):
     loan = _a_loan(db)
@@ -389,7 +421,7 @@ def test_one_payment_may_span_components(db):
 
 # --- the write-guard ships disabled -----------------------------------------
 
-def test_the_guard_function_exists_but_only_the_capture_bridge_is_attached(db):
+def test_the_guard_is_staged_while_capture_delete_and_parity_are_attached(db):
     """Step 5 enables it. Attaching it now would turn every existing writer into
     an exception before any of them has been converted."""
     fn = _exec(db, "SELECT count(*) AS n FROM pg_proc p JOIN pg_namespace n "
@@ -401,9 +433,9 @@ def test_the_guard_function_exists_but_only_the_capture_bridge_is_attached(db):
                     "ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
                     "WHERE c.relname = 'balances' AND NOT t.tgisinternal "
                     "AND n.nspname = %s", (SCHEMA,))
-    assert trg[0]["n"] == 2, (
-        "balances must have exactly the transitional delta-capture and delete-"
-        "rejection triggers; the step-5 general guard remains disabled"
+    assert trg[0]["n"] == 3, (
+        "balances must have transitional delta-capture, delete rejection, and "
+        "deferred parity triggers; the step-5 general guard remains disabled"
     )
 
 
