@@ -214,6 +214,11 @@ def internal_auth_check(
                 "VALUES (%s, 'principal', -0.01, 'payment', %s)",
                 (target_loan, sentinel),
             )
+            # The real apply commits, which runs DEFERRABLE INITIALLY DEFERRED
+            # allocation and parity checks. Force those same checks inside this
+            # throwaway transaction before rolling it back; otherwise a 200 can
+            # prove only the immediate half of the payment write path.
+            cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
             # Never committed. Both writes exist only long enough to prove the
             # path works, so this leaves no data to clean up.
             cur.execute("ROLLBACK")

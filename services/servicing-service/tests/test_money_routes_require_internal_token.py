@@ -401,6 +401,39 @@ def test_auth_check_write_is_rolled_back(monkeypatch):
     assert "ROLLBACK" in joined, "the preflight's write was not rolled back"
 
 
+def test_auth_check_refuses_when_a_deferred_ledger_invariant_fails(monkeypatch):
+    """Deferred constraints must be forced before the throwaway rollback."""
+    from contextlib import contextmanager
+
+    class _DeferredFailureDb:
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                last_sql = ""
+
+                def execute(self, sql, params=None):
+                    self.last_sql = " ".join(sql.split())
+                    if self.last_sql == "SET CONSTRAINTS ALL IMMEDIATE":
+                        raise RuntimeError("deferred ledger parity violation")
+
+                def fetchall(self):
+                    if self.last_sql.startswith("SELECT 1 FROM balances"):
+                        return [{"exists": 1}]
+                    if self.last_sql.startswith("SELECT loan_id FROM balances"):
+                        return [{"loan_id": 1}]
+                    return [{"payment_id": -1}]
+
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _DeferredFailureDb())
+    response = client.get(
+        "/internal/auth-check?loan_id=1",
+        headers={"X-Internal-Token": TOKEN},
+    )
+    assert response.status_code == 503
+    assert "deferred ledger parity violation" not in response.text
+
+
 # --- review round 7: the probe must write to the tables the money path writes -
 
 
