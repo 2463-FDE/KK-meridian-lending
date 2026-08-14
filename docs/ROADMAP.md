@@ -22,6 +22,25 @@ short of that is inventory, not delivery. So the status key distinguishes them:
 Every `D<n>` / `RF-<n>` citation in the tables below is defined in
 [`DEBT.md`](DEBT.md) — the debt register.
 
+## Current planning surface
+
+This is the durable work queue. The detailed matrix and dated audit evidence
+below explain how it was derived.
+
+- **Highest priority:** close `G-INTAKE-401`, so KYC authorization failures fail
+  closed instead of looking like transient network errors.
+- **Next control:** implement `G-MAKER-CHECKER` from ADR 0011/spec 0002 using a
+  server-validated human principal. A shared service token or caller-supplied
+  identity/role headers are not proof of the human actor.
+- **Then:** close D1's Decimal read-path gap and implement D14's payment
+  waterfall on the landed component ledger.
+- **Durable status:** Weeks 1–5 are landed; Week 6 has RBAC and ledger but not
+  maker-checker enforcement; Week 7 has reconciliation but not a cross-service
+  trace ID; Weeks 8–10 retain the scoped gaps in the table below.
+
+PR state, CI state, and exact suite counts are deliberately excluded. Check
+those live; they are not roadmap facts.
+
 Week numbers below are the curriculum's, not feature boundaries — the review
 called that out, so each heading now carries the **feature** it delivered.
 Several weeks' work also shipped out of order (Week 7 and Week 8 pieces landed
@@ -105,7 +124,7 @@ production implementation.
 | 1 | Production LLM client (timeout, retry, cost guard, structured output) | Fail-closed on a missing/unreachable model | **Done** | `loan-assistant/app/llm_client.py` | `loan-assistant/tests/test_llm_client.py`; 153 tests green | None | — | — |
 | 1 | Secrets: no hardcoded keys, `.env` untracked | No key fallback in any `config.py`; `.env` not in `git ls-files`; CI scans history | **Done** | `git ls-files .env` → empty; grep for fallback literals → 0 hits across 8 services | CI's `secrets` job runs gitleaks over the full history on every push and pull request | None. `DEBT.md` D18 records why history was not rewritten and that the committed values are published test PANs, not real data | — | — |
 | 1 | Money as `Decimal`, not `float` | Compute in Decimal; store `NUMERIC` | **Partial** | `db/migrations/0005` (14 columns → `NUMERIC`); `apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py` | `test_money.py`, `test_schedule.py`, `test_amount_financed_rounding.py`; `db/tests/test_schema_parity.py` (CI) | **D1** — the disclosure *read* path still coerces to `float` (`disclosure-service/app/routers/offers.py:459-490, 532-534`). Write path is exact; redisplay is not | Medium | Close D1: keep the read path in Decimal to the serializer boundary |
-| 1 → 5 | Stop storing PAN/CVV | Columns absent from a migrated *and* a fresh database | **Done** | `db/migrations/0031` (contract), `0029` (back-fill gate), `db/init/001_schema.sql` creates neither | `db/tests/test_0031_contract_gate.py`, `test_expand_contract_pan_cvv.py`, `db/tools/check_no_pan_readers.py`, `test_payments_sql_is_static.py`; CI `db-migrations` green | None for the defect (`DEBT.md` D5b/D13 closed). **`README.md` still says the opposite** — see the Medium gap below | Medium | Correct README (separate concern, separate PR) |
+| 1 → 5 | Stop storing PAN/CVV | Columns absent from a migrated *and* a fresh database | **Done** | `db/migrations/0031` (contract), `0029` (back-fill gate), `db/init/001_schema.sql` creates neither | `db/tests/test_0031_contract_gate.py`, `test_expand_contract_pan_cvv.py`, `db/tools/check_no_pan_readers.py`, `test_payments_sql_is_static.py`; CI `db-migrations` green | None for the defect (`DEBT.md` D5b/D13 closed); README schema claims are covered by the next row | — | — |
 | 1 | README states the real compliance position | No PCI-DSS claim; named gaps are gaps that exist | **Done** | `README.md` states there is no `payments.pan` and no `payments.cvv`; the surviving mentions are in a clearly marked history block describing what the vendor delivery did | `db/tests/test_readme_schema_claims.py` — a README claim about the schema must match the schema, the way `test_docs_match_the_logging_code.py` holds the logging claims | None | — | — |
 | 2 | RAG corpus hygiene gate | SSN/PAN/DOB-bearing records blocked offline, before the embedder | **Done** | `loan-assistant/app/corpus.py`; `adr/0005` | `tests/test_corpus.py`, `test_embeddings.py`; 153 green | None | — | — |
 | 2 | Retrieval eval harness incl. the #6012 denial case | Graded on real retrieval output, no answer key as input | **Done** | `loan-assistant/app/rag_eval.py` | `tests/test_policy_chat.py`, `test_main.py`; CI `backend (loan-assistant)` green | None | — | — |
