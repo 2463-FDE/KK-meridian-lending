@@ -19,6 +19,10 @@ from . import db
 log = get_logger("balance")
 
 
+class PaymentReplayConflict(ValueError):
+    """An idempotency key was reused for a different payment application."""
+
+
 def _to_decimal(value) -> Decimal:
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
@@ -87,11 +91,31 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
             (payment_id, loan_id, amount),
         )
         if not cur.fetchall():
+            cur.execute(
+                "SELECT pa.loan_id, pa.amount, p.auth_status, b.balance "
+                "FROM payment_applications pa "
+                "JOIN payments p ON p.id = pa.payment_id "
+                "JOIN balances b ON b.loan_id = pa.loan_id "
+                "WHERE pa.payment_id = %s",
+                (payment_id,),
+            )
+            replay_rows = cur.fetchall()
+            if len(replay_rows) != 1:
+                raise PaymentReplayConflict(
+                    f"payment_id={payment_id} has no complete persisted application"
+                )
+            persisted = replay_rows[0]
+            if (persisted["loan_id"] != loan_id
+                    or _to_decimal(persisted["amount"]) != _to_decimal(amount)
+                    or persisted["auth_status"] != "captured"):
+                raise PaymentReplayConflict(
+                    f"payment_id={payment_id} replay does not match its persisted application"
+                )
             log.info(
-                "apply-payment payment_id=%s already applied -- skipping duplicate apply",
+                "apply-payment payment_id=%s exact replay -- skipping duplicate apply",
                 payment_id,
             )
-            return get_balance(loan_id), False
+            return persisted["balance"], False
 
         cur.execute(
             "INSERT INTO ledger_entries "

@@ -118,6 +118,20 @@ def test_the_token_still_admits_the_legitimate_callers(monkeypatch):
                        json={"amount": 1.0, "payment_id": 1}, headers=auth).status_code == 200
 
 
+def test_mismatched_payment_replay_returns_conflict(monkeypatch):
+    def conflict(*_args):
+        raise main.balance.PaymentReplayConflict("payment replay does not match")
+
+    monkeypatch.setattr(main.balance, "apply_payment_once", conflict)
+    response = client.post(
+        "/accounts/1/apply-payment",
+        json={"amount": 31.0, "payment_id": 7},
+        headers={"X-Internal-Token": TOKEN},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "payment replay does not match"
+
+
 def test_health_and_metrics_stay_open(monkeypatch):
     """Container health checks and the Prometheus scrape must not need a token.
 

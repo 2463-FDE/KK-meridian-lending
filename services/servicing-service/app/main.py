@@ -297,7 +297,10 @@ def apply_payment(loan_id: int, body: ApplyPaymentIn,
     # Review fix: idempotent by payment_id now (balance.apply_payment_once) --
     # payment-service retries this call on a same-key retry if a prior attempt
     # never confirmed, so a duplicate call here must not double-apply.
-    new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
+    try:
+        new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
+    except balance.PaymentReplayConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "loan_id": loan_id,
         "applied_amount": body.amount,

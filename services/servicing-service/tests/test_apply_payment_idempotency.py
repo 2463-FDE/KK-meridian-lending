@@ -46,7 +46,7 @@ class _FakeDb:
 
     def __init__(self, balance=0.0):
         self.balance = balance
-        self.applications = set()
+        self.applications = {}
         self.ledger = set()
         self.payment_statuses = {}
 
@@ -59,8 +59,14 @@ class _FakeDb:
             payment_id, loan_id, amount = params
             if payment_id in self.applications:
                 return []  # ON CONFLICT DO NOTHING -- already applied
-            self.applications.add(payment_id)
+            self.applications[payment_id] = (loan_id, amount)
             return [{"payment_id": payment_id}]
+        if stmt.startswith("SELECT pa.loan_id"):
+            payment_id = params[0]
+            loan_id, amount = self.applications[payment_id]
+            return [{"loan_id": loan_id, "amount": amount,
+                     "auth_status": self.payment_statuses.get(payment_id, "captured"),
+                     "balance": self.balance}]
         if stmt.startswith("SELECT balance"):
             return [{"balance": self.balance}]
         if stmt.startswith("INSERT INTO ledger_entries"):
@@ -81,7 +87,7 @@ class _FakeDb:
     @contextmanager
     def transaction(self):
         snapshot_balance = self.balance
-        snapshot_applications = set(self.applications)
+        snapshot_applications = dict(self.applications)
         snapshot_ledger = set(self.ledger)
         try:
             yield _FakeCursor(self)
@@ -118,6 +124,19 @@ def test_apply_payment_once_is_a_noop_on_duplicate_payment_id(fake_db):
     assert second_applied is False
     assert first_balance == second_balance == 70.0
     assert fake_db.balance == 70.0  # not 40.0 -- the second call never re-applied
+
+
+@pytest.mark.parametrize("replay_loan,replay_amount", [(6, 30.0), (5, 31.0), (6, 31.0)])
+def test_apply_payment_once_rejects_mismatched_replay(fake_db, replay_loan, replay_amount):
+    balance.apply_payment_once(payment_id=7, loan_id=5, amount=30.0)
+
+    with pytest.raises(balance.PaymentReplayConflict, match="does not match"):
+        balance.apply_payment_once(
+            payment_id=7, loan_id=replay_loan, amount=replay_amount
+        )
+
+    assert fake_db.applications[7] == (5, 30.0)
+    assert fake_db.balance == 70.0
 
 
 def test_apply_payment_once_applies_separately_for_different_payment_ids(fake_db):
