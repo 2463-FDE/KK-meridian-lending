@@ -48,8 +48,8 @@ during Week 4); those are marked where they occur.
 | 3 | AI scorer wrapper + append-only decision memory | ✅ Landed |
 | 4 | Auto-disclosure on approval + KG traversal | ✅ Landed |
 | 5 | Card tokenization + payment reconciliation | ✅ Landed |
-| 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC landed; ledger and maker-checker open |
-| 7 | Trace ID + scoped reconciliation control | 🟡 Prometheus/Grafana landed early; the reconciliation control and the trace id are open |
+| 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC and append-only ledger landed; maker-checker is specified but not implemented |
+| 7 | Trace ID + scoped reconciliation control | 🟡 Scheduled transaction-level reconciliation landed; cross-service trace ID remains open |
 | 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
 | 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
@@ -77,7 +77,7 @@ should be able to find it without reading the PR history.
 
 ## Weeks 1–6 audit — traceability matrix
 
-**Re-verified 2026-08-13 against `main` at `1528226`.** Every row was re-checked
+**Re-verified 2026-08-14 against `main` at `87193c4`.** Every row was re-checked
 against the code on `main` — not against a PR title, a comment, or an earlier row
 of this file. `Done` requires all five: on `main`, acceptance criteria met,
 tested, reachable where applicable, documented.
@@ -93,9 +93,11 @@ feature landed in a different week than its brief, both labels appear in the
 Week column as `brief → shipped`. No row is guessed: where the two disagree it is
 because a merged PR says so.
 
-**Counts (31 requirements): 24 Done · 5 Partial · 2 Not started · 0 Blocked ·
-0 Deferred.** Four rows moved to Done and two out of Not started since the
-2026-08-11 pass, all of them by work that has since merged to `main`.
+**Counts (31 requirements): 26 Done · 4 Partial · 1 Not started · 0 Blocked ·
+0 Deferred.** The count is derived from the matrix below. The append-only ledger
+and ADR rows moved to Done after their implementations merged to `main`;
+maker-checker remains Not started because its approved specification is not a
+production implementation.
 
 | Week | Feature/requirement | Acceptance criteria | Status | Code/commit evidence | Test/CI evidence | Remaining gap | Priority | Next action |
 |---|---|---|---|---|---|---|---|---|
@@ -123,11 +125,11 @@ because a merged PR says so.
 | 5 | Card tokenization / PCI scope reduction | Service receives a token + last4 + brand; never a PAN, CVV or SSN; token never persisted | **Done** | `frontend/lib/tokenize.ts`; `PaymentIn` with `extra="forbid"`; `db/migrations/0016`; `adr/0008` supersedes `adr/0003` | `test_charge_flow.py`, `test_charge_no_pan.py`, `test_docs_match_the_logging_code.py` | None for the defect. ⚠️ The tokenization boundary is **mocked** — no real processor. PCI-DSS compliance is *not* claimed and needs a QSA | — | — |
 | 5 | Captured-but-unapplied payments are recoverable | A durable, self-draining work item, not a hope that the client retries | **Done** | `payment-service/app/reconcile.py`; `db/migrations/0028` | `tests/test_reconciler_lifecycle.py`, `test_reconcile_real_postgres.py` | None | — | — |
 | 5 | Spec package committed before it is cited | The cited path resolves | **Done** | `specs/0001-online-payments-idempotency-tokenization.md` | `db/tests/test_docs_citations_resolve.py` | None. History: the original spec was cited for weeks and had never been committed on any branch | — | — |
-| 6 | Money-moving servicing actions are role-gated | Only csr/admin may adjust a balance or waive a fee, enforced server-side | **Partial** | `gateway/app/main.py` — `can_move_money()`, underwriter excluded. `servicing-service/app/main.py` now calls `_require_internal()` on **all four** money routes: `apply-payment`, `adjust-balance`, `waive-fee`, `late-fee` | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py`; `gateway/tests/test_auth_and_routes.py`, `test_proxy_security.py` | The service-side **token** boundary is closed. The **role** boundary is not: servicing still reads no role of its own, so the csr/admin restriction is enforced at one hop only. `DEBT.md` **D8** stays open for that and for the missing second approver | High | Take the role from the authenticated principal server-side, never from a client-supplied header. A written specification for this arrives with `specs/0002-maker-checker-self-approval.md`, which does not exist on `main` |
-| 6 | Append-only ledger; balance as a projection | "Show me every change and who made it" is answerable | **Not started** | No ledger table on `main`: grep across `db/init`, `db/migrations` and `servicing-service/app` → 0 hits. `balance.adjust_balance()` docstring: "No ledger entry; the prior value is gone forever" | None — nothing on `main` to test | The whole feature. `balances.balance` is still one mutable column | High | The design decision is made and written; what remains is the schema and the write-path conversion. `DEBT.md` **D8** |
-| 6 | Maker-checker on money-affecting actions | No single account can move money unilaterally | **Not started** | Grep for maker-checker/second-approver across `services/` and `db/` → only the three comments recording its absence | None | The whole feature | High | Blocked on the ledger above — an approval record needs somewhere to live. `DEBT.md` D8 |
-| 6 | Lost-update proof on the shared column | One failing test pinning the real race | **Done** | `balance.apply_payment()` is still an unlocked read-modify-write — the proof is the deliverable, not the fix | `servicing-service/tests/test_balance_lost_update_real_postgres.py` — `xfail(strict=True)` cases against real PostgreSQL, plus a passing one pinning that the brief's own repro (payment + waiver) does **not** collide, because those touch different columns | None for the proof. The defect it pins is `DEBT.md` **D3**, still open | High | Close D3 — via the ledger, or `SELECT … FOR UPDATE` if that design is rejected |
-| 6 | Legacy-comprehension ADR (RBAC + maker-checker + ledger) | An accepted ADR proposing the three | **Not started** | `adr/` on `main` holds 0001–0009; none covers servicing authz or the ledger | `db/tests/test_docs_citations_resolve.py` passes because nothing on `main` cites a missing ADR | Week 6's stated deliverable. The corrected concurrency analysis exists as prose in this file and as an executable proof in `test_balance_lost_update_real_postgres.py` | Medium | Land the ADR |
+| 6 | Money-moving servicing actions are role-gated | Only csr/admin may adjust a balance or waive a fee, enforced server-side | **Partial** | `gateway/app/main.py` — `can_move_money()`, underwriter excluded. `servicing-service/app/main.py` calls `_require_internal()` on all four money routes | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py`; `gateway/tests/test_auth_and_routes.py`, `test_proxy_security.py` | The service token authenticates only the calling service, not the human. `specs/0002-maker-checker-self-approval.md` now defines the required server-validated principal boundary, but production enforcement is not implemented | High | Implement the validated-principal contract from spec 0002; reject missing/invalid principals and ignore forged identity/role headers |
+| 6 | Append-only ledger; balance as a projection | "Show me every change and who made it" is answerable | **Done** | `db/migrations/0035_ledger_entries.sql`; mirrored fresh-install schema in `db/init/001_schema.sql`; `services/servicing-service/app/balance.py` | `db/tests/test_0035_ledger_projection.py`, `test_migration_paths_converge.py`, `test_schema_parity.py`; `services/servicing-service/tests/test_balance_lost_update_real_postgres.py` | ADR 0010 step 2 is landed. The expand-phase compatibility bridge captures legacy direct writes; final writer conversion and activation of the rejecting general guard remain later ADR steps, not an unrecorded ledger gap | — | Continue ADR 0010's staged writer conversion |
+| 6 | Maker-checker on money-affecting actions | No single account can move money unilaterally | **Not started** | `specs/0002-maker-checker-self-approval.md` and ADR 0011 define the principal, proposal, approval, self-approval, and failure contracts | `db/tests/test_spec_0002_describes_the_real_system.py`, `test_adr_0011_enforcement_runs_on_postgres.py` validate the specification against the current schema and explicitly prevent it from claiming production enforcement | Implementation is intentionally absent; a shared service token plus identity headers is explicitly insufficient | High | Implement spec 0002 using a server-validated, non-forgeable human principal and retain proposal/rejection evidence |
+| 6 | Lost-update proof on the shared column | A real-PostgreSQL test pins concurrent payment behavior | **Done** | Ledger projection replaces the former unlocked payment read-modify-write path | `servicing-service/tests/test_balance_lost_update_real_postgres.py` now asserts both concurrent payments are preserved; `db/tests/test_0035_ledger_projection.py` proves parity | None; D3 is closed by the landed ledger projection | — | — |
+| 6 | Legacy-comprehension ADR (RBAC + maker-checker + ledger) | An accepted ADR proposing the three | **Done** | `adr/0010-append-only-ledger-for-servicing-balances.md`; `adr/0011-maker-checker-for-servicing-adjustments.md` | `db/tests/test_ledger_adr_sequence_is_consistent.py`, `test_adr_0011_enforcement_runs_on_postgres.py`, `test_docs_citations_resolve.py` | None for the architecture decision; implementation stages remain tracked by their own rows | — | — |
 | 6 | Payment waterfall (fees → interest → principal) | A payment is applied in the regulated order | **Partial** | `balance.py:38` applies straight off principal | `test_apply_payment_idempotency.py` pins today's behaviour, not the correct one | `DEBT.md` **D14**, open | Medium | Sequence after the ledger — a waterfall needs per-component rows |
 | 6 | `loans.apr` names what it holds | The column and the UI agree on which regulated rate is displayed | **Partial** | API renamed (`note_rate_pct` alias); three frontend views relabelled; seeds corrected | `db/tests/test_seed_offer_consistency.py::test_loans_apr_holds_the_note_rate_not_the_disclosed_apr` | `DEBT.md` **D19** — the column is still literally `loans.apr`; anyone reading SQL, a dump or `db/init/001_schema.sql` meets the wrong name | Medium | Rename via migration + every query/model/fixture that names it |
 
@@ -143,7 +145,9 @@ list that only ever grows stops being read:
 |---|---|---|
 | **G-KYC** — the CIP handler was reachable unauthenticated, on two routes | `kyc-service` has no host port and `POST /kyc/check` requires `X-Internal-Token` and refuses an unset one; the gateway's `/kyc/*` relay is staff-only **and read-only**, so a POST is refused with 405 rather than signed on an anonymous caller's behalf | `gateway/tests/test_decision_service_not_host_published.py` (now parametrized over `kyc-service` too), `gateway/tests/test_proxy_security.py`, `kyc-service/tests/` |
 | **G-SERVICING-TOKEN** — servicing's money routes checked no token | `_require_internal()` on **all four**: `apply-payment`, `adjust-balance`, `waive-fee`, `late-fee` | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py` |
-| **G-D3-PROOF** — Week 6's failing lost-update test was never written | `servicing-service/tests/test_balance_lost_update_real_postgres.py` | The `xfail(strict=True)` cases fail the suite the day someone "fixes" the race without removing them |
+| **G-D3 / G-D3-PROOF** — payment updates could lose a concurrent write | ADR 0010 step 2 projects immutable ledger entries with database-enforced parity; the former race test now asserts the corrected concurrent behavior | `servicing-service/tests/test_balance_lost_update_real_postgres.py`, `db/tests/test_0035_ledger_projection.py` |
+| **G-LEDGER / G-ADR-0010** — no append-only servicing ledger or accepted design | ADR 0010 plus migration 0035, the fresh-install mirror, opening-state cutover, and legacy-write capture | `db/tests/test_0035_ledger_projection.py`, `test_ledger_adr_sequence_is_consistent.py`, migration convergence and schema parity tests |
+| **G-D7** — reconciliation was not an operational control | Scheduled transaction-level reconciliation now records runs, fails closed when nothing can be compared, and exposes monitoring/runbook evidence | `test_reconciliation_is_actually_scheduled.py`, `test_reconciliation_fails_closed_on_nothing.py`, `test_reconciliation_transaction_level_on_postgres.py` |
 | **G-README** — the README claimed dropped columns still existed | README states the schema as it is | `db/tests/test_readme_schema_claims.py` |
 | **G-DTI** — the policy published cutoffs the code never applied | The DTI section is marked defined-but-not-applied | `db/tests/test_policy_matches_implemented_cutoffs.py` |
 
@@ -159,24 +163,19 @@ four so a fifth route added without a check fails it.
 
 - **G-INTAKE-401** — a KYC authorization failure is indistinguishable from a timeout at intake. `submit_application` wraps the kyc-service call in `except Exception`, which is right for a timeout and wrong for a 401: an unset or rotated `INTERNAL_SERVICE_TOKEN` would silently stop verifying identity on **every** application while intake still returns 200 with all four CIP flags false and no `kyc_checks` row. *AC:* a 401/403 from kyc-service fails the request or raises an alarm, distinctly from a timeout; a test asserts the two are handled differently. *Evidence:* a test in `origination-service/tests/` that a 401 does not produce a 200 with all-false CIP. *Dependency:* none.
 - **G-SERVICING-ROLE** — servicing reads no role of its own, so the csr/admin restriction on money movement is enforced at the gateway hop only (`DEBT.md` D8). *AC:* the role comes from the authenticated server-side principal, never from a client-supplied header, and a caller holding the internal token cannot elevate itself by setting one. *Evidence:* a test asserting a spoofed `X-User-Role` does not grant authority. *Dependency:* none.
-- **G-LEDGER** — no append-only ledger; balance is one mutable column (`DEBT.md` D8). *AC:* every balance change writes an immutable row carrying actor, reason and a signed delta; the displayed balance is derived from those rows; a trigger rejects UPDATE/DELETE, as `decision_events` does. *Evidence:* a migration, a `db/tests` case proving the trigger, and a per-loan parity test that the projection equals the ledger sum. *Dependency:* none — the design decision is made.
-- **G-MAKER-CHECKER** — no second approver on any money-affecting action (`DEBT.md` D8). *AC:* an adjustment or waiver is recorded as a proposal until a second, different staff account approves it; the same account cannot do both, with no exception for an administrator; a rejected proposal is retained. *Evidence:* a test proving self-approval is rejected and one proving a rejected proposal survives. *Dependency:* **G-LEDGER** — the approval writes a ledger entry, so it needs somewhere to write.
-- **G-D3** — `apply_payment` is an unlocked read-modify-write; two concurrent calls lose one (`DEBT.md` D3). The failing test now exists; the fix does not. *AC:* the `xfail(strict=True)` cases in `test_balance_lost_update_real_postgres.py` pass, and the marker is removed in the same commit. *Dependency:* none — either the ledger or `SELECT … FOR UPDATE` closes it.
-- **G-D7** — reconciliation is not a control (`DEBT.md` D7). *AC:* it runs on a schedule, compares at transaction level rather than netting totals, records every run, and fails with a distinct code when it could not compare anything. *Evidence:* a run table, a non-zero exit on a break, and a test that a run over nothing is an error rather than a pass. *Dependency:* none.
+- **G-MAKER-CHECKER** — no second approver is enforced on money-affecting actions (`DEBT.md` D8). ADR 0011 and spec 0002 define the contract but explicitly do not claim production enforcement. *AC:* an adjustment or waiver is recorded as a proposal until a second, different staff account approves it; identity and role come from a server-validated, non-forgeable principal; the same account cannot propose and approve; forged headers, missing/invalid principals, and service-token-only calls cannot elevate authority; rejected proposals are retained. *Evidence:* production-path tests proving each case, in addition to the specification conformance tests. *Dependency:* the ledger dependency is now satisfied.
 
 #### Medium
 
 - **G-D1** — the disclosure read path rebuilds the display schedule in `float` (`DEBT.md` D1, *Partly fixed*). *AC:* Decimal to the serializer boundary; a redisplay test asserting the schedule matches the disclosed payment exactly.
-- **G-ADR-0010** — Week 6's legacy-comprehension ADR is not on `main`. *AC:* an accepted ADR covering servicing RBAC, maker-checker and the ledger, including the corrected concurrency repro.
 - **G-D19** — `loans.apr` holds the note rate (`DEBT.md` D19). API and UI are corrected; the column is not. *AC:* rename via migration, plus every query, model and fixture that names it.
-- **G-D14** — no payment waterfall (`DEBT.md` D14). *Dependency:* G-LEDGER — a waterfall needs per-component rows.
+- **G-D14** — no payment waterfall (`DEBT.md` D14). The ledger dependency is satisfied; component-order implementation remains.
 
 #### Debt
 
 Register entries in scope for Weeks 1–6 and still open, cited by their own IDs —
-no new numbers minted here: **D1** (float read path, partly fixed), **D3**
-(unlocked read-modify-write), **D7** (reconciliation is not a control), **D8**
-(no role check / no second approver / no ledger entry), **D14** (no waterfall),
+no new numbers minted here: **D1** (float read path, partly fixed), **D8**
+(validated human role and second approver are not implemented), **D14** (no waterfall),
 **D19** (column name, partly fixed), **D20** (bounded, not fixed — the static-SQL
 premise is enforced by test instead).
 
@@ -201,12 +200,12 @@ call site, and the fix is to treat them differently and assert that in a test.
 
 After it, in order:
 
-1. **G-D3** — the lost-update race. The failing test is on `main`; the fix is not.
-   Closing it removes the `xfail(strict=True)` markers in the same commit, which
-   is what stops the proof quietly becoming decoration.
-2. **G-D7** — reconciliation as a control that can fail.
-3. **G-LEDGER**, then **G-MAKER-CHECKER**, which depends on it — an approval
-   writes a ledger entry, so it needs somewhere to write.
+1. **G-MAKER-CHECKER** — implement ADR 0011/spec 0002 using a server-validated
+   human principal. The ledger dependency is satisfied; the specification alone
+   is not production enforcement.
+2. **G-D1** — keep disclosure values in Decimal through serialization.
+3. **G-D14** — implement the fees → interest → principal waterfall on the
+   landed component ledger.
 
 ### Historical note — G-KYC, and why it took two passes
 
@@ -243,14 +242,14 @@ precisely what let half of it ship as though it were whole. Both halves landed
 together in the end, because splitting a fix from the defect it closes would have
 left the change claiming something untrue.
 
-## Audit snapshot — 2026-08-13
+## Audit snapshot — 2026-08-14
 
 **Everything in this section is a measurement, not guidance.** It expires the
 moment anyone merges or pushes, and it is fenced here so the rest of the file can
 be read without wondering which parts have gone stale. **Do not cite it as
 current status** — run the commands.
 
-- **Base:** `main` at `1528226`, level with `origin/main` when the audit ran.
+- **Base:** `main` at `87193c4`, level with `origin/main` when the audit ran.
 - **How to reproduce:** `python -m pytest -q` per service (with `DATABASE_URL`
   set, or the real-PostgreSQL cases skip and a skip reads like a pass),
   `python -m pytest db/tests -q`, and `npm run test:e2e` in `frontend/` with the
@@ -672,7 +671,7 @@ hides the Servicing nav from borrowers but enforces nothing server-side.
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
 | 1 | Servicing | Any authenticated user, any role, could adjust any balance or waive any fee — no role check, no second approver | 🟡 Partially fixed, self-directed, ahead of this week's own build: the gateway now enforces staff-only on these actions server-side (41 passing tests, live-verified) | "Trusted reps" isn't a permissions model — a compromised or careless single account could zero out any loan with no second check |
-| 2 | Servicing | No ledger — `balance` is overwritten in place; the prior value is gone the instant the next write lands, so "show me every change and who made it" is unanswerable | ⬜ Open | An append-only ledger (balance as a computed projection, not a mutable column) is the only way to answer a controller's audit question at all |
+| 2 | Servicing | No ledger — `balance` was overwritten in place and prior values disappeared | ✅ Fixed — ADR 0010 step 2, migration 0035, and the fresh-install mirror add immutable entries plus a balance projection and cutover capture | The audit trail and projection are now database-enforced and covered by real-PostgreSQL parity/concurrency tests |
 | 3 | Servicing | No maker-checker / segregation of duties on any money-affecting action | ⬜ Open | A single person moving money with no second approver is a real internal-controls gap, not just a technical one |
 | 4 | Servicing / Gateway | Frontend hides the Servicing nav from borrowers, but the actual endpoints accept any authenticated caller regardless — security-by-UI-obscurity | 🟡 Partially fixed — the gateway now enforces the real check server-side (see #1); the UI hiding was already harmless once the backend check exists, but was previously the *only* thing stopping anyone | Hiding a button is not a permission system — the real gate has to live where the request actually lands |
 
@@ -692,10 +691,9 @@ report (who can call each money-affecting endpoint today, how balance
 actually mutates, the corrected concurrency scenario above), characterization
 tests pinning today's behavior as a baseline, one failing test proving the
 *correctly-paired* lost update, and an ADR proposing RBAC + maker-checker +
-an append-only ledger. **Not the dashboard build — and the maker-checker
-step and the ledger are still fully unbuilt.** Only the RBAC/ownership half
-of the ADR's own proposed fix shipped, and it shipped self-directed, at the
-gateway, ahead of this week's own official scope.
+an append-only ledger. **The ledger and its ADR have since landed; maker-checker
+remains specification-only.** Gateway RBAC still does not replace the required
+server-validated human principal at the servicing trust boundary.
 
 ---
 
@@ -721,10 +719,11 @@ noisy, we just adjust to the bank number."
 | 3 | Payments | A real double-fund event exists in this exact month's data (loan 5582, two identical $410.50 charges 2 seconds apart) and nothing flags it | ⬜ Open | Confirmed: no trace ID or request ID connects the two `POST /payments` attempts — indistinguishable from two genuine charges without a human manually diffing rows by loan_id + amount + near-identical timestamp |
 | 4 | Payments | `payments` has **no `processor_ref` column at all** — even a correctly-scoped reconciliation could only match rows approximately (loan_id + amount + nearby date), never definitively by charge reference | ⬜ Open | This is itself part of why nobody can produce an exact break-report today, not just a missing job. Without the processor's own reference on the row there is no join key, so a comparison can only net totals per loan — and two wrong transactions on one loan then cancel, which is a control that reports success for having hidden its own findings |
 
-*The four rows above are measured against `main` at the audit base, and this is
-the table most likely to move first: `DEBT.md` **D7** is open and the work that
-closes it changes rows 1 and 4 together. Check `git log db/migrations` and
-`gh pr list` rather than reading a ⬜ here as current.*
+*The four rows above are dated discovery evidence, not current guarantees.
+Since that measurement, transaction-level scheduled reconciliation,
+`processor_ref`, capture timestamps/source, run evidence, and fail-closed
+behavior landed. The cross-service trace-ID gap remains; verify current state
+from code and tests rather than treating the historical markers as live status.*
 
 **This week's real deliverable, stated honestly:** **one** instrumented path
 (a shared trace/correlation ID connecting `payment-service`'s `charge()` to
@@ -848,12 +847,11 @@ own central task): the assumption that "Weeks 3/6/7 are all spec-only, not
 built" is **not fully accurate**, checked today:
 - **Week 3** — `decision_events` is real, tested, shipped code, **merged to
   `main`** (PR #5, 2026-07-30). Landed, not spec.
-- **Week 6** — the RBAC/ownership half of the ADR's proposed fix shipped,
-  self-directed, at the gateway (41 tests at the time, live-verified). The
-  maker-checker step and the append-only ledger are still genuinely unbuilt.
-- **Week 7** — no longer untouched: the Prometheus/Grafana stack landed early.
-  But neither thing Week 7 actually scoped (a cross-service trace ID, a scoped
-  reconciliation control) exists, so its own rows are all still open.
+- **Week 6** — gateway RBAC and the append-only ledger have landed. ADR 0011 and
+  spec 0002 define maker-checker and its non-forgeable-principal boundary, but
+  they explicitly do not claim production enforcement.
+- **Week 7** — Prometheus/Grafana and the scoped, scheduled reconciliation
+  control have landed. The cross-service trace ID remains open.
 - **Week 4** — merged to `main` (PR #6, 2026-08-05), including the
   auto-disclosure chain this capstone depends on.
 - **Week 5** — built, CI-green and **merged** (PR #8, 2026-08-05). A showcase must not
@@ -989,7 +987,7 @@ Four rules that this file has broken before, and which later passes fixed:
    fenced; everything else states what must be true, which does not change when a
    branch does.
 
-Last full accuracy pass: **2026-08-13**, against `main` at `1528226`. That is the
+Last full accuracy pass: **2026-08-14**, against `main` at `87193c4`. That is the
 base the Weeks 1–6 matrix and the gap list were re-checked against, and it is what
 the footer is for — a freshness marker naming the commit, and nothing about which
 pull requests happened to be open while it was written. **For what is in flight,
