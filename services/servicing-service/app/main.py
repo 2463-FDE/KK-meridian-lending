@@ -30,6 +30,10 @@ app.include_router(loans.router)
 # W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
 # comment for why this exists across all 8 services now.
 Instrumentator().instrument(app).expose(app)
+# D7: reconciliation state is published by reading `reconciliation_runs`, because
+# the job that produces it runs in a separate process and its own gauges would
+# never reach this registry -- see reconciliation._ReconciliationCollector.
+reconciliation.register_metrics()
 
 
 @app.exception_handler(Exception)
@@ -82,13 +86,7 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
 # source rather than maintained by hand: a hand-kept list of protected things
 # reads as complete while missing one, which is how the probe came to write to a
 # table the money path never touches.
-_PREFLIGHT_WRITE_TABLES = ("payment_applications", "balances")
-
-# And the columns of `balances` the probe must write, for the same reason: the
-# real apply sets `balance`, and a probe that set only `updated_at` proved
-# nothing about a column-level grant, trigger or constraint on `balance`. Also
-# asserted against `apply_payment_once`'s source.
-_PREFLIGHT_BALANCE_COLUMNS = ("balance", "updated_at")
+_PREFLIGHT_WRITE_TABLES = ("payments", "payment_applications", "ledger_entries")
 
 
 @app.get("/internal/auth-check")
@@ -167,10 +165,27 @@ def internal_auth_check(
             # each other on the primary key.
             sentinel = -secrets.randbelow(2_000_000_000) - 1
             cur.execute(
+                "SELECT loan_id FROM balances "
+                "WHERE (%s::int IS NULL OR loan_id = %s) "
+                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                (loan_id, loan_id),
+            )
+            target_rows = cur.fetchall()
+            if not target_rows:
+                raise LookupError("no unlocked balances row available for payment-path preflight")
+            target_loan = loan_id if loan_id is not None else target_rows[0].get(
+                "loan_id", next(iter(target_rows[0].values()))
+            )
+            cur.execute(
+                "INSERT INTO payments (id, loan_id, amount, auth_status, capture_source) "
+                "VALUES (%s, %s, 0.01, 'captured', 'unknown')",
+                (sentinel, target_loan),
+            )
+            cur.execute(
                 "INSERT INTO payment_applications (payment_id, loan_id, amount) "
                 "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING "
                 "RETURNING payment_id",
-                (sentinel, sentinel, 0),
+                (sentinel, target_loan, 0.01),
             )
             cur.fetchall()
             # Review round 8: this wrote `updated_at` only. The real apply writes
@@ -194,12 +209,16 @@ def internal_auth_check(
             # lockable row degrades to a zero-row UPDATE, which still requires
             # the write privilege and still fails in a read-only transaction.
             cur.execute(
-                "UPDATE balances SET balance = balance, updated_at = now() "
-                "WHERE loan_id = (SELECT loan_id FROM balances "
-                "WHERE (%s::int IS NULL OR loan_id = %s) "
-                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED)",
-                (loan_id, loan_id),
+                "INSERT INTO ledger_entries "
+                "(loan_id, component, amount, entry_type, payment_id) "
+                "VALUES (%s, 'principal', -0.01, 'payment', %s)",
+                (target_loan, sentinel),
             )
+            # The real apply commits, which runs DEFERRABLE INITIALLY DEFERRED
+            # allocation and parity checks. Force those same checks inside this
+            # throwaway transaction before rolling it back; otherwise a 200 can
+            # prove only the immediate half of the payment write path.
+            cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
             # Never committed. Both writes exist only long enough to prove the
             # path works, so this leaves no data to clean up.
             cur.execute("ROLLBACK")
@@ -283,7 +302,10 @@ def apply_payment(loan_id: int, body: ApplyPaymentIn,
     # Review fix: idempotent by payment_id now (balance.apply_payment_once) --
     # payment-service retries this call on a same-key retry if a prior attempt
     # never confirmed, so a duplicate call here must not double-apply.
-    new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
+    try:
+        new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
+    except balance.PaymentReplayConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "loan_id": loan_id,
         "applied_amount": body.amount,
@@ -336,8 +358,29 @@ def late_fee(loan_id: int,
 
 @app.get("/reconciliation/peek")
 def reconciliation_peek():
-    # Not a real control — just exposes the two totals. They don't tie out. (debt D7)
+    """The two totals, plus whether the control that compares them is running.
+
+    D7: this used to return the totals alone, which cannot distinguish "these
+    agree" from "nothing has checked since March". `last_successful_run` being
+    null is the honest answer for a system that has never run the job, and it is
+    the answer an operator needs before trusting the two numbers above it.
+    """
+    last_ok = reconciliation.last_successful_run()
     return {
         "ledger_total": reconciliation.ledger_total(),
         "settlement_total": reconciliation.settlement_total(),
+        # Not a control by itself -- see app/reconcile_job.py. These fields say
+        # whether the control has run, so a reader cannot mistake two equal
+        # numbers for a reconciliation that happened.
+        "last_successful_run": (
+            {"id": last_ok["id"], "at": str(last_ok["started_at"]),
+             "loans_compared": last_ok["loans_compared"]} if last_ok else None
+        ),
+        "recent_failures": [
+            {"id": r["id"], "at": str(r["started_at"]), "outcome": r["outcome"],
+             "breaks_found": r["breaks_found"], "break_value": str(r["break_value"]),
+             "error_code": r["error_code"]}
+            for r in reconciliation.recent_failures(limit=5)
+        ],
     }
+

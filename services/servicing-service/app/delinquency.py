@@ -24,8 +24,8 @@ def assess_late_fee(loan_id: int) -> float:
     past_due = rows[0]["past_due"] if rows else 0.0
     new_past_due = float(Decimal(str(past_due)) + Decimal(str(LATE_FEE_FLAT)))
     db.query(
-        "UPDATE balances SET past_due = %s WHERE loan_id = %s",
-        (new_past_due, loan_id),
+        "UPDATE balances SET past_due = COALESCE(past_due, 0) + %s WHERE loan_id = %s",
+        (LATE_FEE_FLAT, loan_id),
     )
     log.info("assessed late fee loan_id=%s -> past_due %s", loan_id, new_past_due)
     return new_past_due

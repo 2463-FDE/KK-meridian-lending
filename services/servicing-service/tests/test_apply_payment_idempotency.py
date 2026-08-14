@@ -46,18 +46,36 @@ class _FakeDb:
 
     def __init__(self, balance=0.0):
         self.balance = balance
-        self.applications = set()
+        self.applications = {}
+        self.ledger = set()
+        self.payment_statuses = {}
 
     def _run(self, sql, params=None):
         stmt = sql.strip()
+        if stmt.startswith("SELECT auth_status FROM payments"):
+            status = self.payment_statuses.get(params[0], "captured")
+            return [{"auth_status": status}] if status is not None else []
         if stmt.startswith("INSERT INTO payment_applications"):
             payment_id, loan_id, amount = params
             if payment_id in self.applications:
                 return []  # ON CONFLICT DO NOTHING -- already applied
-            self.applications.add(payment_id)
+            self.applications[payment_id] = (loan_id, amount)
             return [{"payment_id": payment_id}]
+        if stmt.startswith("SELECT pa.loan_id"):
+            payment_id = params[0]
+            loan_id, amount = self.applications[payment_id]
+            return [{"loan_id": loan_id, "amount": amount,
+                     "auth_status": self.payment_statuses.get(payment_id, "captured"),
+                     "balance": self.balance}]
         if stmt.startswith("SELECT balance"):
             return [{"balance": self.balance}]
+        if stmt.startswith("INSERT INTO ledger_entries"):
+            loan_id, amount, payment_id = params
+            if payment_id in self.ledger:
+                raise RuntimeError("duplicate ledger payment")
+            self.ledger.add(payment_id)
+            self.balance -= amount
+            return []
         if "SET balance" in stmt:
             self.balance = params[0]
             return []
@@ -69,12 +87,14 @@ class _FakeDb:
     @contextmanager
     def transaction(self):
         snapshot_balance = self.balance
-        snapshot_applications = set(self.applications)
+        snapshot_applications = dict(self.applications)
+        snapshot_ledger = set(self.ledger)
         try:
             yield _FakeCursor(self)
         except Exception:
             self.balance = snapshot_balance
             self.applications = snapshot_applications
+            self.ledger = snapshot_ledger
             raise
 
 
@@ -106,6 +126,19 @@ def test_apply_payment_once_is_a_noop_on_duplicate_payment_id(fake_db):
     assert fake_db.balance == 70.0  # not 40.0 -- the second call never re-applied
 
 
+@pytest.mark.parametrize("replay_loan,replay_amount", [(6, 30.0), (5, 31.0), (6, 31.0)])
+def test_apply_payment_once_rejects_mismatched_replay(fake_db, replay_loan, replay_amount):
+    balance.apply_payment_once(payment_id=7, loan_id=5, amount=30.0)
+
+    with pytest.raises(balance.PaymentReplayConflict, match="does not match"):
+        balance.apply_payment_once(
+            payment_id=7, loan_id=replay_loan, amount=replay_amount
+        )
+
+    assert fake_db.applications[7] == (5, 30.0)
+    assert fake_db.balance == 70.0
+
+
 def test_apply_payment_once_applies_separately_for_different_payment_ids(fake_db):
     balance.apply_payment_once(payment_id=1, loan_id=5, amount=30.0)
     _, applied = balance.apply_payment_once(payment_id=2, loan_id=5, amount=20.0)
@@ -122,7 +155,7 @@ def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance
     real_run = fake_db._run
 
     def _fail_the_balance_update(sql, params=None):
-        if "SET balance" in sql.strip():
+        if "INSERT INTO ledger_entries" in sql.strip():
             raise RuntimeError("simulated balance update failure")
         return real_run(sql, params)
 
@@ -143,3 +176,15 @@ def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance
     assert applied is True
     assert new_balance == 70.0
     assert fake_db.balance == 70.0
+
+
+@pytest.mark.parametrize("status", ["failed", "pending"])
+def test_apply_payment_once_rejects_uncaptured_payment_before_marker(fake_db, status):
+    fake_db.payment_statuses[21] = status
+
+    with pytest.raises(ValueError, match="not captured"):
+        balance.apply_payment_once(payment_id=21, loan_id=5, amount=30.0)
+
+    assert 21 not in fake_db.applications
+    assert 21 not in fake_db.ledger
+    assert fake_db.balance == 100.0

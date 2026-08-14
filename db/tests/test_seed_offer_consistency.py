@@ -101,7 +101,7 @@ INIT_DIR = pathlib.Path(__file__).resolve().parents[1] / "init"
 # the same set, so this suite validates the seeds as actually shipped.
 INIT_FILES = (
     "001_schema.sql", "002_seed.sql", "003_seed_bulk.sql",
-    "004_decision_events.sql", "005_manual_reviews.sql", "006_decision_attempts.sql",
+    "004_decision_events.sql", "005_manual_reviews.sql", "006_decision_attempts.sql", "007_ledger_opening_balances.sql",
 )
 
 
