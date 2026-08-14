@@ -86,13 +86,7 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
 # source rather than maintained by hand: a hand-kept list of protected things
 # reads as complete while missing one, which is how the probe came to write to a
 # table the money path never touches.
-_PREFLIGHT_WRITE_TABLES = ("payment_applications", "balances")
-
-# And the columns of `balances` the probe must write, for the same reason: the
-# real apply sets `balance`, and a probe that set only `updated_at` proved
-# nothing about a column-level grant, trigger or constraint on `balance`. Also
-# asserted against `apply_payment_once`'s source.
-_PREFLIGHT_BALANCE_COLUMNS = ("balance", "updated_at")
+_PREFLIGHT_WRITE_TABLES = ("payments", "payment_applications", "ledger_entries")
 
 
 @app.get("/internal/auth-check")
@@ -171,10 +165,27 @@ def internal_auth_check(
             # each other on the primary key.
             sentinel = -secrets.randbelow(2_000_000_000) - 1
             cur.execute(
+                "SELECT loan_id FROM balances "
+                "WHERE (%s::int IS NULL OR loan_id = %s) "
+                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                (loan_id, loan_id),
+            )
+            target_rows = cur.fetchall()
+            if not target_rows:
+                raise LookupError("no unlocked balances row available for payment-path preflight")
+            target_loan = loan_id if loan_id is not None else target_rows[0].get(
+                "loan_id", next(iter(target_rows[0].values()))
+            )
+            cur.execute(
+                "INSERT INTO payments (id, loan_id, amount, auth_status, capture_source) "
+                "VALUES (%s, %s, 0.01, 'captured', 'unknown')",
+                (sentinel, target_loan),
+            )
+            cur.execute(
                 "INSERT INTO payment_applications (payment_id, loan_id, amount) "
                 "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING "
                 "RETURNING payment_id",
-                (sentinel, sentinel, 0),
+                (sentinel, target_loan, 0.01),
             )
             cur.fetchall()
             # Review round 8: this wrote `updated_at` only. The real apply writes
@@ -198,12 +209,16 @@ def internal_auth_check(
             # lockable row degrades to a zero-row UPDATE, which still requires
             # the write privilege and still fails in a read-only transaction.
             cur.execute(
-                "UPDATE balances SET balance = balance, updated_at = now() "
-                "WHERE loan_id = (SELECT loan_id FROM balances "
-                "WHERE (%s::int IS NULL OR loan_id = %s) "
-                "ORDER BY loan_id LIMIT 1 FOR UPDATE SKIP LOCKED)",
-                (loan_id, loan_id),
+                "INSERT INTO ledger_entries "
+                "(loan_id, component, amount, entry_type, payment_id) "
+                "VALUES (%s, 'principal', -0.01, 'payment', %s)",
+                (target_loan, sentinel),
             )
+            # The real apply commits, which runs DEFERRABLE INITIALLY DEFERRED
+            # allocation and parity checks. Force those same checks inside this
+            # throwaway transaction before rolling it back; otherwise a 200 can
+            # prove only the immediate half of the payment write path.
+            cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
             # Never committed. Both writes exist only long enough to prove the
             # path works, so this leaves no data to clean up.
             cur.execute("ROLLBACK")
@@ -287,7 +302,10 @@ def apply_payment(loan_id: int, body: ApplyPaymentIn,
     # Review fix: idempotent by payment_id now (balance.apply_payment_once) --
     # payment-service retries this call on a same-key retry if a prior attempt
     # never confirmed, so a duplicate call here must not double-apply.
-    new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
+    try:
+        new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
+    except balance.PaymentReplayConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "loan_id": loan_id,
         "applied_amount": body.amount,

@@ -19,6 +19,10 @@ from . import db
 log = get_logger("balance")
 
 
+class PaymentReplayConflict(ValueError):
+    """An idempotency key was reused for a different payment application."""
+
+
 def _to_decimal(value) -> Decimal:
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
@@ -38,9 +42,9 @@ def apply_payment(loan_id: int, amount: float) -> float:
     waterfall -- straight off principal (D14)."""
     current = get_balance(loan_id)                                       # READ
     new_balance = float(_to_decimal(current) - _to_decimal(amount))      # MODIFY, exact
-    db.query(                                                            # WRITE (overwrite in place)
-        "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
-        (new_balance, loan_id),
+    db.query(
+        "UPDATE balances SET balance = balance - %s, updated_at = now() WHERE loan_id = %s",
+        (amount, loan_id),
     )
     log.info("applied payment loan_id=%s balance %s -> %s", loan_id, current, new_balance)
     return new_balance
@@ -72,38 +76,75 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
     skipping it.
     """
     with db.transaction() as cur:
+        cur.execute("SELECT auth_status FROM payments WHERE id = %s", (payment_id,))
+        payment_rows = cur.fetchall()
+        if not payment_rows:
+            raise LookupError(f"payment_id={payment_id} does not exist")
+        if payment_rows[0]["auth_status"] != "captured":
+            raise ValueError(
+                f"payment_id={payment_id} is not captured "
+                f"(status={payment_rows[0]['auth_status']})"
+            )
         cur.execute(
             "INSERT INTO payment_applications (payment_id, loan_id, amount) "
             "VALUES (%s, %s, %s) ON CONFLICT (payment_id) DO NOTHING RETURNING payment_id",
             (payment_id, loan_id, amount),
         )
         if not cur.fetchall():
+            cur.execute(
+                "SELECT pa.loan_id, pa.amount, p.auth_status, b.balance "
+                "FROM payment_applications pa "
+                "JOIN payments p ON p.id = pa.payment_id "
+                "JOIN balances b ON b.loan_id = pa.loan_id "
+                "WHERE pa.payment_id = %s",
+                (payment_id,),
+            )
+            replay_rows = cur.fetchall()
+            if len(replay_rows) != 1:
+                raise PaymentReplayConflict(
+                    f"payment_id={payment_id} has no complete persisted application"
+                )
+            persisted = replay_rows[0]
+            if (persisted["loan_id"] != loan_id
+                    or _to_decimal(persisted["amount"]) != _to_decimal(amount)
+                    or persisted["auth_status"] != "captured"):
+                raise PaymentReplayConflict(
+                    f"payment_id={payment_id} replay does not match its persisted application"
+                )
             log.info(
-                "apply-payment payment_id=%s already applied -- skipping duplicate apply",
+                "apply-payment payment_id=%s exact replay -- skipping duplicate apply",
                 payment_id,
             )
-            return get_balance(loan_id), False
+            return persisted["balance"], False
 
+        cur.execute(
+            "INSERT INTO ledger_entries "
+            "(loan_id, component, amount, entry_type, payment_id) "
+            "VALUES (%s, 'principal', -%s, 'payment', %s)",
+            (loan_id, amount, payment_id),
+        )
         cur.execute("SELECT balance FROM balances WHERE loan_id = %s", (loan_id,))
         rows = cur.fetchall()
-        current = rows[0]["balance"] if rows else 0.0
-        new_balance = float(_to_decimal(current) - _to_decimal(amount))
-        cur.execute(
-            "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
-            (new_balance, loan_id),
-        )
-        log.info("applied payment loan_id=%s balance %s -> %s", loan_id, current, new_balance)
+        if not rows:
+            raise LookupError(f"no balances row for loan_id={loan_id}")
+        new_balance = rows[0]["balance"]
+        log.info("applied payment loan_id=%s new_balance=%s", loan_id, new_balance)
     return new_balance, True
 
 
 def adjust_balance(loan_id: int, new_value: float) -> float:
     """Set the balance directly. No ledger entry; the prior value is gone forever."""
-    current = get_balance(loan_id)
     new_balance = float(_to_decimal(new_value))
-    db.query(
-        "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
-        (new_balance, loan_id),
-    )
+    with db.transaction() as cur:
+        cur.execute("SELECT balance FROM balances WHERE loan_id = %s FOR UPDATE", (loan_id,))
+        rows = cur.fetchall()
+        if not rows:
+            raise LookupError(f"no balances row for loan_id={loan_id}")
+        current = rows[0]["balance"]
+        cur.execute(
+            "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
+            (new_balance, loan_id),
+        )
     log.info("adjusted balance loan_id=%s %s -> %s", loan_id, current, new_value)
     return new_balance
 
@@ -114,8 +155,8 @@ def waive_fee(loan_id: int, amount: float) -> float:
     past_due = rows[0]["past_due"] if rows else 0.0
     new_past_due = float(_to_decimal(past_due) - _to_decimal(amount))
     db.query(
-        "UPDATE balances SET past_due = %s, updated_at = now() WHERE loan_id = %s",
-        (new_past_due, loan_id),
+        "UPDATE balances SET past_due = COALESCE(past_due, 0) - %s, updated_at = now() WHERE loan_id = %s",
+        (amount, loan_id),
     )
     log.info("waived fee loan_id=%s past_due %s -> %s", loan_id, past_due, new_past_due)
     return new_past_due

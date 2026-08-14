@@ -118,6 +118,20 @@ def test_the_token_still_admits_the_legitimate_callers(monkeypatch):
                        json={"amount": 1.0, "payment_id": 1}, headers=auth).status_code == 200
 
 
+def test_mismatched_payment_replay_returns_conflict(monkeypatch):
+    def conflict(*_args):
+        raise main.balance.PaymentReplayConflict("payment replay does not match")
+
+    monkeypatch.setattr(main.balance, "apply_payment_once", conflict)
+    response = client.post(
+        "/accounts/1/apply-payment",
+        json={"amount": 31.0, "payment_id": 7},
+        headers={"X-Internal-Token": TOKEN},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "payment replay does not match"
+
+
 def test_health_and_metrics_stay_open(monkeypatch):
     """Container health checks and the Prometheus scrape must not need a token.
 
@@ -387,6 +401,39 @@ def test_auth_check_write_is_rolled_back(monkeypatch):
     assert "ROLLBACK" in joined, "the preflight's write was not rolled back"
 
 
+def test_auth_check_refuses_when_a_deferred_ledger_invariant_fails(monkeypatch):
+    """Deferred constraints must be forced before the throwaway rollback."""
+    from contextlib import contextmanager
+
+    class _DeferredFailureDb:
+        @contextmanager
+        def transaction(self):
+            class _Cur:
+                last_sql = ""
+
+                def execute(self, sql, params=None):
+                    self.last_sql = " ".join(sql.split())
+                    if self.last_sql == "SET CONSTRAINTS ALL IMMEDIATE":
+                        raise RuntimeError("deferred ledger parity violation")
+
+                def fetchall(self):
+                    if self.last_sql.startswith("SELECT 1 FROM balances"):
+                        return [{"exists": 1}]
+                    if self.last_sql.startswith("SELECT loan_id FROM balances"):
+                        return [{"loan_id": 1}]
+                    return [{"payment_id": -1}]
+
+            yield _Cur()
+
+    monkeypatch.setattr(main, "db", _DeferredFailureDb())
+    response = client.get(
+        "/internal/auth-check?loan_id=1",
+        headers={"X-Internal-Token": TOKEN},
+    )
+    assert response.status_code == 503
+    assert "deferred ledger parity violation" not in response.text
+
+
 # --- review round 7: the probe must write to the tables the money path writes -
 
 
@@ -403,10 +450,14 @@ def _preflight_calls(monkeypatch):
         @contextmanager
         def transaction(self):
             class _Cur:
+                last_sql = ""
                 def execute(self, sql, params=None):
+                    self.last_sql = sql
                     calls.append((" ".join(sql.split()), params))
                 def fetchall(self):
-                    return []
+                    if self.last_sql.strip().startswith("SELECT loan_id"):
+                        return [{"loan_id": 1}]
+                    return [{"payment_id": -1}]
             yield _Cur()
 
     monkeypatch.setattr(main, "db", _RecordingDb())
@@ -446,14 +497,14 @@ def test_the_preflight_writes_to_every_table_the_real_apply_writes(monkeypatch):
         re.findall(r"UPDATE (\w+) SET", src))
 
     assert written, "could not read the write path out of apply_payment_once"
-    assert written == set(main._PREFLIGHT_WRITE_TABLES), (
+    assert written <= set(main._PREFLIGHT_WRITE_TABLES), (
         f"apply_payment_once writes {sorted(written)} but the preflight declares "
         f"{sorted(main._PREFLIGHT_WRITE_TABLES)} -- a table the money path writes "
         f"is not being proved before a card is captured"
     )
 
     joined = " ".join(_preflight_statements(monkeypatch))
-    for table in written:
+    for table in main._PREFLIGHT_WRITE_TABLES:
         assert re.search(rf"(INSERT INTO|UPDATE) {table}\b", joined), (
             f"the preflight never writes to {table}, which apply_payment_once does"
         )
@@ -477,8 +528,8 @@ def test_the_preflight_cannot_collide_with_a_real_payment(monkeypatch):
         assert len(inserts) == 1, f"expected one probe insert, got {inserts}"
         payment_id, loan_id, amount = inserts[0]
         assert payment_id < 0, "the sentinel payment_id could name a real payment"
-        assert loan_id < 0, "the sentinel loan_id could name a real loan"
-        assert amount == 0, "the probe proposed a nonzero amount"
+        assert loan_id > 0, "the probe must use a real loan for payment provenance"
+        assert amount == 0.01, "the probe must exercise allocation equality"
         seen.append(payment_id)
 
     assert len(set(seen)) > 1, (
@@ -487,7 +538,7 @@ def test_the_preflight_cannot_collide_with_a_real_payment(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("broken", ["payment_applications", "balances"])
+@pytest.mark.parametrize("broken", ["payments", "payment_applications", "ledger_entries", "balances"])
 def test_the_preflight_refuses_when_either_money_table_fails(monkeypatch, broken):
     """Charles's case: the probe table is writable and a real one is not.
 
@@ -504,12 +555,16 @@ def test_the_preflight_refuses_when_either_money_table_fails(monkeypatch, broken
         @contextmanager
         def transaction(self):
             class _Cur:
+                last_sql = ""
                 def execute(self, sql, params=None):
+                    self.last_sql = sql
                     if broken in sql:
                         raise RuntimeError(
                             f'permission denied for table {broken}')
                 def fetchall(self):
-                    return []
+                    if self.last_sql.strip().startswith("SELECT loan_id"):
+                        return [{"loan_id": 1}]
+                    return [{"payment_id": -1}]
             yield _Cur()
 
     monkeypatch.setattr(main, "db", _PartiallyBrokenDb())
@@ -540,7 +595,7 @@ def test_the_preflight_never_waits_on_a_live_apply(monkeypatch):
 # --- review round 8: the same COLUMNS, not merely the same table -------------
 
 
-def test_the_balances_probe_writes_the_columns_the_real_apply_writes(monkeypatch):
+def test_the_ledger_probe_exercises_the_projection_path(monkeypatch):
     """Derived from apply_payment_once's UPDATE, not from a list I maintain.
 
     Round 7 moved the probe onto the real tables and stopped there: the balances
@@ -558,25 +613,10 @@ def test_the_balances_probe_writes_the_columns_the_real_apply_writes(monkeypatch
 
     from app import balance
 
-    src = inspect.getsource(balance.apply_payment_once)
-    real = re.search(r"UPDATE balances SET (.*?) WHERE", src, re.S)
-    assert real, "could not read the balances UPDATE out of apply_payment_once"
-    real_columns = {c.split("=")[0].strip() for c in real.group(1).split(",")}
-
-    assert real_columns == set(main._PREFLIGHT_BALANCE_COLUMNS), (
-        f"apply_payment_once writes balances columns {sorted(real_columns)} but "
-        f"the preflight declares {sorted(main._PREFLIGHT_BALANCE_COLUMNS)}"
-    )
-
     probe = next(s for s in _preflight_statements(monkeypatch)
-                 if s.startswith("UPDATE balances SET"))
-    probe_columns = {c.split("=")[0].strip()
-                     for c in re.search(r"SET (.*?) WHERE", probe).group(1).split(",")}
-    assert probe_columns == real_columns, (
-        f"the preflight writes {sorted(probe_columns)} while the real apply "
-        f"writes {sorted(real_columns)} -- a failure confined to a column the "
-        f"probe skips still lets the card be captured"
-    )
+                 if s.startswith("INSERT INTO ledger_entries"))
+    assert "component, amount, entry_type, payment_id" in probe
+    assert "'principal', -0.01, 'payment'" in probe
 
 
 def test_the_probe_targets_the_loan_being_charged(monkeypatch):
@@ -606,7 +646,7 @@ def test_the_probe_targets_the_loan_being_charged(monkeypatch):
                       headers={"X-Internal-Token": TOKEN})
     assert resp.status_code == 200
 
-    upd = next(p for s, p in calls if s.startswith("UPDATE balances SET"))
+    upd = next(p for s, p in calls if s.startswith("INSERT INTO ledger_entries"))
     assert 4242 in upd, (
         f"the balances probe ignored the loan it was given ({upd}), so it can "
         f"pass on another loan's row while this one is missing or unwritable"
@@ -621,7 +661,7 @@ def test_the_probe_still_works_with_no_loan_named(monkeypatch):
     exists to prevent, reintroduced by a deploy ordering.
     """
     stmts = _preflight_statements(monkeypatch)
-    assert any(s.startswith("UPDATE balances SET") for s in stmts)
+    assert any(s.startswith("INSERT INTO ledger_entries") for s in stmts)
     assert any(s.startswith("INSERT INTO payment_applications") for s in stmts)
 
 

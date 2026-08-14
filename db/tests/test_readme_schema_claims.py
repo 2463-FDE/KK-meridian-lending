@@ -34,7 +34,7 @@ SCHEMA = "readme_schema_claims"
 INIT_DIR = REPO / "db" / "init"
 INIT_FILES = (
     "001_schema.sql", "002_seed.sql", "003_seed_bulk.sql",
-    "004_decision_events.sql", "005_manual_reviews.sql", "006_decision_attempts.sql",
+    "004_decision_events.sql", "005_manual_reviews.sql", "006_decision_attempts.sql", "007_ledger_opening_balances.sql",
 )
 
 #: Columns the README makes an explicit existence claim about. Card data only --

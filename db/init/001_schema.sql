@@ -426,6 +426,380 @@ CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
 
 CREATE INDEX IF NOT EXISTS idx_kyc_checks_application_id ON kyc_checks(application_id);
 
+-- ---------------------------------------------------------------------------
+-- ADR 0010: the append-only ledger and its projection. Identical to
+-- db/migrations/0035 -- a fresh volume and a migrated database must agree, and
+-- db/tests/test_migration_paths_converge.py builds both and compares them.
+--
+-- The opening balances for seeded loans are written by db/init/007, AFTER the
+-- seed data exists. They cannot be here: this file creates the tables, and there
+-- are no balances to open yet.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS ledger_entries (
+    id           BIGSERIAL   PRIMARY KEY,
+    loan_id      INTEGER     NOT NULL REFERENCES loans(id),
+
+    -- What moved. A signed delta, never a total: an entry says "this much
+    -- changed", so two concurrent entries compose instead of racing. This is
+    -- what closes D3, and it is why `amount` may be negative.
+    component    TEXT        NOT NULL CHECK (component IN ('principal','interest','fees')),
+    amount       NUMERIC(14,2) NOT NULL CHECK (amount <> 0),
+
+    -- Why it moved. 'opening_balance' is the back-fill's marker and nothing else
+    -- may use it: it means "this loan's balance as it stood when the ledger
+    -- began, with no record of how it got there". A distinct type rather than a
+    -- boolean, because it cannot be defaulted, cannot be forgotten on insert,
+    -- and every query that means "real money movements" already filters on
+    -- entry_type.
+    entry_type   TEXT        NOT NULL CHECK (entry_type IN
+                   ('opening_balance','legacy_direct_write','disbursement','payment',
+                    'fee_assessed','fee_waived','adjustment')),
+    reason       TEXT,
+
+    -- Who moved it.
+    actor_id     INTEGER,
+    actor_role   TEXT,
+
+    -- Provenance. payment_id makes an apply idempotent by construction.
+    --
+    -- Deliberately no single-column REFERENCES here: the foreign key is the
+    -- COMPOSITE one added below, which ties the payment to the same loan the
+    -- entry moves. A plain reference to payments(id) would let an entry cite a
+    -- payment captured for one borrower while moving another borrower's
+    -- balance -- and ledger rows are immutable, so that movement could never be
+    -- corrected by an update. It would sit on the wrong balance permanently.
+    payment_id   INTEGER,
+
+    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ledger_control (
+    singleton           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    initialization_open BOOLEAN NOT NULL DEFAULT TRUE
+);
+INSERT INTO ledger_control(singleton, initialization_open)
+VALUES (TRUE, TRUE) ON CONFLICT (singleton) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION ledger_control_cannot_reopen() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR OLD.initialization_open = FALSE
+       OR NEW.initialization_open = TRUE THEN
+        RAISE EXCEPTION 'ledger initialization gate cannot be reopened or deleted';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS ledger_control_one_way ON ledger_control;
+CREATE TRIGGER ledger_control_one_way
+    BEFORE UPDATE OR DELETE ON ledger_control
+    FOR EACH ROW EXECUTE FUNCTION ledger_control_cannot_reopen();
+
+CREATE OR REPLACE FUNCTION ledger_system_entry_is_authorized() RETURNS trigger AS $$
+BEGIN
+    IF NEW.entry_type = 'legacy_direct_write' AND pg_trigger_depth() < 2 THEN
+        RAISE EXCEPTION 'legacy_direct_write may only come from the balances capture trigger';
+    END IF;
+    IF NEW.entry_type = 'opening_balance' AND NOT EXISTS (
+        SELECT 1 FROM ledger_control WHERE singleton AND initialization_open
+    ) THEN
+        RAISE EXCEPTION 'opening_balance is closed after ledger initialization';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS ledger_entries_system_type_guard ON ledger_entries;
+CREATE TRIGGER ledger_entries_system_type_guard
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_system_entry_is_authorized();
+
+-- Invariant 7: exactly one entry per payment/component pair. NOT per payment --
+-- a waterfall (D14) splits one payment across components by definition, so a
+-- single-row rule would forbid the thing the ledger is being built to allow.
+-- Idempotency comes from the pair being unique, not from the payment appearing
+-- once.
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_payment_component
+    ON ledger_entries (payment_id, component) WHERE payment_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
+
+-- Invariant 7, the half the unique index cannot express: a payment entry must
+-- HAVE a payment, and nothing else may have one.
+--
+-- The index above is `UNIQUE (payment_id, component) WHERE payment_id IS NOT
+-- NULL`, and NULLs are excluded from it. So without this constraint a
+-- ledger-writing path that passed no payment_id would create entries that never
+-- collide -- a retried apply posting the balance twice, which is exactly the
+-- idempotency the pair is supposed to provide. ADR 0010's invariant 7 says so in
+-- words; this is the words made enforceable.
+--
+-- And the other direction: a non-payment entry may not consume a
+-- (payment_id, component) pair, which would block the real payment entry from
+-- ever being written. An adjustment's provenance is its proposal (ADR 0011), not
+-- a payment.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_payment_provenance;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_payment_provenance CHECK (
+    (entry_type = 'payment') = (payment_id IS NOT NULL)
+);
+
+-- The payment must belong to the SAME loan the entry moves.
+--
+-- `loan_id` and `payment_id` were independent, so a row could cite a payment
+-- captured for loan A while projecting the movement onto loan B. Nothing in the
+-- schema said otherwise, and the ledger is immutable: a wrong movement cannot be
+-- corrected by updating the row, so it stays on that borrower's balance for
+-- good.
+--
+-- Enforced by a COMPOSITE foreign key rather than a trigger, because it is a
+-- referential fact and a declarative constraint cannot be forgotten, bypassed by
+-- a session flag, or dropped independently of the column it protects. It needs a
+-- unique key on the referenced pair; `payments.id` is already the primary key, so
+-- `(id, loan_id)` is unique by construction and the index costs only space.
+--
+-- MATCH SIMPLE (the default) is what makes this work alongside the CHECK above:
+-- when `payment_id` is NULL the constraint does not apply at all, which is
+-- exactly right for the non-payment entry types. When it is present, both columns
+-- must match a real payments row -- so an entry may not cite a payment that is
+-- not attached to any loan either.
+-- Dropped in dependency order and re-added in the reverse, so a replay of this
+-- file is idempotent. The unique key cannot be dropped while the foreign key
+-- depends on its index, and this migration is replayed by
+-- db/tests/test_migration_paths_converge.py precisely to catch that.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_entries_payment_loan_fk;
+ALTER TABLE payments       DROP CONSTRAINT IF EXISTS payments_id_loan_uniq;
+
+ALTER TABLE payments ADD CONSTRAINT payments_id_loan_uniq UNIQUE (id, loan_id);
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_entries_payment_loan_fk
+    FOREIGN KEY (payment_id, loan_id) REFERENCES payments (id, loan_id);
+
+-- The same rule again, BEFORE the row is inserted.
+--
+-- Not redundancy for its own sake. The composite key is the guarantee; this is
+-- what makes the failure legible and makes it happen FIRST. A referential
+-- constraint is checked by an internal AFTER-row trigger, so without this the
+-- projection trigger can run before it -- and if the wrongly-named loan has no
+-- `balances` row, the error a developer sees is the projection's row-count
+-- complaint about loan B rather than the fact that the entry cited loan A's
+-- payment. Same rollback either way, entirely different diagnosis, and the
+-- misleading one arrives on the path most likely to be hit.
+CREATE OR REPLACE FUNCTION ledger_entry_payment_matches_loan() RETURNS trigger AS $$
+DECLARE
+    payment_loan INTEGER;
+    payment_status TEXT;
+BEGIN
+    IF NEW.payment_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT loan_id, auth_status INTO payment_loan, payment_status
+      FROM payments WHERE id = NEW.payment_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ledger entry names payment % which does not exist',
+                        NEW.payment_id;
+    END IF;
+    IF payment_loan IS DISTINCT FROM NEW.loan_id THEN
+        RAISE EXCEPTION 'ledger entry moves loan % but cites payment %, which '
+                        'was captured for loan %',
+                        NEW.loan_id, NEW.payment_id, payment_loan;
+    END IF;
+    IF payment_status IS DISTINCT FROM 'captured' THEN
+        RAISE EXCEPTION 'ledger payment entry requires captured payment % (status: %)',
+                        NEW.payment_id, payment_status;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_payment_belongs_to_loan ON ledger_entries;
+CREATE TRIGGER ledger_entries_payment_belongs_to_loan
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_entry_payment_matches_loan();
+
+-- Invariant 4: the sign is keyed to the effect on what the borrower owes.
+-- A payment reduces; a fee assessment increases; only an adjustment may go
+-- either way, which is exactly why it is the type that needs an approver.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_sign_matches_type;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_sign_matches_type CHECK (
+       (entry_type = 'payment'         AND amount < 0)
+    OR (entry_type = 'fee_waived'      AND amount < 0)
+    OR (entry_type = 'fee_assessed'    AND amount > 0)
+    OR (entry_type = 'disbursement'    AND amount > 0)
+    OR (entry_type = 'opening_balance' AND amount <> 0)
+    OR (entry_type = 'legacy_direct_write' AND amount <> 0)
+    OR (entry_type = 'adjustment')
+);
+
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_type_matches_component;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_type_matches_component CHECK (
+       (entry_type IN ('opening_balance','legacy_direct_write','adjustment')
+        AND component IN ('principal','fees'))
+    OR (entry_type = 'disbursement' AND component = 'principal')
+    OR (entry_type = 'payment' AND component IN ('principal','fees','interest'))
+    OR (entry_type IN ('fee_assessed','fee_waived') AND component = 'fees')
+);
+
+CREATE OR REPLACE FUNCTION ledger_payment_allocation_matches_capture() RETURNS trigger AS $$
+DECLARE captured NUMERIC(14,2); allocated NUMERIC(14,2);
+BEGIN
+    IF NEW.payment_id IS NULL THEN RETURN NULL; END IF;
+    SELECT amount INTO captured FROM payments WHERE id = NEW.payment_id;
+    SELECT COALESCE(-SUM(amount), 0) INTO allocated
+      FROM ledger_entries WHERE payment_id = NEW.payment_id;
+    IF allocated <> captured THEN
+        RAISE EXCEPTION 'ledger allocation % does not equal captured payment % for payment %',
+                        allocated, captured, NEW.payment_id;
+    END IF;
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS ledger_payment_allocation_exact ON ledger_entries;
+CREATE CONSTRAINT TRIGGER ledger_payment_allocation_exact
+    AFTER INSERT ON ledger_entries DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION ledger_payment_allocation_matches_capture();
+
+-- A posted payment's amount is part of the immutable ledger provenance.
+CREATE OR REPLACE FUNCTION reject_posted_payment_amount_change() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.amount IS DISTINCT FROM OLD.amount
+        OR NEW.auth_status IS DISTINCT FROM OLD.auth_status)
+       AND (EXISTS (SELECT 1 FROM ledger_entries WHERE payment_id = OLD.id)
+            OR EXISTS (SELECT 1 FROM payment_applications WHERE payment_id = OLD.id)) THEN
+        RAISE EXCEPTION 'cannot change amount or capture status for posted payment %', OLD.id;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS payments_posted_amount_immutable ON payments;
+CREATE TRIGGER payments_posted_amount_immutable
+    BEFORE UPDATE ON payments
+    FOR EACH ROW EXECUTE FUNCTION reject_posted_payment_amount_change();
+
+-- Invariant 5: a human-directed entry names the human.
+-- 'payment' is exempt: servicing's apply-payment receives an amount and a
+-- payment_id and no actor, because the borrower is not "acting" on the balance
+-- in the sense this column means. Requiring one here would fail every real
+-- payment on insert. Its provenance is stronger than an actor string anyway --
+-- payment_id points at the row carrying the idempotency key and the capture.
+-- 'opening_balance' is exempt because no one authored it.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_actor_required;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_actor_required CHECK (
+    entry_type IN ('disbursement','fee_assessed','payment','opening_balance',
+                   'legacy_direct_write')
+    OR (actor_id IS NOT NULL AND actor_role IS NOT NULL)
+);
+
+-- Invariant 1: append-only. A trigger rather than a REVOKE, for the reason
+-- ADR 0002/0006 already established for decision_events: every service connects
+-- as the schema-owning role, so a revoke from the owner does not stick.
+CREATE OR REPLACE FUNCTION ledger_entries_are_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'ledger_entries is append-only (attempted % on id %)',
+                    TG_OP, COALESCE(OLD.id, NEW.id);
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_immutable ON ledger_entries;
+CREATE TRIGGER ledger_entries_immutable
+    BEFORE UPDATE OR DELETE ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_entries_are_immutable();
+
+-- Invariant 3: `balances` is a projection. This trigger is what maintains it.
+--
+-- Opening-state and legacy-capture entries describe a mutation already present
+-- in balances and do not project. Normal entries cannot be suppressed by a
+-- caller-controlled session setting.
+CREATE OR REPLACE FUNCTION project_ledger_entry() RETURNS trigger AS $$
+DECLARE
+    projected INTEGER;
+BEGIN
+    IF NEW.entry_type IN ('opening_balance', 'legacy_direct_write') THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM set_config('meridian.projecting', 'on', true);
+
+    IF NEW.component = 'principal' THEN
+        UPDATE balances SET balance  = balance  + NEW.amount, updated_at = now()
+         WHERE loan_id = NEW.loan_id;
+        GET DIAGNOSTICS projected = ROW_COUNT;
+    ELSIF NEW.component = 'fees' THEN
+        UPDATE balances SET past_due = COALESCE(past_due, 0) + NEW.amount, updated_at = now()
+         WHERE loan_id = NEW.loan_id;
+        GET DIAGNOSTICS projected = ROW_COUNT;
+    ELSE
+        -- 'interest' projects nowhere: it is owed within a payment, not a
+        -- separate balance the borrower carries. See ADR 0010. Nothing was
+        -- updated and nothing should have been, so the check below is skipped.
+        projected := 1;
+    END IF;
+
+    -- Exactly one row, or the entry does not exist.
+    --
+    -- Without this the UPDATE silently matches zero rows when a loan has no
+    -- `balances` row, and the insert still succeeds: the ledger records that
+    -- money moved and no balance moves with it. That is the projection claiming
+    -- to be maintained while it is not, which is the one failure this design
+    -- cannot tolerate -- `balances` is derived, so a divergence is invisible
+    -- until a parity run, and the entry is immutable so it cannot be corrected
+    -- afterwards.
+    --
+    -- Raising rolls back the INSERT with it. An entry that could not be
+    -- projected must not be retained: it would be a permanent, uncorrectable
+    -- record of a movement that never reached the borrower's balance.
+    IF projected <> 1 THEN
+        RAISE EXCEPTION 'ledger entry for loan % projected onto % balance rows '
+                        '(expected exactly 1)', NEW.loan_id, projected;
+    END IF;
+
+    PERFORM set_config('meridian.projecting', 'off', true);
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_project ON ledger_entries;
+CREATE TRIGGER ledger_entries_project
+    AFTER INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION project_ledger_entry();
+
+-- The write-guard function ships now and the TRIGGER IS NOT CREATED. Step 5
+-- enables it, once every writer has been converted (step 3) and verified. Having
+-- the function present makes that step one statement, and makes reverting it one
+-- statement too.
+CREATE OR REPLACE FUNCTION balances_are_trigger_maintained() RETURNS trigger AS $$
+BEGIN
+    IF current_setting('meridian.projecting', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'balances is maintained by the ledger projection; '
+                        'write a ledger entry instead';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+-- Immediate guard provenance is backed by a deferred parity invariant because
+-- custom GUCs are caller-settable and therefore cannot be authorization alone.
+CREATE OR REPLACE FUNCTION balances_must_match_ledger() RETURNS trigger AS $$
+DECLARE
+    target_loan INTEGER := COALESCE(NEW.loan_id, OLD.loan_id);
+    actual_principal NUMERIC(14,2);
+    actual_fees NUMERIC(14,2);
+    ledger_principal NUMERIC(14,2);
+    ledger_fees NUMERIC(14,2);
+BEGIN
+    SELECT balance, COALESCE(past_due, 0)
+      INTO actual_principal, actual_fees
+      FROM balances WHERE loan_id = target_loan;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'balance projection row for loan % cannot be removed', target_loan;
+    END IF;
+    SELECT COALESCE(SUM(amount) FILTER (WHERE component = 'principal'), 0),
+           COALESCE(SUM(amount) FILTER (WHERE component = 'fees'), 0)
+      INTO ledger_principal, ledger_fees
+      FROM ledger_entries WHERE loan_id = target_loan;
+    IF actual_principal IS DISTINCT FROM ledger_principal
+       OR actual_fees IS DISTINCT FROM ledger_fees THEN
+        RAISE EXCEPTION 'balance/ledger parity violation for loan %', target_loan;
+    END IF;
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION balances_are_trigger_maintained() IS
+    'ADR 0010 step 5. Not attached to a trigger yet -- every writer must be '
+    'converted first, or the guard turns working code into exceptions. Enable '
+    'with: CREATE TRIGGER balances_guard BEFORE UPDATE OR DELETE ON balances '
+    'FOR EACH ROW EXECUTE FUNCTION balances_are_trigger_maintained();';
+
 -- Mirrors db/migrations/0040. Reconciliation's window predicate reads this on
 -- every run; without it here a fresh install and a migrated one would differ,
 -- which test_migration_paths_converge catches -- and did.
