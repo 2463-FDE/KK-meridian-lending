@@ -200,7 +200,18 @@ def test_the_debt_register_does_not_still_call_d3_open():
     assert "test_balance_lost_update_real_postgres" in row, (
         "D3 claims a fix without naming the test that proves it"
     )
-    assert "skip" in row.lower() or "not** executed" in row or "not executed" in row, (
-        "D3 does not disclose that its proof needs a real PostgreSQL and skips "
-        "without one -- a skipped test reads exactly like a passing one"
+    # The entry must say what kind of evidence it has, because "Fixed" on its own
+    # cannot distinguish a proof that ran from one that skipped. It said "not
+    # executed during this pass" while no database was reachable; it now says the
+    # cases were executed and against what. Either is acceptable; silence is not.
+    lowered = row.lower()
+    assert ("executed" in lowered or "skip" in lowered), (
+        "D3 does not disclose whether its real-PostgreSQL proof actually ran -- a "
+        "skipped test reads exactly like a passing one, so the entry has to say"
     )
+    if "executed" in lowered and "postgresql" not in lowered:
+        raise AssertionError(
+            "D3 claims its proof was executed without naming the database it ran "
+            "against; 'executed' with no version is the claim this register keeps "
+            "having to retract"
+        )
