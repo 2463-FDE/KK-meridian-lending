@@ -1,9 +1,17 @@
 """Payment handling (formerly the vendor's prototype 'pay.py').
 
 There is NO idempotency key — a retried POST inserts a second payments row and
-applies the amount twice (double-charge). (D2, #4, #7 -- unrelated to the PCI
-fix below, left as-is; same scope boundary payment-service's own idempotency
-fix drew for its equivalent debt.)
+applies the amount twice (double-charge). This is the still-open half of D2:
+payment-service's `POST /payments` was fixed (required `idempotency_key`, partial
+unique index, apply-once through `payment_applications`), and this duplicate was
+never ported. D2 in `docs/DEBT.md` records both halves; reading it as "D2 is
+fixed" is what this note exists to prevent.
+
+Bounded, not closed: the route requires `X-Internal-Token` and the gateway 404s
+the path rather than proxying it, so the retry that double-applies has to come
+from inside the compose network. It also calls no processor, so its rows are
+labelled `capture_source='servicing_legacy'` and reconciliation excludes them
+(D7) — there is no settlement line that could ever corroborate one.
 
 ADR 0008 (Week 5 tokenization): this used to receive and store the FULL PAN
 and CVV on the payments row, and log the full charge request (PAN, CVV, SSN)

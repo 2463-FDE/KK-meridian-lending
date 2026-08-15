@@ -1,15 +1,37 @@
 """Balance + payment application.
 
-Arithmetic now runs in Decimal internally (D12 fix, same pattern already
-applied to disclosure-service's apr.py) -- values still travel to/from the
-DOUBLE PRECISION columns as float; only the computation itself is exact now,
-so repeated payments/adjustments no longer accumulate float drift. The DB
-column type itself is unchanged here -- a real schema migration
-(DOUBLE PRECISION -> NUMERIC) is a separate, bigger step, not done in this pass.
+Arithmetic runs in Decimal internally (D12 fix, same pattern as
+disclosure-service's apr.py). The money columns are `NUMERIC(14,2)` -- see
+`db/init/001_schema.sql`, `balances.balance` and `balances.past_due`. This
+docstring claimed for months that they were still `DOUBLE PRECISION` and that
+the migration was "a separate, bigger step, not done in this pass"; that
+migration landed, and the sentence outlived it.
 
-The read-modify-write here still has no lock (D3, unrelated to this fix, still
-open) and there is still no payment waterfall -- fees/interest/principal
-(D14, unrelated, still open).
+D3 is CLOSED, and the sentence that said otherwise was the last thing in this
+service still asserting it. `apply_payment_once` writes an immutable
+`ledger_entries` row and the projection trigger maintains `balances` by
+composing signed deltas (`db/migrations/0035_ledger_entries.sql`), so two
+concurrent payments both survive. Proven by
+`tests/test_balance_lost_update_real_postgres.py` and
+`db/tests/test_0035_ledger_projection.py`, which need a real PostgreSQL and
+skip without `DATABASE_URL`.
+
+What is genuinely still open here, so nothing below reads as finished:
+
+  * **No waterfall (D14).** Every payment posts one `principal` entry for its
+    whole amount. Fees and interest are never touched.
+  * **No maker-checker (D8).** `adjust_balance` and `waive_fee` move money on
+    one person's say-so, and this module is given no principal to record.
+  * **Legacy writers are still direct.** `apply_payment`, `adjust_balance` and
+    `waive_fee` write `balances` themselves rather than through the ledger.
+    They are not invisible -- 0035's compatibility bridge mirrors each committed
+    delta into `ledger_entries` as a `legacy_direct_write` -- but the entry
+    carries no actor, and ADR 0010's guard against direct writes stays disabled
+    until those three are converted.
+  * **A stale returned balance.** `apply_payment` and `waive_fee` compute their
+    return value from a read taken before their own UPDATE. The stored value is
+    correct; the number handed back to the caller can be out of date if another
+    write lands in between.
 """
 from decimal import Decimal
 
@@ -38,10 +60,22 @@ def get_past_due(loan_id: int) -> float:
 
 
 def apply_payment(loan_id: int, amount: float) -> float:
-    """Read-modify-write with no lock (D3). Decimal math now (D12 fix). No
-    waterfall -- straight off principal (D14)."""
+    """The legacy apply, called only by this service's own `POST /payments`.
+
+    No waterfall -- the whole amount comes off the balance, never
+    fees->interest->principal (D14).
+
+    The stored balance is safe under concurrency: the UPDATE below is a relative
+    delta, so two of these compose rather than one overwriting the other, and
+    0035's capture trigger mirrors the delta into the ledger. What is NOT safe is
+    the value returned: `current` is read before the UPDATE, so a concurrent
+    write lands between them and the caller is handed a balance that was true a
+    moment ago. The database is right and the response can be wrong -- which is
+    why this is described precisely rather than as "D3", the lost update that the
+    ledger projection closed.
+    """
     current = get_balance(loan_id)                                       # READ
-    new_balance = float(_to_decimal(current) - _to_decimal(amount))      # MODIFY, exact
+    new_balance = float(_to_decimal(current) - _to_decimal(amount))      # stale by construction
     db.query(
         "UPDATE balances SET balance = balance - %s, updated_at = now() WHERE loan_id = %s",
         (amount, loan_id),
@@ -133,7 +167,19 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
 
 
 def adjust_balance(loan_id: int, new_value: float) -> float:
-    """Set the balance directly. No ledger entry; the prior value is gone forever."""
+    """Set the balance directly, on one person's say-so.
+
+    This function writes no ledger entry of its own, and the comment here used to
+    conclude "the prior value is gone forever". That stopped being true when
+    `db/migrations/0035_ledger_entries.sql` landed: its `capture_legacy_balance_delta`
+    trigger mirrors this UPDATE's committed delta into `ledger_entries` as a
+    `legacy_direct_write`, so the movement is recoverable after the fact.
+
+    What the ledger cannot supply is who did it. The entry's `actor_id` is NULL
+    because this route is handed no human principal to record -- that half of D8
+    is untouched, along with the second approver that would make the movement
+    reviewable at all (`specs/0002-maker-checker-self-approval.md`).
+    """
     new_balance = float(_to_decimal(new_value))
     with db.transaction() as cur:
         cur.execute("SELECT balance FROM balances WHERE loan_id = %s FOR UPDATE", (loan_id,))
@@ -150,7 +196,16 @@ def adjust_balance(loan_id: int, new_value: float) -> float:
 
 
 def waive_fee(loan_id: int, amount: float) -> float:
-    """Reduce past_due. Read-modify-write, no lock -- races with apply_payment (D3)."""
+    """Reduce past_due, on one person's say-so.
+
+    Same shape as `apply_payment`: the UPDATE is a relative delta, so the stored
+    `past_due` composes correctly with a concurrent write, and only the returned
+    figure can be stale. It used to be described as racing with `apply_payment`
+    under D3; the two touch different columns and neither loses an update.
+
+    The open part is authorisation, not concurrency -- no role check here, no
+    approver, and the captured ledger entry names nobody (D8).
+    """
     rows = db.query("SELECT past_due FROM balances WHERE loan_id = %s", (loan_id,))
     past_due = rows[0]["past_due"] if rows else 0.0
     new_past_due = float(_to_decimal(past_due) - _to_decimal(amount))
