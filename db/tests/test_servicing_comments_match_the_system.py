@@ -63,8 +63,8 @@ RETIRED = [
     ("accept ANY authenticated caller",
      "every money route requires X-Internal-Token and the gateway adds a role rule"),
     ("applies the amount twice (double-charge)",
-     "this route calls no processor -- a retry double-records the payment and "
-     "double-applies the balance, and charges nothing"),
+     "a retry inserts another payment record and applies the loan balance again; "
+     "it double-records and double-applies, and performs no processor charge"),
 ]
 
 
@@ -116,13 +116,19 @@ def test_the_open_limitations_are_still_written_down():
     )
 
 
-def test_the_legacy_payment_route_still_admits_it_is_not_idempotent():
-    """D2's open half, pinned to the code rather than to the comment.
+def test_the_legacy_payment_route_declares_no_idempotency_key():
+    """A static check, and it is only a static check.
 
-    `charge()` may not acquire an idempotency key without this test being
-    updated: if it becomes idempotent, D2 closes and every document describing it
-    as half-open needs rewriting. Either way the register and the code move
-    together.
+    It proves that the name `idempotency_key` appears nowhere in the legacy
+    charge path's code, which is a tripwire on the shape of the module -- not
+    evidence about what a retry does. **The runtime behaviour is proven by
+    `services/servicing-service/tests/test_legacy_payments_is_not_idempotent.py`**,
+    which issues the same request twice and counts the inserts, the
+    `balance.apply_payment` calls and the outbound HTTP calls.
+
+    Kept because the two fail at different moments: this one fails the instant
+    someone starts wiring a key in, before the behaviour changes and before the
+    characterization test would notice.
     """
     source = (APP / "payments.py").read_text(encoding="utf-8")
     assert "NO idempotency key" in source, (

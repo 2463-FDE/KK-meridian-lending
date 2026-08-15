@@ -1,12 +1,14 @@
 """Payment handling (formerly the vendor's prototype 'pay.py').
 
-There is NO idempotency key — a retried POST double-records the payment and
-double-applies the balance: a second `payments` row, and `balance.apply_payment`
-called again for the same money. This route calls no processor at all, so nothing
-is charged a second time: the card is untouched and what is wrong is the loan
-balance and the payment history. That distinction is the difference between this
-defect and the one payment-service had, and this comment used to collapse the two
-by borrowing payment-service's name for it.
+There is NO idempotency key. A retry inserts another payment record and applies
+the loan balance again. It double-records and double-applies; it does not perform
+another processor charge — this route calls no processor at all, so the card is
+untouched and what is wrong is the loan balance and the payment history.
+
+That distinction is the difference between this defect and the one
+payment-service had, and this comment used to collapse the two by borrowing
+payment-service's name for it. The names matter because the remedies differ: one
+is corrected by refunding a borrower, the other by correcting a balance.
 
 This is the still-open half of D2:
 payment-service's `POST /payments` was fixed (required `idempotency_key`, partial

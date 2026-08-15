@@ -289,17 +289,16 @@ def post_payment(body: PaymentIn,
                  x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
     _require_internal(x_internal_token)
     # The vendor's legacy duplicate of payment-service's /payments, and the half
-    # of D2 that is still open. No idempotency key is accepted or checked, so a
-    # retried POST double-records the payment and double-applies the balance: a
-    # second `payments` row, and `balance.apply_payment` called again for the
-    # same money. payment-service's own /payments was fixed (idempotency_key,
-    # partial unique index, apply-once); this one was never ported.
+    # of D2 that is still open. No idempotency key is accepted or checked.
     #
-    # NOT a double-charge. This route calls no processor -- there is nothing to
-    # authorize a second time, so the borrower's card is untouched and what is
-    # wrong is the loan balance and the payment history. Worth stating precisely,
-    # because the two defects need different fixes and this comment used to name
-    # the wrong one.
+    # A retry inserts another payment record and applies the loan balance again.
+    # It double-records and double-applies; it does not perform another processor
+    # charge -- this route calls no processor at all, so the borrower's card is
+    # untouched and what is wrong is the loan balance and the payment history.
+    # Worth stating precisely, because the two defects need different fixes and
+    # this comment used to name the wrong one. payment-service's own /payments
+    # was fixed (idempotency_key, partial unique index, apply-once); this one was
+    # never ported.
     #
     # Two things bound it, and neither closes it: the internal token above, and
     # the gateway, which matches no rule for this path and 404s rather than

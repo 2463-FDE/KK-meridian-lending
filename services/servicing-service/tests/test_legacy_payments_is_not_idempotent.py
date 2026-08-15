@@ -48,11 +48,19 @@ BODY = {
 
 @pytest.fixture
 def legacy_route(monkeypatch):
-    """The legacy charge path with its database and balance layer recorded."""
+    """The legacy charge path with its database, balance layer and any outbound
+    HTTP recorded.
+
+    Outbound HTTP is counted rather than assumed absent: "no processor call
+    occurs" is the claim that licenses the wording in `docs/DEBT.md` D2, and a
+    claim about runtime behaviour needs runtime evidence. Every HTTP entry point
+    the service could reach a processor through raises if it is touched.
+    """
     monkeypatch.setattr(main.config, "INTERNAL_SERVICE_TOKEN", TOKEN)
 
     inserts = []
     applies = []
+    outbound = []
 
     def _query(sql, params=None):
         if "INSERT INTO payments" in sql:
@@ -63,9 +71,39 @@ def legacy_route(monkeypatch):
         applies.append((loan_id, amount))
         return 0.0
 
+    def _no_http(*a, **kw):                                  # pragma: no cover
+        outbound.append((a, kw))
+        raise AssertionError(
+            "servicing's legacy charge path made an outbound HTTP call -- if it "
+            "now reaches a processor, a retry IS a second charge and every "
+            "document describing this route needs the stronger word back"
+        )
+
     monkeypatch.setattr(payments.db, "query", _query)
     monkeypatch.setattr(payments.balance, "apply_payment", _apply_payment)
-    return inserts, applies
+
+    # Rigged at the TRANSPORT, not at the client. `TestClient` is itself an
+    # `httpx.Client`, so patching `Client.request` would break the harness and
+    # prove nothing about the application. A real outbound call goes through
+    # `HTTPTransport`; the in-process test request goes through `ASGITransport`,
+    # which is left alone. So this fails on a network call and only on a network
+    # call.
+    import httpx
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _no_http, raising=False)
+    monkeypatch.setattr(
+        httpx.AsyncHTTPTransport, "handle_async_request", _no_http, raising=False
+    )
+    try:
+        import requests.adapters
+
+        monkeypatch.setattr(
+            requests.adapters.HTTPAdapter, "send", _no_http, raising=False
+        )
+    except ImportError:                                      # pragma: no cover
+        pass
+
+    return inserts, applies, outbound
 
 
 def _post(body=None):
@@ -80,7 +118,7 @@ def test_a_retried_request_records_the_payment_twice(legacy_route):
     Fails when the route learns to deduplicate -- at which point D2's open half
     is closed and this file is the wrong description of the system.
     """
-    inserts, _ = legacy_route
+    inserts, _, _ = legacy_route
 
     first, second = _post(), _post()
 
@@ -101,7 +139,7 @@ def test_a_retried_request_applies_the_balance_twice(legacy_route):
     A duplicate row is a reporting problem; a second `apply_payment` is a loan
     balance that no longer reflects what was paid.
     """
-    _, applies = legacy_route
+    _, applies, _ = legacy_route
 
     _post()
     _post()
@@ -111,16 +149,28 @@ def test_a_retried_request_applies_the_balance_twice(legacy_route):
     )
 
 
-def test_no_processor_is_called_so_nothing_is_charged_twice(legacy_route):
-    """The claim the documents make about what is NOT wrong here.
+def test_no_processor_call_occurs_on_either_request(legacy_route):
+    """The claim the documents make about what is NOT wrong here, at runtime.
 
     `charge()` takes a `processor_token` and does nothing with it: no
     authorization, no capture, no processor module imported at all. So a retry
     duplicates the record and the balance movement and never touches the card.
-    Asserted because the wording it protects -- "double-records and
-    double-applies", not "double-charges" -- is only accurate while this holds.
+    Asserted because the wording it protects -- "it double-records and
+    double-applies; it does not perform another processor charge" -- is only
+    accurate while this holds.
+
+    Behavioural first: both requests run with every HTTP entry point rigged to
+    fail, so an outbound call would surface as a failed request rather than as an
+    unchecked assumption. The source checks that follow catch the case where a
+    processor is reached by some means this fixture does not rig.
     """
     import inspect
+
+    _, _, outbound = legacy_route
+
+    assert _post().status_code == 200
+    assert _post().status_code == 200
+    assert outbound == [], f"the legacy charge path called out to {outbound!r}"
 
     source = inspect.getsource(payments)
     for processor_call in ("authorize_charge(", "capture_charge(", "processor."):
@@ -155,7 +205,7 @@ def test_the_route_accepts_no_idempotency_key(legacy_route):
     So the accurate statement, and the one the documents now make, is that this
     route has no idempotency at all -- not that it pretends to.
     """
-    inserts, applies = legacy_route
+    inserts, applies, _ = legacy_route
 
     assert "idempotency_key" not in main.PaymentIn.model_fields, (
         "the legacy route now declares an idempotency_key -- D2's open half may "
