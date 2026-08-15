@@ -135,7 +135,7 @@ They have since been executed here. Against **PostgreSQL 16.14** (the
 
 | Suite | Result |
 |---|---|
-| `db/tests` | **666 passed, 0 skipped** |
+| `db/tests` | **675 passed, 0 skipped** |
 | servicing-service | **296 passed, 0 skipped** |
 | origination-service | **301 passed, 0 skipped** |
 | disclosure-service | **175 passed, 1 skipped** |
@@ -384,7 +384,7 @@ current status** — run the commands.
 
 - **Base:** `main` at `c91fd19`, level with `origin/main` when the audit ran.
 - **Local run:** all eight backend suites plus `db/tests` passed **against
-  PostgreSQL 16.14**, with `DATABASE_URL` set — `db/tests` 666, servicing 296,
+  PostgreSQL 16.14**, with `DATABASE_URL` set — `db/tests` 675, servicing 296,
   origination 301, disclosure 175, payment 171, gateway 98, kyc 90, decision 40,
   loan-assistant 238. Zero database skips. One non-database skip remains (an
   uncaptured FFIEC oracle vector), described in the audit section above.
@@ -1132,11 +1132,19 @@ Four rules that this file has broken before, and which later passes fixed:
    fenced; everything else states what must be true, which does not change when a
    branch does.
 
-Last full accuracy pass: **2026-08-14**, against `main` at `87193c4`. That is the
+Last full accuracy pass: **2026-08-15**, against `main` at `c91fd19`. That is the
 base the Weeks 1–6 matrix and the gap list were re-checked against, and it is what
 the footer is for — a freshness marker naming the commit, and nothing about which
 pull requests happened to be open while it was written. **For what is in flight,
 run `gh pr list`.**
+
+*This stamp read `2026-08-14` / `87193c4` while the matrix header 1,000 lines
+above already said `2026-08-15` / `c91fd19`.* A freshness marker that disagrees
+with the thing it dates is worse than no marker: the header and the footer of one
+file certified two different audits, and a reader checking either one alone had
+no way to see the conflict. Added to the pinned claims below for that reason —
+the same file, the same fact, two places, which is the condition every stale
+claim in this repository has been found in.
 
 *Two earlier versions of this footer are worth recording, because rule 5 is what
 they cost. One read "with PRs #1–#17 all merged and no PR open" while the section

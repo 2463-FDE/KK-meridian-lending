@@ -31,6 +31,7 @@ and skip without it, which is stated rather than hidden.
 """
 import os
 import pathlib
+import re
 
 import pytest
 
@@ -87,6 +88,30 @@ RETIRED = [
 OPENING_QUOTES = ('"', "“")
 
 
+def _inside_quotes(flat: str, start: int, end: int | None = None) -> bool:
+    """Is the span quoted -- i.e. bracketed by quote marks close on either side?
+
+    Adjacency is not enough: a quotation opens before the words the pattern
+    matches, so `said "still a single mutable column, no ledger"` puts the quote
+    three words ahead of the match. Nor is parity: a Python module docstring
+    opens with three quote characters, so counting them makes every claim in
+    every docstring read as quoted or unquoted depending on how many other
+    quotations precede it -- which is how this check first passed a file that
+    genuinely denied the ledger.
+
+    So it looks for a bracketing pair within a short window. Prose that happens
+    to sit between two unrelated quotations further apart than that is not
+    treated as quoted.
+    """
+    end = len(flat) if end is None else end
+    window = 200
+    before = flat[max(0, start - window):start]
+    after = flat[end:end + window]
+    opens = any(q in before for q in ('"', "“"))
+    closes = any(q in after for q in ('"', "”"))
+    return opens and closes
+
+
 def _stated_as_current_fact(text: str, sentence: str) -> list[str]:
     """Occurrences of `sentence` that are asserted rather than quoted.
 
@@ -118,6 +143,104 @@ def test_a_retired_database_claim_is_only_ever_quoted_as_history(path, sentence,
         f"{path.relative_to(REPO)} states {sentence!r} as current fact. It is "
         f"false: {why_false}. If this line is narrating history, say so on the "
         f"same line.\n  " + "\n  ".join(o[:150] for o in offenders)
+    )
+
+
+#: Files that describe only the CURRENT system: source, DDL and seeds. A ledger
+#: denial in any of these is false however it is worded.
+#:
+#: `docs/ROADMAP.md` and `README.md` are deliberately NOT here, and the reason is
+#: a real limit rather than an oversight. They carry the vendor-handoff findings
+#: table, where "a single mutable `balance` column, no ledger" is a true
+#: statement about what was found and is marked ✅ Fixed beside it. No pattern
+#: distinguishes that from a stale claim, and a check that forced those rows to
+#: be reworded would delete the history this repository keeps on purpose. The
+#: narrative documents are covered by the exact-sentence pins above and by
+#: `test_the_architecture_service_table_does_not_deny_the_ledger` below, which
+#: names a structural location instead of guessing from prose.
+CURRENT_FACING = (
+    SERVICING_MODELS, PAYMENT_MODELS, LOANS_ROUTER, SCHEMA, SEED_BULK,
+    REPO / "services" / "servicing-service" / "app" / "main.py",
+    REPO / "services" / "servicing-service" / "app" / "balance.py",
+)
+
+#: The CONCEPT, not a phrasing. Exact-sentence pins caught
+#: "is still a single mutable column (no ledger)" and let
+#: "still a single mutable column, no ledger" through one table row away -- the
+#: review found that variant in `ARCHITECTURE.md`'s service table after the
+#: parenthesised one had been corrected twelve lines below it. Any sentence that
+#: puts a mutable/single balance column next to a denial of the ledger is the
+#: same false claim, so the pattern matches the pairing.
+LEDGER_DENIAL = re.compile(
+    r"(single mutable|mutable balance|one column, overwritten)"
+    r"[^.]{0,80}?no ledger"
+    r"|no ledger[^.]{0,80}?(single mutable|mutable balance|overwritten in place)",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize(
+    "path", CURRENT_FACING, ids=[p.name for p in CURRENT_FACING]
+)
+def test_no_current_facing_file_denies_the_ledger_in_any_wording(path):
+    """`balances` is a projection of `ledger_entries`. Saying otherwise is false
+    whatever words are used, and the exact-sentence pins below cannot see a
+    rephrasing."""
+    if not path.is_file():
+        pytest.skip(f"{path.name} is not present")
+    flat = " ".join(path.read_text(encoding="utf-8").split())
+    offenders = [
+        flat[max(0, m.start() - 70):m.end() + 40]
+        for m in LEDGER_DENIAL.finditer(flat)
+        if not _inside_quotes(flat, m.start(), m.end())
+    ]
+    assert not offenders, (
+        f"{path.relative_to(REPO)} denies the ledger as current fact -- "
+        f"`balances` is maintained by the projection trigger (db/migrations/0035):"
+        f"\n  " + "\n  ".join(o[:170] for o in offenders)
+    )
+
+
+def test_the_architecture_service_table_does_not_deny_the_ledger():
+    """The row the round-2 review found, pinned by structure rather than prose.
+
+    `ARCHITECTURE.md`'s service table describes what each service does now. Its
+    `servicing-service` row said `apply-payment` writes to "a single mutable
+    column, no ledger" while the same file, twelve lines further down, described
+    `balances` as a ledger projection — a wording variant that the
+    exact-sentence pin for the parenthesised form could not see.
+    """
+    row = next(
+        (line for line in ARCHITECTURE.read_text(encoding="utf-8").splitlines()
+         if line.startswith("| `servicing-service`")),
+        None,
+    )
+    assert row, "the servicing-service row is gone from the architecture table"
+    offenders = [m.group(0) for m in LEDGER_DENIAL.finditer(row)
+                 if not _inside_quotes(row, m.start(), m.end())]
+    assert not offenders, (
+        f"the architecture service table denies the ledger: {offenders}"
+    )
+
+
+def test_the_roadmap_header_and_footer_date_the_same_audit():
+    """One file, one fact, two places -- the condition every stale claim here has
+    been found in. The footer stamped 2026-08-14/87193c4 while the matrix header
+    a thousand lines above stamped 2026-08-15/c91fd19."""
+    text = ROADMAP.read_text(encoding="utf-8")
+    header = re.search(
+        r"\*\*Re-verified (\d{4}-\d{2}-\d{2}) against `main` at `([0-9a-f]+)`", text
+    )
+    footer = re.search(
+        r"Last full accuracy pass: \*\*(\d{4}-\d{2}-\d{2})\*\*, against `main` at `([0-9a-f]+)`",
+        text,
+    )
+    assert header, "the matrix no longer stamps the audit it was re-verified against"
+    assert footer, "the freshness footer is gone"
+    assert header.groups() == footer.groups(), (
+        f"the matrix header dates the audit {header.group(1)} at {header.group(2)} "
+        f"while the footer says {footer.group(1)} at {footer.group(2)} -- one file "
+        f"certifying two different audits"
     )
 
 
