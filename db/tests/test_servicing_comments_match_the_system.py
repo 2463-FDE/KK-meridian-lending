@@ -60,6 +60,11 @@ RETIRED = [
      "the gateway restricts these routes to csr/admin (auth.can_move_money)"),
     ("ANY authenticated user can waive a fee",
      "the gateway restricts these routes to csr/admin (auth.can_move_money)"),
+    ("accept ANY authenticated caller",
+     "every money route requires X-Internal-Token and the gateway adds a role rule"),
+    ("applies the amount twice (double-charge)",
+     "this route calls no processor -- a retry double-records the payment and "
+     "double-applies the balance, and charges nothing"),
 ]
 
 
@@ -121,7 +126,8 @@ def test_the_legacy_payment_route_still_admits_it_is_not_idempotent():
     """
     source = (APP / "payments.py").read_text(encoding="utf-8")
     assert "NO idempotency key" in source, (
-        "payments.py no longer states that a retried POST double-applies"
+        "payments.py no longer states that a retried POST double-records the "
+        "payment and double-applies the balance"
     )
     # The module docstring names `idempotency_key` when describing the path that
     # IS fixed, so the check has to look at the code rather than the file.
@@ -148,6 +154,34 @@ def test_the_debt_register_does_not_claim_d2_is_fixed_everywhere():
             break
     else:
         pytest.fail("D2 does not say that one of its two paths is still open")
+
+
+def test_the_processorless_route_is_not_described_as_charging_anyone():
+    """A retry here duplicates a record and a balance movement. It charges nobody.
+
+    `servicing-service` calls no processor on any path, so "double-charge" is the
+    wrong defect name for it -- and the wrong name points at the wrong fix, since
+    a double-charge is remediated by refunding a borrower and this is remediated
+    by correcting a balance. payment-service's own history DID include a real
+    double-charge and its documents may say so; this check is scoped to
+    servicing's sources and to the D2 row's description of the legacy route.
+    """
+    wrong = ("double-charge", "double charge", "charges twice", "charged twice",
+             "charge twice")
+    for path in _sources():
+        text = path.read_text(encoding="utf-8").lower()
+        for phrase in wrong:
+            if phrase not in text:
+                continue
+            # Naming the distinction is the correction; claiming it is the defect.
+            for line in text.splitlines():
+                if phrase not in line:
+                    continue
+                assert ("not a double-charge" in line or "nothing is charged" in line
+                        or "charges nothing" in line or "payment-service" in line), (
+                    f"{path.relative_to(REPO)} describes this processorless route "
+                    f"with {phrase!r}: {line.strip()[:110]!r}"
+                )
 
 
 def test_the_debt_register_does_not_still_call_d3_open():

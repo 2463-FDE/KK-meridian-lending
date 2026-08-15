@@ -1,9 +1,18 @@
 """Servicing service (LSS) — FastAPI.
 
 Read API (loan list / detail / schedule / payment history) uses SQLAlchemy. The
-money-moving endpoints (payments, balance adjust, fee waiver) keep their original raw
-implementation and accept ANY authenticated caller — no role check, no maker-checker.
-(weak authz — kept on purpose)
+money-moving endpoints (payments, balance adjust, fee waiver) keep their original
+raw implementation.
+
+Authorization, stated as it now stands: every money route requires
+`X-Internal-Token` and the service refuses to start without a usable one, and the
+gateway restricts adjust-balance / waive-fee / late-fee to csr/admin. What this
+service itself does not do is identify the human — it reads no principal, ignores
+the `x_user_role` header it accepts, and enforces no second approver (D8). This
+docstring used to describe the money endpoints as open to any authenticated
+caller with no check of any kind, which stopped being true once the token and the
+gateway rule landed, and was never the right description of who may authorise a
+movement.
 """
 import logging
 import os
@@ -281,18 +290,26 @@ def post_payment(body: PaymentIn,
     _require_internal(x_internal_token)
     # The vendor's legacy duplicate of payment-service's /payments, and the half
     # of D2 that is still open. No idempotency key is accepted or checked, so a
-    # retried POST inserts a second `payments` row AND applies the balance a
-    # second time. payment-service's own /payments was fixed (idempotency_key,
+    # retried POST double-records the payment and double-applies the balance: a
+    # second `payments` row, and `balance.apply_payment` called again for the
+    # same money. payment-service's own /payments was fixed (idempotency_key,
     # partial unique index, apply-once); this one was never ported.
+    #
+    # NOT a double-charge. This route calls no processor -- there is nothing to
+    # authorize a second time, so the borrower's card is untouched and what is
+    # wrong is the loan balance and the payment history. Worth stating precisely,
+    # because the two defects need different fixes and this comment used to name
+    # the wrong one.
     #
     # Two things bound it, and neither closes it: the internal token above, and
     # the gateway, which matches no rule for this path and 404s rather than
     # proxying it -- so a browser or a staff session cannot reach it at all. It
     # is reachable by a service already inside the compose network holding the
-    # shared token, and for that caller the double-apply is real.
+    # shared token, and for that caller both duplications are real.
     #
-    # It also calls no processor, which is why its rows are labelled
+    # Having no processor is also why its rows are labelled
     # capture_source='servicing_legacy' and excluded from reconciliation (D7).
+    # Characterized by servicing-service/tests/test_legacy_payments_is_not_idempotent.py.
     return payments.charge(
         body.loan_id, body.processor_token, body.last4, body.brand, body.amount, body.name, body.method
     )
