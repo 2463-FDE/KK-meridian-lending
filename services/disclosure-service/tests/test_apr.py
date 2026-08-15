@@ -322,14 +322,19 @@ def test_the_ffiec_vector_describes_the_cash_flow_this_system_actually_discloses
 @pytest.mark.skipif(
     FFIEC_VECTOR["expected_apr"] is None,
     reason=(
-        "FFIEC APR tool result not yet captured. This is the only OUTSIDE oracle in "
-        "this file and PR #10 must not merge while it is skipped -- sections 1-3 are "
-        "all internal to this repository. To close: run the FFIEC APR tool with "
-        "amount financed 17,460.00, monthly, regular first period, no balloon, and "
-        "the payment stream entered as 47 payments of 439.35 FOLLOWED BY one "
-        "payment of 439.25 (total 21,088.70 -- check the tool agrees). Then fill in "
-        "tool, url, expected_apr and verified_on. Do not enter 48 level payments: "
-        "that is a different cash flow and its APR would not be this loan's."
+        "FFIEC APR tool result not captured FOR THIS VECTOR, so there is nothing to "
+        "compare against and this case cannot assert anything. An outside oracle IS "
+        "in the suite -- tests/test_ffiec_external_oracle.py carries a transcribed "
+        "FFIEC result for a different cash flow and runs on every pass -- so the "
+        "external check is not missing; this second vector is. "
+        "To close: run the FFIEC APR tool with amount financed 17,460.00, monthly, "
+        "regular first period, no balloon, and the payment stream entered as 47 "
+        "payments of 439.35 FOLLOWED BY one payment of 439.25 (total 21,088.70 -- "
+        "check the tool agrees). Then fill in tool, url, expected_apr and "
+        "verified_on. Do not enter 48 level payments: that is a different cash flow "
+        "and its APR would not be this loan's. The figure is NOT to be computed from "
+        "this repository -- an oracle derived from the code it checks is not an "
+        "oracle, which is the defect D15 was found by escaping."
     ),
 )
 def test_the_apr_matches_a_federally_published_tool():

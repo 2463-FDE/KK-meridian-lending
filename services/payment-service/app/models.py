@@ -11,12 +11,14 @@ Python-side value a plain float, matching payments.py's own
 Decimal-internally/float-at-the-boundary quantization.
 
 ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
-longer declares `pan`/`cvv`: no code path reads or writes either column. The
-columns themselves still exist in the database -- db/migrations/0029 (this
-release) only back-fills `last4` from `pan`; the DROP is the contract step,
-db/migrations/0031, on its own PR. They are dead-going-forward columns for rows
-that predate tokenization. New rows populate `last4`/`brand` instead, from the
-processor's own token response.
+longer declares `pan`/`cvv`, and **neither does the database**: db/migrations/0029
+back-filled `last4` from `pan`, db/migrations/0031 dropped both columns behind an
+operator acknowledgement that refuses to run on an incomplete back-fill, and
+`db/init/001_schema.sql` creates neither -- so a migrated database and a fresh
+one agree that they do not exist. This docstring described the drop as a future
+step on its own PR ("the columns themselves still exist in the database") after
+that step had shipped, which is the same stale-comment defect `docs/DEBT.md` D5c
+records. New rows populate `last4`/`brand`, from the processor's token response.
 
 Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/
 0017) tracks whether a real processor authorization was ever confirmed for

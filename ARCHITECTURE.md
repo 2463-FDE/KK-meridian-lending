@@ -145,7 +145,14 @@ fails fast rather than hanging the request, and replaying an already-captured pa
 never reaches the check, because it authorizes nothing.
 
 **What this does not close.** `DEBT.md` **D8** is about who may *authorize* a money
-movement — no role check, no second approver, no ledger entry — and remains fully open.
+movement, and it is **partly closed** — the sentence here described all of it as open
+long after two thirds of it landed. What landed: a role rule at the gateway
+(`gateway/app/auth.py::can_move_money`, csr/admin only) and a ledger entry for every
+movement, including the direct writes 0035's compatibility bridge captures. What is
+still open, and is the whole of D8 now: **servicing validates no human principal**
+(`adjust_balance` and `waive_fee` take `x_user_role` and never read it) and **no second
+approver exists**, so one account still moves a balance alone and the captured ledger
+entry names nobody.
 That is a different question from who can *reach* the endpoint, which is what the token
 answers; closing either leaves the other open, and an earlier draft conflated them by
 citing D8 as if it tracked the token gap.
@@ -248,7 +255,9 @@ notably `0005_money_columns_to_numeric.sql`, `0008_offer_decision_link.sql` +
 
 Money columns are `NUMERIC` (D12 fix — every dollar-amount column used to be `DOUBLE
 PRECISION`; `employment_years` stayed float since it's a duration, not money). `balances`
-is still a single mutable column (no ledger). `decisions` records the outcome only;
+is a projection of `ledger_entries`, maintained by 0035's trigger rather than
+overwritten by its last writer — this line read "is still a single mutable column (no
+ledger)" after that shipped. `decisions` records the outcome only;
 `decision_events` (Week 3) is a separate **append-only** audit row per decision — inputs,
 model score/version, top features, reason codes — so a decision can be proven, not just
 asserted. `offers.decision_id` is now FK'd to `decisions.app_id` with a **unique**

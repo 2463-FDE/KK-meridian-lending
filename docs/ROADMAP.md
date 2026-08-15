@@ -27,16 +27,28 @@ Every `D<n>` / `RF-<n>` citation in the tables below is defined in
 This is the durable work queue. The detailed matrix and dated audit evidence
 below explain how it was derived.
 
-- **Highest priority:** close `G-INTAKE-401`, so KYC authorization failures fail
-  closed instead of looking like transient network errors.
-- **Next control:** implement `G-MAKER-CHECKER` from ADR 0011/spec 0002 using a
-  server-validated human principal. A shared service token or caller-supplied
-  identity/role headers are not proof of the human actor.
-- **Then:** close D1's Decimal read-path gap and implement D14's payment
-  waterfall on the landed component ledger.
-- **Durable status:** Weeks 1–5 are landed; Week 6 has RBAC and ledger but not
-  maker-checker enforcement; Week 7 has reconciliation but not a cross-service
-  trace ID; Weeks 8–10 retain the scoped gaps in the table below.
+- **Highest priority:** `G-SERVICING-ROLE` + `G-MAKER-CHECKER`, as one control.
+  Servicing validates no human principal, and no second approver exists, so one
+  account still moves a borrower's balance alone. A shared service token or
+  caller-supplied identity/role headers are not proof of the human actor —
+  reading `x_user_role` without a verifiable principal is a bypass, not a fix.
+- **Then:** `G-D2-LEGACY` (servicing's processorless `POST /payments` records and
+  applies a retried payment twice), `G-D14` (payment waterfall on the landed
+  component ledger), `G-D19` (`loans.apr` holds the note rate).
+- **Durable status:** Weeks 1–4 are landed; **Week 5 is Partial** — the canonical
+  processor-backed payment path is idempotent and servicing's legacy duplicate is
+  not; Week 6 has the token boundary, the gateway role rule and the ledger, but
+  not a validated human principal or maker-checker enforcement; Week 7 has
+  reconciliation but not a cross-service trace ID; Weeks 8–10 retain the scoped
+  gaps in the table below.
+
+*This block is the summary of the matrix below and it drifted from it.* It led
+with `G-INTAKE-401` and D1 — both closed, and recorded closed in the same file —
+and called Weeks 1–5 landed while the Week 5 row read **Partial**. A planning
+surface that contradicts its own evidence table sends the next person at work
+that is already done, which is the failure this file exists to prevent. It is
+kept in agreement with **Start next** below; if the two ever disagree again, the
+matrix wins and this block is wrong.
 
 PR state, CI state, and exact suite counts are deliberately excluded. Check
 those live; they are not roadmap facts.
@@ -123,9 +135,9 @@ They have since been executed here. Against **PostgreSQL 16.14** (the
 
 | Suite | Result |
 |---|---|
-| `db/tests` | **649 passed, 0 skipped** |
+| `db/tests` | **666 passed, 0 skipped** |
 | servicing-service | **296 passed, 0 skipped** |
-| origination-service | **300 passed, 1 skipped** |
+| origination-service | **301 passed, 0 skipped** |
 | disclosure-service | **175 passed, 1 skipped** |
 | payment-service | **171 passed, 0 skipped** |
 | gateway / kyc / decision / loan-assistant | 98 / 90 / 40 / 238, no database needed |
@@ -134,14 +146,36 @@ Every previously-skipped database case now runs and passes, including the five
 concurrency cases in `servicing-service/tests/test_balance_lost_update_real_postgres.py`
 and the 64 in `db/tests/test_0035_ledger_projection.py` that prove D3.
 
-**Two skips survive, and neither is a database skip.**
-`origination-service/tests/test_rolling_deploy_compatibility.py:162` cannot
-import the `kyc-service` package from that working directory, and
-`disclosure-service/tests/test_apr.py:322` is an unfilled FFIEC oracle
-placeholder — whose own skip message still says "PR #10 must not merge while it
-is skipped", four days after #10 merged. The transcribed FFIEC oracle in
-`test_ffiec_external_oracle.py` does run and pass, so the coverage is not
-missing; the message is stale and is recorded here rather than silently fixed.
+**One skip survives, and it is not a database skip.**
+`disclosure-service/tests/test_apr.py` has no captured FFIEC result for its
+second vector, so that case has nothing to compare against. The figure is not
+computable from this repository — an oracle derived from the code it checks is
+not an oracle, which is how D15 escaped — so it stays skipped until someone runs
+the tool. The suite is not without an outside oracle: `test_ffiec_external_oracle.py`
+carries a transcribed FFIEC result and runs on every pass. The skip's own message
+used to add "PR #10 must not merge while it is skipped", four days after #10
+merged; that instruction is gone and the pointer to the captured oracle replaces it.
+
+**The other skip was not an environment limitation.**
+`origination-service/tests/test_rolling_deploy_compatibility.py` — the case
+proving old origination can still call new kyc-service during a rolling deploy —
+inserted kyc-service's directory into `sys.path` and imported `app.schemas`. But
+`app` is already in `sys.modules` as *origination's* package, and `sys.path` is
+only consulted for a module that is not already imported, so the import resolved
+to the wrong service, raised, and was caught by an `except` that called it "not
+importable from here". **It skipped on every run on every machine, including CI**,
+printing an `s` on a cross-service compatibility guarantee. It now loads the
+module by path under a name of its own and runs; mutation-checked by adding a
+required field to `CipCheckIn`, which fails it.
+
+**One caution for anyone reproducing this.** A `docker compose` Postgres volume is
+initialised only when its data directory is empty, so a volume created before a
+schema change keeps serving the old shape indefinitely — the one on the machine
+that ran this pass was created 2026-08-12 and has no `ledger_entries` at all.
+`db/tests` build their own schemas and are unaffected; a hand-written check
+against `$DATABASE_URL` is not. New database assertions here build a fresh schema
+from `db/init` the way `test_schema_parity.py` does, rather than trusting
+whatever the environment variable points at.
 
 CI remains the independent check, on the same commit: GitHub Actions run
 `31759960436` on `c91fd19`, 2026-08-14T01:14Z, all 23 jobs green including
@@ -220,7 +254,7 @@ list that only ever grows stops being read:
 | Gap | Closed by | Verify it stayed closed |
 |---|---|---|
 | **G-KYC** — the CIP handler was reachable unauthenticated, on two routes | `kyc-service` has no host port and `POST /kyc/check` requires `X-Internal-Token` and refuses an unset one; the gateway's `/kyc/*` relay is staff-only **and read-only**, so a POST is refused with 405 rather than signed on an anonymous caller's behalf | `gateway/tests/test_decision_service_not_host_published.py` (now parametrized over `kyc-service` too), `gateway/tests/test_proxy_security.py`, `kyc-service/tests/` |
-| **G-SERVICING-TOKEN** — servicing's money routes checked no token | `_require_internal()` on **all four**: `apply-payment`, `adjust-balance`, `waive-fee`, `late-fee` | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py` |
+| **G-SERVICING-TOKEN** — servicing's money routes checked no token | `_require_internal()` on **all five**: `apply-payment`, `adjust-balance`, `waive-fee`, `late-fee` and the legacy `POST /payments`. *This cell said "all four" and omitted the last one — the same hand-written-list defect the paragraph below this table was written about, repeated inside the correction for it. The count is not the guarantee: `test_every_money_route_is_guarded` derives the list from the running app* | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py` |
 | **G-D3 / G-D3-PROOF** — payment updates could lose a concurrent write | ADR 0010 step 2 projects immutable ledger entries with database-enforced parity; the former race test now asserts the corrected concurrent behavior | `servicing-service/tests/test_balance_lost_update_real_postgres.py`, `db/tests/test_0035_ledger_projection.py` |
 | **G-LEDGER / G-ADR-0010** — no append-only servicing ledger or accepted design | ADR 0010 plus migration 0035, the fresh-install mirror, opening-state cutover, and legacy-write capture | `db/tests/test_0035_ledger_projection.py`, `test_ledger_adr_sequence_is_consistent.py`, migration convergence and schema parity tests |
 | **G-D7** — reconciliation was not an operational control | Scheduled transaction-level reconciliation now records runs, fails closed when nothing can be compared, and exposes monitoring/runbook evidence | `test_reconciliation_is_actually_scheduled.py`, `test_reconciliation_fails_closed_on_nothing.py`, `test_reconciliation_transaction_level_on_postgres.py` |
@@ -350,10 +384,10 @@ current status** — run the commands.
 
 - **Base:** `main` at `c91fd19`, level with `origin/main` when the audit ran.
 - **Local run:** all eight backend suites plus `db/tests` passed **against
-  PostgreSQL 16.14**, with `DATABASE_URL` set — `db/tests` 649, servicing 296,
-  origination 300, disclosure 175, payment 171, gateway 98, kyc 90, decision 40,
-  loan-assistant 238. Zero database skips. Two non-database skips remain, listed
-  in the audit section above.
+  PostgreSQL 16.14**, with `DATABASE_URL` set — `db/tests` 666, servicing 296,
+  origination 301, disclosure 175, payment 171, gateway 98, kyc 90, decision 40,
+  loan-assistant 238. Zero database skips. One non-database skip remains (an
+  uncaptured FFIEC oracle vector), described in the audit section above.
 - **What was NOT run here:** the Playwright specs under `frontend/e2e/`. CI run
   `31759960436` (head `c91fd19`, 2026-08-14T01:14Z, 23/23 jobs green) covers them
   and everything else on this commit.

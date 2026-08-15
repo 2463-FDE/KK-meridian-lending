@@ -7,14 +7,27 @@ binary float. `asdecimal=False` keeps the Python-side value a plain float
 so this is a storage-layer fix, not a ripple of Decimal typing through every
 caller that reads these columns.
 
-The `balances` table is still a single mutable balance column (no ledger).
+`balances` is a PROJECTION, not the system of record. ADR 0010 step 2
+(db/migrations/0035_ledger_entries.sql) made `ledger_entries` the immutable
+record of every movement, and `project_ledger_entry()` maintains the two columns
+below by composing signed deltas. This docstring said "still a single mutable
+balance column (no ledger)" for as long as the ledger has existed.
+
+What is still true, and is why the model looks unchanged: the columns are read
+the same way, the projection keeps them current, and three legacy writers
+(`balance.apply_payment`, `adjust_balance`, `waive_fee`) still UPDATE them
+directly. Those writes are captured into the ledger by 0035's compatibility
+bridge, and ADR 0010's guard against direct writes stays disabled until they are
+converted.
 
 ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
 longer declares `pan`/`cvv`, and payment-service never receives a raw PAN/CVV to
-write here. The columns still exist in the database -- db/migrations/0029 (this
-release) only back-fills `last4`; the DROP is the contract step,
-db/migrations/0031, on its own PR. New rows populate
-`last4`/`brand` instead.
+write here. **The columns are gone from the database too** --
+db/migrations/0029 back-filled `last4`, db/migrations/0031 dropped both columns
+behind an operator acknowledgement, and `db/init/001_schema.sql` creates neither,
+so no migrated or freshly initialised database has them. This docstring described
+the drop as future work ("the DROP is the contract step ... on its own PR")
+after that PR had merged. New rows populate `last4`/`brand`.
 
 Review fix: `auth_status` ('pending' | 'captured' | 'failed', db/migrations/
 0017) tracks whether payment-service ever confirmed a real processor
@@ -57,7 +70,10 @@ class Balance(Base):
     __tablename__ = "balances"
 
     loan_id: Mapped[int] = mapped_column(ForeignKey("loans.id"), primary_key=True)
-    balance: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))  # single mutable column, no ledger (debt)
+    # Maintained by the ledger projection (db/migrations/0035), not by whoever
+    # last wrote it. The comment here said "single mutable column, no ledger
+    # (debt)" after the ledger landed.
+    balance: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     past_due: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False), default=0)
     updated_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
