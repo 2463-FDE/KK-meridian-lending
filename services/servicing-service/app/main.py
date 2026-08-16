@@ -24,7 +24,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional
 
-from . import balance, config, db, delinquency, reconciliation
+from . import balance, config, db, delinquency, principal, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
@@ -33,6 +33,11 @@ log = get_logger("servicing")
 
 # Fail at boot rather than per-request on an unusable token (PR #22 review).
 config.validate_internal_token()
+# Same fail-closed treatment for the key that proves WHO is acting (spec 0002
+# REQ-ID-3). A malformed key -- or the private half landing here, which would let
+# this service mint the identities it is supposed to only check -- is a boot
+# failure, not a per-request surprise on a staff action.
+config.validate_principal_verify_key()
 
 app = FastAPI(title="Meridian Servicing Service (LSS)", version="2.0.0")
 app.include_router(loans.router)
@@ -315,19 +320,32 @@ class AdjustIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/adjust-balance")
 def adjust_balance(loan_id: int, body: AdjustIn,
-                   x_user_role: Optional[str] = Header(None),
+                   x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+                   x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+                   x_principal_assertion: Optional[str] = Header(
+                       None, alias="X-Principal-Assertion"),
                    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    # Two independent checks, in order, because they answer different questions.
+    # The token says the caller is a service on this network; the assertion says
+    # which human is behind the request, verified against the gateway's public
+    # key. Neither substitutes for the other: a service token is shared by every
+    # backend, so on its own it cannot distinguish a csr from payment-service.
     _require_internal(x_internal_token)
-    # D8, stated as it now stands rather than as it was first reported.
+    actor = principal.require_money_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    # D8, stated as it now stands. **Closed here:** servicing verifies the human
+    # and applies the csr/admin rule itself, so the restriction no longer lives
+    # one hop away at the gateway and a caller reaching this service directly on
+    # the compose network is subject to it too.
     #
-    # `x_user_role` above is accepted and never read -- this handler applies no
-    # authorisation rule of its own, and one caller can move money alone with no
-    # approver. That is the open part.
-    #
-    # What is no longer true: the gateway restricts this route to csr/admin
-    # (gateway/app/auth.py::can_move_money), and the write is captured in the
-    # ledger by 0035's compatibility bridge, so the prior value is recoverable.
-    # The captured entry names no actor, because nothing here knows one.
+    # **Still open:** no second approver. `actor` is one person, and one person
+    # can still move this balance alone (spec 0002 §2, not implemented). The
+    # ledger entry the compatibility bridge captures still names nobody -- wiring
+    # `actor.subject` into it belongs with the maker-checker cutover, where the
+    # approver rather than the requester is the actor that must be recorded.
+    log.info("adjust-balance loan_id=%s by subject=%s role=%s",
+             loan_id, actor.subject, actor.role)
     return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
 
 
@@ -337,19 +355,42 @@ class WaiveIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/waive-fee")
 def waive_fee(loan_id: int, body: WaiveIn,
-              x_user_role: Optional[str] = Header(None),
+              x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+              x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+              x_principal_assertion: Optional[str] = Header(
+                  None, alias="X-Principal-Assertion"),
               x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    # Same boundary as adjust-balance: service token, then verified human, then
+    # the csr/admin rule enforced here rather than only at the gateway. Still no
+    # second approver (D8's remaining half).
     _require_internal(x_internal_token)
-    # Same position as adjust-balance above: no approver and no human principal
-    # here (D8, open); csr/admin enforced at the gateway and the delta captured
-    # in the ledger by 0035 (both landed). The role header is not consulted.
+    actor = principal.require_money_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    log.info("waive-fee loan_id=%s amount=%s by subject=%s role=%s",
+             loan_id, body.amount, actor.subject, actor.role)
     return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}
 
 
 @app.post("/accounts/{loan_id}/late-fee")
 def late_fee(loan_id: int,
+             x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+             x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+             x_principal_assertion: Optional[str] = Header(
+                 None, alias="X-Principal-Assertion"),
              x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    # Grouped with the staff routes, not the machine ones, because nothing
+    # automated calls it: `delinquency.assess_late_fee` has exactly one caller,
+    # this handler, and the gateway already treats the route as money-moving
+    # (csr/admin). If a scheduled assessor is ever built it will need a machine
+    # path of its own rather than a fabricated human -- spec 0002 §8 keeps
+    # machine-originated fees outside the staff workflow deliberately.
     _require_internal(x_internal_token)
+    actor = principal.require_money_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    log.info("late-fee loan_id=%s by subject=%s role=%s",
+             loan_id, actor.subject, actor.role)
     return {"loan_id": loan_id, "past_due": delinquency.assess_late_fee(loan_id)}
 
 
