@@ -72,7 +72,20 @@ def _set_if_missing(text: str, key: str, value: str) -> tuple[str, bool]:
     if re.search(rf"^{re.escape(key)}=.+$", text, re.M):
         return text, False
     if re.search(rf"^{re.escape(key)}=.*$", text, re.M):
-        return re.sub(rf"^{re.escape(key)}=.*$", f"{key}={value}", text, count=1, flags=re.M), True
+        # The replacement is a FUNCTION, not a string. `re.sub` expands escape
+        # sequences in a string replacement, so an escaped PEM -- whose whole
+        # point is that `\n` stays two characters -- came back out as a real
+        # multi-line value and broke `.env` parsing entirely
+        # (`unexpected character "+" in variable name`).
+        #
+        # It only bit on the clean-checkout path: this branch runs when the key
+        # is present-but-empty, which is what copying `.env.example` produces. A
+        # developer whose `.env` already had the key took the append path below,
+        # where nothing re-interprets the value. So it passed locally and failed
+        # in CI, on the job whose entire purpose is proving a clean checkout can
+        # start the stack.
+        return re.sub(rf"^{re.escape(key)}=.*$", lambda _: f"{key}={value}",
+                      text, count=1, flags=re.M), True
     return text.rstrip("\n") + f"\n{key}={value}\n", True
 
 
