@@ -210,7 +210,8 @@ def _borrower_loans(applicant_id: int) -> dict:
     filter of its own). Same shape as servicing-service's Page[LoanListItem]
     so the frontend needs no special-casing for the borrower path."""
     rows = db.query(
-        "SELECT l.id, l.applicant_name, l.principal, l.apr, l.schedule_version, "
+        "SELECT l.id, l.applicant_name, l.principal, l.apr, l.note_rate_pct, "
+        "       l.schedule_version, "
         "       l.term_months, l.status, "
         "       COALESCE(b.balance, 0) AS balance, COALESCE(b.past_due, 0) AS past_due, "
         "       l.opened_at "
@@ -239,8 +240,17 @@ def _borrower_loans(applicant_id: int) -> dict:
             # it -- the same rule servicing-service applies. Reported only where
             # it is proven; unknown stays unknown rather than printing a rate
             # the borrower was never quoted. Reviewed on PR #10.
-            "note_rate_pct": (float(r["apr"]) if r.get("schedule_version") else None),
-            "note_rate_proven": bool(r.get("schedule_version")),
+            # D19 expand: prefer the column that says what it holds; fall back
+            # to the `apr`+`schedule_version` inference for rows an
+            # older-image instance boarded after 0038 ran, which are proven but
+            # have an empty new column. Same rule as
+            # `servicing-service/app/routers/loans.py::_proven_note_rate`, and
+            # the fallback goes at the contract step in both places.
+            "note_rate_pct": (
+                float(r["note_rate_pct"]) if r.get("note_rate_pct") is not None
+                else float(r["apr"]) if r.get("schedule_version") else None),
+            "note_rate_proven": (
+                r.get("note_rate_pct") is not None or bool(r.get("schedule_version"))),
             "term_months": r["term_months"],
             "status": r["status"],
             "balance": float(r["balance"]),

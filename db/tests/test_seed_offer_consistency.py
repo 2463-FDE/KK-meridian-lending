@@ -22,6 +22,7 @@ import pathlib
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 
 import psycopg2
+import psycopg2.extras
 import pytest
 
 getcontext().prec = 50
@@ -480,3 +481,43 @@ def test_seeded_kyc_rows_satisfy_the_application_scoped_decision_gate(seeded_db)
             f"kyc_checks rows linked to an application belonging to a different "
             f"applicant: {mismatched}"
         )
+
+
+def test_a_seeded_loan_carries_the_note_rate_its_offer_proves(seeded_db):
+    """Fresh and migrated databases must agree on DATA, not only on shape.
+
+    D19-SEED-NOTE-RATE. `db/migrations/0038` back-fills `loans.note_rate_pct`
+    from a proven offer, but migrations are not replayed over `db/init` -- so a
+    freshly seeded database had NULL note rates on exactly the loans a migrated
+    one filled. `test_schema_parity.py` compares structure and cannot see that:
+    both databases have the column, and only one has the values.
+
+    The consequence is visible rather than academic. A seeded loan whose rate is
+    proven would render "not recorded" on a fresh exercise database and 11.25% on
+    a migrated one -- the same loan, two answers, which is the D19 confusion in a
+    new place.
+    """
+    with seeded_db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(
+            "SELECT l.id, l.note_rate_pct, o.note_rate_pct AS offer_rate "
+            "  FROM loans l JOIN offers o ON o.app_id = l.app_id "
+            " WHERE o.schedule_version IS NOT NULL "
+            "   AND o.note_rate_pct IS NOT NULL "
+            "   AND l.schedule_version IS NOT NULL"
+        )
+        rows = cur.fetchall()
+    assert rows, "no seeded loan carries a proven contract -- nothing was checked"
+
+    missing = [r for r in rows if r["note_rate_pct"] is None]
+    assert not missing, (
+        f"{len(missing)} seeded loan(s) have a proven offer note rate and a NULL "
+        f"loans.note_rate_pct: {[r['id'] for r in missing][:5]}. A fresh database "
+        f"disagrees with a migrated one about the same loan's rate."
+    )
+    wrong = [r for r in rows if round(float(r["note_rate_pct"]), 3)
+             != round(float(r["offer_rate"]), 3)]
+    assert not wrong, (
+        f"seeded loans disagree with their own offer's note rate: "
+        f"{[(r['id'], r['note_rate_pct'], r['offer_rate']) for r in wrong][:5]}"
+    )

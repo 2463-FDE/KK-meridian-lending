@@ -320,11 +320,18 @@ def board_to_servicing(app_id: int, applicant_name: str, principal: float,
     but a silently complete-looking all-NULL write is exactly what it permits.
     """
     loan = db.query(
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months, "
-        "regular_payment, regular_payment_count, final_payment, schedule_version) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (app_id, applicant_name, principal, annual_rate_pct, term_months,
-         regular_payment, regular_payment_count, final_payment, schedule_version),
+        # D19 expand: BOTH columns, same value. `annual_rate_pct` is and always
+        # was the contractual note rate on this path -- `apr` is the legacy name,
+        # `note_rate_pct` is the honest one, and writing both is what lets the
+        # old column be dropped later without a flag day. The dual write ends at
+        # the contract step, when `apr` goes.
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, note_rate_pct, "
+        "term_months, regular_payment, regular_payment_count, final_payment, "
+        "schedule_version) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct, annual_rate_pct,
+         term_months, regular_payment, regular_payment_count, final_payment,
+         schedule_version),
     )
     loan_id = loan[0]["id"]
     # reach across into the servicing balances table directly
@@ -354,11 +361,17 @@ def board_to_servicing_tx(cur, app_id: int, applicant_name: str, principal: floa
     and the offer is thereafter immutable.
     """
     cur.execute(
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months, "
-        "regular_payment, regular_payment_count, final_payment, schedule_version) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (app_id, applicant_name, principal, annual_rate_pct, term_months,
-         regular_payment, regular_payment_count, final_payment, schedule_version),
+        # D19 expand: both columns, same value -- see board_to_servicing above.
+        # This is the transactional twin of that insert, and a dual write that
+        # existed on only one of the two boarding paths would leave whichever
+        # loans went through the other one unreadable after the contract step.
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, note_rate_pct, "
+        "term_months, regular_payment, regular_payment_count, final_payment, "
+        "schedule_version) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct, annual_rate_pct,
+         term_months, regular_payment, regular_payment_count, final_payment,
+         schedule_version),
     )
     loan_id = cur.fetchone()["id"]
     cur.execute(
