@@ -68,14 +68,32 @@ def _display_last4(payment) -> str | None:
 def _proven_note_rate(loan) -> tuple:
     """(rate, proven) for a loan, from whether boarding recorded the contract.
 
-    `loans.apr` holds the contractual note rate when the loan was boarded by the
-    current path, and the DISCLOSED APR when it was boarded by the pre-change
-    one -- 5.196% for a contract priced at 7.99%. `schedule_version` is set only
-    by the current path, so it is the evidence that the rate means what the API
-    calls it. Where it is absent the rate is not reported at all: unknown stays
-    unknown, and the UI says "not recorded" rather than printing a number the
-    borrower was never quoted. Reviewed on PR #10.
+    Two sources, in order of evidence.
+
+    `loans.note_rate_pct` (D19 expand, db/migrations/0038) says what it holds, so
+    a value there is the answer. It is NULL for two different reasons and both
+    are handled below.
+
+    `loans.apr` is the legacy column and holds the contractual note rate when the
+    loan was boarded by the current path, but the DISCLOSED APR when it was
+    boarded by the pre-change one -- 5.196% for a contract priced at 7.99%.
+    `schedule_version` is set only by the current path, so it is the evidence
+    that the value means what the API calls it.
+
+    **The fallback is what makes the deploy safe, and it is temporary.** After
+    0038 runs, an instance still on the previous image boards loans writing `apr`
+    and a schedule but not `note_rate_pct` -- a row whose rate IS proven and
+    whose new column is empty. Reading only the new column would report "not
+    recorded" for a loan this service can describe exactly. It goes at the
+    contract step, once no deployed writer can produce such a row.
+
+    Where neither source proves anything, the rate is not reported at all:
+    unknown stays unknown, and the UI says "not recorded" rather than printing a
+    number the borrower was never quoted. Reviewed on PR #10.
     """
+    recorded = getattr(loan, "note_rate_pct", None)
+    if recorded is not None:
+        return float(recorded), True
     if loan.schedule_version:
         return float(loan.apr), True
     return None, False

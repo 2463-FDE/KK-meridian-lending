@@ -49,6 +49,12 @@ class Loan(Base):
     applicant_name: Mapped[str | None] = mapped_column(String, nullable=True)
     principal: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     apr: Mapped[float] = mapped_column(Numeric(7, 3, asdecimal=False))
+    # D19 expand (db/migrations/0038). The contractual rate under its own name.
+    # Nullable: a legacy row whose figure could not be proven is left unknown
+    # rather than relabelled, so readers must handle None -- see
+    # routers/loans.py::_proven_note_rate.
+    note_rate_pct: Mapped[float | None] = mapped_column(
+        Numeric(7, 3, asdecimal=False), nullable=True)
     term_months: Mapped[int] = mapped_column(Integer)
     # The Model B contractual schedule copied from the offer at boarding
     # (db/migrations/0030). Nothing in this service reads them yet -- billing
