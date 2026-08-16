@@ -208,7 +208,7 @@ service and evaluated every 30s; the rules are visible at
   Wiring an Alertmanager is a deployment decision -- where pages go, who is on
   call, what the escalation path is -- and is not one this repository can make.
 - **Only processor-backed captures are compared.** `payments` has a second live
-  writer -- servicing-service's legacy `POST /payments` -- which calls no
+  writer -- servicing-service's legacy `POST /payments`, now retired (D2) -- which called no
   processor, so no settlement file can contain a line for it. Those rows are
   labelled `capture_source = 'servicing_legacy'` (migration `0042`), excluded
   from the comparison and **counted** on the run as `out_of_scope_captures`, so

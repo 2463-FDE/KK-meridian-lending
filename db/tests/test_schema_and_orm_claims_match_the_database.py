@@ -313,15 +313,42 @@ def test_the_roadmap_planning_surface_agrees_with_start_next():
         )
 
 
-def test_the_roadmap_does_not_call_week_5_landed():
-    """Week 5's row is Partial (`G-D2-LEGACY`). The summary called Weeks 1-5
-    landed, which is the matrix and its own summary disagreeing about a money
-    path."""
+def test_the_landed_weeks_claim_agrees_with_the_matrix():
+    """The summary may only call a week landed if every row for it is Done.
+
+    This replaces a snapshot assertion that Week 5 must NOT be described as
+    landed -- true while servicing's duplicate `POST /payments` was open, and
+    wrong the moment it was retired. A test that pins today's answer has to be
+    edited every time the answer changes, and the edit is exactly where someone
+    stops thinking. So it derives the claim from the matrix instead: whichever
+    weeks the summary says are landed, no row in those weeks may be Partial or
+    Not started.
+    """
+    import re as _re
+
     text = ROADMAP.read_text(encoding="utf-8")
     surface = text[text.index("## Current planning surface"):text.index("## Status at a glance")]
-    assert "Weeks 1–5 are landed" not in surface and "Weeks 1-5 are landed" not in surface, (
-        "the planning surface calls Weeks 1-5 landed while the Week 5 row is "
-        "Partial -- servicing's legacy POST /payments is not idempotent"
+    claim = _re.search(r"Weeks 1[–-](\d+) are landed", surface)
+    assert claim, (
+        "the planning surface no longer states which weeks are landed -- if that "
+        "claim moved, point this test at its new home rather than deleting it"
+    )
+    landed_through = int(claim.group(1))
+
+    matrix = text[text.index("| Week | Feature/requirement |"):text.index("### Remaining gaps")]
+    unfinished = []
+    for line in matrix.splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 6 or not cells[1] or cells[1] in ("Week", "---"):
+            continue
+        week = cells[1].split("→")[0].strip()
+        if not week.isdigit() or int(week) > landed_through:
+            continue
+        if cells[4] in ("**Partial**", "**Not started**", "**Blocked**"):
+            unfinished.append(f"week {week}: {cells[2][:60]} is {cells[4]}")
+    assert not unfinished, (
+        f"the summary says Weeks 1-{landed_through} are landed, but the matrix "
+        f"has unfinished rows inside that range:\n  " + "\n  ".join(unfinished)
     )
 
 

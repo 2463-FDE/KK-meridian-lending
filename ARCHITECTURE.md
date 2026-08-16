@@ -88,8 +88,8 @@ services from `services/` on disk — so a new service is covered the day its di
 appears, not the day someone remembers to add it.
 
 `servicing-service` **now checks the token on every money-moving route** —
-`adjust-balance`, `waive-fee`, `late-fee`, `apply-payment` and the legacy `/payments`
-duplicate. It is not host-published either, but that was the *only* control it had, and
+`adjust-balance`, `waive-fee`, `late-fee` and `apply-payment`. (A fifth, the legacy
+`/payments` duplicate, was retired with D2 — it no longer exists to guard.) It is not host-published either, but that was the *only* control it had, and
 "not published" is network topology rather than an application-level check: any container
 that could resolve `servicing-service:8002` could set a balance to zero. Its read routes
 are unchanged — they are ownership-checked at the gateway. *This paragraph previously read

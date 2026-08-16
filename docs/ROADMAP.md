@@ -32,12 +32,12 @@ below explain how it was derived.
   account still moves a borrower's balance alone. A shared service token or
   caller-supplied identity/role headers are not proof of the human actor —
   reading `x_user_role` without a verifiable principal is a bypass, not a fix.
-- **Then:** `G-D2-LEGACY` (servicing's processorless `POST /payments` records and
-  applies a retried payment twice), `G-D14` (payment waterfall on the landed
-  component ledger), `G-D19` (`loans.apr` holds the note rate).
-- **Durable status:** Weeks 1–4 are landed; **Week 5 is Partial** — the canonical
-  processor-backed payment path is idempotent and servicing's legacy duplicate is
-  not; Week 6 has the token boundary, the gateway role rule and the ledger, but
+- **Then:** `G-D14` (payment waterfall on the landed component ledger) and
+  `G-D19` (`loans.apr` holds the note rate, and the column name still says APR).
+- **Durable status:** Weeks 1–5 are landed — the canonical processor-backed
+  payment path is idempotent and servicing's processorless duplicate has been
+  retired, so payment creation has exactly one path again; Week 6 has the token
+  boundary, the gateway role rule and the ledger, but
   not a validated human principal or maker-checker enforcement; Week 7 has
   reconciliation but not a cross-service trace ID; Weeks 8–10 retain the scoped
   gaps in the table below.
@@ -192,19 +192,17 @@ feature landed in a different week than its brief, both labels appear in the
 Week column as `brief → shipped`. No row is guessed: where the two disagree it is
 because a merged PR says so.
 
-**Counts (31 requirements): 26 Done · 4 Partial · 1 Not started · 0 Blocked ·
+**Counts (31 requirements): 27 Done · 3 Partial · 1 Not started · 0 Blocked ·
 0 Deferred.** The count is derived from the matrix below.
 
-**The totals are unchanged from the previous pass and the membership is not, so
-the number on its own would have hidden both corrections.** Two rows moved in
-opposite directions: Week 1's Decimal row moved **Partial → Done** (the
-disclosure read path keeps money in Decimal now, and D1's remaining gap was
-closed before the previous pass ran), and Week 5's payment-idempotency row moved
-**Done → Partial** (see D2 below — one of the two `POST /payments` endpoints in
-this repository still double-records and double-applies on retry). Nothing was
-traded to hold the
-total at 26; it landed there twice by coincidence, and saying so is cheaper than
-letting the next reader assume nothing moved.
+**What moved, and when.** The audit pass moved Week 1's Decimal row
+**Partial → Done** (the disclosure read path keeps money in Decimal) and Week 5's
+payment-idempotency row **Done → Partial**, holding the total at 26 by
+coincidence — recorded at the time so a stable number would not read as "nothing
+moved". Week 5 is now **Done**: servicing's processorless `POST /payments` is
+retired, so the acceptance criterion — a repeated payment request is recorded
+once and applied once — holds on every path that exists, rather than on the
+canonical one while a second endpoint of the same name double-recorded.
 
 Maker-checker remains Not started because an approved specification is not a
 production implementation.
@@ -231,7 +229,7 @@ production implementation.
 | 4 | Loan-history traversal | applicant → application → decision → offers in one call, staff-only | **Done** | `origination-service/app/kg.py`; `GET /applications/{id}/history` | `test_staff_gated_routes_require_internal_token.py`; `adr/0009` + `db/bench/graph_traversal_benchmark.py` answer the graph-store question with a measurement | None | — | — |
 | 4 | Internal services not reachable around the gateway | No host port **and** `X-Internal-Token`, for every service with no auth of its own | **Done** | `docker-compose.yml` publishes no port for `kyc-service`; `kyc-service/app/routers/kyc.py:85-90` requires the token and refuses an unset one; `gateway/app/main.py:314-372` makes `/kyc/*` staff-only **and read-only** — a POST is refused with 405, so the gateway can no longer sign an anonymous caller's write | `gateway/tests/test_decision_service_not_host_published.py` (now including `kyc-service`), `kyc-service/tests/`, `gateway/tests/test_proxy_security.py`; CI green on `main` | None for reachability. What CIP actually checks is `DEBT.md` **D11**, a different and deliberately scoped gap belonging to Week 9 | — | — |
 | 4 | Intake validation and field persistence | Phone/SSN format-checked; every submitted field persisted | **Done** | PR #7 (base `kalab-week4-disclosure-automation`, reached `main` via #6) | `origination-service/tests/test_validation.py`; 210 tests | None | — | — |
-| 5 | Payment idempotency | A repeated payment request is **recorded once and applied once**. On the processor-backed path it is also authorized once, and a same-key retry with different terms 409s | **Partial** | **Canonical, processor-backed path** — `payment-service/app/payments.py::charge`, `db/migrations/0007`, `0010`, `0012`, `0013`: required `idempotency_key`, partial unique index, `ON CONFLICT DO NOTHING`, apply-once via `payment_applications`, and `authorize_charge()` is not re-called on a retry. **Legacy processorless route** — `servicing-service/app/main.py::post_payment` → `payments.py::charge`: no key, no unique index, and `balance.apply_payment` called again on every retry | Canonical: `tests/test_charge_flow.py`, `test_apply_payment_idempotency.py`; `test_reconcile_real_postgres.py` (**needs PostgreSQL**; run here against 16.14 and green in CI run `31759960436`). Legacy: `servicing-service/tests/test_legacy_payments_is_not_idempotent.py` issues the same request twice and counts what happens — 2 inserts, 2 `balance.apply_payment` calls, 0 outbound HTTP calls. It characterizes the defect rather than asserting it away | **G-D2-LEGACY** — a retry on servicing's own `POST /payments` **inserts another payment record and applies the loan balance again. It double-records and double-applies; it does not perform another processor charge.** No processor means no settlement line for either row either, which is why reconciliation excludes them (D7). Bounded, not closed: it requires `X-Internal-Token` and the gateway 404s the path instead of proxying it, so it is reachable only from inside the compose network. *Read **Done** while a second `POST /payments` that records and applies twice was live.* | Medium | Retire the endpoint, or port `idempotency_key` to it. Deleting it is the smaller change and removes an unreconcilable capture path (D7) |
+| 5 | Payment idempotency | A repeated payment request is **recorded once and applied once**. On the processor-backed path it is also authorized once, and a same-key retry with different terms 409s | **Done** | **One creation path, and it is keyed** — `payment-service/app/payments.py::charge`, `db/migrations/0007`, `0010`, `0012`, `0013`: required `idempotency_key`, partial unique index, `ON CONFLICT DO NOTHING`, apply-once via `payment_applications`, and `authorize_charge()` is not re-called on a retry. **The processorless duplicate is deleted** — servicing's `POST /payments`, its `PaymentIn` schema and `app/payments.py` are gone, so servicing records no payments at all; it only applies an already-captured one, keyed by `payment_id` | `payment-service/tests/test_charge_flow.py`, `test_apply_payment_idempotency.py`, `test_reconcile_real_postgres.py`; `servicing-service/tests/test_legacy_payments_route_is_retired.py` (7 cases: route absent from the routing table, call reaches no money code, module unimportable, retry pair refused, no `servicing_legacy` INSERT remains, apply path still keyed, label still schema-valid) — mutation-verified by restoring the route, which fails 5 of the 7. All executed against PostgreSQL 16.14 | None. **Historical rows are untouched**: `capture_source='servicing_legacy'` stays permitted and reconciliation still counts and excludes those captures (D7) — that population is closed, not deleted | — | — |
 | 5 | Card tokenization / PCI scope reduction | Service receives a token + last4 + brand; never a PAN, CVV or SSN; token never persisted | **Done** | `frontend/lib/tokenize.ts`; `PaymentIn` with `extra="forbid"`; `db/migrations/0016`; `adr/0008` supersedes `adr/0003` | `test_charge_flow.py`, `test_charge_no_pan.py`, `test_docs_match_the_logging_code.py` | None for the defect. ⚠️ The tokenization boundary is **mocked** — no real processor. PCI-DSS compliance is *not* claimed and needs a QSA | — | — |
 | 5 | Captured-but-unapplied payments are recoverable | A durable, self-draining work item, not a hope that the client retries | **Done** | `payment-service/app/reconcile.py`; `db/migrations/0028` | `tests/test_reconciler_lifecycle.py`, `test_reconcile_real_postgres.py` | None | — | — |
 | 5 | Spec package committed before it is cited | The cited path resolves | **Done** | `specs/0001-online-payments-idempotency-tokenization.md` | `db/tests/test_docs_citations_resolve.py` | None. History: the original spec was cited for weeks and had never been committed on any branch | — | — |
@@ -259,6 +257,7 @@ list that only ever grows stops being read:
 | **G-LEDGER / G-ADR-0010** — no append-only servicing ledger or accepted design | ADR 0010 plus migration 0035, the fresh-install mirror, opening-state cutover, and legacy-write capture | `db/tests/test_0035_ledger_projection.py`, `test_ledger_adr_sequence_is_consistent.py`, migration convergence and schema parity tests |
 | **G-D7** — reconciliation was not an operational control | Scheduled transaction-level reconciliation now records runs, fails closed when nothing can be compared, and exposes monitoring/runbook evidence | `test_reconciliation_is_actually_scheduled.py`, `test_reconciliation_fails_closed_on_nothing.py`, `test_reconciliation_transaction_level_on_postgres.py` |
 | **G-README** — the README claimed dropped columns still existed | README states the schema as it is | `db/tests/test_readme_schema_claims.py` |
+| **G-D2-LEGACY** — servicing's processorless `POST /payments` double-recorded and double-applied a retried payment | The route, its `PaymentIn` schema and `app/payments.py` are deleted. Payment creation belongs to payment-service alone, which requires an `idempotency_key`; servicing only applies a captured payment, keyed by `payment_id`. Historical `capture_source='servicing_legacy'` rows and their reconciliation handling are unchanged | `servicing-service/tests/test_legacy_payments_route_is_retired.py`, `db/tests/test_servicing_comments_match_the_system.py::test_no_servicing_module_reintroduces_an_unkeyed_charge` |
 | **G-DTI** — the policy published cutoffs the code never applied | The DTI section is marked defined-but-not-applied | `db/tests/test_policy_matches_implemented_cutoffs.py` |
 | **G-INTAKE-401** — a KYC authorization failure was indistinguishable from a timeout | `submit_application` catches `httpx.HTTPStatusError` separately; 401/403/503 mark the application `kyc_unverified` and return a resumable 503. Then the authoritative check runs regardless of the exception: **no persisted CIP row → mark and refuse**, so a 422, a 5xx, a connection error and a silent no-op INSERT all fail closed. Decisioning independently requires a *passing* row (`_require_persisted_kyc`) | `origination-service/tests/test_kyc_auth_failure_blocks_intake.py`, `test_decision_requires_persisted_kyc.py`, `test_rolling_deploy_compatibility.py` |
 | **G-D1** — the disclosure read path rebuilt the display schedule in `float` | `_dec()` at the boundary; Decimal through the expansion and the residue check | `disclosure-service/tests/test_redisplay_is_exact.py` |
@@ -284,20 +283,20 @@ list from the running app, and a sixth route added without a check fails it.
 
 #### Medium
 
-- **G-D2-LEGACY** — servicing's own `POST /payments` accepts no idempotency key (`DEBT.md` D2, open half). **A retry inserts another payment record and applies the loan balance again. It double-records and double-applies; it does not perform another processor charge.** Because there is no processor there is also no settlement line to corroborate either row — reconciliation excludes them by label (D7). Bounded by the internal token and by the gateway refusing to proxy the path. *AC:* the route is removed, or a repeated request is recorded once and applied once. *Evidence:* a retry test on whichever survives; if removed, a test that the path is gone. The present behaviour is characterized at runtime by `servicing-service/tests/test_legacy_payments_is_not_idempotent.py`, which must be rewritten in the same change that closes this. *Dependency:* none.
 - **G-D19** — `loans.apr` holds the note rate (`DEBT.md` D19). API and UI are corrected; the column is not. *AC:* rename via migration, plus every query, model and fixture that names it.
 - **G-D14** — no payment waterfall (`DEBT.md` D14). The ledger dependency is satisfied; component-order implementation remains.
 
 #### Debt
 
 Register entries in scope for Weeks 1–6 and still open, cited by their own IDs —
-no new numbers minted here: **D2** (fixed on payment-service's path; servicing's
-processorless legacy duplicate still double-records and double-applies on
-retry, without a second processor charge), **D8** (a validated human
+no new numbers minted here: **D8** (a validated human
 principal and a second approver are not implemented — the network, gateway-role
 and ledger thirds of the original entry have landed), **D14** (no waterfall),
 **D19** (column name, partly fixed), **D20** (bounded, not fixed — the static-SQL
 premise is enforced by test instead).
+
+**D2 has left this list too**, with the endpoint that kept it open. It is closed
+on both paths now: one keyed creation path, and no second one.
 
 **D1 has left this list.** It read "float read path, partly fixed" here and in the
 register while the read path had been in Decimal since PR #24 merged.
@@ -330,12 +329,9 @@ enforce. The ledger dependency they waited on is satisfied.
 
 After it, in order:
 
-1. **G-D2-LEGACY** — retire or fix servicing's legacy `POST /payments`. Deleting
-   it is the smaller change and also removes the only capture path reconciliation
-   can never corroborate.
-2. **G-D14** — implement the fees → interest → principal waterfall on the landed
+1. **G-D14** — implement the fees → interest → principal waterfall on the landed
    component ledger.
-3. **G-D19** — rename `loans.apr` to the note rate it actually holds.
+2. **G-D19** — rename `loans.apr` to the note rate it actually holds.
 
 ### Historical note — G-KYC, and why it took two passes
 
@@ -493,7 +489,7 @@ PAN/CVV/SSN. Float-based money math. A README claiming PCI-DSS compliance.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | ✅ **Closed, all four halves — the last one by PR #15.** ✅ `payment-service.charge()` redacts via a ported copy of `services/loan-assistant/app/redactor.py` before logging. ✅ `servicing-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. ✅ Storage: the `pan`/`cvv` columns are **gone** — `db/migrations/0031` dropped them and `db/init/001_schema.sql` no longer creates them, so neither a migrated nor a fresh database has them (PR #15). The writers went first: the application in PR #8, the seeds in PR #11, with `0029` back-filling `last4` so payment history still displays and `0031` refusing to run until that was complete and an operator acknowledged the drop. Closes D5b/D13. *Two earlier versions of this line were wrong in opposite directions — it claimed the seeds "still write real values into them, so every fresh database contains card data" after PR #11 had stopped them, and before that it had understated the seeds entirely.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
+| 1 | Payments | `payment-service.log` writes full PAN, CVV, SSN in plaintext on every charge | ✅ **Closed, all four halves — the last one by PR #15.** ✅ `payment-service.charge()` redacts via a ported copy of `services/loan-assistant/app/redactor.py` before logging. ✅ `payment-service/app/payments.py` logs `loan_id`/`amount`/`method` only, and receives a processor token rather than a PAN (ADR 0008). ✅ Origination's intake logs `app_id`/`applicant_id`; the "request middleware logging full POST bodies" named here **never existed** — that claim came from a copy-pasted docstring, which is the D5c defect reproducing itself inside this roadmap. ✅ Storage: the `pan`/`cvv` columns are **gone** — `db/migrations/0031` dropped them and `db/init/001_schema.sql` no longer creates them, so neither a migrated nor a fresh database has them (PR #15). The writers went first: the application in PR #8, the seeds in PR #11, with `0029` back-filling `last4` so payment history still displays and `0031` refusing to run until that was complete and an operator acknowledged the drop. Closes D5b/D13. *Two earlier versions of this line were wrong in opposite directions — it claimed the seeds "still write real values into them, so every fresh database contains card data" after PR #11 had stopped them, and before that it had understated the seeds entirely.* **And the log file itself stayed committed to the repo until 2026-08-05** — the code was fixed weeks before the artifact it produced was removed, which is the closure gap the client review led with. See `DEBT.md` | CVV storage/logging is an absolute PCI-DSS violation, no exceptions — a leaked log is a breach, not a bug |
 | 2 | Origination / Decisioning | Bureau + core-banking + processor keys hardcoded in `config.py`, also committed in root `.env` | ✅ Effectively closed — `.env` untracked, hardcoded fallbacks removed from all 7 services. **Confirmed with the project owner: these were training placeholders (`EXAMPLE-LEAKED-KEY-rotate-me`), never real provider accounts** — so there's no live credential to rotate, and the old values still in git history aren't a real security exposure, just cosmetic (a reviewer seeing placeholder-labeled strings in `git log`). A history rewrite remains available on request but isn't fixing an actual vulnerability here | For a *real* deployment this would be a genuine breach risk (a leaked bureau key pulling real credit data under Meridian's name) — confirmed not the case for this training instance specifically |
 | 3 | Finance | Money stored/computed as `float` everywhere (`0.1 + 0.2` problem) | ✅ Fixed, both layers. **The separate defect this row used to point at -- exact arithmetic is not the same as the right formula -- is fixed too: `compute_apr` has used the actuarial present-value solve since PR #10 merged, checked against an independent FFIEC vector. The row previously warned that `main` still shipped the wrong formula, which was true until 2026-08-10.** Details:<br>• **Computation** — `disclosure-service` + `servicing-service` compute in `Decimal` throughout (`apr.py`, `offer.py`, `schedule.py`, `balance.py`, `delinquency.py`); `payment-service.charge()` quantizes to exact cents before storing/forwarding<br>• **Storage** — all 14 money columns migrated `DOUBLE PRECISION` → `NUMERIC` (`db/migrations/0005_money_columns_to_numeric.sql`), applied live against a populated 307-row DB, no data loss. `asdecimal=False` on the ORM models keeps it storage-only, no Decimal ripple<br>• **Regression caught + fixed** — post-migration live test broke `run_decision()`: raw-psycopg2 reads of a `NUMERIC` column return `Decimal` (unaffected by `asdecimal`), and forwarding that via `httpx.post(json=...)` crashed (`Decimal is not JSON serializable`). Fixed with `float(...)` at the forward boundary; audited every other cross-service call site, none else affected<br>• All 182 backend tests pass *(at the time — see Verification baseline for current)* | Rounding error compounds across balance updates and APR calculations — this exact fault line also caused a real Reg Z disclosure violation. Schema fix alone surfaced a live bug only end-to-end testing against a real populated DB would catch |
 | 4 | Payments | README claims "PCI-DSS compliant," schema has plaintext `pan`/`cvv` columns | ✅ Fixed:<br>• Removed the false "PCI-DSS compliant" claim<br>• README now states plainly it's **not** compliant and names the specific gaps (raw PAN/CVV storage, plaintext logging half still open) | a false claim is worse than an honest gap |

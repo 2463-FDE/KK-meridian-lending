@@ -21,10 +21,10 @@ import secrets
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from pydantic import BaseModel
+from typing import Optional
 
-from . import balance, config, db, delinquency, payments, reconciliation
+from . import balance, config, db, delinquency, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
@@ -245,73 +245,26 @@ def internal_auth_check(
     return {"status": "ok", "auth": "ok"}
 
 
-class PaymentIn(BaseModel):
-    # ADR 0008 (Week 5 tokenization): this used to accept raw pan/cvv/ssn
-    # directly and log/persist them unredacted (D5) -- the exact same gap
-    # payment-service's own /payments closed, just not yet ported to this
-    # duplicate, legacy endpoint. Same contract now: only the processor's
-    # opaque token plus non-sensitive display fields, never a raw PAN/CVV,
-    # and ssn had no functional role in a card/ACH charge here to begin with.
-    # `extra="forbid"` makes that a real rejection, not a silent field drop.
-    model_config = {"extra": "forbid"}
-
-    # Bounded, because charge() writes it into the log line BEFORE the insert
-    # that would reject a nonexistent loan -- so an unbounded integer is a
-    # channel too: `{"loan_id": 4111111111111111}` wrote a raw PAN to
-    # payment-service.log even though the charge then failed. `loans.id` is a
-    # SERIAL, i.e. int4, so this is the range the column can actually hold and
-    # nothing legitimate is refused. Reviewed on PR #16.
-    loan_id: int = Field(ge=1, le=2_147_483_647)
-    processor_token: str
-    # Shape-constrained, not merely name-constrained. `extra="forbid"` rejects
-    # unknown FIELD NAMES and says nothing about values, so an unconstrained
-    # string field is a channel for exactly the data this endpoint is supposed
-    # to have stopped accepting: `method="4111111111111111"` reached
-    # `payments.charge()` and was written verbatim to payment-service.log,
-    # which made the module's "no card data reaches this logger" claim false.
-    # Reviewed on PR #16.
-    #
-    # Each of the three display fields is now the shape it is documented to be,
-    # so a PAN cannot be smuggled through any of them and the 422 names the
-    # field rather than dropping it silently.
-    last4: Optional[str] = Field(default=None, pattern=r"^\d{4}$")
-    brand: Optional[str] = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ]{0,19}$")
-    # Also logged, so also bounded. A consumer instalment payment has no
-    # business being a sixteen-digit figure, and an unbounded float carries one
-    # just as well as a string does.
-    amount: float = Field(gt=0, le=10_000_000)
-    name: Optional[str] = None
-    method: Literal["card", "ach"] = "card"
-
-
-@app.post("/payments")
-def post_payment(body: PaymentIn,
-                 x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
-    _require_internal(x_internal_token)
-    # The vendor's legacy duplicate of payment-service's /payments, and the half
-    # of D2 that is still open. No idempotency key is accepted or checked.
-    #
-    # A retry inserts another payment record and applies the loan balance again.
-    # It double-records and double-applies; it does not perform another processor
-    # charge -- this route calls no processor at all, so the borrower's card is
-    # untouched and what is wrong is the loan balance and the payment history.
-    # Worth stating precisely, because the two defects need different fixes and
-    # this comment used to name the wrong one. payment-service's own /payments
-    # was fixed (idempotency_key, partial unique index, apply-once); this one was
-    # never ported.
-    #
-    # Two things bound it, and neither closes it: the internal token above, and
-    # the gateway, which matches no rule for this path and 404s rather than
-    # proxying it -- so a browser or a staff session cannot reach it at all. It
-    # is reachable by a service already inside the compose network holding the
-    # shared token, and for that caller both duplications are real.
-    #
-    # Having no processor is also why its rows are labelled
-    # capture_source='servicing_legacy' and excluded from reconciliation (D7).
-    # Characterized by servicing-service/tests/test_legacy_payments_is_not_idempotent.py.
-    return payments.charge(
-        body.loan_id, body.processor_token, body.last4, body.brand, body.amount, body.name, body.method
-    )
+# `PaymentIn` and `POST /payments` were removed here, not disabled.
+#
+# They were the vendor's processorless duplicate of payment-service's charge
+# endpoint: no idempotency key, so a retry inserted a second `payments` row and
+# applied the loan balance a second time (docs/DEBT.md D2's open half). Nothing
+# called it. The gateway matched no rule for `/lss/payments` and 404'd, no
+# frontend referenced it, and payment-service -- the canonical, processor-backed
+# path -- never used it. Its only callers were its own tests.
+#
+# Deleted rather than left behind a flag or a 410, because a disabled money route
+# is still a money route: it keeps its schema, its imports and its place in the
+# next reader's mental model, and re-enabling it is a one-line mistake. What
+# replaces it is the absence itself, asserted by
+# tests/test_legacy_payments_route_is_retired.py.
+#
+# Historical rows are untouched. Every `payments` row this route wrote carries
+# `capture_source='servicing_legacy'`, that value stays in the CHECK constraint,
+# and reconciliation still counts and excludes those rows exactly as before --
+# they have no processor behind them and never will, which is why they are
+# excluded rather than compared. Nothing new can be written with that label.
 
 
 class ApplyPaymentIn(BaseModel):

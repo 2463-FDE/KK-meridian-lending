@@ -363,9 +363,13 @@ CREATE TABLE IF NOT EXISTS payments (
     -- Who captured this payment (db/migrations/0042). 'processor' means
     -- payment-service obtained a real authorization and the row must appear in a
     -- settlement file -- these are the only rows reconciliation compares.
-    -- 'servicing_legacy' is servicing-service's prototype POST /payments (D2),
-    -- which calls no processor, so no settlement line exists for it and
-    -- comparing it against one is a category error rather than a strict control.
+    -- 'servicing_legacy' was servicing-service's prototype POST /payments (D2),
+    -- which called no processor, so no settlement line exists for those rows and
+    -- comparing them against one is a category error rather than a strict
+    -- control. **That route is retired and the value is now closed to new rows**
+    -- -- no writer emits it. It stays in this CHECK because the rows it already
+    -- wrote are real money history: a schema that rejected the value would
+    -- invalidate every database holding one.
     -- 'unknown' is the default and covers rows written before the column:
     -- counted by reconciliation, excluded from the comparison, because admitting
     -- them would manufacture breaks out of missing evidence.
