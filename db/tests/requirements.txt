@@ -5,3 +5,6 @@ pytest==9.0.3
 # import failed -- the same local-masks-CI shape as the .env findings on this
 # branch, one layer up in the dependency list.
 PyYAML==6.0.2
+# test_bootstrap_writes_a_usable_env.py runs the real bootstrap, which generates
+# the principal signing pair (spec 0002 REQ-ID-3) alongside the internal token.
+cryptography==48.0.0
