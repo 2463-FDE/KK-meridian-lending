@@ -385,26 +385,41 @@ def test_the_servicing_token_gap_row_matches_the_routes_that_exist():
                 live.add(dec.args[0].value)
     assert live, "no POST routes parsed from servicing main.py -- the check found nothing"
 
-    row = next(line for line in ROADMAP.read_text(encoding="utf-8").splitlines()
-               if line.startswith("| **G-SERVICING-TOKEN**"))
+    # BOTH rows that enumerate guarded routes, not just one. The first version of
+    # this check covered the closed-gap row only, and the Week 6 matrix row went
+    # on claiming five guarded routes through a whole review round because
+    # nothing looked at it. Two places stating one fact is the condition every
+    # stale claim in this repository has been found in; checking one of them is
+    # how the second survives.
+    roadmap = ROADMAP.read_text(encoding="utf-8").splitlines()
+    rows = {
+        "closed-gap row": next(
+            l for l in roadmap if l.startswith("| **G-SERVICING-TOKEN**")),
+        "Week 6 matrix row": next(
+            l for l in roadmap
+            if l.startswith("| 6 | Money-moving servicing actions are role-gated")),
+    }
 
-    # Every route the row names as CURRENTLY guarded must be a route that exists.
-    # `/payments` may only appear as history -- the row says "has since been
-    # retired", and that phrasing is what the check keys on.
     named = {"apply-payment", "adjust-balance", "waive-fee", "late-fee"}
-    for action in named:
-        assert action in row, f"the gap row no longer names the guarded route {action}"
-        assert any(action in path for path in live), (
-            f"the gap row names {action} as guarded, but no POST route serves it"
-        )
-    if "/payments" in row:
-        assert "retired" in row.lower(), (
-            "the gap row lists /payments among the guarded routes; that endpoint "
-            "was retired with D2 and must be marked as history if named at all"
-        )
-        assert "/payments" not in live, (
-            "POST /payments exists again while the roadmap calls it retired"
-        )
+    for label, row in rows.items():
+        for action in named:
+            assert action in row, (
+                f"the {label} no longer names the guarded route {action}"
+            )
+            assert any(action in path for path in live), (
+                f"the {label} names {action} as guarded, but no POST route serves it"
+            )
+        # `/payments` may appear only as history -- the rows say "retired", and
+        # that is what the check keys on.
+        if "/payments" in row:
+            assert "retired" in row.lower(), (
+                f"the {label} lists /payments among the guarded routes; that "
+                f"endpoint was retired with D2 and must be marked as history if "
+                f"it is named at all"
+            )
+            assert "/payments" not in live, (
+                "POST /payments exists again while the roadmap calls it retired"
+            )
 
 
 #: Built the way `db/tests/test_schema_parity.py` builds one: the `db/init`
