@@ -90,8 +90,6 @@ services:
       # when it turned out to be reachable anyway. Same default as the other
       # services so they agree without an .env entry.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
-      # The PUBLIC half. Servicing verifies human principals and cannot mint one.
-      PRINCIPAL_VERIFY_KEY: ${PRINCIPAL_VERIFY_KEY:?set PRINCIPAL_VERIFY_KEY in .env -- generate with python db/tools/generate_principal_keypair.py}
     depends_on:
       postgres:
         condition: service_healthy
@@ -340,10 +338,6 @@ services:
       # Forwarded as X-Internal-Token on the staff-ops /decision/* proxy path
       # (see app/main.py) -- must match decision-service's copy above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
-      # The PRIVATE half of the principal signing pair. Gateway only -- any other
-      # service holding it could mint an admin, which is the shared-secret
-      # weakness the signature exists to remove (spec 0002 REQ-ID-3).
-      PRINCIPAL_SIGNING_KEY: ${PRINCIPAL_SIGNING_KEY:?set PRINCIPAL_SIGNING_KEY in .env -- generate with python db/tools/generate_principal_keypair.py}
       # Read by this service's startup token validation, which treats an unset
       # ENVIRONMENT as production and fails closed (PR #18). Declared here
       # because compose passes a host variable through only to services that

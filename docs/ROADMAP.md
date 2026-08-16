@@ -192,7 +192,7 @@ feature landed in a different week than its brief, both labels appear in the
 Week column as `brief → shipped`. No row is guessed: where the two disagree it is
 because a merged PR says so.
 
-**Counts (31 requirements): 28 Done · 2 Partial · 1 Not started · 0 Blocked ·
+**Counts (31 requirements): 27 Done · 3 Partial · 1 Not started · 0 Blocked ·
 0 Deferred.** The count is derived from the matrix below.
 
 **What moved, and when.** The audit pass moved Week 1's Decimal row
@@ -233,7 +233,7 @@ production implementation.
 | 5 | Card tokenization / PCI scope reduction | Service receives a token + last4 + brand; never a PAN, CVV or SSN; token never persisted | **Done** | `frontend/lib/tokenize.ts`; `PaymentIn` with `extra="forbid"`; `db/migrations/0016`; `adr/0008` supersedes `adr/0003` | `test_charge_flow.py`, `payment-service/tests/test_charge_flow.py::test_post_payment_rejects_pan_cvv_ssn_outright` (the wire contract, on the live path), `test_docs_match_the_logging_code.py`. *This cell cited servicing's `test_charge_no_pan.py` until that service's duplicate `POST /payments` was retired (D2); the test went with the module it covered, and the guarantee is unchanged because it was always also asserted on the canonical path* | None for the defect. ⚠️ The tokenization boundary is **mocked** — no real processor. PCI-DSS compliance is *not* claimed and needs a QSA | — | — |
 | 5 | Captured-but-unapplied payments are recoverable | A durable, self-draining work item, not a hope that the client retries | **Done** | `payment-service/app/reconcile.py`; `db/migrations/0028` | `tests/test_reconciler_lifecycle.py`, `test_reconcile_real_postgres.py` | None | — | — |
 | 5 | Spec package committed before it is cited | The cited path resolves | **Done** | `specs/0001-online-payments-idempotency-tokenization.md` | `db/tests/test_docs_citations_resolve.py` | None. History: the original spec was cited for weeks and had never been committed on any branch | — | — |
-| 6 | Money-moving servicing actions are role-gated | Only csr/admin may adjust a balance or waive a fee, **enforced by servicing itself** against an identity the caller cannot forge | **Done** | `services/gateway/app/principal.py` mints a short-lived, audience-bound Ed25519 assertion from the resolved Redis session; `servicing-service/app/principal.py` verifies signature, issuer, audience, expiry, not-before, subject, role and maximum lifetime, then applies csr/admin. Private key gateway-only (`docker-compose.yml`); `X-User-*` are untrusted hints and a disagreement with the signature is refused. `_require_internal()` still guards all four live money routes -- `adjust-balance`, `waive-fee`, `late-fee` and `apply-payment` -- as the service boundary; the fifth, the legacy `POST /payments`, was retired with D2. The three staff routes additionally require a verified principal; `apply-payment` stays machine-only (payment-service has no human behind it, spec 0002 §8) | `servicing-service/tests/test_money_routes_require_a_verified_human.py` (27 cases: token-alone bypass, forged headers, header/signature disagreement, foreign key, HMAC forged with the published verify key, `alg=none`, expired, not-yet-valid, wrong audience, wrong issuer, no expiry, over-long lifetime, malformed, underwriter and borrower refusals, unconfigured key); `gateway/tests/test_principal_signing.py` (19 cases incl. the compose key split); `db/tests/test_money_roles_agree_across_services.py`. Mutation-verified three ways | None for the role. **The second approver is not implemented** — one verified csr can still move a balance alone (D8's remaining half, `G-MAKER-CHECKER`) | — | — |
+| 6 | Money-moving servicing actions are role-gated | Only csr/admin may adjust a balance or waive a fee, enforced server-side | **Partial** | `gateway/app/main.py` → `auth.can_move_money()`, underwriter excluded. `servicing-service/app/main.py` calls `_require_internal()` on **all four live money routes** — `adjust-balance`, `waive-fee`, `late-fee` and `apply-payment`. A fifth, the legacy `POST /payments`, was guarded here until it was retired with D2 and no longer exists. This row has had the count wrong in both directions — it said "all four" while five were guarded, then "five" after the fifth was deleted — which is why `test_every_money_route_is_guarded` derives the set from the running app and `db/tests/test_schema_and_orm_claims_match_the_database.py` now checks this row against servicing's own route decorators. | `servicing-service/tests/test_money_routes_require_internal_token.py`, `test_internal_token_startup_validation.py`; `gateway/tests/test_auth_and_routes.py`, `test_proxy_security.py` | The service token authenticates only the calling service, not the human. `specs/0002-maker-checker-self-approval.md` now defines the required server-validated principal boundary, but production enforcement is not implemented | High | Implement the validated-principal contract from spec 0002; reject missing/invalid principals and ignore forged identity/role headers |
 | 6 | Append-only ledger; balance as a projection | "Show me every change and who made it" is answerable | **Done** | `db/migrations/0035_ledger_entries.sql`; mirrored fresh-install schema in `db/init/001_schema.sql`; `services/servicing-service/app/balance.py` | `db/tests/test_0035_ledger_projection.py`, `test_migration_paths_converge.py`, `test_schema_parity.py`; `services/servicing-service/tests/test_balance_lost_update_real_postgres.py` | ADR 0010 step 2 is landed. The expand-phase compatibility bridge captures legacy direct writes; final writer conversion and activation of the rejecting general guard remain later ADR steps, not an unrecorded ledger gap | — | Continue ADR 0010's staged writer conversion |
 | 6 | Maker-checker on money-affecting actions | No single account can move money unilaterally | **Not started** | `specs/0002-maker-checker-self-approval.md` and ADR 0011 define the principal, proposal, approval, self-approval, and failure contracts | `db/tests/test_spec_0002_describes_the_real_system.py`, `test_adr_0011_enforcement_runs_on_postgres.py` validate the specification against the current schema and explicitly prevent it from claiming production enforcement | Implementation is intentionally absent; a shared service token plus identity headers is explicitly insufficient | High | Implement spec 0002 using a server-validated, non-forgeable human principal and retain proposal/rejection evidence |
 | 6 | Lost-update proof on the shared column | A real-PostgreSQL test pins concurrent payment behavior | **Done** | Ledger projection replaces the former unlocked payment read-modify-write path: `balance.py::apply_payment_once` inserts the entry, `db/migrations/0035_ledger_entries.sql`'s `project_ledger_entry()` composes the signed delta into `balances` | `servicing-service/tests/test_balance_lost_update_real_postgres.py` (5 cases) asserts both concurrent payments survive; `db/tests/test_0035_ledger_projection.py` (64 cases) proves parity. **Both executed against PostgreSQL 16.14 on 2026-08-15, all 69 cases passing.** They skipped on the first pass, when no database was reachable, and the row cited CI for them; they are no longer a claim resting on a skip. CI run `31759960436` on this exact commit corroborates, jobs `db-migrations` and `backend (servicing-service)` green | None for the lost update. Residual, distinct from D3: `balance.py::apply_payment` and `::waive_fee` return a figure computed before their own UPDATE, so the *returned* balance can be stale under concurrency while the stored one is correct | — | — |
@@ -257,7 +257,6 @@ list that only ever grows stops being read:
 | **G-LEDGER / G-ADR-0010** — no append-only servicing ledger or accepted design | ADR 0010 plus migration 0035, the fresh-install mirror, opening-state cutover, and legacy-write capture | `db/tests/test_0035_ledger_projection.py`, `test_ledger_adr_sequence_is_consistent.py`, migration convergence and schema parity tests |
 | **G-D7** — reconciliation was not an operational control | Scheduled transaction-level reconciliation now records runs, fails closed when nothing can be compared, and exposes monitoring/runbook evidence | `test_reconciliation_is_actually_scheduled.py`, `test_reconciliation_fails_closed_on_nothing.py`, `test_reconciliation_transaction_level_on_postgres.py` |
 | **G-README** — the README claimed dropped columns still existed | README states the schema as it is | `db/tests/test_readme_schema_claims.py` |
-| **G-SERVICING-ROLE** — servicing read no role of its own, so csr/admin was enforced only at the gateway hop | The gateway signs an Ed25519 assertion naming the human from the resolved session; servicing verifies it against the public half and applies csr/admin itself. The private key is gateway-only, so no backend holding the shared token can mint a human — which is why the header could never be trusted before. Caller-supplied `X-User-*` are refused when they disagree with the signature | `servicing-service/tests/test_money_routes_require_a_verified_human.py`, `gateway/tests/test_principal_signing.py`, `db/tests/test_money_roles_agree_across_services.py` |
 | **G-D2-LEGACY** — servicing's processorless `POST /payments` double-recorded and double-applied a retried payment | The route, its `PaymentIn` schema and `app/payments.py` are deleted. Payment creation belongs to payment-service alone, which requires an `idempotency_key`; servicing only applies a captured payment, keyed by `payment_id`. Historical `capture_source='servicing_legacy'` rows and their reconciliation handling are unchanged | `servicing-service/tests/test_legacy_payments_route_is_retired.py`, `db/tests/test_servicing_comments_match_the_system.py::test_no_servicing_module_reintroduces_an_unkeyed_charge` |
 | **G-DTI** — the policy published cutoffs the code never applied | The DTI section is marked defined-but-not-applied | `db/tests/test_policy_matches_implemented_cutoffs.py` |
 | **G-INTAKE-401** — a KYC authorization failure was indistinguishable from a timeout | `submit_application` catches `httpx.HTTPStatusError` separately; 401/403/503 mark the application `kyc_unverified` and return a resumable 503. Then the authoritative check runs regardless of the exception: **no persisted CIP row → mark and refuse**, so a 422, a 5xx, a connection error and a silent no-op INSERT all fail closed. Decisioning independently requires a *passing* row (`_require_persisted_kyc`) | `origination-service/tests/test_kyc_auth_failure_blocks_intake.py`, `test_decision_requires_persisted_kyc.py`, `test_rolling_deploy_compatibility.py` |
@@ -279,6 +278,7 @@ list from the running app, and a sixth route added without a check fails it.
 
 #### High
 
+- **G-SERVICING-ROLE** — servicing reads no role of its own, so the csr/admin restriction on money movement is enforced at the gateway hop only (`DEBT.md` D8). `adjust_balance` and `waive_fee` accept `x_user_role` and never read it. *AC:* the role comes from the authenticated server-side principal, never from a client-supplied header, and a caller holding the internal token cannot elevate itself by setting one. *Evidence:* a test asserting a spoofed `X-User-Role` does not grant authority. *Dependency:* none.
 - **G-MAKER-CHECKER** — no second approver is enforced on money-affecting actions (`DEBT.md` D8). ADR 0011 and spec 0002 define the contract but explicitly do not claim production enforcement. *AC:* an adjustment or waiver is recorded as a proposal until a second, different staff account approves it; identity and role come from a server-validated, non-forgeable principal; the same account cannot propose and approve; forged headers, missing/invalid principals, and service-token-only calls cannot elevate authority; rejected proposals are retained. *Evidence:* production-path tests proving each case, in addition to the specification conformance tests. *Dependency:* the ledger dependency is now satisfied.
 
 #### Medium
@@ -307,26 +307,25 @@ and closing it did not touch D11.
 
 ## Start next
 
-**G-MAKER-CHECKER — the second approver, and the last money-movement gap.**
+**G-SERVICING-ROLE + G-MAKER-CHECKER — one control, and the only remaining
+money-movement gap that a person can exploit.**
 
 The previous entry here was G-INTAKE-401, which is closed. It is first now
 because everything else in this file is either a naming problem, a display
 problem, or an endpoint nothing outside the compose network can reach.
 
-Servicing now knows who is acting: `G-SERVICING-ROLE` is closed, the identity is
-signed by the gateway and unforgeable by any other backend, and csr/admin is
-enforced by servicing itself. What is still missing is the *second person*. One
-verified csr can zero a borrower's balance alone, and the ledger entry that
-records the movement carries `actor_id = NULL`.
+Servicing validates no human. `adjust_balance` and `waive_fee` accept
+`x_user_role` and never read it, the shared service token authenticates a service
+rather than a person, and the csr/admin rule lives one hop away at the gateway.
+On top of that, no second approver exists at all: one account still moves a
+borrower's balance alone, and the ledger entry that records the movement carries
+`actor_id = NULL` because nothing in the request says who acted.
 
-The dependencies are now all satisfied: the ledger exists (ADR 0010 step 2), and
-the verified principal that a proposal's `requested_by` and an approval's
-`resolved_by` must be taken from exists as of this change (spec 0002 REQ-ID-1,
-REQ-ID-5). ADR 0011 says what the tables must enforce; spec 0002 says what the
-API must refuse. **Before implementation, four values must come from a human:**
-`MAKER_CHECKER_ADMIN_THRESHOLD`, `MAKER_CHECKER_MAX_DELTA`, the permitted loan
-statuses, and the maker's authorization scope. Spec 0002 §3 refuses to invent
-them, and so does this file.
+The two are one piece of work and splitting them would ship half a control:
+reading the role header without a verifiable principal is a bypass, not a fix —
+any backend holding the shared token could set `X-User-Role: admin`. Spec 0002
+REQ-ID-3 says what the principal has to be; ADR 0011 says what the tables must
+enforce. The ledger dependency they waited on is satisfied.
 
 After it, in order:
 
