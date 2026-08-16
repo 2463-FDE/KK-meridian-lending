@@ -24,7 +24,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-INIT = REPO / "db" / "init" / "001_schema.sql"
+# 001 builds the tables and the projection; 007 defines the ledger controls and
+# attaches them to `balances` -- the compatibility bridge among them. Both are
+# needed for this fixture to be a fresh database rather than half of one, and
+# the first version of this file applied only 001, which is what made one of the
+# tests below vacuous. With no seed data 007's back-fill is a no-op.
+INIT_FILES = ("001_schema.sql", "007_ledger_opening_balances.sql")
 SCHEMA = "servicing_late_fee_ledger_test"
 
 # The app's own connection, pinned to the test schema. `db.transaction()` opens
@@ -71,6 +76,10 @@ def schema():
     against a shape production never has -- which is exactly the objection that
     was upheld against `test_no_card_data_on_either_schema_path` before
     `db/tests/migration_paths.py` existed.
+
+    Applying only part of `db/init` is the same mistake in miniature, and this
+    fixture made it: it built 001 alone, so the ledger controls 007 attaches
+    were absent and a test that depended on one of them passed for no reason.
     """
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = True
@@ -78,7 +87,8 @@ def schema():
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
         cur.execute(f"SET search_path TO {SCHEMA}")
-        cur.execute(INIT.read_text(encoding="utf-8"))
+        for name in INIT_FILES:
+            cur.execute((REPO / "db" / "init" / name).read_text(encoding="utf-8"))
     yield conn
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
@@ -137,6 +147,18 @@ def _entries(loan_id):
         "  FROM ledger_entries WHERE loan_id = %s ORDER BY id", (loan_id,))
 
 
+def _fee_entries(loan_id):
+    """Entries against `fees` only.
+
+    The fixture's own `INSERT INTO balances` is a direct write, so the
+    compatibility bridge records a `principal` `legacy_direct_write` for the
+    opening amount -- correctly, and exactly as a legacy row entering the system
+    would. That entry is fixture setup, not the subject, so assertions about the
+    fee filter it out rather than counting every row on the loan.
+    """
+    return [e for e in _entries(loan_id) if e["component"] == "fees"]
+
+
 def _past_due(loan_id):
     return float(_rows("SELECT past_due FROM balances WHERE loan_id = %s",
                        (loan_id,))[0]["past_due"])
@@ -149,8 +171,8 @@ def test_it_writes_a_fee_assessed_entry(loan):
 
     delinquency.assess_late_fee(loan)
 
-    entries = _entries(loan)
-    assert len(entries) == 1, f"expected exactly one entry, got {entries}"
+    entries = _fee_entries(loan)
+    assert len(entries) == 1, f"expected exactly one fee entry, got {entries}"
     entry = entries[0]
     assert entry["entry_type"] == "fee_assessed"
     assert entry["component"] == "fees"
@@ -169,14 +191,15 @@ def test_it_survives_the_write_guard_that_forbids_direct_balance_writes(loan, sc
     the only way to prove the negative: the fee reached `past_due` WITHOUT a
     direct write.
 
-    **This replaced a test that was vacuous, and the replacement is the point.**
-    The first version asserted that no `legacy_direct_write` entry appeared,
-    reasoning that 0035's compatibility bridge captures direct writes. Mutation
-    testing -- restoring the direct `UPDATE` -- left it passing. The bridge
-    trigger is created by `db/migrations/0035` and is NOT in
-    `db/init/001_schema.sql`, so on a freshly-built database it does not exist
-    and captures nothing. An absent control cannot witness the defect it was
-    being used to detect.
+    **This was added because another test here was vacuous, and the sequence is
+    the point.** That test asserted no `legacy_direct_write` entry appeared,
+    relying on the compatibility bridge to capture a direct write. Mutation
+    testing -- restoring the direct `UPDATE` -- left it passing, because this
+    fixture applied `db/init/001_schema.sql` alone and the bridge is attached by
+    `db/init/007`. An absent control cannot witness the defect it is being used
+    to detect. The fixture now applies both files, so that test bites too; this
+    one is kept because it proves the property directly rather than through a
+    second control.
     """
     from app import delinquency
 
@@ -204,6 +227,41 @@ def test_it_survives_the_write_guard_that_forbids_direct_balance_writes(loan, sc
             cur.execute(f"SET search_path TO {SCHEMA}")
             cur.execute("DROP TRIGGER IF EXISTS balances_guard_direct_writes "
                         "ON balances")
+
+
+def test_it_writes_no_legacy_direct_write_entry(loan):
+    """The compatibility bridge must have nothing to capture.
+
+    `balances_capture_legacy_delta` (attached by `db/init/007` on a fresh
+    database and by `db/migrations/0035` on an upgraded one) records a direct
+    `balances` write as a `legacy_direct_write` entry -- an entry that says the
+    column moved and nothing about what moved it. Its presence here would mean
+    the conversion did not happen, however right `past_due` looks afterwards.
+
+    This test was vacuous in its first form: the fixture applied
+    `db/init/001_schema.sql` alone, so the bridge was never attached and the
+    assertion held no matter what the code did. Mutation testing caught it. The
+    fixture applies 007 too now, so the bridge exists and this bites.
+    """
+    from app import delinquency
+
+    # Guard the guard: the control this test depends on must actually be here.
+    attached = _rows(
+        "SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+        "  JOIN pg_namespace n ON n.oid = c.relnamespace "
+        " WHERE n.nspname = %s AND c.relname = 'balances' "
+        "   AND t.tgname = 'balances_capture_legacy_delta'", (SCHEMA,))
+    assert attached, (
+        "the compatibility bridge is not attached, so this test cannot observe "
+        "a direct write and would pass regardless"
+    )
+
+    delinquency.assess_late_fee(loan)
+
+    kinds = [e["entry_type"] for e in _fee_entries(loan)]
+    assert "legacy_direct_write" not in kinds, (
+        f"the fee still reached past_due by a direct UPDATE: {kinds}"
+    )
 
 
 def test_past_due_moves_by_exactly_the_fee(loan):
@@ -249,7 +307,7 @@ def test_repeated_assessments_accumulate(loan):
     delinquency.assess_late_fee(loan)
     delinquency.assess_late_fee(loan)
 
-    entries = _entries(loan)
+    entries = _fee_entries(loan)
     assert len(entries) == 2
     assert _past_due(loan) == pytest.approx(2 * delinquency.LATE_FEE_FLAT)
 
@@ -263,7 +321,7 @@ def test_the_entry_names_no_actor(loan):
 
     delinquency.assess_late_fee(loan)
 
-    entry = _entries(loan)[0]
+    entry = _fee_entries(loan)[0]
     assert entry["actor_id"] is None
     assert entry["actor_role"] is None
     assert entry["payment_id"] is None
@@ -277,7 +335,7 @@ def test_the_entry_records_why(loan):
 
     delinquency.assess_late_fee(loan)
 
-    assert (_entries(loan)[0]["reason"] or "").strip(), (
+    assert (_fee_entries(loan)[0]["reason"] or "").strip(), (
         "the entry carries no reason, so the ledger records that past_due moved "
         "and not that it was a late fee"
     )

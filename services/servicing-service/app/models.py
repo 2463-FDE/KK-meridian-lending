@@ -30,10 +30,10 @@ keeps producing. It now writes a `fee_assessed` ledger entry instead (ADR 0010
 step 3).
 
 ADR 0010's guard against direct writes stays disabled until the three above are
-retired or converted. **Note that the compatibility bridge is not a safety net
-on every database:** `balances_capture_legacy_delta` is created by
-`db/migrations/0035` and is absent from `db/init/001_schema.sql`, so a freshly
-built database captures nothing -- a direct write there is simply unrecorded.
+retired or converted. Until then the compatibility bridge
+(`balances_capture_legacy_delta`) records what they would move: it is created by
+`db/migrations/0035` on an upgraded database and by `db/init/007` on a fresh
+one, so both paths capture a stray direct write.
 
 ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
 longer declares `pan`/`cvv`, and payment-service never receives a raw PAN/CVV to
