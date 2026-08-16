@@ -344,7 +344,7 @@ def test_an_inbound_assertion_is_replaced_not_forwarded(staff_session):
     assert _decode(sent, public_pem)["sub"] == "7", (
         "the forwarded assertion does not describe the resolved session"
     )
-    copies = [k for k in (_CapturingClient.last_headers or {}) 
+    copies = [k for k in (_CapturingClient.last_headers or {})
               if k.lower() == "x-principal-assertion"]
     assert len(copies) == 1, f"two assertion headers went on the wire: {copies}"
 

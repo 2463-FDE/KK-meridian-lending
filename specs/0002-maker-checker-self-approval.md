@@ -22,11 +22,18 @@
 
 > ### This document specifies the control. It does not implement it.
 >
-> **No part of the control described below is implemented.** There is no
-> `pending_movements` table, no approval endpoint, and servicing validates no
-> human principal — the routes still take `x_user_role` and never read it. D8 is
-> **open**, and it stays open until the implementation PR lands and its tests
-> pass — merging this changes nothing about what the running system permits.
+> **The approval control described below is not implemented.** There is no
+> `pending_movements` table and no approval endpoint: **one authorised person can
+> still move a balance alone**, which is the whole of what D8 now means. It stays
+> open until the implementation PR lands and its tests pass.
+>
+> **The identity half is now built, and this notice used to deny it.** §3a's
+> requirements are satisfied: the gateway mints a short-lived, audience-bound
+> Ed25519 assertion from the resolved session (`services/gateway/app/principal.py`),
+> servicing verifies it against the public half and enforces csr/admin itself
+> (`services/servicing-service/app/principal.py`), and the private key is the
+> gateway's alone. So `requested_by` and `resolved_by` have a non-forgeable source
+> to come from — the dependency the rest of this document was waiting on.
 >
 > Two things this notice used to deny do now exist, and denying them is its own
 > stale claim. **The ledger exists** (`db/migrations/0035_ledger_entries.sql`),
@@ -56,33 +63,36 @@ Two endpoints move money with no approval of any kind:
 
 | Endpoint | What it does | Who may call it today |
 |---|---|---|
-| `POST /accounts/{loan_id}/adjust-balance` | Sets `balances.balance` to an arbitrary value | Any caller holding the internal service token. Through the gateway, csr/admin only |
-| `POST /accounts/{loan_id}/waive-fee` | Reduces `balances.past_due` | Any caller holding the internal service token. Through the gateway, csr/admin only |
+| `POST /accounts/{loan_id}/adjust-balance` | Sets `balances.balance` to an arbitrary value | A verified csr or admin, alone |
+| `POST /accounts/{loan_id}/waive-fee` | Reduces `balances.past_due` | A verified csr or admin, alone |
 
-The two columns of that last cell are the whole point: the gateway restricts the
-role (`services/gateway/app/main.py` → `auth.can_move_money`), and servicing
-enforces nothing of the sort itself. A caller that reaches servicing directly on
-the compose network with the shared token is subject to no role rule at all.
+**"Alone" is the whole of what is left.** Both routes now require the internal
+service token *and* a gateway-signed principal that servicing verifies for
+itself, and both refuse any role outside csr/admin. What neither requires is a
+**second person**.
 
-Verified against `services/servicing-service/app/main.py`: both take
-`x_user_role` as an **optional header and never read it**. The comment on
-`adjust_balance` says so in the source — *"ANY authenticated user. No role check,
-no second approver, no ledger entry."*
+*This section previously described something weaker, and the difference is the
+work that has landed since.* It read: "the gateway restricts the role and
+servicing enforces nothing of the sort itself; a caller that reaches servicing
+directly on the compose network with the shared token is subject to no role rule
+at all", and recorded that both handlers took `x_user_role` as an optional header
+and never read it. That was accurate until the signed principal existed. It is
+now false in every part: `require_money_principal` is a real check, the direct
+path is refused (`test_the_shared_token_alone_cannot_move_money`), and a role
+header that disagrees with the signature is refused rather than ignored.
 
-What that means concretely, and why it is D8 rather than a hardening nicety:
+What remains, and why it is still D8 rather than a hardening nicety:
 
-- **no second person** — one staff account can zero a borrower's balance alone;
-- **no record of who** — `adjust_balance` overwrites `balances.balance` in place
-  and names nobody. *What changed:* the movement is no longer lost. Migration
-  0035's compatibility bridge (`capture_legacy_balance_delta`) mirrors every
-  committed direct write into `ledger_entries` as a `legacy_direct_write`, so the
-  prior value is now recoverable. That entry carries `actor_id = NULL`, because
-  the endpoint never knew who was calling — the ledger records **what** moved,
-  and the identity D8 asks for still does not exist;
+- **no second person** — one authorised staff account can zero a borrower's
+  balance by itself. This is the residue, and everything below specifies it;
 - **no record of why** — there is no reason field on either path;
-- **no role restriction at the service** — a CSR and an administrator are
-  indistinguishable to these endpoints. The gateway distinguishes them; servicing
-  does not, and the gateway is not the only way to reach servicing.
+- **the ledger entry still names nobody** — migration 0035's compatibility
+  bridge mirrors every committed direct write into `ledger_entries` as a
+  `legacy_direct_write`, so the movement is recoverable, but `actor_id` is NULL.
+  Servicing now knows who acted; the *entry* does not record it, because these
+  routes still write `balances` directly rather than through an approved
+  proposal. Wiring the actor in belongs with the cutover below, where the
+  approver — not the requester — is the actor that must be recorded.
 
 PR #22 closed the *network* half of this: both routes now require
 `X-Internal-Token`, so they are not reachable from outside the compose network.
@@ -221,12 +231,22 @@ approve. The token is a *service* credential shared by every backend, not a *use
 credential, so it authenticates the caller as "a service on this network" and says
 nothing about which human is acting.
 
-The running repository has no signed principal assertion, gateway-only signing
-key, or servicing-side verifier today. `gateway::_proxy` strips and re-stamps
-headers, but every backend knows the same `X-Internal-Token`; another backend can
-therefore call servicing directly and forge those re-stamped values. This spec
-requires the signed assertion above for the future implementation and does not
-claim the present headers satisfy it.
+**This section described a gap that has since been closed, and is kept because
+the reasoning is what the next verifier will need.** When it was written, the
+running repository had no signed principal assertion, no gateway-only signing
+key and no servicing-side verifier: `gateway::_proxy` stripped and re-stamped
+identity headers, but every backend knew the same `X-Internal-Token`, so another
+backend could call servicing directly and forge those re-stamped values.
+
+All three now exist. `services/gateway/app/principal.py` mints the assertion,
+`services/servicing-service/app/principal.py` verifies it and applies csr/admin,
+and `docker-compose.yml` gives the private half to the gateway alone — asserted
+by `services/gateway/tests/test_principal_signing.py::test_only_the_gateway_receives_the_private_key`,
+because if a second service ever holds it, everything in §3a is void again.
+
+**The tempting implementation named below is still the wrong one**, and that is
+why the paragraph above it stays: reading `x_user_role` remains a bypass, not a
+shortcut. What changed is that there is now a right one to reach for instead.
 
 | Missing | Consequence |
 |---|---|
