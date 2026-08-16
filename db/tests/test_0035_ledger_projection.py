@@ -153,12 +153,43 @@ def test_the_backfill_seeded_something(db):
     assert n > 0, "ledger initialization produced no opening entries"
 
 
+def _an_approved_proposal(db, loan, amount, component="principal",
+                          entry_type="adjustment"):
+    """A proposal, approved by someone other than its requester.
+
+    Since ADR 0011 step 1 (db/migrations/0036), an `adjustment` or `fee_waived`
+    entry may only enter the ledger naming the proposal that authorised it --
+    `approved_entries_have_a_proposal`. These tests are about the LEDGER's own
+    rules and used to reach for `adjustment` as a convenient human-typed entry;
+    they now have to create one the legal way.
+
+    That is the tightening working as intended: before 0036 any caller could
+    write an adjustment with no approval behind it, which is what maker-checker
+    exists to stop.
+    """
+    movement = _exec(db,
+        "INSERT INTO pending_movements (loan_id, component, amount, entry_type, reason, "
+        "requested_by, requested_role) VALUES (%s, %s, %s, %s, 'ledger rule test', 1, 'csr') "
+        "RETURNING id", (loan, component, amount, entry_type))[0]["id"]
+    _exec(db, "UPDATE pending_movements SET resolution='approved', resolved_by=2, "
+              "resolved_role='underwriter', resolved_at=now() WHERE id=%s", (movement,))
+    return movement
+
+
+def _link_entry(db, movement, entry):
+    """Close the approval so the deferred completeness check passes at COMMIT."""
+    _exec(db, "UPDATE pending_movements SET ledger_entry_id=%s WHERE id=%s",
+          (entry, movement))
+
+
 def test_a_session_flag_cannot_suppress_a_normal_projection(db):
     loan = _a_loan(db)
     before = _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"]
     _exec(db, "SELECT set_config('meridian.suppress_projection','on',true)")
-    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,actor_id,actor_role) "
-              "VALUES(%s,'principal',9,'adjustment',1,'admin')", (loan,))
+    movement = _an_approved_proposal(db, loan, 9)
+    _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,actor_id,"
+              "actor_role,pending_movement_id) "
+              "VALUES(%s,'principal',9,'adjustment',1,'admin',%s)", (loan, movement))
     after = _exec(db, "SELECT balance FROM balances WHERE loan_id=%s", (loan,))[0]["balance"]
     assert after == before + 9
     db.rollback()
@@ -333,11 +364,23 @@ def test_an_entry_cannot_be_changed_or_removed(db, statement):
     ("fee_waived", 10.00),
 ])
 def test_a_wrong_signed_entry_is_refused(db, entry_type, amount):
+    """The sign rule, reached rather than short-circuited.
+
+    Since 0036 a `fee_waived` entry must name an approved proposal, and that
+    trigger runs BEFORE INSERT -- so without a proposal this case would be
+    refused for the wrong reason and would keep passing if the sign constraint
+    were dropped. The proposal is created so the CHECK under test is what fires.
+    """
     loan = _a_loan(db)
+    component = "fees" if entry_type == "fee_waived" else "principal"
+    movement = (_an_approved_proposal(db, loan, amount, component=component,
+                                      entry_type=entry_type)
+                if entry_type in ("adjustment", "fee_waived") else None)
     with pytest.raises(psycopg2.errors.CheckViolation):
         _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
-                  "actor_id, actor_role) VALUES (%s, 'principal', %s, %s, 1, 'csr')",
-              (loan, amount, entry_type))
+                  "actor_id, actor_role, pending_movement_id) "
+                  "VALUES (%s, %s, %s, %s, 1, 'csr', %s)",
+              (loan, component, amount, entry_type, movement))
     db.rollback()
 
 
@@ -346,9 +389,13 @@ def test_an_adjustment_may_go_either_way(db):
     second approver (ADR 0011)."""
     loan = _a_loan(db)
     for amount in (12.00, -12.00):
-        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
-                  "actor_id, actor_role) VALUES (%s, 'principal', %s, 'adjustment', 1, 'csr')",
-              (loan, amount))
+        movement = _an_approved_proposal(db, loan, amount)
+        entry = _exec(db,
+            "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+            "actor_id, actor_role, pending_movement_id) "
+            "VALUES (%s, 'principal', %s, 'adjustment', 1, 'csr', %s) RETURNING id",
+            (loan, amount, movement))[0]["id"]
+        _link_entry(db, movement, entry)
     db.commit()
 
 
@@ -356,23 +403,46 @@ def test_a_zero_entry_is_refused(db):
     """A movement of nothing is not a movement, and it would make the ledger
     unreadable as a history."""
     loan = _a_loan(db)
+    movement = _an_approved_proposal(db, loan, 0)
     with pytest.raises(psycopg2.errors.CheckViolation):
         _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
-                  "actor_id, actor_role) VALUES (%s, 'principal', 0, 'adjustment', 1, 'csr')",
-              (loan,))
+                  "actor_id, actor_role, pending_movement_id) "
+                  "VALUES (%s, 'principal', 0, 'adjustment', 1, 'csr', %s)",
+              (loan, movement))
     db.rollback()
 
 
 # --- invariant 5: a human-directed entry names the human --------------------
 
 @pytest.mark.parametrize("entry_type", ["adjustment", "fee_waived"])
-def test_a_human_directed_entry_without_an_actor_is_refused(db, entry_type):
+def test_a_human_directed_entry_always_names_the_human(db, entry_type):
+    """Invariant 5, and 0036 changed HOW it holds rather than whether.
+
+    It used to be a CHECK an inserter could trip by omitting the actor. Now the
+    proposal-matching trigger OVERWRITES both actor fields from the approving
+    proposal, and a proposal cannot be approved without a resolver -- so the
+    entry cannot lack an actor, and cannot carry one the approver did not earn.
+
+    That is strictly stronger, and the test says so rather than asserting a
+    refusal that no longer happens. The CHECK still guards the types this trigger
+    does not touch; a machine entry needs no actor and the next test covers it.
+    """
     loan = _a_loan(db)
     amount = -5.00 if entry_type == "fee_waived" else 5.00
-    with pytest.raises(psycopg2.errors.CheckViolation):
-        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
-                  "VALUES (%s, 'fees', %s, %s)", (loan, amount, entry_type))
-    db.rollback()
+    movement = _an_approved_proposal(db, loan, amount, component="fees",
+                                     entry_type=entry_type)
+    entry = _exec(db,
+        "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+        "pending_movement_id) VALUES (%s, 'fees', %s, %s, %s) RETURNING id",
+        (loan, amount, entry_type, movement))[0]["id"]
+    _link_entry(db, movement, entry)
+    row = _exec(db, "SELECT actor_id, actor_role FROM ledger_entries WHERE id = %s",
+                (entry,))[0]
+    db.commit()
+    assert row["actor_id"] == 2 and row["actor_role"] == "underwriter", (
+        "the entry was written with no actor -- the trigger did not supply the "
+        "approver, so a human-directed movement records nobody"
+    )
 
 
 def test_a_machine_originated_entry_needs_no_actor(db):
@@ -468,15 +538,55 @@ def test_a_balance_row_cannot_be_deleted_during_cutover(db):
 @pytest.mark.parametrize("entry_type,component,amount", [
     ("fee_assessed", "principal", 10),
     ("fee_assessed", "interest", 10),
-    ("fee_waived", "principal", -10),
     ("disbursement", "fees", 10),
-    ("adjustment", "interest", 10),
 ])
-def test_entry_type_must_match_its_component(db, entry_type, component, amount):
+def test_a_machine_entry_type_must_match_its_component(db, entry_type, component, amount):
+    """The machine-originated types, refused by the ledger's own CHECK."""
     loan = _a_loan(db)
     with pytest.raises(psycopg2.errors.CheckViolation):
         _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,actor_id,actor_role) "
                   "VALUES(%s,%s,%s,%s,1,'admin')", (loan, component, amount, entry_type))
+    db.rollback()
+
+
+@pytest.mark.parametrize("entry_type,component,amount", [
+    ("fee_waived", "principal", -10),
+    ("adjustment", "interest", 10),
+])
+def test_a_human_entry_type_cannot_even_be_proposed_with_a_wrong_component(
+        db, entry_type, component, amount):
+    """0036 moved this guarantee up a level, and made it stronger.
+
+    `ledger_type_matches_component` still refuses these entries. But since an
+    adjustment or fee waiver may now only enter the ledger naming an APPROVED
+    PROPOSAL, the combination has to survive `pending_movements` first -- and it
+    cannot: `pending_fee_waiver_is_fees` refuses a waiver against principal, and
+    `pending_component` refuses a component the ledger cannot hold.
+
+    So the incoherent request never reaches an approver's queue, which is the
+    point ADR 0011 makes about refusing at creation rather than at approval: a
+    human should never be shown a request the system was always going to reject.
+    """
+    loan = _a_loan(db)
+    if entry_type == "fee_waived":
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            _exec(db,
+                "INSERT INTO pending_movements (loan_id, component, amount, entry_type, "
+                "reason, requested_by, requested_role) "
+                "VALUES (%s, %s, %s, %s, 'wrong component', 1, 'csr')",
+                (loan, component, amount, entry_type))
+        db.rollback()
+        return
+
+    # `adjustment` on `interest` IS a legal proposal -- correcting accrued
+    # interest is a real correction -- so the refusal comes from the ledger,
+    # which does not hold interest adjustments. Both layers are exercised.
+    movement = _an_approved_proposal(db, loan, amount, component=component,
+                                     entry_type=entry_type)
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,actor_id,"
+                  "actor_role,pending_movement_id) VALUES(%s,%s,%s,%s,1,'admin',%s)",
+              (loan, component, amount, entry_type, movement))
     db.rollback()
 
 
@@ -923,12 +1033,18 @@ def test_a_non_payment_entry_may_not_carry_a_payment(db, entry_type, component,
     pay = _a_payment(db, loan, "20.00")
     db.commit()
 
+    # The human types need an approved proposal to clear the 0036 trigger, so
+    # that `ledger_payment_provenance` -- the constraint under test -- is what
+    # refuses the payment_id, rather than the missing proposal refusing first.
+    human = entry_type in ("adjustment", "fee_waived")
+    movement = (_an_approved_proposal(db, loan, amount, component=component,
+                                      entry_type=entry_type) if human else None)
     with pytest.raises(psycopg2.errors.CheckViolation):
         _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
-                  "actor_id, actor_role, payment_id) "
-                  "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                  "actor_id, actor_role, payment_id, pending_movement_id) "
+                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
               (loan, component, amount, entry_type,
-               1 if actor else None, "admin" if actor else None, pay))
+               1 if actor else None, "admin" if actor else None, pay, movement))
     db.rollback()
 
 

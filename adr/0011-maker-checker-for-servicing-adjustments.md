@@ -1,9 +1,36 @@
 # ADR 0011: Maker-checker for servicing balance adjustments
 
-- **Status:** Proposed — depends on ADR 0010
-- **Date:** 2026-08-12
+- **Status:** Accepted. **Schema landed** in `db/migrations/0036_pending_movements.sql`
+  (step 1); the approval function and the API cutover are step 2 and are not built
+  yet, so **D8 remains open** — one person can still move a balance alone.
+- **Date:** 2026-08-12 (schema landed 2026-08-16)
+- **Depends on:** ADR 0010, and on the signed human principal that
+  `services/servicing-service/app/principal.py` verifies — a proposal's
+  `requested_by` and an approval's `resolved_by` are meaningless without an
+  identity the caller cannot forge
 - **Bears on:** `docs/DEBT.md` D8 (any authenticated user can adjust a balance or
   waive a fee, with no second approver and no record of who asked)
+
+## Configured limits, approved for this cohort/demo environment
+
+The project owner approved four values on 2026-08-16. They are **configuration**,
+not architecture, and this ADR records them so a reader can tell what the control
+was built and tested against — **they are not Lending Operations policy, and
+production adoption requires Lending Operations to set or approve each one.**
+
+| Decision | Approved value | Enforced where |
+|---|---|---|
+| `MAKER_CHECKER_ADMIN_THRESHOLD` | 500.00 — at or below, underwriter or admin may approve; above, admin only; csr never | API, from configuration |
+| `MAKER_CHECKER_MAX_DELTA` | 5000.00 — above it, refused at creation for every role | API, from configuration |
+| Permitted loan statuses | exactly `{"current"}`; anything else, including unrecognised, fails closed and is re-checked at approval | API, from configuration |
+| Maker authorization scope | spec 0002 REQ-VAL-14 **option 2**: any staff principal may propose against any serviced, `current` loan with a `balances` row. A reviewed limitation, not an assignment model | API |
+
+**Neither figure appears in the schema, and that is deliberate.** A CHECK
+carrying 500.00 or 5000.00 would make a policy change a migration, and would
+freeze a cohort/demo number into the shape of the data. `pending_movements`
+records `resolved_threshold` — the limit a resolution was actually judged
+against — so a later reader can tell which bar applied without the schema
+asserting what the bar should be.
 
 ## Required invariants
 

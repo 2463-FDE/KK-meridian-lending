@@ -135,6 +135,25 @@ unimplementable matrix is how the last version of this control stayed a document
 
 **Threshold:** `MAKER_CHECKER_ADMIN_THRESHOLD`, applied to `ABS(amount)`.
 
+> ### Approved for this cohort/demo environment — NOT production policy
+>
+> The project owner approved these four values on 2026-08-16. They are
+> **configuration**, recorded here so the control can be built and tested; they
+> are **not** Lending Operations policy, and production adoption requires
+> Lending Operations to set or approve each one.
+>
+> | Decision | Approved value |
+> |---|---|
+> | `MAKER_CHECKER_ADMIN_THRESHOLD` | **500.00** — `ABS(amount) ≤ 500.00` may be approved by underwriter or admin; above it, **admin only**. No csr may approve any amount. No one, including admin, may approve their own proposal |
+> | `MAKER_CHECKER_MAX_DELTA` | **5000.00** — `ABS(amount) > 5000.00` is refused at creation, for every role |
+> | Permitted loan statuses | exactly **`{"current"}`** — missing, null, differently cased, closed, charged-off, delinquent or unrecognised all fail closed, and the status is re-checked inside the approval transaction |
+> | Maker authorization scope | **REQ-VAL-14 option 2** — any authenticated staff principal (csr, underwriter, admin) may propose against any serviced loan that exists, has a `balances` row, and has status exactly `current`. **No staff-to-loan assignment model is invented here.** Recorded as a reviewed cohort/demo limitation |
+>
+> **Both figures remain configuration, not constants.** They are read from the
+> environment at runtime, absent from every database constraint, and have no code
+> default — `db/migrations/0036_pending_movements.sql` deliberately encodes
+> neither, because a CHECK carrying a figure makes a policy change a migration.
+
 **It has no default, and a missing or unparseable value fails closed.** An
 earlier draft of this spec set it to `$500.00`. Nobody chose that number: it is
 not in `policies/`, no stakeholder stated it, and it does not appear anywhere in
@@ -336,10 +355,15 @@ be shown a request that the system was always going to refuse.
   project onto, and the movement would be approved and then land nowhere.
 - **REQ-VAL-13** — The loan SHALL be in a status the implementation explicitly
   permits movements on, and **an unrecognised status SHALL refuse**. This spec
-  names no status list: `loans.status` is an unconstrained `TEXT` column
-  defaulting to `'current'`, and enumerating values here that the schema does not
-  enforce would be inventing a vocabulary. The implementation PR SHALL declare the
-  permitted set in code, with a test, and refuse anything outside it.
+  named no status list while none had been chosen, because `loans.status` is an
+  unconstrained `TEXT` column and enumerating values the schema does not enforce
+  would have been inventing a vocabulary.
+
+  **Approved 2026-08-16 for this cohort/demo environment: exactly `{"current"}`.**
+  Missing, null, differently cased, closed, charged-off, delinquent and every
+  unrecognised value fail closed. The status SHALL be re-checked inside the
+  approval transaction, not only at creation — a proposal raised while a loan was
+  current and approved after it closed must refuse.
 - **REQ-VAL-14** — The maker SHALL be authorised for the specific target, not
   merely authenticated as staff. **This system has no data model for that today**
   — there is no assignment of loans to staff anywhere in the schema — so the
@@ -353,6 +377,14 @@ be shown a request that the system was always going to refuse.
   What it SHALL NOT do is leave the requirement unaddressed, which is how
   "authorised for the target" becomes "authenticated at all" without anyone
   choosing it. Whichever is chosen, an unevaluable predicate SHALL refuse.
+
+  **Chosen: option 2, approved 2026-08-16 for this cohort/demo environment.**
+  Any authenticated staff principal may propose against any serviced loan that
+  exists, has a `balances` row and is `current`. This is a *reviewed limitation*,
+  not an oversight: the alternative was inventing a staff-to-loan assignment
+  model that no part of this system has, and a scope predicate backed by invented
+  data would be less honest than a stated one. **Production adoption requires
+  Lending Operations to replace or approve this scope.**
 - **REQ-VAL-15** — Approval SHALL re-read and revalidate the complete executable
   target inside the resolution transaction: the loan still exists, still has a
   `balances` row, its current status is still explicitly permitted, the movement
