@@ -118,7 +118,8 @@ def propose(loan_id: int, *, component: str, amount, entry_type: str, reason: st
     # requester gets a message, and re-checked inside the approval transaction
     # because state moves while a proposal sits in a queue.
     rows = db.query(
-        "SELECT l.status AS status, b.loan_id AS serviced "
+        "SELECT l.status AS status, b.loan_id AS serviced, "
+        "       b.balance AS balance, COALESCE(b.past_due, 0) AS past_due "
         "FROM loans l LEFT JOIN balances b ON b.loan_id = l.id WHERE l.id = %s",
         (loan_id,),
     )
@@ -135,6 +136,22 @@ def propose(loan_id: int, *, component: str, amount, entry_type: str, reason: st
         raise _bad_request(
             f"loan {loan_id} is {status or 'unset'!r}; a movement may only be "
             f"proposed on {sorted(permitted_statuses)}"
+        )
+
+    # REQ-VAL-8 / AC-20: a movement may not take the targeted component below
+    # zero, checked HERE as well as inside the approval transaction. Only the
+    # approval check existed, so a waiver larger than the fees owed was accepted,
+    # returned 202, and sat in the queue until an approver hit the failure --
+    # the maker never learning their request was impossible. The approval check
+    # stays because the balance moves while a proposal waits; this one exists so
+    # the person who can fix the request is the one who is told.
+    component_now = Decimal(str(
+        rows[0]["past_due"] if component == "fees" else rows[0]["balance"]))
+    if component_now + delta < 0:
+        raise _bad_request(
+            f"a movement of {delta} would take {component} below zero "
+            f"({component_now} + {delta}); the ledger cannot hold a negative "
+            f"{component}"
         )
 
     created = db.query(

@@ -266,6 +266,26 @@ _ACCOUNT_READ_ACTIONS = ("balance",)
 _PROPOSAL_ACTIONS = ("adjust-balance", "waive-fee")
 
 
+def _principal_headers(svc: dict, user: dict) -> dict:
+    """Service headers plus a freshly minted human principal, or 503.
+
+    Every LSS path that mints goes through here. Three call sites each doing
+    their own try/except is three chances to forget one -- and forgetting it
+    turns a missing signing key into a generic 500, which points an operator at
+    the wrong service entirely. A money route that cannot say who is acting must
+    refuse, and must say why.
+    """
+    headers = dict(svc)
+    try:
+        headers[principal.HEADER] = principal.mint(user)
+    except config.PrincipalKeyError as exc:
+        log.error("cannot mint a principal assertion: %s", exc)
+        raise HTTPException(
+            status_code=503, detail="identity signing unavailable",
+        ) from exc
+    return headers
+
+
 @app.api_route("/lss/{path:path}", methods=["GET", "POST"])
 async def lss(path: str, request: Request, authorization: str | None = Header(None)):
     user = _require_user(authorization)
@@ -304,10 +324,8 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
         # here would block the control's main reviewer from using it.
         if action in _PROPOSAL_ACTIONS:
             if auth.is_staff(user):
-                money_headers = dict(svc)
-                money_headers[principal.HEADER] = principal.mint(user)
                 return await _proxy(SERVICING_URL, f"/{path}", request, user,
-                                    extra_headers=money_headers)
+                                    extra_headers=_principal_headers(svc, user))
             raise HTTPException(status_code=403, detail="staff only")
 
         # adjust-balance / waive-fee / late-fee -- CSR/admin only. Underwriter is
@@ -321,21 +339,8 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
         # caller that skips the gateway entirely is now refused by servicing
         # instead of arriving unauthenticated-as-a-human with a shared token.
         if auth.can_move_money(user):
-            money_headers = dict(svc)
-            try:
-                money_headers[principal.HEADER] = principal.mint(user)
-            except config.PrincipalKeyError as exc:
-                # Fail closed, and say which thing is broken. Without this the
-                # failure surfaces either as a crypto traceback (500, a mystery)
-                # or as a 401 from servicing, which points the operator at the
-                # wrong service entirely. A money route with no way to say who is
-                # acting must refuse, not degrade.
-                log.error("cannot mint a principal assertion: %s", exc)
-                raise HTTPException(
-                    status_code=503, detail="identity signing unavailable",
-                ) from exc
             return await _proxy(SERVICING_URL, f"/{path}", request, user,
-                                extra_headers=money_headers)
+                                extra_headers=_principal_headers(svc, user))
         raise HTTPException(status_code=403, detail="csr/admin only")
 
     # The maker-checker queue and the resolve endpoint. Staff-only here; WHICH
@@ -343,10 +348,8 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
     # principal and the configured threshold rather than at this hop.
     if path == "movements" or _MOVEMENT_RESOLVE_RE.match(path):
         if auth.is_staff(user):
-            money_headers = dict(svc)
-            money_headers[principal.HEADER] = principal.mint(user)
             return await _proxy(SERVICING_URL, f"/{path}", request, user,
-                                extra_headers=money_headers)
+                                extra_headers=_principal_headers(svc, user))
         raise HTTPException(status_code=403, detail="staff only")
 
     if path == "reconciliation/peek":

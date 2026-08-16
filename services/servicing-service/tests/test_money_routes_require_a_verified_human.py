@@ -17,6 +17,7 @@ and a fixture that committed one would be handing over the ability to mint an
 admin (`db/tools/generate_principal_keypair.py` is how a deployment gets a pair).
 """
 import time
+from decimal import Decimal
 
 import jwt
 import pytest
@@ -86,7 +87,10 @@ def _proposal_db(monkeypatch):
     def _query(sql, params=None):
         flat = " ".join(sql.split())
         if "FROM loans l LEFT JOIN balances b" in flat:
-            return [{"status": "current", "serviced": 1}]
+            # balance/past_due included: proposal validation now reads them to
+            # refuse a movement that would drive a component below zero.
+            return [{"status": "current", "serviced": 1,
+                     "balance": Decimal("1000.00"), "past_due": Decimal("80.00")}]
         if "INSERT INTO pending_movements" in flat:
             return [{"id": 1, "requested_at": None}]
         return []
@@ -369,7 +373,8 @@ def test_a_verified_underwriter_may_raise_a_proposal(keys, monkeypatch):
     from app import maker_checker
 
     monkeypatch.setattr(maker_checker.db, "query", lambda sql, params=None: (
-        [{"status": "current", "serviced": 1}]
+        [{"status": "current", "serviced": 1, "balance": Decimal("1000.00"),
+          "past_due": Decimal("80.00")}]
         if "FROM loans l LEFT JOIN balances b" in " ".join(sql.split())
         else [{"id": 5, "requested_at": None}]))
     private_pem, _ = keys

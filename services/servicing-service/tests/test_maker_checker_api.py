@@ -56,13 +56,16 @@ def keys(monkeypatch):
 @pytest.fixture
 def fake_db(monkeypatch):
     """Records what reached the database, and what did not."""
-    state = {"inserts": [], "resolves": [], "loan_status": "current", "serviced": True}
+    state = {"inserts": [], "resolves": [], "loan_status": "current", "serviced": True,
+             "balance": "1000.00", "past_due": "80.00"}
 
     def _query(sql, params=None):
         flat = " ".join(sql.split())
         if "FROM loans l LEFT JOIN balances b" in flat:
             return [{"status": state["loan_status"],
-                     "serviced": 1 if state["serviced"] else None}]
+                     "serviced": 1 if state["serviced"] else None,
+                     "balance": Decimal(state["balance"]),
+                     "past_due": Decimal(state["past_due"])}]
         if "INSERT INTO pending_movements" in flat:
             state["inserts"].append(params)
             return [{"id": 7, "requested_at": None}]
@@ -349,3 +352,52 @@ def test_late_fee_still_requires_a_human_and_still_works(keys, monkeypatch):
     response = _client().post("/accounts/1/late-fee",
                               headers=_headers(keys, sub="2", role="csr"))
     assert response.status_code == 200, response.text
+
+
+# --- review round 1 -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("component, past_due, balance, amount, entry_type", [
+    ("fees", "40.00", "1000.00", -80.00, "fee_waived"),
+    ("fees", "40.00", "1000.00", -80.00, "adjustment"),
+    ("principal", "40.00", "100.00", -100.01, "adjustment"),
+])
+def test_a_movement_below_zero_is_refused_at_creation(keys, fake_db, no_money,
+                                                      component, past_due, balance,
+                                                      amount, entry_type):
+    """MC-NEG-CREATE. spec 0002 AC-20 refuses at creation AND at approval.
+
+    Only the approval check existed. A waiver larger than the fees owed was
+    accepted, returned 202 and sat in the queue until an approver hit the
+    failure -- so the person who could fix the request was never told, and the
+    approver was shown a movement the system had already decided was impossible.
+
+    The approval check stays: the balance moves while a proposal waits, so a
+    request that is valid now can be invalid then. This one exists so the maker
+    finds out.
+    """
+    fake_db["balance"] = balance
+    fake_db["past_due"] = past_due
+    path = ("/accounts/1/waive-fee" if entry_type == "fee_waived"
+            else "/accounts/1/adjust-balance")
+    body = ({"amount": amount, "reason": "more than is owed"}
+            if entry_type == "fee_waived"
+            else {"component": component, "amount": amount,
+                  "reason": "more than is owed"})
+
+    response = _client().post(path, json=body, headers=_headers(keys, role="csr"))
+
+    assert response.status_code == 422, response.text
+    assert "below zero" in response.json()["detail"]
+    assert not fake_db["inserts"], "the impossible proposal was queued anyway"
+
+
+def test_a_movement_that_exactly_empties_a_component_is_allowed(keys, fake_db, no_money):
+    """Guards the refusal above: `<= 0` instead of `< 0` would forbid waiving
+    exactly what is owed, which is the most ordinary waiver there is."""
+    fake_db["past_due"] = "40.00"
+    response = _client().post(
+        "/accounts/1/waive-fee", json={"amount": -40.00, "reason": "waive it all"},
+        headers=_headers(keys, role="csr"))
+    assert response.status_code == 202, response.text
+    assert fake_db["inserts"]
