@@ -38,10 +38,20 @@ TOKEN = "test-internal-token"
 # Every route below moves money. The bodies are the minimum each schema accepts;
 # what is asserted is the authorization outcome, never the arithmetic.
 MONEY_ROUTES = [
-    ("/accounts/1/adjust-balance", {"new_balance": 1.0}),
-    ("/accounts/1/waive-fee", {"amount": 1.0}),
+    # Bodies must be VALID for their route. FastAPI validates the body before the
+    # handler runs, so an out-of-date shape returns 422 without the auth guard
+    # ever executing -- and this file would then be asserting that a malformed
+    # request is refused, which proves nothing about the token. The maker-checker
+    # cutover changed two of these schemas and that is exactly what surfaced it.
+    ("/accounts/1/adjust-balance",
+     {"component": "principal", "amount": -1.0, "reason": "token test"}),
+    ("/accounts/1/waive-fee", {"amount": -1.0, "reason": "token test"}),
     ("/accounts/1/late-fee", None),
     ("/accounts/1/apply-payment", {"amount": 1.0, "payment_id": 1}),
+    # Added with the cutover. `test_every_money_route_is_guarded` derives the set
+    # from the running app and failed until this was listed -- the hand-written
+    # list going stale, caught by the check written for exactly that.
+    ("/movements/7/resolve", {"resolution": "approved"}),
 ]
 # `/payments` was in this list until the processorless duplicate was retired
 # (docs/DEBT.md D2). It is not listed as an unguarded exception -- the route does
@@ -143,9 +153,15 @@ def test_the_token_alone_no_longer_admits_the_staff_money_routes(monkeypatch):
     monkeypatch.setattr(main.delinquency, "assess_late_fee", _boom)
 
     auth = {"X-Internal-Token": TOKEN}
-    assert client.post("/accounts/1/adjust-balance", json={"new_balance": 1.0},
+    # Valid bodies, so the 401 comes from the identity guard rather than from
+    # schema validation -- which runs first and would otherwise answer 422 while
+    # this file believed it was testing the token.
+    assert client.post("/accounts/1/adjust-balance",
+                       json={"component": "principal", "amount": -1.0,
+                             "reason": "token only"},
                        headers=auth).status_code == 401
-    assert client.post("/accounts/1/waive-fee", json={"amount": 1.0},
+    assert client.post("/accounts/1/waive-fee",
+                       json={"amount": -1.0, "reason": "token only"},
                        headers=auth).status_code == 401
     assert client.post("/accounts/1/late-fee", headers=auth).status_code == 401
 

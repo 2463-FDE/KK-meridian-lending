@@ -27,11 +27,9 @@ Every `D<n>` / `RF-<n>` citation in the tables below is defined in
 This is the durable work queue. The detailed matrix and dated audit evidence
 below explain how it was derived.
 
-- **Highest priority:** `G-SERVICING-ROLE` + `G-MAKER-CHECKER`, as one control.
-  Servicing validates no human principal, and no second approver exists, so one
-  account still moves a borrower's balance alone. A shared service token or
-  caller-supplied identity/role headers are not proof of the human actor —
-  reading `x_user_role` without a verifiable principal is a bypass, not a fix.
+- **Highest priority:** `G-D14` — the payment waterfall. It is the last gap that
+  changes what a borrower is charged, and it needs an authoritative interest
+  model before allocation can mean anything.
 - **Then:** `G-D14` (payment waterfall on the landed component ledger) and
   `G-D19` (`loans.apr` holds the note rate, and the column name still says APR).
 - **Durable status:** Weeks 1–5 are landed — the canonical processor-backed
@@ -192,7 +190,7 @@ feature landed in a different week than its brief, both labels appear in the
 Week column as `brief → shipped`. No row is guessed: where the two disagree it is
 because a merged PR says so.
 
-**Counts (31 requirements): 28 Done · 2 Partial · 1 Not started · 0 Blocked ·
+**Counts (31 requirements): 29 Done · 2 Partial · 0 Not started · 0 Blocked ·
 0 Deferred.** The count is derived from the matrix below.
 
 **What moved, and when.** The audit pass moved Week 1's Decimal row
@@ -235,7 +233,7 @@ production implementation.
 | 5 | Spec package committed before it is cited | The cited path resolves | **Done** | `specs/0001-online-payments-idempotency-tokenization.md` | `db/tests/test_docs_citations_resolve.py` | None. History: the original spec was cited for weeks and had never been committed on any branch | — | — |
 | 6 | Money-moving servicing actions are role-gated | Only csr/admin may adjust a balance or waive a fee, **enforced by servicing itself** against an identity the caller cannot forge | **Done** | `services/gateway/app/principal.py` mints a short-lived, audience-bound Ed25519 assertion from the resolved Redis session; `servicing-service/app/principal.py` verifies signature, issuer, audience, expiry, not-before, subject, role and maximum lifetime, then applies csr/admin. Private key gateway-only (`docker-compose.yml`); `X-User-*` are untrusted hints and a disagreement with the signature is refused. `_require_internal()` still guards all four live money routes -- `adjust-balance`, `waive-fee`, `late-fee` and `apply-payment` -- as the service boundary; the fifth, the legacy `POST /payments`, was retired with D2. The three staff routes additionally require a verified principal; `apply-payment` stays machine-only (payment-service has no human behind it, spec 0002 §8) | `servicing-service/tests/test_money_routes_require_a_verified_human.py` (27 cases: token-alone bypass, forged headers, header/signature disagreement, foreign key, HMAC forged with the published verify key, `alg=none`, expired, not-yet-valid, wrong audience, wrong issuer, no expiry, over-long lifetime, malformed, underwriter and borrower refusals, unconfigured key); `gateway/tests/test_principal_signing.py` (19 cases incl. the compose key split); `db/tests/test_money_roles_agree_across_services.py`. Mutation-verified three ways | None for the role. **The second approver is not implemented** — one verified csr can still move a balance alone (D8's remaining half, `G-MAKER-CHECKER`) | — | — |
 | 6 | Append-only ledger; balance as a projection | "Show me every change and who made it" is answerable | **Done** | `db/migrations/0035_ledger_entries.sql`; mirrored fresh-install schema in `db/init/001_schema.sql`; `services/servicing-service/app/balance.py` | `db/tests/test_0035_ledger_projection.py`, `test_migration_paths_converge.py`, `test_schema_parity.py`; `services/servicing-service/tests/test_balance_lost_update_real_postgres.py` | ADR 0010 step 2 is landed. The expand-phase compatibility bridge captures legacy direct writes; final writer conversion and activation of the rejecting general guard remain later ADR steps, not an unrecorded ledger gap | — | Continue ADR 0010's staged writer conversion |
-| 6 | Maker-checker on money-affecting actions | No single account can move money unilaterally | **Not started** | `specs/0002-maker-checker-self-approval.md` and ADR 0011 define the principal, proposal, approval, self-approval, and failure contracts | `db/tests/test_spec_0002_describes_the_real_system.py`, `test_adr_0011_enforcement_runs_on_postgres.py` validate the specification against the current schema and explicitly prevent it from claiming production enforcement | Implementation is intentionally absent; a shared service token plus identity headers is explicitly insufficient | High | Implement spec 0002 using a server-validated, non-forgeable human principal and retain proposal/rejection evidence |
+| 6 | Maker-checker on money-affecting actions | No single account can move money unilaterally | **Done** | `servicing-service/app/maker_checker.py` (propose/queue/resolve), `db/migrations/0037_resolve_pending_movement.sql` (the only path that resolves: locks the row, one transition, refuses self-approval, revalidates the target inside the lock, writes one entry from the locked proposal with the approver as actor), `db/migrations/0036` (the schema). `adjust-balance` and `waive-fee` return 202 and move nothing | `db/tests/test_0037_resolve_pending_movement.py` (23, incl. a two-connection approval race), `db/tests/test_0036_pending_movements.py` (41), `servicing-service/tests/test_maker_checker_api.py` (role matrix, refuse-at-creation, identity, machine paths). All against PostgreSQL 16.14 | None for the control. **Scoped limitations, named not implied:** the threshold, cap and permitted statuses are cohort/demo configuration and not Lending Operations policy; the maker's scope is REQ-VAL-14 option 2 (no staff-to-loan model exists); no notification or delegation (spec 0002 §8) | — | — |
 | 6 | Lost-update proof on the shared column | A real-PostgreSQL test pins concurrent payment behavior | **Done** | Ledger projection replaces the former unlocked payment read-modify-write path: `balance.py::apply_payment_once` inserts the entry, `db/migrations/0035_ledger_entries.sql`'s `project_ledger_entry()` composes the signed delta into `balances` | `servicing-service/tests/test_balance_lost_update_real_postgres.py` (5 cases) asserts both concurrent payments survive; `db/tests/test_0035_ledger_projection.py` (64 cases) proves parity. **Both executed against PostgreSQL 16.14 on 2026-08-15, all 69 cases passing.** They skipped on the first pass, when no database was reachable, and the row cited CI for them; they are no longer a claim resting on a skip. CI run `31759960436` on this exact commit corroborates, jobs `db-migrations` and `backend (servicing-service)` green | None for the lost update. Residual, distinct from D3: `balance.py::apply_payment` and `::waive_fee` return a figure computed before their own UPDATE, so the *returned* balance can be stale under concurrency while the stored one is correct | — | — |
 | 6 | Legacy-comprehension ADR (RBAC + maker-checker + ledger) | An accepted ADR proposing the three | **Done** | `adr/0010-append-only-ledger-for-servicing-balances.md`; `adr/0011-maker-checker-for-servicing-adjustments.md` | `db/tests/test_ledger_adr_sequence_is_consistent.py`, `test_adr_0011_enforcement_runs_on_postgres.py`, `test_docs_citations_resolve.py` | None for the architecture decision; implementation stages remain tracked by their own rows | — | — |
 | 6 | Payment waterfall (fees → interest → principal) | A payment is applied in the regulated order | **Partial** | `balance.py:38` applies straight off principal | `test_apply_payment_idempotency.py` pins today's behaviour, not the correct one | `DEBT.md` **D14**, open | Medium | Sequence after the ledger — a waterfall needs per-component rows |
@@ -257,6 +255,7 @@ list that only ever grows stops being read:
 | **G-LEDGER / G-ADR-0010** — no append-only servicing ledger or accepted design | ADR 0010 plus migration 0035, the fresh-install mirror, opening-state cutover, and legacy-write capture | `db/tests/test_0035_ledger_projection.py`, `test_ledger_adr_sequence_is_consistent.py`, migration convergence and schema parity tests |
 | **G-D7** — reconciliation was not an operational control | Scheduled transaction-level reconciliation now records runs, fails closed when nothing can be compared, and exposes monitoring/runbook evidence | `test_reconciliation_is_actually_scheduled.py`, `test_reconciliation_fails_closed_on_nothing.py`, `test_reconciliation_transaction_level_on_postgres.py` |
 | **G-README** — the README claimed dropped columns still existed | README states the schema as it is | `db/tests/test_readme_schema_claims.py` |
+| **G-MAKER-CHECKER** — no second approver on money-affecting actions | `adjust-balance` and `waive-fee` raise proposals and move nothing; a different verified principal resolves through `resolve_pending_movement`, which locks the proposal, permits one transition, refuses self-approval including admin, revalidates the target inside the lock, and writes exactly one ledger entry naming the approver. Rejections write none and are retained | `db/tests/test_0037_resolve_pending_movement.py`, `db/tests/test_0036_pending_movements.py`, `servicing-service/tests/test_maker_checker_api.py` |
 | **G-SERVICING-ROLE** — servicing read no role of its own, so csr/admin was enforced only at the gateway hop | The gateway signs an Ed25519 assertion naming the human from the resolved session; servicing verifies it against the public half and applies csr/admin itself. The private key is gateway-only, so no backend holding the shared token can mint a human — which is why the header could never be trusted before. Caller-supplied `X-User-*` are refused when they disagree with the signature | `servicing-service/tests/test_money_routes_require_a_verified_human.py`, `gateway/tests/test_principal_signing.py`, `db/tests/test_money_roles_agree_across_services.py` |
 | **G-D2-LEGACY** — servicing's processorless `POST /payments` double-recorded and double-applied a retried payment | The route, its `PaymentIn` schema and `app/payments.py` are deleted. Payment creation belongs to payment-service alone, which requires an `idempotency_key`; servicing only applies a captured payment, keyed by `payment_id`. Historical `capture_source='servicing_legacy'` rows and their reconciliation handling are unchanged | `servicing-service/tests/test_legacy_payments_route_is_retired.py`, `db/tests/test_servicing_comments_match_the_system.py::test_no_servicing_module_reintroduces_an_unkeyed_charge` |
 | **G-DTI** — the policy published cutoffs the code never applied | The DTI section is marked defined-but-not-applied | `db/tests/test_policy_matches_implemented_cutoffs.py` |
@@ -278,8 +277,6 @@ the number is not the guarantee: `test_every_money_route_is_guarded` derives the
 list from the running app, and a sixth route added without a check fails it.
 
 #### High
-
-- **G-MAKER-CHECKER** — no second approver is enforced on money-affecting actions (`DEBT.md` D8). ADR 0011 and spec 0002 define the contract but explicitly do not claim production enforcement. *AC:* an adjustment or waiver is recorded as a proposal until a second, different staff account approves it; identity and role come from a server-validated, non-forgeable principal; the same account cannot propose and approve; forged headers, missing/invalid principals, and service-token-only calls cannot elevate authority; rejected proposals are retained. *Evidence:* production-path tests proving each case, in addition to the specification conformance tests. *Dependency:* the ledger dependency is now satisfied.
 
 #### Medium
 
@@ -307,32 +304,36 @@ and closing it did not touch D11.
 
 ## Start next
 
-**G-MAKER-CHECKER — the second approver, and the last money-movement gap.**
+**G-D14 — the payment waterfall, and the interest model it needs first.**
 
-The previous entry here was G-INTAKE-401, which is closed. It is first now
-because everything else in this file is either a naming problem, a display
-problem, or an endpoint nothing outside the compose network can reach.
+Every gap that decides *who may move money* is closed. What is left changes what
+a borrower is charged, and it cannot be built honestly in one step.
 
-Servicing now knows who is acting: `G-SERVICING-ROLE` is closed, the identity is
-signed by the gateway and unforgeable by any other backend, and csr/admin is
-enforced by servicing itself. What is still missing is the *second person*. One
-verified csr can zero a borrower's balance alone, and the ledger entry that
-records the movement carries `actor_id = NULL`.
+A payment is still applied straight off principal. Applying it fees → interest →
+principal requires an authoritative answer to "how much interest is outstanding
+right now", and this system does not have one: there is no `interest_due`, no
+accrual, and an `interest` ledger entry currently projects nowhere. Writing three
+ledger rows in that order would look like a waterfall and allocate against a
+number nobody maintains, which is the shape of overclaim this repository has
+already had to correct twice.
 
-The dependencies are now all satisfied: the ledger exists (ADR 0010 step 2), and
-the verified principal that a proposal's `requested_by` and an approval's
-`resolved_by` must be taken from exists as of this change (spec 0002 REQ-ID-1,
-REQ-ID-5). ADR 0011 says what the tables must enforce; spec 0002 says what the
-API must refuse. **Before implementation, four values must come from a human:**
-`MAKER_CHECKER_ADMIN_THRESHOLD`, `MAKER_CHECKER_MAX_DELTA`, the permitted loan
-statuses, and the maker's authorization scope. Spec 0002 §3 refuses to invent
-them, and so does this file.
+So it is two pieces of work, in order:
 
-After it, in order:
+1. **The interest/accrual foundation** — an authoritative source for outstanding
+   interest, with a writer, a projection or rebuild rule, a migration, the
+   fresh-schema mirror and non-vacuous tests. No column that nothing maintains.
+2. **G-D14 itself** — exact Decimal allocation across fees, interest and
+   principal, allocating no more than each outstanding component, summing exactly
+   to the captured payment, idempotent on retry and correct under concurrency.
 
-1. **G-D14** — implement the fees → interest → principal waterfall on the landed
-   component ledger.
-2. **G-D19** — rename `loans.apr` to the note rate it actually holds.
+**Three decisions are needed before step 1**, and this file will not invent them:
+the authoritative source and lifecycle of outstanding interest, what happens when
+a payment exceeds everything owed, and the rounding and allocation rule at
+component boundaries.
+
+After that, `G-D19` — `loans.apr` holds the note rate, and the column name still
+says APR. Expand and contract, because legacy rows may hold a disclosed APR that
+was never a note rate and must not be relabelled.
 
 ### Historical note — G-KYC, and why it took two passes
 

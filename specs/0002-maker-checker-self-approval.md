@@ -1,6 +1,10 @@
 # Spec 0002 — Maker-checker for servicing money movements
 
-- **Status:** Draft, for review before implementation begins
+- **Status:** **Implemented.** Written before the code, reviewed as a draft, and
+  now built in three steps -- the signed principal, `db/migrations/0036` (schema)
+  and `db/migrations/0037` + `app/maker_checker.py` (the cutover). Kept as the
+  specification of record: the acceptance criteria below are what the tests
+  assert, and a change to the control changes this document first
 - **Date:** 2026-08-12
 - **Closes:** `docs/DEBT.md` **D8** — fee waiver / balance adjust is available to
   *any* authenticated user, with no role check, no second approver and no ledger
@@ -20,85 +24,63 @@
   vendor delivery, and the reason it stayed open is that "add an approval step"
   is not a requirement — it is a wish. This says what must be true.
 
-> ### This document specifies the control. It does not implement it.
+> ### This document specified the control. The control now exists.
 >
-> **The approval control described below is not implemented.** There is no
-> `pending_movements` table and no approval endpoint: **one authorised person can
-> still move a balance alone**, which is the whole of what D8 now means. It stays
-> open until the implementation PR lands and its tests pass.
+> **Implemented**, in three steps: the signed human principal
+> (`services/servicing-service/app/principal.py`), the schema
+> (`db/migrations/0036_pending_movements.sql`) and the cutover
+> (`db/migrations/0037_resolve_pending_movement.sql` with
+> `services/servicing-service/app/maker_checker.py`). `adjust-balance` and
+> `waive-fee` raise proposals and move no money; a **different** authorised
+> person approves, and that approval writes exactly one ledger entry naming them.
 >
-> **The identity half is now built, and this notice used to deny it.** §3a's
-> requirements are satisfied: the gateway mints a short-lived, audience-bound
-> Ed25519 assertion from the resolved session (`services/gateway/app/principal.py`),
-> servicing verifies it against the public half and enforces csr/admin itself
-> (`services/servicing-service/app/principal.py`), and the private key is the
-> gateway's alone. So `requested_by` and `resolved_by` have a non-forgeable source
-> to come from — the dependency the rest of this document was waiting on.
+> **What this notice used to say, kept because the sequence is the lesson:** for
+> most of this document's life it opened "Nothing described below exists yet",
+> and `db/tests/test_spec_0002_describes_the_real_system.py` was written to fail
+> the day that stopped being true — with the failure as the instruction to
+> rewrite §1 as *what it was*, not to delete the test. It fired twice, once when
+> the principal landed and once here, and both times it was right.
 >
-> Two things this notice used to deny do now exist, and denying them is its own
-> stale claim. **The ledger exists** (`db/migrations/0035_ledger_entries.sql`),
-> so §2's "approval writes the ledger entry" has somewhere to write. **A role
-> restriction exists at the gateway** — `services/gateway/app/auth.py::can_move_money`
-> limits `adjust-balance` / `waive-fee` / `late-fee` to csr/admin, and servicing
-> now applies the same rule itself against the verified principal. Neither is
-> maker-checker: **one person still moves money alone.**
+> **D8 is closed.** What remains around it is scoped and named rather than
+> implied: there is no notification, delegation or out-of-office routing (§8),
+> the two configured limits are cohort/demo values rather than Lending Operations
+> policy (§3), and the maker's scope is REQ-VAL-14 option 2 — any staff principal
+> on any serviced `current` loan — recorded as a reviewed limitation because this
+> system has no staff-to-loan assignment to enforce anything narrower.
 >
-> `db/tests/test_spec_0002_describes_the_real_system.py` asserts that, from both
-> directions: §1's description of today's system must stay true, and this
-> document must not claim the control is in place. When maker-checker is
-> implemented those tests fail, and that failure is the instruction to rewrite §1
-> as *what it was* — not to delete the test.
->
-> The distinction matters here more than usual. This codebase has twice shipped a
-> document that read as a description of a working control and was a description
-> of an intention: a policy publishing DTI cutoffs nothing evaluated, and a
-> reconciliation "control" that never ran. A spec that is mistaken for an
-> implementation is the same failure a third time.
+> The distinction this notice exists for still holds in the other direction: a
+> spec that is mistaken for an implementation, and an implementation that claims
+> more than it does, are the same failure. This codebase has shipped the first
+> twice — a policy publishing DTI cutoffs nothing evaluated, and a reconciliation
+> "control" that never ran.
 
 ---
 
 ## 1. Current state
 
-Two endpoints move money with no approval of any kind:
+**Two endpoints move money, and neither moves it alone.**
 
-| Endpoint | What it does | Who may call it today |
+| Endpoint | What it does now | Who may call it |
 |---|---|---|
-| `POST /accounts/{loan_id}/adjust-balance` | Sets `balances.balance` to an arbitrary value | A verified csr or admin, alone |
-| `POST /accounts/{loan_id}/waive-fee` | Reduces `balances.past_due` | A verified csr or admin, alone |
+| `POST /accounts/{loan_id}/adjust-balance` | Raises an adjustment **proposal**. Returns 202. Moves nothing | Any verified staff principal |
+| `POST /accounts/{loan_id}/waive-fee` | Raises a fee-waiver **proposal**. Returns 202. Moves nothing | Any verified staff principal |
+| `POST /movements/{id}/resolve` | Approves or rejects. An approval writes exactly one ledger entry | A **different** principal: underwriter or admin at or below the configured threshold, admin above it, never a csr |
 
-**"Alone" is the whole of what is left.** Both routes now require the internal
-service token *and* a gateway-signed principal that servicing verifies for
-itself, and both refuse any role outside csr/admin. What neither requires is a
-**second person**.
+*What this section said before, because the difference is the work:* it described
+both endpoints as moving money on the say-so of "any caller holding the internal
+service token", with no role check at the service, no second approver, no record
+of who asked and no record of why. Every clause of that is now false:
 
-*This section previously described something weaker, and the difference is the
-work that has landed since.* It read: "the gateway restricts the role and
-servicing enforces nothing of the sort itself; a caller that reaches servicing
-directly on the compose network with the shared token is subject to no role rule
-at all", and recorded that both handlers took `x_user_role` as an optional header
-and never read it. That was accurate until the signed principal existed. It is
-now false in every part: `require_money_principal` is a real check, the direct
-path is refused (`test_the_shared_token_alone_cannot_move_money`), and a role
-header that disagrees with the signature is refused rather than ignored.
-
-What remains, and why it is still D8 rather than a hardening nicety:
-
-- **no second person** — one authorised staff account can zero a borrower's
-  balance by itself. This is the residue, and everything below specifies it;
-- **no record of why** — there is no reason field on either path;
-- **the ledger entry still names nobody** — migration 0035's compatibility
-  bridge mirrors every committed direct write into `ledger_entries` as a
-  `legacy_direct_write`, so the movement is recoverable, but `actor_id` is NULL.
-  Servicing now knows who acted; the *entry* does not record it, because these
-  routes still write `balances` directly rather than through an approved
-  proposal. Wiring the actor in belongs with the cutover below, where the
-  approver — not the requester — is the actor that must be recorded.
-
-PR #22 closed the *network* half of this: both routes now require
-`X-Internal-Token`, so they are not reachable from outside the compose network.
-That answers **who can reach the endpoint** and says nothing about **who may
-authorise the movement**. The two are independent; closing either leaves the
-other open.
+- **no second person** → `resolve_pending_movement` refuses a resolver equal to
+  the requester, and `no_self_approval` refuses it again at the table. No
+  exception, including admin;
+- **no record of who** → `pending_movements.requested_by`/`resolved_by`, both
+  taken from a verified assertion the caller cannot forge, and the ledger entry's
+  actor is overwritten with the approver;
+- **no record of why** → `reason` is required, non-blank and immutable after
+  creation;
+- **no role restriction at the service** → servicing applies the matrix itself
+  against the configured threshold, and records which threshold it applied.
 
 ## 2. Target state
 

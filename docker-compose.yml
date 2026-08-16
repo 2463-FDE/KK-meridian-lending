@@ -92,6 +92,13 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env -- see .env.example}
       # The PUBLIC half. Servicing verifies human principals and cannot mint one.
       PRINCIPAL_VERIFY_KEY: ${PRINCIPAL_VERIFY_KEY:?set PRINCIPAL_VERIFY_KEY in .env -- generate with python db/tools/generate_principal_keypair.py}
+      # Maker-checker limits, approved for this cohort/demo environment and NOT
+      # Lending Operations policy. Required with no default: an unset threshold
+      # would let an underwriter approve any amount, and an unset cap would let
+      # any amount be proposed. Both fail the service's boot instead.
+      MAKER_CHECKER_ADMIN_THRESHOLD: ${MAKER_CHECKER_ADMIN_THRESHOLD:?set MAKER_CHECKER_ADMIN_THRESHOLD in .env -- see .env.example}
+      MAKER_CHECKER_MAX_DELTA: ${MAKER_CHECKER_MAX_DELTA:?set MAKER_CHECKER_MAX_DELTA in .env -- see .env.example}
+      MAKER_CHECKER_PERMITTED_LOAN_STATUSES: ${MAKER_CHECKER_PERMITTED_LOAN_STATUSES:?set MAKER_CHECKER_PERMITTED_LOAN_STATUSES in .env -- see .env.example}
     depends_on:
       postgres:
         condition: service_healthy

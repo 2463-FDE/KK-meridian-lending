@@ -291,25 +291,46 @@ def test_the_display_helper_reads_no_card_number():
 def test_the_roadmap_planning_surface_agrees_with_start_next():
     """The summary at the top and the decision at the bottom are one claim.
 
-    They disagreed: the planning bullets led with `G-INTAKE-401` and D1, both
-    recorded closed further down the same file, while "Start next" named the
-    maker-checker work. A reader who trusts the summary is sent at finished work.
+    They disagreed once: the planning bullets led with `G-INTAKE-401` and D1,
+    both recorded closed further down the same file, while "Start next" named
+    different work. A reader who trusts the summary is sent at finished work.
+
+    Named gaps are no longer hard-coded here -- they were, and every closure
+    needed this test edited, which is where someone stops thinking. It now
+    derives the claim: whatever the planning surface says is highest priority
+    must also be what "Start next" leads with, and neither may name a gap the
+    file records as closed.
     """
+    import re as _re
+
     text = ROADMAP.read_text(encoding="utf-8")
     surface = text[text.index("## Current planning surface"):text.index("## Status at a glance")]
-
-    for closed in ("G-INTAKE-401", "G-D1"):
-        assert f"close `{closed}`" not in surface, (
-            f"the planning surface still directs the reader to close {closed}, "
-            f"which this file records as closed"
-        )
-    assert "G-SERVICING-ROLE" in surface and "G-MAKER-CHECKER" in surface, (
-        "the planning surface does not name the work 'Start next' selects"
-    )
     start_next = text[text.index("## Start next"):]
-    for gap in ("G-SERVICING-ROLE", "G-MAKER-CHECKER"):
-        assert gap in start_next[:1200], (
-            f"'Start next' no longer leads with {gap} while the summary does"
+    start_next = start_next[:start_next.index("### Historical note")]
+
+    # Only the bullets that DIRECT work. The same block also explains, in prose,
+    # which closed gaps it used to point at -- that history is the correction
+    # this file exists to keep, and counting it as a work pointer would force the
+    # explanation to be deleted to satisfy the test.
+    directive = " ".join(line for line in surface.splitlines()
+                         if line.startswith("- **"))
+    surface_gaps = set(_re.findall(r"`(G-[A-Z0-9-]+)`", directive))
+    next_gaps = set(_re.findall(r"`?\*?\*?(G-[A-Z0-9-]+)", start_next))
+    assert surface_gaps, "the planning surface names no gap at all"
+    assert surface_gaps & next_gaps, (
+        f"the planning surface points at {sorted(surface_gaps)} while 'Start "
+        f"next' works on {sorted(next_gaps)} -- one file, two answers to what "
+        f"happens next"
+    )
+
+    # And neither may name something the closed-gap table records as done.
+    closed_table = text[text.index("**Closed since the 2026-08-11 pass**"):
+                        text.index("#### High")] if "#### High" in text else ""
+    closed = set(_re.findall(r"\| \*\*(G-[A-Z0-9-]+)\*\*", closed_table))
+    for gap in surface_gaps | next_gaps:
+        assert gap not in closed, (
+            f"{gap} is in the closed-gap table and is still being pointed at as "
+            f"work to do"
         )
 
 

@@ -426,13 +426,21 @@ def test_lss_account_money_moving_action_rejects_owning_borrower(monkeypatch, ac
     assert resp.status_code == 403
 
 
-@pytest.mark.parametrize("action", ["adjust-balance", "waive-fee", "late-fee"])
-def test_lss_account_money_moving_action_rejects_underwriter(monkeypatch, action):
-    # Review finding: underwriter is staff (auth.is_staff -> True) but has no
-    # business moving money -- the servicing UI only shows this button to
-    # CSR/admin, but the gateway used to accept any is_staff() caller, so an
-    # underwriter could POST straight past the UI and alter a loan's balance
-    # or past-due amount. Must be CSR/admin only now.
+@pytest.mark.parametrize("action", ["late-fee"])
+def test_lss_direct_money_action_rejects_underwriter(monkeypatch, action):
+    """`late-fee` still moves money on one person's say-so, so it stays csr/admin.
+
+    Review finding: underwriter is staff (auth.is_staff -> True) but has no
+    business moving money alone -- the servicing UI only shows this button to
+    CSR/admin, but the gateway used to accept any is_staff() caller, so an
+    underwriter could POST straight past the UI and alter a balance.
+
+    `adjust-balance` and `waive-fee` LEFT this list with the maker-checker
+    cutover, and the next test is why: they now raise proposals that move
+    nothing, and an underwriter is the role that does most of the approving.
+    Keeping them here would have blocked the control's main reviewer from using
+    the control.
+    """
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(auth, "get_session", lambda token: {
         "id": 2, "username": "sam", "role": "underwriter", "name": "Sam Okafor", "applicant_id": None,

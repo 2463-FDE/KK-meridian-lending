@@ -253,11 +253,17 @@ def _borrower_loans(applicant_id: int) -> dict:
 
 
 _LOAN_SUBPATH_RE = re.compile(r"^loans/(\d+)(?:/(schedule|payments))?$")
+_MOVEMENT_RESOLVE_RE = re.compile(r"^movements/(\d+)/resolve$")
 _ACCOUNT_ACTION_RE = re.compile(r"^accounts/(\d+)/(balance|adjust-balance|waive-fee|late-fee)$")
 # Read-only, ownership-checked for a borrower; every other accounts/ action below
 # (adjust-balance, waive-fee, late-fee) is a money-moving action -- CSR/admin only
 # (underwriter is staff but not permitted to move money -- see can_move_money).
 _ACCOUNT_READ_ACTIONS = ("balance",)
+
+#: Actions that raise a maker-checker proposal rather than moving money. Any
+#: staff role may reach these -- the authority to APPROVE is a separate question
+#: that servicing answers against the configured threshold.
+_PROPOSAL_ACTIONS = ("adjust-balance", "waive-fee")
 
 
 @app.api_route("/lss/{path:path}", methods=["GET", "POST"])
@@ -290,6 +296,20 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
             if auth.is_staff(user) or auth.owns_loan(user, loan_id):
                 return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
             raise HTTPException(status_code=403, detail="forbidden")
+        # `late-fee` still moves money on one person's say-so, so it stays
+        # csr/admin: an underwriter is staff and has no business moving a balance
+        # alone. `adjust-balance` and `waive-fee` are different since the
+        # maker-checker cutover -- they raise PROPOSALS and move nothing, and an
+        # underwriter is the role that does most of the approving. Refusing them
+        # here would block the control's main reviewer from using it.
+        if action in _PROPOSAL_ACTIONS:
+            if auth.is_staff(user):
+                money_headers = dict(svc)
+                money_headers[principal.HEADER] = principal.mint(user)
+                return await _proxy(SERVICING_URL, f"/{path}", request, user,
+                                    extra_headers=money_headers)
+            raise HTTPException(status_code=403, detail="staff only")
+
         # adjust-balance / waive-fee / late-fee -- CSR/admin only. Underwriter is
         # staff but has no business moving money; is_staff() alone let an
         # underwriter POST straight to these routes even though the servicing UI
@@ -317,6 +337,17 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
             return await _proxy(SERVICING_URL, f"/{path}", request, user,
                                 extra_headers=money_headers)
         raise HTTPException(status_code=403, detail="csr/admin only")
+
+    # The maker-checker queue and the resolve endpoint. Staff-only here; WHICH
+    # staff may approve what is servicing's decision, made against the verified
+    # principal and the configured threshold rather than at this hop.
+    if path == "movements" or _MOVEMENT_RESOLVE_RE.match(path):
+        if auth.is_staff(user):
+            money_headers = dict(svc)
+            money_headers[principal.HEADER] = principal.mint(user)
+            return await _proxy(SERVICING_URL, f"/{path}", request, user,
+                                extra_headers=money_headers)
+        raise HTTPException(status_code=403, detail="staff only")
 
     if path == "reconciliation/peek":
         if auth.is_staff(user):
