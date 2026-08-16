@@ -352,21 +352,58 @@ def test_the_landed_weeks_claim_agrees_with_the_matrix():
     )
 
 
-def test_the_servicing_token_gap_row_counts_every_guarded_route():
-    """The closed-gap row said 'all four'. There are five, and the paragraph
-    beneath that table is *about* hand-written lists going stale."""
-    text = ROADMAP.read_text(encoding="utf-8")
-    row = next(line for line in text.splitlines()
+def test_the_servicing_token_gap_row_matches_the_routes_that_exist():
+    """The gap row must not name a route the service no longer serves.
+
+    This assertion has now been wrong in both directions: it first locked in
+    "all four" while five routes were guarded, was corrected to "all five", and
+    that became wrong the moment the fifth was retired. Pinning a NUMBER pins the
+    thing most likely to change, so it checks the named routes against the app's
+    real routing table instead -- a route named in the row must exist, and a
+    guarded route missing from it is only acceptable if the row is not claiming
+    to enumerate.
+    """
+    import ast
+
+    # Read the decorators, do not import the app. An earlier version inserted
+    # servicing-service on sys.path and imported `app.main` here; that left
+    # `app` in sys.modules pointing at another service and broke two unrelated
+    # fixtures in this same file. A doc test has no business mutating the
+    # importer for the rest of the suite.
+    main_src = (REPO / "services" / "servicing-service" / "app" / "main.py")
+    tree = ast.parse(main_src.read_text(encoding="utf-8"))
+    live = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Attribute):
+                continue
+            if dec.func.attr != "post":
+                continue
+            if dec.args and isinstance(dec.args[0], ast.Constant):
+                live.add(dec.args[0].value)
+    assert live, "no POST routes parsed from servicing main.py -- the check found nothing"
+
+    row = next(line for line in ROADMAP.read_text(encoding="utf-8").splitlines()
                if line.startswith("| **G-SERVICING-TOKEN**"))
-    assert "all five" in row, "the row no longer states how many routes are guarded"
-    # "all four" may survive only as the quoted history of what this row used to
-    # claim -- the same allowance the retired-sentence pins make, for the same
-    # reason: a correction is more useful when it shows what it corrected.
-    if "all four" in row:
-        assert not _stated_as_current_fact(row, "all four"), (
-            "the G-SERVICING-TOKEN row states four routes as current fact; the "
-            "legacy POST /payments is guarded too, and the token test "
-            "parametrizes over five"
+
+    # Every route the row names as CURRENTLY guarded must be a route that exists.
+    # `/payments` may only appear as history -- the row says "has since been
+    # retired", and that phrasing is what the check keys on.
+    named = {"apply-payment", "adjust-balance", "waive-fee", "late-fee"}
+    for action in named:
+        assert action in row, f"the gap row no longer names the guarded route {action}"
+        assert any(action in path for path in live), (
+            f"the gap row names {action} as guarded, but no POST route serves it"
+        )
+    if "/payments" in row:
+        assert "retired" in row.lower(), (
+            "the gap row lists /payments among the guarded routes; that endpoint "
+            "was retired with D2 and must be marked as history if named at all"
+        )
+        assert "/payments" not in live, (
+            "POST /payments exists again while the roadmap calls it retired"
         )
 
 

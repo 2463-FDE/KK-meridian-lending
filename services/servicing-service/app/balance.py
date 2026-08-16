@@ -60,7 +60,20 @@ def get_past_due(loan_id: int) -> float:
 
 
 def apply_payment(loan_id: int, amount: float) -> float:
-    """The legacy apply, called only by this service's own `POST /payments`.
+    """The legacy apply. **Nothing calls it any more.**
+
+    It existed for this service's own `POST /payments`, which was retired with
+    D2 -- so no route, and no other module, reaches this function. It is kept for
+    one reason, stated so it is not mistaken for a live path:
+    `tests/test_money.py` uses it as the vehicle for D12's Decimal evidence,
+    and rewriting that evidence onto another path is a money-arithmetic change,
+    not part of retiring an endpoint.
+
+    Removing it belongs with ADR 0010's writer conversion (steps 3 and 5), where
+    the remaining direct `balances` writers -- `adjust_balance` and `waive_fee` --
+    are converted and the guard against direct writes is enabled. Until then this
+    is dead code that still writes money, which is exactly the kind of thing that
+    should be named rather than left to be discovered.
 
     No waterfall -- the whole amount comes off the balance, never
     fees->interest->principal (D14).
