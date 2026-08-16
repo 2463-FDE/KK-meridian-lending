@@ -358,11 +358,19 @@ WHERE l.id BETWEEN 7000 AND 7299;
 -- One statement covering the curated loans (002) and the bulk ones above,
 -- keyed on app_id, so a loan can only ever take the schedule of its own offer.
 -- Reviewed on PR #10.
+-- `note_rate_pct` is carried across with the rest of the contract (D19 expand,
+-- db/migrations/0038). Without it a FRESH seeded database has NULL note rates on
+-- exactly the loans a MIGRATED one back-fills -- the two agreeing on shape and
+-- disagreeing on data, which `test_schema_parity.py` cannot see because it
+-- compares structure. The evidence guard is the same one the migration uses and
+-- the same one this statement already applied: the offer must carry a proven
+-- contract, keyed to the loan's own application.
 UPDATE loans l
    SET regular_payment       = o.monthly_payment,
        regular_payment_count = o.regular_payment_count,
        final_payment         = o.final_payment,
-       schedule_version      = o.schedule_version
+       schedule_version      = o.schedule_version,
+       note_rate_pct         = o.note_rate_pct
   FROM offers o
  WHERE o.app_id = l.app_id
    AND o.schedule_version IS NOT NULL
