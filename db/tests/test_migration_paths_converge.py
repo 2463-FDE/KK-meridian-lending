@@ -43,11 +43,6 @@ MIGRATIONS_DIR = REPO_ROOT / "db" / "migrations"
 
 # Schema-only init files. 002/003 are seed DATA -- irrelevant to a schema
 # comparison, and 003 depends on rows 002 seeds.
-INIT_SCHEMA_FILES = (
-    "001_schema.sql", "004_decision_events.sql",
-    "005_manual_reviews.sql", "006_decision_attempts.sql", "007_ledger_opening_balances.sql",
-)
-
 SCHEMAS = {
     "fresh": "gapd_fresh_init",
     "legacy": "gapd_legacy_then_migrations",
@@ -226,6 +221,44 @@ def _defaults(conn, schema, table):
         }
 
 
+def _triggers(conn, schema, table):
+    """Triggers on the table, with the function each one calls and when it fires.
+
+    **This aspect was missing, and its absence hid a real divergence.**
+    `db/migrations/0035` creates three triggers on `balances` -- the ledger
+    compatibility bridge, the balance/ledger parity check, and the guard against
+    deleting a projection row. `db/init` created none of them, so a freshly
+    built database had the ledger tables and the projection but none of the
+    controls that keep the projection honest. Every other aspect matched, so
+    every case here passed.
+
+    A trigger IS the control in this schema: append-only, parity and the
+    projection itself are all triggers. Comparing columns and constraints while
+    ignoring triggers compares the shape of the database and not its rules.
+
+    Timing and events are compared as well as the name, because a trigger that
+    fires `BEFORE UPDATE` on one path and `AFTER UPDATE` on the other is a
+    different control wearing the same name -- and `DEFERRABLE` matters more
+    still: a constraint trigger checked per statement instead of at commit
+    forbids ordinary work that is in balance by the time it commits.
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT t.tgname, p.proname, t.tgtype, t.tgdeferrable, t.tginitdeferred "
+            "  FROM pg_trigger t "
+            "  JOIN pg_class c ON c.oid = t.tgrelid "
+            "  JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "  JOIN pg_proc p ON p.oid = t.tgfoid "
+            " WHERE n.nspname = %s AND c.relname = %s AND NOT t.tgisinternal",
+            (schema, table),
+        )
+        return {
+            r["tgname"]: (r["proname"], r["tgtype"], r["tgdeferrable"],
+                          r["tginitdeferred"])
+            for r in cur.fetchall()
+        }
+
+
 def _shape(conn, schema, table):
     """Everything compared for a table, as one value."""
     return {
@@ -235,7 +268,34 @@ def _shape(conn, schema, table):
         "foreign_keys": _foreign_keys(conn, schema, table),
         "indexes": _indexes(conn, schema, table),
         "defaults": _defaults(conn, schema, table),
+        "triggers": _triggers(conn, schema, table),
     }
+
+
+def _functions(conn, schema):
+    """Every function in the schema, by name and argument signature.
+
+    Schema-wide rather than per-table, because a trigger function is not owned
+    by a table and a missing one is invisible in any per-table comparison. Two
+    of the three divergences this file now catches were missing FUNCTIONS
+    (`capture_legacy_balance_delta`, `balances_cannot_be_deleted_during_cutover`)
+    as well as missing triggers.
+
+    Bodies are deliberately NOT compared. `db/init` and `db/migrations` are
+    independent copies of the same definitions -- 007 says so about itself -- and
+    holding them to byte-identical bodies would fail on a reformatted comment
+    while still passing on a control that was never attached to anything. The
+    name and signature are what a trigger definition depends on; whether the
+    control actually fires is what the trigger comparison above tests.
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args "
+            "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            " WHERE n.nspname = %s",
+            (schema,),
+        )
+        return {(r["proname"], r["args"]) for r in cur.fetchall()}
 
 
 # --- the four paths -----------------------------------------------------------
@@ -301,14 +361,30 @@ def test_path_4_migrations_are_idempotent_when_replayed(conn):
 
 # --- convergence ---------------------------------------------------------------
 
-_CONVERGENCE_TABLES = (
-    "applications", "offers", "loans", "manual_reviews",
-    "decision_events", "decision_attempts", "payments", "payment_applications",
-)
+def _tables(conn, schema):
+    """Every ordinary table in the schema, derived rather than listed.
 
-# Same tables, for the legacy-upgrade comparison. Kept as its own name so that
-# narrowing one comparison can never silently narrow the other.
-_LEGACY_CONVERGENCE_TABLES = _CONVERGENCE_TABLES
+    **The list this replaces omitted `balances`, `ledger_entries` and
+    `pending_movements`** -- the money tables, and the ones carrying the ledger
+    controls. So no comparison in this file ever looked at them, and a
+    divergence there would have been invisible however many aspects were added.
+
+    That is the same defect this repository keeps producing in a new place: a
+    hand-maintained list that reads complete while missing one. `db/init` is the
+    definition of what a database has, so the tables to compare come from it.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT c.relname FROM pg_class c "
+            "  JOIN pg_namespace n ON n.oid = c.relnamespace "
+            " WHERE n.nspname = %s AND c.relkind = 'r' ORDER BY c.relname",
+            (schema,),
+        )
+        return tuple(r[0] for r in cur.fetchall())
+
+# Both comparisons derive their tables from the fresh schema (see `_tables`),
+# so neither can be narrowed by editing a list -- and narrowing one can still
+# never silently narrow the other, because neither is a list any more.
 
 
 def _build_all_paths(conn):
@@ -326,7 +402,8 @@ def _build_all_paths(conn):
 
 
 @pytest.mark.parametrize("aspect", ["columns", "unique_columns", "checks",
-                                    "foreign_keys", "indexes", "defaults"])
+                                    "foreign_keys", "indexes", "defaults",
+                                    "triggers"])
 @pytest.mark.parametrize("other", ["replay", "twice"])
 def test_init_based_paths_converge_on_every_aspect(conn, other, aspect):
     """Fresh init, fresh init + migrations, and fresh init + migrations twice
@@ -334,7 +411,12 @@ def test_init_based_paths_converge_on_every_aspect(conn, other, aspect):
     keys, indexes and defaults -- one parametrized case per aspect so a failure
     names which kind of divergence it is."""
     _build_all_paths(conn)
-    for table in _CONVERGENCE_TABLES:
+    tables = _tables(conn, SCHEMAS["fresh"])
+    assert len(tables) > 8, (
+        f"only {len(tables)} tables found on the fresh path -- the comparison "
+        f"is not reading the schema, so a pass here proves nothing"
+    )
+    for table in tables:
         expected = _shape(conn, SCHEMAS["fresh"], table)[aspect]
         actual = _shape(conn, SCHEMAS[other], table)[aspect]
         assert actual == expected, f"{table}.{aspect} diverges between fresh-init and {other}"
@@ -354,7 +436,8 @@ def test_a_replay_never_downgrades_a_validated_check_to_not_valid(conn):
 
 
 @pytest.mark.parametrize("aspect", ["columns", "unique_columns", "checks",
-                                    "foreign_keys", "indexes", "defaults"])
+                                    "foreign_keys", "indexes", "defaults",
+                                    "triggers"])
 def test_legacy_upgrade_reaches_the_same_shape_as_a_fresh_install(conn, aspect):
     """The path an existing operator actually takes, compared against the path a
     new one gets. This is the comparison that matters most and was missing: an
@@ -368,12 +451,83 @@ def test_legacy_upgrade_reaches_the_same_shape_as_a_fresh_install(conn, aspect):
     that is exactly the drift being looked for.
     """
     _build_all_paths(conn)
-    for table in _LEGACY_CONVERGENCE_TABLES:
+    tables = _tables(conn, SCHEMAS["fresh"])
+    assert len(tables) > 8, (
+        f"only {len(tables)} tables found on the fresh path -- the comparison "
+        f"is not reading the schema, so a pass here proves nothing"
+    )
+    for table in tables:
         expected = _shape(conn, SCHEMAS["fresh"], table)[aspect]
         actual = _shape(conn, SCHEMAS["legacy"], table)[aspect]
         assert actual == expected, (
             f"{table}.{aspect} diverges between a fresh install and a legacy upgrade"
         )
+
+
+@pytest.mark.parametrize("other", ["replay", "twice", "legacy"])
+def test_every_path_defines_the_same_functions(conn, other):
+    """Schema-wide, because a trigger function belongs to no table.
+
+    The per-table comparisons above cannot see a missing function: they look at
+    tables, and `capture_legacy_balance_delta` is not on one. Both of the
+    functions `db/init` was missing -- that one and
+    `balances_cannot_be_deleted_during_cutover` -- would have stayed invisible
+    to every other case in this file.
+
+    Names and signatures only, not bodies. `db/init` and `db/migrations` are
+    independent copies of the same definitions on purpose (007 says so about
+    itself), so requiring identical bodies would fail on a reworded comment
+    while still passing on a control nothing had attached. Whether the control
+    fires is the `triggers` aspect's job.
+    """
+    _build_all_paths(conn)
+    expected = _functions(conn, SCHEMAS["fresh"])
+    actual = _functions(conn, SCHEMAS[other])
+
+    # Guard the guard: an empty comparison would pass and prove nothing.
+    assert len(expected) > 5, (
+        f"only {len(expected)} functions found on the fresh path -- the sweep is "
+        f"not reading the schema"
+    )
+    missing = sorted(n for n, _ in expected - actual)
+    extra = sorted(n for n, _ in actual - expected)
+    assert not missing and not extra, (
+        f"functions diverge between a fresh install and {other} -- "
+        f"missing from {other}: {missing or 'none'}; "
+        f"present only on {other}: {extra or 'none'}"
+    )
+
+
+def test_the_ledger_controls_exist_on_a_fresh_install(conn):
+    """Named individually, because this is the divergence that prompted the two
+    comparisons above and a regression here should say so by name.
+
+    A fresh database had the ledger tables and `project_ledger_entry` but none
+    of the three controls on `balances`. The consequence was not theoretical: the
+    compatibility bridge is what makes an unconverted legacy writer *recorded*
+    rather than *invisible*, and it was absent on exactly the path every
+    developer and every e2e run uses.
+    """
+    _build_fresh_init(conn, SCHEMAS["fresh"])
+    triggers = _triggers(conn, SCHEMAS["fresh"], "balances")
+
+    for name in ("balances_capture_legacy_delta",
+                 "balances_ledger_parity",
+                 "balances_reject_delete_during_cutover"):
+        assert name in triggers, (
+            f"{name} is missing from a freshly built database. ADR 0010's "
+            f"controls hold on the migrated path only, so the guarantee depends "
+            f"on how the operator's database was built."
+        )
+
+    # The parity check must be DEFERRABLE INITIALLY DEFERRED. Attached as an
+    # ordinary constraint it would fire per statement and refuse a transaction
+    # that is in balance by the time it commits -- the same control by name,
+    # rejecting correct work.
+    _, _, deferrable, initially_deferred = triggers["balances_ledger_parity"]
+    assert deferrable and initially_deferred, (
+        "balances_ledger_parity is not DEFERRABLE INITIALLY DEFERRED"
+    )
 
 
 def test_the_four_previously_colliding_constraints_are_guarded(conn):
