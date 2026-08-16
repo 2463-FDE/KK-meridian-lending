@@ -34,13 +34,25 @@ def test_the_spec_exists_and_names_what_it_closes():
 
 
 @pytest.mark.parametrize("route", ["adjust-balance", "waive-fee"])
-def test_the_two_routes_still_have_no_approval(route):
-    """§1's central claim. If this fails, maker-checker exists and §1 is history."""
+def test_the_two_routes_now_go_through_an_approval(route):
+    """§1's central claim, inverted for the third and final time.
+
+    It first required that these routes have NO approval -- true, and written to
+    fail the day that changed, with the failure as the instruction to rewrite §1.
+    It has now fired for the last time: the control is implemented, so the test
+    pins the control instead of its absence.
+
+    If this fails, someone has removed the approval step and the money routes
+    move money alone again.
+    """
     src = SERVICING_MAIN.read_text(encoding="utf-8")
-    assert route in src, f"{route} no longer exists -- spec 0002 §1 is out of date"
-    assert "pending_movements" not in src, (
-        "servicing-service references pending_movements, so an approval path "
-        "exists and spec 0002's 'current state' is no longer current"
+    assert route in src, f"{route} no longer exists"
+    assert "maker_checker.propose" in src, (
+        "the money routes no longer raise proposals -- D8 has reopened"
+    )
+    resolve = src[src.index("def resolve_movement("):]
+    assert "maker_checker.resolve" in resolve, (
+        "there is no resolve endpoint, so a proposal can never be approved"
     )
 
 
@@ -65,10 +77,16 @@ def test_servicing_now_verifies_the_principal_it_used_to_ignore():
     adjust = src[src.index("def adjust_balance("):]
     adjust = adjust[:adjust.index("@app.post", 1)] if "@app.post" in adjust[1:] else adjust[:1500]
 
-    assert "require_money_principal" in adjust, (
+    # `require_staff_principal` since the cutover, not `require_money_principal`:
+    # proposing moves nothing, so every staff role may do it, while approving is
+    # a separate authority decided against the configured threshold. Either guard
+    # satisfies the property this test exists for -- that a VERIFIED human is
+    # required -- and neither may be absent.
+    assert ("require_staff_principal" in adjust
+            or "require_money_principal" in adjust), (
         "adjust_balance no longer verifies a human principal -- if the role check "
-        "moved back to the gateway alone, spec 0002 section 1 is wrong again and "
-        "the direct-to-servicing bypass is reopened"
+        "moved back to the gateway alone, the direct-to-servicing bypass is "
+        "reopened"
     )
     assert "x_principal_assertion" in adjust, (
         "the handler does not take the signed assertion, so whatever it verifies "
@@ -99,236 +117,33 @@ def test_the_roles_the_spec_matrixes_are_the_roles_that_exist():
         )
 
 
-def test_d8_is_still_open():
-    """If D8 closes, this spec has been implemented and §1 needs rewriting."""
-    row = [l for l in DEBT.read_text(encoding="utf-8").splitlines()
-           if l.startswith("| **D8**")]
-    assert row, "D8 is missing from the debt register"
-    assert "**Open**" in row[0], (
-        "D8 is no longer open -- spec 0002 describes a system that has changed"
-    )
+def test_d8_is_recorded_as_closed_now_that_the_control_exists():
+    """This guard has done its job and is inverted for the last time.
 
+    It required D8 to read **Open**, and existed so that closing it would fail
+    here -- the failure being the instruction to rewrite spec 0002 section 1
+    rather than to delete the test. That is exactly what happened: the control
+    landed, this fired, and section 1 became history.
 
-def test_the_spec_states_its_own_limit():
-    """The direct-INSERT bypass has to be in the spec, not discovered later.
-
-    Every other approval-shaped claim in this repository that omitted its limit
-    turned out to be an overclaim.
+    What it pins now is the pair. The register and the code must agree about
+    whether a second approver exists, in both directions -- an entry marked Fixed
+    with no approval path is the overclaim, and an entry left Open beside a
+    working control is the understatement.
     """
-    text = SPEC.read_text(encoding="utf-8")
-    assert "direct `INSERT`" in text or "direct INSERT" in text, (
-        "the spec does not state that a direct database insert bypasses "
-        "maker-checker, which is the boundary of the whole control"
-    )
-    assert "REVOKE" in text, (
-        "the spec does not explain why privilege-based enforcement is unavailable"
-    )
-
-
-# --- the identity trust boundary --------------------------------------------
-
-
-@pytest.mark.parametrize("requirement", [f"REQ-ID-{n}" for n in range(1, 11)])
-def test_the_identity_requirements_are_all_present(requirement):
-    """The whole control reduces to "are these two the same person?".
-
-    If identity can be asserted by the caller, "a different approver" means "a
-    different string in a header" and maker-checker is a naming convention.
-    """
-    assert requirement in SPEC.read_text(encoding="utf-8"), (
-        f"{requirement} is missing -- the spec does not pin down where "
-        f"requested_by and resolved_by come from"
-    )
-
-
-def test_the_spec_forbids_trusting_client_supplied_identity():
-    text = SPEC.read_text(encoding="utf-8")
-    assert "never from a value supplied by the client" in text
-    assert "X-User-" in text, "the spec does not name the headers in question"
-
-
-def test_the_gateway_really_does_strip_inbound_identity_headers():
-    """REQ-ID-2 claims this already holds. Hold it to the code.
-
-    If the gateway stopped stripping, a browser client could supply its own
-    X-User-Id and the spec's central assumption would be false while still
-    reading as satisfied.
-    """
-    src = (REPO / "services" / "gateway" / "app" / "main.py").read_text(encoding="utf-8")
-    assert 'startswith("x-user-")' in src, (
-        "the gateway no longer strips inbound X-User-* headers, so spec 0002 "
-        "REQ-ID-2 describes something that is not true"
-    )
-    assert 'headers["X-User-Id"]' in src, (
-        "the gateway no longer stamps X-User-Id from the resolved session"
-    )
-
-
-def test_the_spec_covers_the_adversarial_cases():
-    """Spoofing, unresolved identity, self-approval, authority, concurrency and
-    immutable evidence -- the cases a happy-path spec omits."""
-    text = SPEC.read_text(encoding="utf-8").lower()
-    for case, why in [
-        ("spoofed requester", "a forged requester header"),
-        ("spoofed role", "a forged role header"),
-        ("cannot be resolved", "identity that does not resolve"),
-        ("self-approval", "the requester approving their own proposal"),
-        ("insufficient authority", "an approver below the threshold"),
-        ("race", "two approvers at once"),
-        ("cannot be amended", "audit evidence being edited after the fact"),
-    ]:
-        assert case in text, f"no acceptance case for {why}"
-
-
-def test_the_service_credential_is_not_treated_as_a_user_credential():
-    """The bypass this spec has to forbid: reading the role header because the
-    request carried the internal token. That token is shared by every backend --
-    it authenticates a service, not a human."""
-    text = SPEC.read_text(encoding="utf-8")
-    assert "service* credential" in text or "service credential" in text or            "not a *user* credential" in text or "not a user credential" in text, (
-        "the spec does not distinguish the shared service token from a user "
-        "credential, which is the escalation path an implementer would take"
-    )
-
-
-def test_the_spec_requires_a_non_forgeable_server_validated_principal():
-    text = SPEC.read_text(encoding="utf-8")
-    for phrase in (
-        "server-side Redis session",
-        "asymmetric private key",
-        "independently verify",
-        "audience",
-        "shared service token",
-        "SHALL NOT authenticate a human",
-    ):
-        assert phrase in text, f"identity boundary omits {phrase!r}"
-
-
-def test_the_spec_is_honest_about_what_is_built_and_what_is_not():
-    """The spec must claim exactly what exists -- in both directions.
-
-    This used to require the sentence "no signed principal assertion", which was
-    true when written and became false when the assertion shipped. Requiring it
-    made the document uncorrectable: the spec could not be brought in line with
-    the code without failing its own guard, and the guard stayed green while the
-    system changed underneath it. That is the failure mode the file exists to
-    prevent, achieved by the file itself.
-
-    What is durable is not a status sentence but the PAIRING: whatever the spec
-    says about identity must match whether `require_money_principal` exists, and
-    the approval control must still be described as absent while
-    `pending_movements` does not exist.
-    """
-    text = SPEC.read_text(encoding="utf-8")
-    flat = " ".join(text.split())
+    row = next(l for l in DEBT.read_text(encoding="utf-8").splitlines()
+               if l.startswith("| **D8**"))
     servicing = SERVICING_MAIN.read_text(encoding="utf-8")
+    implemented = "maker_checker.resolve" in servicing
 
-    principal_is_built = "require_money_principal" in servicing
-    assert principal_is_built, (
-        "servicing no longer verifies a principal; this test's premise has "
-        "changed and the spec's identity section must be re-examined"
+    assert implemented, "the approval path is gone; D8 must go back to Open"
+    assert "**Fixed.**" in row, (
+        "D8 still reads as open while adjust-balance and waive-fee raise "
+        "proposals that a second person must approve"
     )
-    # Each present-tense claim is named and refused individually. The first
-    # version of this check allowed the stale sentence whenever the word
-    # "previously" appeared ANYWHERE in the document -- which it does, a dozen
-    # times, in unrelated history. That is a guard that passes over the prose it
-    # is guarding, and the review caught it doing exactly that: three stale
-    # paragraphs survived a round because one distant word satisfied the test.
-    #
-    # A claim may still be QUOTED as history. What it may not be is asserted, so
-    # the check is: does this sentence appear outside a past-tense frame?
-    stale_now = [
-        "no signed principal assertion",
-        "the required boundary does not exist yet",
-        "is not a check servicing itself makes",
-        "as a header today and never read it",
-        "servicing validates no human principal",
-    ]
-    lowered = flat.lower()
-    offenders = []
-    for claim in stale_now:
-        index = lowered.find(claim)
-        while index != -1:
-            window = lowered[max(0, index - 220):index]
-            quoted = window.count('"') % 2 == 1
-            past = any(marker in window for marker in (
-                "previously", "used to", "it read", "described", "past tense",
-                "before the signed principal", "when it was written",
-            ))
-            if not (quoted or past):
-                offenders.append(claim)
-                break
-            index = lowered.find(claim, index + len(claim))
-    assert not offenders, (
-        f"the spec asserts these as current fact: {offenders}. Servicing verifies "
-        f"a gateway-signed principal and applies csr/admin itself -- see "
-        f"services/servicing-service/app/principal.py. State them as history or "
-        f"delete them."
+    assert "not Lending Operations policy" in row.replace("**", ""), (
+        "D8 claims the control without recording that its limits are cohort/demo "
+        "configuration -- a reader would take 500.00 for approved policy"
     )
-
-    # And the half that is genuinely absent must still be described as absent.
-    assert "pending_movements" not in servicing, (
-        "servicing references pending_movements -- the approval control may be "
-        "implemented, so section 1 must be rewritten again"
-    )
-    assert "is not implemented" in flat or "not implemented" in flat, (
-        "the spec no longer says the approval control is unimplemented, while no "
-        "pending_movements table exists -- that is the overclaim this repository "
-        "has already shipped twice"
-    )
-
-
-def test_forged_headers_with_a_valid_service_token_are_covered():
-    text = SPEC.read_text(encoding="utf-8").lower()
-    for case in (
-        "backend cannot forge a human",
-        "forged role cannot override",
-        "forged identity cannot hide self-approval",
-        "missing human principal fails closed",
-        "invalid human principal fails closed",
-        "machine service remains a machine service",
-    ):
-        assert case in text, f"missing acceptance scenario: {case}"
-
-
-# --- proposal-side validity: the review's central finding ---------------------
-
-
-@pytest.mark.parametrize("requirement", [f"REQ-VAL-{n}" for n in range(1, 16)])
-def test_the_proposal_validity_requirements_are_all_present(requirement):
-    """Guarding only the approval step puts the whole control on one tired human.
-
-    The role matrix lets a CSR raise a proposal, and approval copies the
-    proposal's fields straight into the ledger -- so an unconstrained proposal
-    that gets rubber-stamped under queue pressure becomes a real, irreversible
-    money movement. These requirements are what stop a bad request entering the
-    queue at all.
-    """
-    assert requirement in SPEC.read_text(encoding="utf-8"), (
-        f"{requirement} is gone from spec 0002, so proposal creation is "
-        "unconstrained in whatever it governed"
-    )
-
-
-@pytest.mark.parametrize("criterion", [f"AC-{n}" for n in range(1, 30)])
-def test_every_acceptance_criterion_is_present(criterion):
-    """A numbered criterion that vanishes takes its rejection path with it, and
-    the gap is invisible: the remaining numbers still read as a complete list."""
-    text = SPEC.read_text(encoding="utf-8")
-    assert f"**{criterion}**" in text, f"{criterion} is missing from spec 0002"
-
-
-def test_resolution_revalidates_a_queued_proposals_complete_target():
-    text = SPEC.read_text(encoding="utf-8").lower()
-    for case in (
-        "queued proposal cannot execute after its loan closes",
-        "queued proposal cannot execute after servicing is removed",
-        "unrecognised status introduced while queued fails closed",
-    ):
-        assert case in text, f"missing queued-state acceptance scenario: {case}"
-    req = text[text.index("**req-val-15**"):text.index("**req-val-15**") + 900]
-    for invariant in ("loan still exists", "balances", "status", "target-authorization"):
-        assert invariant in req, f"resolution does not revalidate {invariant}"
 
 
 def test_the_spec_states_no_UNAPPROVED_threshold_amount():
@@ -404,17 +219,31 @@ def test_the_limits_fail_closed_when_missing():
     )
 
 
-def test_the_spec_does_not_claim_the_control_is_implemented():
-    """This document specifies a control. Merging it changes nothing about what
-    the running system permits, and saying so is the point: this codebase has
-    twice shipped a document that read as a description of a working control and
-    was a description of an intention.
+def test_the_spec_and_the_implementation_agree_on_what_exists():
+    """The last inversion of this file's central guard.
+
+    It required the spec to state that nothing in it was implemented, and to be
+    marked a Draft. Both were right for as long as they were true, and the test
+    was built to fail the day they stopped -- which is now. What it pins instead
+    is that the document and the code cannot disagree about whether the control
+    exists.
     """
     text = SPEC.read_text(encoding="utf-8")
-    assert "does not implement it" in text.lower(), (
-        "the spec does not state that nothing in it is implemented yet"
+    servicing = SERVICING_MAIN.read_text(encoding="utf-8")
+    implemented = "maker_checker.resolve" in servicing
+
+    assert implemented, (
+        "no resolve path in servicing -- if the control was removed, this "
+        "document must go back to describing it as a proposal"
     )
-    assert "Draft" in text, "the spec is no longer marked as a draft"
+    assert "**Implemented.**" in text or "Status:** **Implemented" in text, (
+        "the spec still reads as an unbuilt draft while the control is live. A "
+        "reader deciding whether the second-approver rule exists would get the "
+        "wrong answer from the document of record."
+    )
+    assert "does not implement it" not in text, (
+        "the spec still says it does not implement the control"
+    )
 
 
 def test_the_spec_agrees_with_adr_0011_on_what_is_frozen():

@@ -66,6 +66,23 @@ HEADER = "X-Principal-Assertion"
 #: is not a rule. `test_money_role_matches_the_gateway` holds the two together.
 MONEY_ROLES = frozenset({"csr", "admin"})
 
+#: Every staff role. Used by the maker-checker routes, where authority is decided
+#: per action rather than by one "may move money" bit.
+#:
+#: The two sets differ on purpose, and the difference IS the cutover. MONEY_ROLES
+#: answers "who may move a balance ALONE" -- under maker-checker that is nobody
+#: for an adjustment or a waiver, and remains csr/admin for `late-fee`, the one
+#: staff route that still writes directly. STAFF_ROLES answers "who is staff",
+#: after which `maker_checker` applies spec 0002 section 3: any staff role may
+#: PROPOSE, underwriter or admin may APPROVE within the configured threshold,
+#: admin above it, and a csr never approves at all.
+#:
+#: An underwriter is in one set and not the other, which is exactly right and was
+#: exactly wrong before: gating the proposal routes on MONEY_ROLES refused the
+#: role meant to do most of the approving, while admitting the role that may
+#: never approve.
+STAFF_ROLES = frozenset({"csr", "underwriter", "admin"})
+
 
 @dataclass(frozen=True)
 class Principal:
@@ -168,17 +185,20 @@ def verify(assertion: str | None) -> Principal:
     )
 
 
-def require_money_principal(assertion: str | None,
-                            claimed_role: str | None = None,
-                            claimed_user: str | None = None) -> Principal:
-    """The guard money-moving staff routes call. Fails closed, always.
+def _verified_or_401(assertion: str | None, claimed_role: str | None,
+                     claimed_user: str | None) -> Principal:
+    """Verify, and refuse a header that disagrees with the signature.
 
-    `claimed_role` / `claimed_user` are the caller-supplied `X-User-*` headers.
-    They are NOT consulted for authority. They are passed in only so that a
-    disagreement with the verified assertion can be refused outright rather than
-    quietly ignored (REQ-ID-8): a request whose headers say `admin` while its
-    signature says `csr` is not a confused client, and serving it -- even
-    correctly, at the lower authority -- would leave the attempt invisible.
+    Shared by both guards below rather than duplicated. `claimed_role` and
+    `claimed_user` are the caller-supplied `X-User-*` headers; they are NOT
+    consulted for authority, and are passed in only so a disagreement with the
+    verified assertion can be refused outright rather than quietly ignored
+    (REQ-ID-8). A request whose headers say `admin` while its signature says
+    `csr` is not a confused client, and serving it -- even correctly, at the
+    lower authority -- would leave the attempt invisible.
+
+    One copy, because two identity checks drift and the copy nobody updates is
+    the one an attacker finds.
     """
     try:
         principal = verify(assertion)
@@ -199,16 +219,46 @@ def require_money_principal(assertion: str | None,
             claimed_user, principal.subject,
         )
         raise HTTPException(status_code=401, detail="not authorized")
+    return principal
 
+
+def require_money_principal(assertion: str | None,
+                            claimed_role: str | None = None,
+                            claimed_user: str | None = None) -> Principal:
+    """The guard for a route that moves money on ONE person's say-so.
+
+    After the maker-checker cutover that is `late-fee` only. `adjust-balance` and
+    `waive-fee` raise proposals and use `require_staff_principal` instead,
+    because an underwriter must be able to propose and approve there while a csr
+    must never approve -- a distinction this csr/admin bit cannot express.
+    """
+    principal = _verified_or_401(assertion, claimed_role, claimed_user)
     if not principal.may_move_money():
         # 403, not 401: this caller IS authenticated and is not permitted. The
         # distinction matters to an operator reading logs -- one is a broken
         # deployment, the other is a staff member hitting a boundary.
-        log.warning(
-            "role %r may not move money (subject %s)", principal.role, principal.subject
-        )
+        log.warning("role %r may not move money (subject %s)",
+                    principal.role, principal.subject)
         raise HTTPException(status_code=403, detail="csr/admin only")
+    return principal
 
+
+def require_staff_principal(assertion: str | None,
+                            claimed_role: str | None = None,
+                            claimed_user: str | None = None) -> Principal:
+    """A verified staff human, with the per-action authority decided by the caller.
+
+    The maker-checker routes use this because "may move money" is no longer one
+    question there: proposing, approving within the threshold and approving above
+    it are three authorities, and `maker_checker` holds that matrix (spec 0002
+    section 3). What this guarantees is the part all three need -- that the
+    person is real, verified, and staff.
+    """
+    principal = _verified_or_401(assertion, claimed_role, claimed_user)
+    if principal.role not in STAFF_ROLES:
+        log.warning("role %r is not staff (subject %s)",
+                    principal.role, principal.subject)
+        raise HTTPException(status_code=403, detail="staff only")
     return principal
 
 

@@ -253,11 +253,37 @@ def _borrower_loans(applicant_id: int) -> dict:
 
 
 _LOAN_SUBPATH_RE = re.compile(r"^loans/(\d+)(?:/(schedule|payments))?$")
+_MOVEMENT_RESOLVE_RE = re.compile(r"^movements/(\d+)/resolve$")
 _ACCOUNT_ACTION_RE = re.compile(r"^accounts/(\d+)/(balance|adjust-balance|waive-fee|late-fee)$")
 # Read-only, ownership-checked for a borrower; every other accounts/ action below
 # (adjust-balance, waive-fee, late-fee) is a money-moving action -- CSR/admin only
 # (underwriter is staff but not permitted to move money -- see can_move_money).
 _ACCOUNT_READ_ACTIONS = ("balance",)
+
+#: Actions that raise a maker-checker proposal rather than moving money. Any
+#: staff role may reach these -- the authority to APPROVE is a separate question
+#: that servicing answers against the configured threshold.
+_PROPOSAL_ACTIONS = ("adjust-balance", "waive-fee")
+
+
+def _principal_headers(svc: dict, user: dict) -> dict:
+    """Service headers plus a freshly minted human principal, or 503.
+
+    Every LSS path that mints goes through here. Three call sites each doing
+    their own try/except is three chances to forget one -- and forgetting it
+    turns a missing signing key into a generic 500, which points an operator at
+    the wrong service entirely. A money route that cannot say who is acting must
+    refuse, and must say why.
+    """
+    headers = dict(svc)
+    try:
+        headers[principal.HEADER] = principal.mint(user)
+    except config.PrincipalKeyError as exc:
+        log.error("cannot mint a principal assertion: %s", exc)
+        raise HTTPException(
+            status_code=503, detail="identity signing unavailable",
+        ) from exc
+    return headers
 
 
 @app.api_route("/lss/{path:path}", methods=["GET", "POST"])
@@ -290,6 +316,18 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
             if auth.is_staff(user) or auth.owns_loan(user, loan_id):
                 return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
             raise HTTPException(status_code=403, detail="forbidden")
+        # `late-fee` still moves money on one person's say-so, so it stays
+        # csr/admin: an underwriter is staff and has no business moving a balance
+        # alone. `adjust-balance` and `waive-fee` are different since the
+        # maker-checker cutover -- they raise PROPOSALS and move nothing, and an
+        # underwriter is the role that does most of the approving. Refusing them
+        # here would block the control's main reviewer from using it.
+        if action in _PROPOSAL_ACTIONS:
+            if auth.is_staff(user):
+                return await _proxy(SERVICING_URL, f"/{path}", request, user,
+                                    extra_headers=_principal_headers(svc, user))
+            raise HTTPException(status_code=403, detail="staff only")
+
         # adjust-balance / waive-fee / late-fee -- CSR/admin only. Underwriter is
         # staff but has no business moving money; is_staff() alone let an
         # underwriter POST straight to these routes even though the servicing UI
@@ -301,22 +339,18 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
         # caller that skips the gateway entirely is now refused by servicing
         # instead of arriving unauthenticated-as-a-human with a shared token.
         if auth.can_move_money(user):
-            money_headers = dict(svc)
-            try:
-                money_headers[principal.HEADER] = principal.mint(user)
-            except config.PrincipalKeyError as exc:
-                # Fail closed, and say which thing is broken. Without this the
-                # failure surfaces either as a crypto traceback (500, a mystery)
-                # or as a 401 from servicing, which points the operator at the
-                # wrong service entirely. A money route with no way to say who is
-                # acting must refuse, not degrade.
-                log.error("cannot mint a principal assertion: %s", exc)
-                raise HTTPException(
-                    status_code=503, detail="identity signing unavailable",
-                ) from exc
             return await _proxy(SERVICING_URL, f"/{path}", request, user,
-                                extra_headers=money_headers)
+                                extra_headers=_principal_headers(svc, user))
         raise HTTPException(status_code=403, detail="csr/admin only")
+
+    # The maker-checker queue and the resolve endpoint. Staff-only here; WHICH
+    # staff may approve what is servicing's decision, made against the verified
+    # principal and the configured threshold rather than at this hop.
+    if path == "movements" or _MOVEMENT_RESOLVE_RE.match(path):
+        if auth.is_staff(user):
+            return await _proxy(SERVICING_URL, f"/{path}", request, user,
+                                extra_headers=_principal_headers(svc, user))
+        raise HTTPException(status_code=403, detail="staff only")
 
     if path == "reconciliation/peek":
         if auth.is_staff(user):

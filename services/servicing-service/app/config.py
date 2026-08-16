@@ -202,3 +202,113 @@ def validate_principal_verify_key(environment: str | None = None,
             f"PRINCIPAL_VERIFY_KEY is a {key.__class__.__name__}; Ed25519 is "
             f"required so the verifier can pin a single algorithm. " + hint
         )
+
+
+# --- maker-checker limits (spec 0002 section 3, ADR 0011) ----------------------
+#
+# Human-approved configuration for this cohort/demo environment, NOT Lending
+# Operations policy. Read from the environment with no default, and validated at
+# boot, for the same reason INTERNAL_SERVICE_TOKEN has no fallback: a limit this
+# repository chooses for itself is a limit nobody approved.
+#
+# spec 0002 REQ-CFG-1..4 is explicit that an unset value must NOT be treated as
+# "no threshold". An unset admin threshold would silently let an underwriter
+# approve any amount; an unset maximum delta would let any amount be proposed.
+# Both fail closed instead.
+MAKER_CHECKER_ADMIN_THRESHOLD = os.getenv("MAKER_CHECKER_ADMIN_THRESHOLD", "")
+MAKER_CHECKER_MAX_DELTA = os.getenv("MAKER_CHECKER_MAX_DELTA", "")
+
+#: Loan statuses a movement may be proposed and approved against. Approved as
+#: exactly {"current"} for this environment. Configured rather than constant so
+#: the approved set is visible in the deployment rather than compiled in, and so
+#: an unset value refuses instead of defaulting to something permissive.
+MAKER_CHECKER_PERMITTED_LOAN_STATUSES = os.getenv(
+    "MAKER_CHECKER_PERMITTED_LOAN_STATUSES", "")
+
+
+class MakerCheckerConfigError(RuntimeError):
+    """Raised at startup when a maker-checker limit is missing or unusable."""
+
+
+def _decimal_limit(name: str, raw: str) -> "Decimal":
+    """A configured money limit, or a startup failure naming what is wrong.
+
+    Rejects everything that is not a finite positive number: empty, unparseable,
+    NaN, Infinity, zero and negative. A NaN limit is the worst of them -- every
+    comparison against it is False, so an unbounded amount would pass a maximum
+    it silently could not enforce.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    if not raw or not raw.strip():
+        raise MakerCheckerConfigError(
+            f"{name} is unset. spec 0002 REQ-CFG-2: an absent limit must not be "
+            f"read as 'no limit'. Set it to the approved value for this "
+            f"environment -- it is deliberately not defaulted in code."
+        )
+    try:
+        value = Decimal(raw.strip())
+    except InvalidOperation as exc:
+        raise MakerCheckerConfigError(
+            f"{name}={raw!r} is not a number"
+        ) from exc
+    if not value.is_finite():
+        raise MakerCheckerConfigError(
+            f"{name}={raw!r} is not finite; every comparison against it would be "
+            f"False, so the limit would not bound anything"
+        )
+    if value <= 0:
+        raise MakerCheckerConfigError(
+            f"{name}={raw!r} must be positive; a zero or negative limit refuses "
+            f"every movement, which is a broken deployment rather than a policy"
+        )
+    return value
+
+
+def permitted_loan_statuses(raw: str | None = None) -> tuple[str, ...]:
+    """The statuses a movement may execute on, exactly as configured.
+
+    Compared exactly, including case: spec 0002 AC-18 requires an unrecognised
+    status to refuse, and normalising case would silently accept 'CURRENT' as a
+    status nobody approved.
+    """
+    value = MAKER_CHECKER_PERMITTED_LOAN_STATUSES if raw is None else raw
+    statuses = tuple(s for s in (part.strip() for part in (value or "").split(",")) if s)
+    if not statuses:
+        raise MakerCheckerConfigError(
+            "MAKER_CHECKER_PERMITTED_LOAN_STATUSES is unset. With no permitted "
+            "set, no movement can be shown to be executable -- refusing rather "
+            "than assuming every status is fine."
+        )
+    return statuses
+
+
+def admin_threshold():
+    return _decimal_limit("MAKER_CHECKER_ADMIN_THRESHOLD", MAKER_CHECKER_ADMIN_THRESHOLD)
+
+
+def max_delta():
+    return _decimal_limit("MAKER_CHECKER_MAX_DELTA", MAKER_CHECKER_MAX_DELTA)
+
+
+def validate_maker_checker_config(environment: str | None = None) -> None:
+    """Refuse to start without usable limits.
+
+    Unlike the principal key, there is no development exemption. A dev box
+    running without a token merely cannot verify a caller; a dev box running
+    without these would approve money movements against limits nobody set, and
+    the tests that prove the limits work would pass against no limit at all.
+    """
+    admin_threshold()
+    max_delta()
+    permitted_loan_statuses()
+
+    # A maximum below the admin bar is a configuration that cannot happen: every
+    # proposal large enough to need an admin would already have been refused at
+    # creation, so the admin tier would be unreachable and nobody would notice.
+    if admin_threshold() > max_delta():
+        raise MakerCheckerConfigError(
+            f"MAKER_CHECKER_ADMIN_THRESHOLD ({MAKER_CHECKER_ADMIN_THRESHOLD}) is "
+            f"above MAKER_CHECKER_MAX_DELTA ({MAKER_CHECKER_MAX_DELTA}), so no "
+            f"proposal can ever reach the admin-only tier and that rule is dead"
+        )

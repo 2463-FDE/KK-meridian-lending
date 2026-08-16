@@ -101,6 +101,15 @@ def main() -> int:
     text, token_added = _set_if_missing(text, "INTERNAL_SERVICE_TOKEN", secrets.token_urlsafe(32))
     text, env_added = _set_if_missing(text, "ENVIRONMENT", "development")
 
+    # The approved cohort/demo maker-checker limits. Written here rather than
+    # defaulted in code: compose requires them, the service refuses to boot
+    # without them, and a developer should see the figures their stack is
+    # enforcing rather than inherit them invisibly.
+    for key, value in (("MAKER_CHECKER_ADMIN_THRESHOLD", "500.00"),
+                       ("MAKER_CHECKER_MAX_DELTA", "5000.00"),
+                       ("MAKER_CHECKER_PERMITTED_LOAN_STATUSES", "current")):
+        text, _ = _set_if_missing(text, key, value)
+
     # The principal signing pair, for the same reason and on the same terms as
     # the token: compose requires both halves, nothing in the repository is a
     # usable key, and whoever holds the private half can mint an admin.

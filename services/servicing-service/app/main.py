@@ -22,9 +22,9 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
 
-from . import balance, config, db, delinquency, principal, reconciliation
+from . import balance, config, db, delinquency, maker_checker, principal, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
@@ -38,6 +38,10 @@ config.validate_internal_token()
 # this service mint the identities it is supposed to only check -- is a boot
 # failure, not a per-request surprise on a staff action.
 config.validate_principal_verify_key()
+# The approved limits, validated at boot. An unset threshold would silently let
+# an underwriter approve any amount; an unset cap would let any amount be
+# proposed. Neither is a weaker mode of operation -- both are a boot failure.
+config.validate_maker_checker_config()
 
 app = FastAPI(title="Meridian Servicing Service (LSS)", version="2.0.0")
 app.include_router(loans.router)
@@ -315,7 +319,18 @@ def get_account_balance(loan_id: int):
 
 
 class AdjustIn(BaseModel):
-    new_balance: float
+    """A signed DELTA on a named component, never a target balance.
+
+    spec 0002 REQ-VAL-1. "Set the balance to 250.00" cannot be reviewed without
+    knowing what it is now, and what it is now can change between the review and
+    the approval -- so the old `new_balance` field is gone rather than optional.
+    A caller still sending it gets a 422 from `extra="forbid"` instead of having
+    it silently ignored.
+    """
+    component: Literal["principal", "fees"]
+    amount: float
+    reason: str
+    model_config = {"extra": "forbid"}
 
 
 @app.post("/accounts/{loan_id}/adjust-balance")
@@ -325,32 +340,28 @@ def adjust_balance(loan_id: int, body: AdjustIn,
                    x_principal_assertion: Optional[str] = Header(
                        None, alias="X-Principal-Assertion"),
                    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
-    # Two independent checks, in order, because they answer different questions.
-    # The token says the caller is a service on this network; the assertion says
-    # which human is behind the request, verified against the gateway's public
-    # key. Neither substitutes for the other: a service token is shared by every
-    # backend, so on its own it cannot distinguish a csr from payment-service.
+    """Raise an adjustment PROPOSAL. This route no longer moves money.
+
+    D8 closed. It used to set `balances.balance` to whatever it was given, on the
+    say-so of whoever called it. It now writes a `pending_movements` row and
+    returns 202: nothing moves until a *different* authorised person approves it,
+    and the approval -- not this call -- writes the ledger entry.
+    """
     _require_internal(x_internal_token)
-    actor = principal.require_money_principal(
+    actor = principal.require_staff_principal(
         x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
     )
-    # D8, stated as it now stands. **Closed here:** servicing verifies the human
-    # and applies the csr/admin rule itself, so the restriction no longer lives
-    # one hop away at the gateway and a caller reaching this service directly on
-    # the compose network is subject to it too.
-    #
-    # **Still open:** no second approver. `actor` is one person, and one person
-    # can still move this balance alone (spec 0002 §2, not implemented). The
-    # ledger entry the compatibility bridge captures still names nobody -- wiring
-    # `actor.subject` into it belongs with the maker-checker cutover, where the
-    # approver rather than the requester is the actor that must be recorded.
-    log.info("adjust-balance loan_id=%s by subject=%s role=%s",
-             loan_id, actor.subject, actor.role)
-    return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
+    proposal = maker_checker.propose(
+        loan_id, component=body.component, amount=body.amount,
+        entry_type="adjustment", reason=body.reason, actor=actor,
+    )
+    return JSONResponse(status_code=202, content=proposal)
 
 
 class WaiveIn(BaseModel):
     amount: float
+    reason: str
+    model_config = {"extra": "forbid"}
 
 
 @app.post("/accounts/{loan_id}/waive-fee")
@@ -360,16 +371,58 @@ def waive_fee(loan_id: int, body: WaiveIn,
               x_principal_assertion: Optional[str] = Header(
                   None, alias="X-Principal-Assertion"),
               x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
-    # Same boundary as adjust-balance: service token, then verified human, then
-    # the csr/admin rule enforced here rather than only at the gateway. Still no
-    # second approver (D8's remaining half).
+    """Raise a fee-waiver PROPOSAL. Moves no money -- see adjust-balance."""
     _require_internal(x_internal_token)
-    actor = principal.require_money_principal(
+    actor = principal.require_staff_principal(
         x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
     )
-    log.info("waive-fee loan_id=%s amount=%s by subject=%s role=%s",
-             loan_id, body.amount, actor.subject, actor.role)
-    return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}
+    proposal = maker_checker.propose(
+        loan_id, component="fees", amount=body.amount,
+        entry_type="fee_waived", reason=body.reason, actor=actor,
+    )
+    return JSONResponse(status_code=202, content=proposal)
+
+
+@app.get("/movements")
+def movement_queue(x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+                   x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+                   x_principal_assertion: Optional[str] = Header(
+                       None, alias="X-Principal-Assertion"),
+                   x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
+    """The unresolved queue. Visibility is not authority: any staff principal may
+    read it, and reading it approves nothing."""
+    _require_internal(x_internal_token)
+    principal.require_staff_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    return {"movements": maker_checker.queue()}
+
+
+class ResolveIn(BaseModel):
+    resolution: Literal["approved", "rejected"]
+    model_config = {"extra": "forbid"}
+
+
+@app.post("/movements/{movement_id}/resolve")
+def resolve_movement(movement_id: int, body: ResolveIn,
+                     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+                     x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+                     x_principal_assertion: Optional[str] = Header(
+                         None, alias="X-Principal-Assertion"),
+                     x_internal_token: Optional[str] = Header(
+                         None, alias="X-Internal-Token")):
+    """Approve or reject. The second person, and the only path that moves money
+    for a staff-directed adjustment or waiver.
+
+    One endpoint rather than two, because approving and rejecting are the same
+    decision with different outcomes and must share one lock, one transition and
+    one set of checks. Two endpoints would be two chances to diverge.
+    """
+    _require_internal(x_internal_token)
+    actor = principal.require_staff_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    return maker_checker.resolve(movement_id, resolution=body.resolution, actor=actor)
 
 
 @app.post("/accounts/{loan_id}/late-fee")

@@ -17,6 +17,7 @@ and a fixture that committed one would be handing over the ability to mint an
 admin (`db/tools/generate_principal_keypair.py` is how a deployment gets a pair).
 """
 import time
+from decimal import Decimal
 
 import jwt
 import pytest
@@ -28,9 +29,13 @@ from app import main, principal
 
 
 TOKEN = "test-internal-token"
+#: Bodies are valid for their route. FastAPI validates the body before the
+#: handler, so a stale shape returns 422 and the identity guard never runs --
+#: the assertion would then be about schema validation, not about who may act.
 STAFF_ROUTES = [
-    ("/accounts/1/adjust-balance", {"new_balance": 1.0}),
-    ("/accounts/1/waive-fee", {"amount": 1.0}),
+    ("/accounts/1/adjust-balance",
+     {"component": "principal", "amount": -1.0, "reason": "identity test"}),
+    ("/accounts/1/waive-fee", {"amount": -1.0, "reason": "identity test"}),
     ("/accounts/1/late-fee", None),
 ]
 
@@ -67,6 +72,30 @@ def no_money(monkeypatch):
     for fn in ("adjust_balance", "waive_fee", "apply_payment", "apply_payment_once"):
         monkeypatch.setattr(main.balance, fn, _boom, raising=False)
     monkeypatch.setattr(main.delinquency, "assess_late_fee", _boom, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _proposal_db(monkeypatch):
+    """The proposal path reads the loan before writing.
+
+    Stubbed for every case in this file, because these tests are about WHO may
+    act -- a database error would refuse the request for an unrelated reason and
+    the identity assertion would pass without having been exercised.
+    """
+    from app import maker_checker
+
+    def _query(sql, params=None):
+        flat = " ".join(sql.split())
+        if "FROM loans l LEFT JOIN balances b" in flat:
+            # balance/past_due included: proposal validation now reads them to
+            # refuse a movement that would drive a component below zero.
+            return [{"status": "current", "serviced": 1,
+                     "balance": Decimal("1000.00"), "past_due": Decimal("80.00")}]
+        if "INSERT INTO pending_movements" in flat:
+            return [{"id": 1, "requested_at": None}]
+        return []
+
+    monkeypatch.setattr(maker_checker.db, "query", _query)
 
 
 @pytest.fixture
@@ -121,15 +150,18 @@ def _headers(assertion=None, **extra):
 def test_a_verified_csr_may_move_money(keys, money_spy, path, body):
     private_pem, _ = keys
     response = _post(path, body, _headers(_assert(private_pem, role="csr")))
-    assert response.status_code == 200, response.text
-    assert money_spy, "the request was accepted but never reached the money layer"
+    # 202 on the two routes that now raise a proposal, 200 on late-fee which
+    # still moves money directly. Both mean "the verified csr was allowed to
+    # act"; what changed is what acting DOES.
+    assert response.status_code in (200, 202), response.text
 
 
-def test_a_verified_admin_may_move_money(keys, money_spy):
+def test_a_verified_admin_may_act(keys, money_spy):
     private_pem, _ = keys
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 5.0},
+    response = _post("/accounts/1/adjust-balance",
+                     {"component": "principal", "amount": -5.0, "reason": "admin fix"},
                      _headers(_assert(private_pem, role="admin", sub="42")))
-    assert response.status_code == 200, response.text
+    assert response.status_code == 202, response.text
 
 
 # --- the direct-to-servicing bypass, which is the whole point ----------------
@@ -170,7 +202,7 @@ def test_a_role_header_cannot_disagree_with_the_signature(keys, no_money):
     where the header IS read.
     """
     private_pem, _ = keys
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, role="csr"),
                               **{"X-User-Role": "admin"}))
     assert response.status_code == 401
@@ -178,7 +210,7 @@ def test_a_role_header_cannot_disagree_with_the_signature(keys, no_money):
 
 def test_a_subject_header_cannot_disagree_with_the_signature(keys, no_money):
     private_pem, _ = keys
-    response = _post("/accounts/1/waive-fee", {"amount": 1.0},
+    response = _post("/accounts/1/waive-fee", {"amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, sub="7"), **{"X-User-Id": "9"}))
     assert response.status_code == 401
 
@@ -189,7 +221,7 @@ def test_a_subject_header_cannot_disagree_with_the_signature(keys, no_money):
 def test_an_assertion_signed_by_another_key_is_refused(keys, no_money):
     """Signature checked, not merely parsed."""
     other_private, _ = _keypair()
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(other_private)))
     assert response.status_code == 401
 
@@ -225,7 +257,7 @@ def test_an_hmac_token_forged_with_the_public_key_is_refused(keys, no_money):
     signature = _b64(hmac.new(public_pem.encode(), signing_input, hashlib.sha256).digest())
     forged = (signing_input + b"." + signature).decode()
 
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(forged))
     assert response.status_code == 401, (
         "an HMAC token forged with the PUBLISHED verification key was accepted -- "
@@ -241,7 +273,7 @@ def test_an_unsigned_none_algorithm_token_is_refused(keys, no_money):
          "role": "admin", "iat": now, "nbf": now, "exp": now + 120},
         key="", algorithm="none",
     )
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(unsigned))
     assert response.status_code == 401
 
@@ -249,7 +281,7 @@ def test_an_unsigned_none_algorithm_token_is_refused(keys, no_money):
 def test_an_expired_assertion_is_refused(keys, no_money):
     private_pem, _ = keys
     now = int(time.time())
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, iat=now - 600, nbf=now - 600,
                                       exp=now - 300)))
     assert response.status_code == 401
@@ -258,7 +290,7 @@ def test_an_expired_assertion_is_refused(keys, no_money):
 def test_a_not_yet_valid_assertion_is_refused(keys, no_money):
     private_pem, _ = keys
     now = int(time.time())
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, iat=now + 3600, nbf=now + 3600,
                                       exp=now + 3720)))
     assert response.status_code == 401
@@ -271,14 +303,14 @@ def test_an_assertion_for_another_audience_is_refused(keys, no_money):
     origination or disclosure verifier -- being replayed at the money routes.
     """
     private_pem, _ = keys
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, aud="origination-service")))
     assert response.status_code == 401
 
 
 def test_an_assertion_from_another_issuer_is_refused(keys, no_money):
     private_pem, _ = keys
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, iss="not-the-gateway")))
     assert response.status_code == 401
 
@@ -290,7 +322,7 @@ def test_an_assertion_with_no_expiry_is_refused(keys, no_money):
     through an expiry check that has nothing to compare.
     """
     private_pem, _ = keys
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, exp=None)))
     assert response.status_code == 401
 
@@ -300,14 +332,14 @@ def test_an_over_long_lifetime_is_refused_even_though_it_has_not_expired(keys, n
     this long?" -- which is what catches a leaked key minting week-long tokens."""
     private_pem, _ = keys
     now = int(time.time())
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, iat=now, nbf=now,
                                       exp=now + 7 * 24 * 3600)))
     assert response.status_code == 401
 
 
 def test_a_malformed_assertion_is_refused(keys, no_money):
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers("not-a-jwt-at-all"))
     assert response.status_code == 401
 
@@ -315,29 +347,54 @@ def test_a_malformed_assertion_is_refused(keys, no_money):
 # --- authorization, once identity is settled ---------------------------------
 
 
-def test_a_verified_underwriter_is_refused_by_servicing_itself(keys, no_money):
-    """Staff, authenticated, and still not permitted.
+def test_a_verified_underwriter_is_refused_from_moving_money_alone(keys, no_money):
+    """Staff, authenticated, and still not permitted to move money by itself.
 
-    403 rather than 401: this caller is who they say they are. Underwriter is a
-    real staff role that has no business moving money, and until now that rule
-    existed only at the gateway.
+    `late-fee` is the route this now describes. It writes directly, so it keeps
+    the csr/admin rule -- an underwriter is staff and has no business moving a
+    balance alone.
+
+    On `adjust-balance` the answer is different and deliberately so: since the
+    maker-checker cutover an underwriter MAY propose there, because proposing
+    moves nothing, and may approve someone else's proposal within the configured
+    threshold. Refusing them from the proposal route would have blocked the role
+    that does most of the approving -- which is what an earlier version of this
+    change did, and what the API tests caught.
     """
     private_pem, _ = keys
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/late-fee", None,
                      _headers(_assert(private_pem, role="underwriter")))
     assert response.status_code == 403
 
 
+def test_a_verified_underwriter_may_raise_a_proposal(keys, monkeypatch):
+    """The other half of the same rule, asserted so the refusal above cannot
+    quietly widen back into "underwriters may not touch anything"."""
+    from app import maker_checker
+
+    monkeypatch.setattr(maker_checker.db, "query", lambda sql, params=None: (
+        [{"status": "current", "serviced": 1, "balance": Decimal("1000.00"),
+          "past_due": Decimal("80.00")}]
+        if "FROM loans l LEFT JOIN balances b" in " ".join(sql.split())
+        else [{"id": 5, "requested_at": None}]))
+    private_pem, _ = keys
+    response = _post("/accounts/1/adjust-balance",
+                     {"component": "principal", "amount": -1.0, "reason": "proposing"},
+                     _headers(_assert(private_pem, role="underwriter")))
+    assert response.status_code == 202, response.text
+
+
 def test_a_borrower_role_is_refused(keys, no_money):
     private_pem, _ = keys
-    response = _post("/accounts/1/waive-fee", {"amount": 1.0},
+    response = _post("/accounts/1/waive-fee",
+                     {"amount": -1.0, "reason": "not staff"},
                      _headers(_assert(private_pem, role="borrower")))
     assert response.status_code == 403
 
 
 def test_an_assertion_with_no_role_is_refused(keys, no_money):
     private_pem, _ = keys
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance", {"component": "principal", "amount": -1.0, "reason": "x"},
                      _headers(_assert(private_pem, role=None)))
     assert response.status_code == 401
 
@@ -358,7 +415,8 @@ def test_money_routes_refuse_when_no_verification_key_is_configured(monkeypatch,
     monkeypatch.setattr(main.config, "PRINCIPAL_VERIFY_KEY", "")
     monkeypatch.setattr(principal.config, "PRINCIPAL_VERIFY_KEY", "")
 
-    response = _post("/accounts/1/adjust-balance", {"new_balance": 1.0},
+    response = _post("/accounts/1/adjust-balance",
+                     {"component": "principal", "amount": -1.0, "reason": "no key"},
                      _headers(_assert(private_pem)))
     assert response.status_code == 401
 
