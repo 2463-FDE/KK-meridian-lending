@@ -43,7 +43,7 @@ self-clearing: the window moves, and every capture written after 0041 carries th
 reference.
 
 **Only processor-backed captures are compared.** `payments` has a second live
-writer -- servicing-service's legacy `POST /payments` -- which calls no processor
+writer -- servicing-service's legacy `POST /payments`, retired with D2 -- which called no processor
 and therefore produces rows no settlement file can contain. Comparing them was a
 category error that made this control breach on our own writes, permanently.
 `capture_source` (db/migrations/0042) makes the provenance a stored fact, the
@@ -302,9 +302,15 @@ def _ledger_rows(window=(None, None)) -> list[dict]:
 def _out_of_scope_captures(window=(None, None)) -> int:
     """Captures in the window that this control does not compare, counted.
 
-    The rows `_ledger_rows` excludes: servicing-service's legacy `POST /payments`
-    (no processor was called, so no settlement line can exist) and rows whose
-    provenance predates db/migrations/0042 and cannot be established.
+    The rows `_ledger_rows` excludes: captures written by servicing-service's
+    legacy `POST /payments` (no processor was called, so no settlement line can
+    exist) and rows whose provenance predates db/migrations/0042 and cannot be
+    established.
+
+    That route is retired (D2), so this population is closed rather than growing
+    -- but the rows it already wrote are real money history and are still counted
+    and excluded here. Nothing about their handling changed with the deletion,
+    which is deliberate: retiring a writer must not invalidate what it wrote.
 
     Counted rather than ignored. An exclusion nobody can see is how a comparison
     quietly narrows until it is comparing nothing -- the same failure the vacuity

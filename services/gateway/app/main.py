@@ -298,10 +298,13 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
             return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
         raise HTTPException(status_code=403, detail="staff only")
 
-    # Unrecognized /lss sub-path (including the legacy servicing-service /payments
-    # duplicate, and apply-payment which payment-service calls servicing-service
-    # for directly and should never be reachable through this proxy at all) --
-    # fail closed rather than proxy something no authz rule above accounted for.
+    # Unrecognized /lss sub-path -- fail closed rather than proxy something no
+    # authz rule above accounted for. This is what kept servicing's legacy
+    # `POST /payments` duplicate unreachable from a browser or a staff session
+    # for as long as it existed; that route has since been retired outright
+    # (docs/DEBT.md D2), so the fall-through no longer has to carry it. It still
+    # covers `apply-payment`, which payment-service calls servicing directly for
+    # and which should never be reachable through this proxy at all.
     raise HTTPException(status_code=404, detail="not found")
 
 

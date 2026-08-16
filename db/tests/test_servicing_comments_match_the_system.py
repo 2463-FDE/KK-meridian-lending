@@ -102,7 +102,6 @@ def test_the_open_limitations_are_still_written_down():
     part that was true. These three are open, and the source must keep saying so.
     """
     balance = (APP / "balance.py").read_text(encoding="utf-8")
-    payments = (APP / "payments.py").read_text(encoding="utf-8")
     main = (APP / "main.py").read_text(encoding="utf-8")
 
     assert "D14" in balance, "balance.py no longer records that there is no waterfall"
@@ -110,84 +109,92 @@ def test_the_open_limitations_are_still_written_down():
         "main.py no longer records that the money routes have no approver and "
         "no human principal"
     )
-    assert "D2" in payments, (
-        "payments.py no longer records that this legacy route has no idempotency "
-        "key -- the half of D2 that is still open"
+    # D2's servicing half is no longer a limitation to write down: the
+    # processorless route and `app/payments.py` were deleted, so there is no
+    # non-idempotent servicing payment path left to admit to. What replaced this
+    # assertion is the absence itself --
+    # `servicing-service/tests/test_legacy_payments_route_is_retired.py` fails if
+    # the route, the module, or a `servicing_legacy` INSERT returns.
+    assert not (APP / "payments.py").exists(), (
+        "app/payments.py is back. It held the charge that recorded a payment "
+        "twice on a retry; if it is needed again, D2 reopens and docs/DEBT.md, "
+        "the Week 5 roadmap row and the retirement test must change together"
     )
 
 
-def test_the_legacy_payment_route_declares_no_idempotency_key():
-    """A static check, and it is only a static check.
+def test_no_servicing_module_reintroduces_an_unkeyed_charge():
+    """The tripwire that replaces the one reading `payments.py`.
 
-    It proves that the name `idempotency_key` appears nowhere in the legacy
-    charge path's code, which is a tripwire on the shape of the module -- not
-    evidence about what a retry does. **The runtime behaviour is proven by
-    `services/servicing-service/tests/test_legacy_payments_is_not_idempotent.py`**,
-    which issues the same request twice and counts the inserts, the
-    `balance.apply_payment` calls and the outbound HTTP calls.
+    That check asserted the deleted module still said "NO idempotency key" --
+    correct while the module existed, meaningless once it did not. The property
+    worth keeping is broader and outlives the file: no servicing module may
+    insert a `payments` row at all. Payment creation belongs to payment-service,
+    which requires an `idempotency_key`; servicing only APPLIES an already
+    captured payment, keyed by `payment_id`.
 
-    Kept because the two fail at different moments: this one fails the instant
-    someone starts wiring a key in, before the behaviour changes and before the
-    characterization test would notice.
+    Static, and only static -- it fails the moment someone writes the INSERT,
+    which is earlier than any behavioural test could notice.
     """
-    source = (APP / "payments.py").read_text(encoding="utf-8")
-    assert "NO idempotency key" in source, (
-        "payments.py no longer states that a retried POST double-records the "
-        "payment and double-applies the balance"
-    )
-    # The module docstring names `idempotency_key` when describing the path that
-    # IS fixed, so the check has to look at the code rather than the file.
-    tree = ast.parse(source)
-    body = tree.body[1:] if ast.get_docstring(tree) else tree.body
-    code = "\n".join(ast.unparse(node) for node in body)
-    assert "idempotency_key" not in code, (
-        "servicing's legacy charge() now handles an idempotency key -- D2's open "
-        "half may be closed; update docs/DEBT.md D2, the roadmap row and this "
-        "test together"
+    #: The one legitimate INSERT INTO payments in this service. It writes a
+    #: negative-id sentinel inside a transaction that is ALWAYS rolled back, to
+    #: prove the apply-payment write path is usable before payment-service
+    #: authorizes a card -- a preflight that returns 200 without exercising a
+    #: write is how a charge got captured against an apply that could not land.
+    #: It creates no payment: nothing it writes survives the rollback.
+    PREFLIGHT = "internal_auth_check"
+
+    offenders = []
+    for path in sorted(APP.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if func.name == PREFLIGHT:
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if "INSERT INTO PAYMENTS" in " ".join(node.value.upper().split()):
+                    offenders.append(f"{path.name}:{node.lineno} in {func.name}()")
+    assert not offenders, (
+        f"servicing-service records a payment again at {offenders}. Only "
+        f"payment-service may create a payment row -- it is the path that "
+        f"carries an idempotency key (docs/DEBT.md D2). If a new rolled-back "
+        f"probe needs one, name it here explicitly rather than widening the rule."
     )
 
 
-def test_the_debt_register_does_not_claim_d2_is_fixed_everywhere():
+def test_the_debt_register_names_both_payment_paths_in_d2():
+    """D2 covered two endpoints with one name, and that is what made it wrong.
+
+    The register first said the repository was idempotent while servicing's
+    processorless duplicate double-recorded on retry. It then said one path was
+    fixed and one still open. Both statements were true in their moment, and a
+    test pinned to either would now be wrong -- the duplicate has been retired.
+
+    So the durable requirement is not a status word but the DISTINCTION: D2 must
+    keep naming both endpoints, because the entry is unreadable without it. A
+    reader who does not know there were two `POST /payments` cannot tell which
+    one a claim is about, which is exactly how this row went stale twice.
+    """
     row = next(l for l in DEBT.read_text(encoding="utf-8").splitlines()
                if l.startswith("| **D2**"))
-    assert "servicing" in row.lower(), (
-        "D2 does not mention the servicing-service duplicate, so it reads as "
-        "though the whole repository is idempotent"
+    assert "payment-service" in row, (
+        "D2 no longer names the canonical processor-backed path"
     )
-    assert "payment-service" in row, "D2 does not name the path that IS fixed"
-    for open_state in ("still open", "not idempotent", "open and bounded"):
-        if open_state in row.lower():
-            break
-    else:
-        pytest.fail("D2 does not say that one of its two paths is still open")
-
-
-def test_the_processorless_route_is_not_described_as_charging_anyone():
-    """A retry here duplicates a record and a balance movement. It charges nobody.
-
-    `servicing-service` calls no processor on any path, so "double-charge" is the
-    wrong defect name for it -- and the wrong name points at the wrong fix, since
-    a double-charge is remediated by refunding a borrower and this is remediated
-    by correcting a balance. payment-service's own history DID include a real
-    double-charge and its documents may say so; this check is scoped to
-    servicing's sources and to the D2 row's description of the legacy route.
-    """
-    wrong = ("double-charge", "double charge", "charges twice", "charged twice",
-             "charge twice")
-    for path in _sources():
-        text = path.read_text(encoding="utf-8").lower()
-        for phrase in wrong:
-            if phrase not in text:
-                continue
-            # Naming the distinction is the correction; claiming it is the defect.
-            for line in text.splitlines():
-                if phrase not in line:
-                    continue
-                assert ("not a double-charge" in line or "nothing is charged" in line
-                        or "charges nothing" in line or "payment-service" in line), (
-                    f"{path.relative_to(REPO)} describes this processorless route "
-                    f"with {phrase!r}: {line.strip()[:110]!r}"
-                )
+    assert "servicing" in row.lower(), (
+        "D2 no longer names the servicing duplicate, so it reads as though there "
+        "was only ever one POST /payments"
+    )
+    assert "retired" in row.lower() or "deleted" in row.lower(), (
+        "D2 claims a fix without saying what happened to the second endpoint -- "
+        "if it were merely disabled or still present, the defect would still be "
+        "reachable by anything holding the internal token"
+    )
+    # And the claim has to be checkable, not asserted.
+    assert "test_legacy_payments_route_is_retired" in row, (
+        "D2 does not cite the test that proves the route is gone"
+    )
 
 
 def test_the_debt_register_does_not_still_call_d3_open():

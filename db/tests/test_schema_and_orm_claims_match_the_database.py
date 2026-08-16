@@ -313,34 +313,113 @@ def test_the_roadmap_planning_surface_agrees_with_start_next():
         )
 
 
-def test_the_roadmap_does_not_call_week_5_landed():
-    """Week 5's row is Partial (`G-D2-LEGACY`). The summary called Weeks 1-5
-    landed, which is the matrix and its own summary disagreeing about a money
-    path."""
+def test_the_landed_weeks_claim_agrees_with_the_matrix():
+    """The summary may only call a week landed if every row for it is Done.
+
+    This replaces a snapshot assertion that Week 5 must NOT be described as
+    landed -- true while servicing's duplicate `POST /payments` was open, and
+    wrong the moment it was retired. A test that pins today's answer has to be
+    edited every time the answer changes, and the edit is exactly where someone
+    stops thinking. So it derives the claim from the matrix instead: whichever
+    weeks the summary says are landed, no row in those weeks may be Partial or
+    Not started.
+    """
+    import re as _re
+
     text = ROADMAP.read_text(encoding="utf-8")
     surface = text[text.index("## Current planning surface"):text.index("## Status at a glance")]
-    assert "Weeks 1–5 are landed" not in surface and "Weeks 1-5 are landed" not in surface, (
-        "the planning surface calls Weeks 1-5 landed while the Week 5 row is "
-        "Partial -- servicing's legacy POST /payments is not idempotent"
+    claim = _re.search(r"Weeks 1[–-](\d+) are landed", surface)
+    assert claim, (
+        "the planning surface no longer states which weeks are landed -- if that "
+        "claim moved, point this test at its new home rather than deleting it"
+    )
+    landed_through = int(claim.group(1))
+
+    matrix = text[text.index("| Week | Feature/requirement |"):text.index("### Remaining gaps")]
+    unfinished = []
+    for line in matrix.splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 6 or not cells[1] or cells[1] in ("Week", "---"):
+            continue
+        week = cells[1].split("→")[0].strip()
+        if not week.isdigit() or int(week) > landed_through:
+            continue
+        if cells[4] in ("**Partial**", "**Not started**", "**Blocked**"):
+            unfinished.append(f"week {week}: {cells[2][:60]} is {cells[4]}")
+    assert not unfinished, (
+        f"the summary says Weeks 1-{landed_through} are landed, but the matrix "
+        f"has unfinished rows inside that range:\n  " + "\n  ".join(unfinished)
     )
 
 
-def test_the_servicing_token_gap_row_counts_every_guarded_route():
-    """The closed-gap row said 'all four'. There are five, and the paragraph
-    beneath that table is *about* hand-written lists going stale."""
-    text = ROADMAP.read_text(encoding="utf-8")
-    row = next(line for line in text.splitlines()
-               if line.startswith("| **G-SERVICING-TOKEN**"))
-    assert "all five" in row, "the row no longer states how many routes are guarded"
-    # "all four" may survive only as the quoted history of what this row used to
-    # claim -- the same allowance the retired-sentence pins make, for the same
-    # reason: a correction is more useful when it shows what it corrected.
-    if "all four" in row:
-        assert not _stated_as_current_fact(row, "all four"), (
-            "the G-SERVICING-TOKEN row states four routes as current fact; the "
-            "legacy POST /payments is guarded too, and the token test "
-            "parametrizes over five"
-        )
+def test_the_servicing_token_gap_row_matches_the_routes_that_exist():
+    """The gap row must not name a route the service no longer serves.
+
+    This assertion has now been wrong in both directions: it first locked in
+    "all four" while five routes were guarded, was corrected to "all five", and
+    that became wrong the moment the fifth was retired. Pinning a NUMBER pins the
+    thing most likely to change, so it checks the named routes against the app's
+    real routing table instead -- a route named in the row must exist, and a
+    guarded route missing from it is only acceptable if the row is not claiming
+    to enumerate.
+    """
+    import ast
+
+    # Read the decorators, do not import the app. An earlier version inserted
+    # servicing-service on sys.path and imported `app.main` here; that left
+    # `app` in sys.modules pointing at another service and broke two unrelated
+    # fixtures in this same file. A doc test has no business mutating the
+    # importer for the rest of the suite.
+    main_src = (REPO / "services" / "servicing-service" / "app" / "main.py")
+    tree = ast.parse(main_src.read_text(encoding="utf-8"))
+    live = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Attribute):
+                continue
+            if dec.func.attr != "post":
+                continue
+            if dec.args and isinstance(dec.args[0], ast.Constant):
+                live.add(dec.args[0].value)
+    assert live, "no POST routes parsed from servicing main.py -- the check found nothing"
+
+    # BOTH rows that enumerate guarded routes, not just one. The first version of
+    # this check covered the closed-gap row only, and the Week 6 matrix row went
+    # on claiming five guarded routes through a whole review round because
+    # nothing looked at it. Two places stating one fact is the condition every
+    # stale claim in this repository has been found in; checking one of them is
+    # how the second survives.
+    roadmap = ROADMAP.read_text(encoding="utf-8").splitlines()
+    rows = {
+        "closed-gap row": next(
+            l for l in roadmap if l.startswith("| **G-SERVICING-TOKEN**")),
+        "Week 6 matrix row": next(
+            l for l in roadmap
+            if l.startswith("| 6 | Money-moving servicing actions are role-gated")),
+    }
+
+    named = {"apply-payment", "adjust-balance", "waive-fee", "late-fee"}
+    for label, row in rows.items():
+        for action in named:
+            assert action in row, (
+                f"the {label} no longer names the guarded route {action}"
+            )
+            assert any(action in path for path in live), (
+                f"the {label} names {action} as guarded, but no POST route serves it"
+            )
+        # `/payments` may appear only as history -- the rows say "retired", and
+        # that is what the check keys on.
+        if "/payments" in row:
+            assert "retired" in row.lower(), (
+                f"the {label} lists /payments among the guarded routes; that "
+                f"endpoint was retired with D2 and must be marked as history if "
+                f"it is named at all"
+            )
+            assert "/payments" not in live, (
+                "POST /payments exists again while the roadmap calls it retired"
+            )
 
 
 #: Built the way `db/tests/test_schema_parity.py` builds one: the `db/init`

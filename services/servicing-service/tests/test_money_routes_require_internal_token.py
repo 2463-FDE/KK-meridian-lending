@@ -42,9 +42,12 @@ MONEY_ROUTES = [
     ("/accounts/1/waive-fee", {"amount": 1.0}),
     ("/accounts/1/late-fee", None),
     ("/accounts/1/apply-payment", {"amount": 1.0, "payment_id": 1}),
-    ("/payments", {"loan_id": 1, "processor_token": "tok_x", "last4": "1111",
-                   "brand": "visa", "amount": 1.0, "method": "card"}),
 ]
+# `/payments` was in this list until the processorless duplicate was retired
+# (docs/DEBT.md D2). It is not listed as an unguarded exception -- the route does
+# not exist, and `test_every_money_route_is_guarded` below derives its coverage
+# from the running app, so it would fail if the route ever came back unguarded.
+# Its absence is asserted directly in test_legacy_payments_route_is_retired.py.
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +69,6 @@ def no_writes(monkeypatch):
     for fn in ("adjust_balance", "waive_fee", "apply_payment", "apply_payment_once"):
         monkeypatch.setattr(main.balance, fn, _boom, raising=False)
     monkeypatch.setattr(main.delinquency, "assess_late_fee", _boom, raising=False)
-    monkeypatch.setattr(main.payments, "charge", _boom, raising=False)
 
 
 @pytest.mark.parametrize("path, body", MONEY_ROUTES)
