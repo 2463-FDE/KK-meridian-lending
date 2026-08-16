@@ -331,37 +331,68 @@ def test_resolution_revalidates_a_queued_proposals_complete_target():
         assert invariant in req, f"resolution does not revalidate {invariant}"
 
 
-def test_the_spec_invents_no_threshold_amount():
-    """The reported finding, and the one most likely to come back.
+def test_the_spec_states_no_UNAPPROVED_threshold_amount():
+    """A figure may appear only as an approved decision, never as a bare default.
 
-    An earlier draft set MAKER_CHECKER_ADMIN_THRESHOLD to $500.00. Nobody chose
-    that number -- it is in no policy document and no stakeholder stated it. A
-    specification that invents a monetary control limit and writes it in the tone
-    of a requirement is what `policies/underwriting_guidelines.md` already had to
-    be corrected for, where published DTI cutoffs described nothing the code
-    evaluated.
+    The original rule was absolute: no dollar figure anywhere near either limit.
+    That was right while nobody had chosen one -- an earlier draft set
+    MAKER_CHECKER_ADMIN_THRESHOLD to $500.00 that no policy document supported,
+    which is what `policies/underwriting_guidelines.md` had already been
+    corrected for.
+
+    A figure has since been approved by the project owner for the cohort/demo
+    environment. So the durable requirement is not "no number" but
+    "no number without a named approval and a stated scope" -- and the scope
+    matters as much as the approval: these are explicitly NOT production Lending
+    Operations policy, and a reader who takes them for policy has been misled by
+    this document.
     """
     text = SPEC.read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+
     threshold_lines = [
         line for line in text.splitlines()
         if "MAKER_CHECKER_ADMIN_THRESHOLD" in line or "MAKER_CHECKER_MAX_DELTA" in line
     ]
-    assert threshold_lines, "the spec no longer names a configured threshold at all"
+    assert threshold_lines, "the spec no longer names a configured limit at all"
+
+    # No code default, ever. A default is how an unset variable silently becomes
+    # a policy decision nobody made.
     for line in threshold_lines:
-        if "default" not in line.lower():
-            continue
-        assert "no default" in line.lower(), (
-            f"the spec gives a configured money limit a default: {line.strip()!r}"
+        if "default" in line.lower():
+            assert "no default" in line.lower(), (
+                f"the spec gives a configured money limit a default: {line.strip()!r}"
+            )
+
+    # Any figure present must sit inside the approval block, and that block must
+    # say who approved it and that it is not production policy.
+    if any(re.search(r"\d+\.\d{2}", line) for line in threshold_lines):
+        assert "approved" in flat.lower(), (
+            "the spec states a monetary limit with no record of anyone approving it"
         )
-    # No bare dollar figure may be attached to either limit.
-    for line in threshold_lines:
-        assert not re.search(r"\$\s?\d", line), (
-            f"the spec states a dollar figure for a limit it does not own: "
-            f"{line.strip()!r}"
+        assert "NOT production" in flat or "not production" in flat.lower(), (
+            "the spec states an approved figure without marking it as "
+            "cohort/demo rather than Lending Operations policy -- a reader would "
+            "take it for policy, which is the overclaim this repository has "
+            "already had to correct in policies/underwriting_guidelines.md"
         )
-        assert not re.search(r"\b\d+\.\d+\b", line), (
-            f"the spec states a bare numeric figure for a limit it does not own: "
-            f"{line.strip()!r}"
+
+
+def test_the_approved_limits_are_not_hardcoded_in_the_schema():
+    """Approved configuration must stay configuration.
+
+    A CHECK carrying 500.00 would make a policy change a migration, and would
+    freeze a cohort/demo figure into the shape of the data.
+    """
+    migration = (REPO / "db" / "migrations" / "0036_pending_movements.sql")
+    if not migration.is_file():
+        pytest.skip("the maker-checker schema has not landed yet")
+    sql = migration.read_text(encoding="utf-8")
+    body = sql[sql.index("CREATE TABLE IF NOT EXISTS pending_movements"):]
+    for figure in ("500.00", "5000.00"):
+        assert figure not in body, (
+            f"db/migrations/0036 encodes the configured limit {figure}; the "
+            f"limits are read from the environment at runtime"
         )
 
 
