@@ -28,24 +28,31 @@ def _display_last4(payment) -> str | None:
     ADR 0008: new rows carry `last4` directly, from the processor's token
     response rather than from a card number this service never sees.
 
-    THE `pan` FALLBACK IS DELIBERATE AND TEMPORARY (expand phase, PR #11).
-    An earlier version of this PR removed it on the grounds that
-    db/migrations/0029 back-fills `last4` from `pan`. Automated review caught the
-    ordering assumption: nothing in this change enforces that the migration has
-    run before this service version serves traffic. Deploys are not atomic, so
-    there is a real window -- new code live, 0029 not yet applied, or applied to a
-    replica but not the primary -- in which `last4` is NULL and `pan` holds the
-    only display value. Removing the fallback there blanks the card column on
-    every historical payment: no error, just missing data, exactly the failure the
-    back-fill exists to prevent.
+    **There is no `pan` fallback.** It was removed in the contract step it was
+    annotated for, and the columns it read are gone (db/migrations/0031). This
+    function reads `last4` and nothing else; a row without one renders nothing.
 
-    So the order is: read `last4`; fall back to the last four digits of `pan` only
-    when `last4` is absent. Storing and displaying the last four digits is
-    permitted under PCI-DSS -- storing the PAN is what was not, and this only
-    reads a column that already exists.
+    This docstring is the reason that sentence is stated first. Until now it
+    opened with "THE `pan` FALLBACK IS DELIBERATE AND TEMPORARY" and closed with
+    an instruction to remove it in a later PR -- describing, in the present tense
+    and in capitals, a card-number read that the code below had already stopped
+    doing. Anyone auditing PCI scope by reading this function would have found a
+    PAN read that does not exist, and `docs/RUNBOOK-pan-cvv-contract.md` cited
+    exactly this behaviour as the reason the migration was dangerous.
 
-    REMOVE THIS FALLBACK IN PR #15, the contract step, after 0029 is deployed and
-    verified. At that point `pan` no longer exists and the branch is dead code.
+    The history, kept because the sequencing was the point: the fallback existed
+    for the deployment window between `0029` back-filling `last4` and every
+    instance running the new image. Deploys are not atomic, so a row could
+    legitimately have `last4` NULL and a `pan` holding the only display value,
+    and removing the read too early would have blanked the card column on every
+    historical payment -- no error, just missing data. `0031` refuses to drop the
+    columns until the back-fill is complete, which is what made removing it safe.
+
+    Storing and displaying the last four digits is permitted under PCI-DSS;
+    storing the PAN was what was not, and nothing here stores or reads one.
+    `tests/test_pan_mask.py::test_the_display_never_reads_a_pan_attribute` raises
+    on any attribute access other than `last4`, so a reinstated fallback fails
+    loudly rather than quietly reviving card-number handling.
     """
     if payment.last4:
         return "•••• " + payment.last4

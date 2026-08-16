@@ -1,9 +1,30 @@
 """Payment handling (formerly the vendor's prototype 'pay.py').
 
-There is NO idempotency key — a retried POST inserts a second payments row and
-applies the amount twice (double-charge). (D2, #4, #7 -- unrelated to the PCI
-fix below, left as-is; same scope boundary payment-service's own idempotency
-fix drew for its equivalent debt.)
+There is NO idempotency key. A retry inserts another payment record and applies
+the loan balance again. It double-records and double-applies; it does not perform
+another processor charge — this route calls no processor at all, so the card is
+untouched and what is wrong is the loan balance and the payment history.
+
+That distinction is the difference between this defect and the one
+payment-service had, and this comment used to collapse the two by borrowing
+payment-service's name for it. The names matter because the remedies differ: one
+is corrected by refunding a borrower, the other by correcting a balance.
+
+This is the still-open half of D2:
+payment-service's `POST /payments` was fixed (required `idempotency_key`, partial
+unique index, apply-once through `payment_applications`), and this duplicate was
+never ported. D2 in `docs/DEBT.md` records both halves; reading it as "D2 is
+fixed" is what this note exists to prevent.
+
+Bounded, not closed: the route requires `X-Internal-Token` and the gateway 404s
+the path rather than proxying it, so the retry that duplicates has to come from
+inside the compose network. Having no processor is also why its rows are labelled
+`capture_source='servicing_legacy'` and excluded from reconciliation (D7) —
+there is no settlement line that could ever corroborate either copy.
+
+`servicing-service/tests/test_legacy_payments_is_not_idempotent.py` characterizes both
+duplications. It fails when this route becomes idempotent or is deleted, which is
+deliberate: the test and the D2 entry move in the same change.
 
 ADR 0008 (Week 5 tokenization): this used to receive and store the FULL PAN
 and CVV on the payments row, and log the full charge request (PAN, CVV, SSN)

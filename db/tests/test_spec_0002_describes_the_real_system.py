@@ -317,13 +317,17 @@ def test_the_role_the_ledger_records_is_specified():
     )
 
 
-# --- and once ADR 0011 is on the same branch, agreement is checked directly ---
+# --- ADR 0011 is on `main`, so agreement is checked directly ------------------
 
 ADR_0011 = REPO / "adr" / "0011-maker-checker-for-servicing-adjustments.md"
 
+#: Retained rather than deleted: the guard costs nothing and states the
+#: precondition. It no longer skips -- the ADR is on `main` alongside this test,
+#: so every case below runs. The old skip reason named the branch the ADR was
+#: being written on, which stopped being true the moment it merged.
 adr_present = pytest.mark.skipif(
     not ADR_0011.is_file(),
-    reason="ADR 0011 is on PR #20's branch, not this one",
+    reason="adr/0011-maker-checker-for-servicing-adjustments.md is not present",
 )
 
 

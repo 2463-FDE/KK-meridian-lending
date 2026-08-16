@@ -6,21 +6,35 @@
   *any* authenticated user, with no role check, no second approver and no ledger
   entry
 - **Depends on:** ADR 0010 (the ledger gives a proposal somewhere to point) and
-  ADR 0011 (the database design this spec makes testable), both on PR #20. This
-  spec is written against 0011 as finalised there: the proposal carries
-  `requested_role` and `resolved_role`, its substance including `reason` and
-  `requested_at` is frozen by the transition trigger, and the commit-time rule
-  re-reads the proposal rather than the queued row
+  ADR 0011 (the database design this spec makes testable). Both are accepted and
+  on `main`, and **0010's ledger is built**: `db/migrations/0035_ledger_entries.sql`
+  creates `ledger_entries`, its immutability trigger and the projection that
+  maintains `balances`. So this spec's dependency is satisfied — an approved
+  proposal now has a real table to write into. ADR 0011's `pending_movements` is
+  still a design, not a migration. This spec is written against 0011 as
+  finalised: the proposal carries `requested_role` and `resolved_role`, its
+  substance including `reason` and `requested_at` is frozen by the transition
+  trigger, and the commit-time rule re-reads the proposal rather than the queued
+  row
 - **Written before the code**, deliberately. D8 has been open since the original
   vendor delivery, and the reason it stayed open is that "add an approval step"
   is not a requirement — it is a wish. This says what must be true.
 
 > ### This document specifies the control. It does not implement it.
 >
-> **Nothing described below exists yet.** There is no `pending_movements` table,
-> no approval endpoint, no role check on either money route, and no ledger. D8 is
+> **No part of the control described below is implemented.** There is no
+> `pending_movements` table, no approval endpoint, and servicing validates no
+> human principal — the routes still take `x_user_role` and never read it. D8 is
 > **open**, and it stays open until the implementation PR lands and its tests
 > pass — merging this changes nothing about what the running system permits.
+>
+> Two things this notice used to deny do now exist, and denying them is its own
+> stale claim. **The ledger exists** (`db/migrations/0035_ledger_entries.sql`),
+> so §2's "approval writes the ledger entry" has somewhere to write. **A role
+> restriction exists at the gateway** — `services/gateway/app/auth.py::can_move_money`
+> limits `adjust-balance` / `waive-fee` / `late-fee` to csr/admin. Neither is
+> maker-checker: one person still moves money alone, and the gateway's role check
+> is not a check servicing itself makes.
 >
 > `db/tests/test_spec_0002_describes_the_real_system.py` asserts that, from both
 > directions: §1's description of today's system must stay true, and this
@@ -42,8 +56,13 @@ Two endpoints move money with no approval of any kind:
 
 | Endpoint | What it does | Who may call it today |
 |---|---|---|
-| `POST /accounts/{loan_id}/adjust-balance` | Sets `balances.balance` to an arbitrary value | Any caller holding the internal service token |
-| `POST /accounts/{loan_id}/waive-fee` | Reduces `balances.past_due` | Any caller holding the internal service token |
+| `POST /accounts/{loan_id}/adjust-balance` | Sets `balances.balance` to an arbitrary value | Any caller holding the internal service token. Through the gateway, csr/admin only |
+| `POST /accounts/{loan_id}/waive-fee` | Reduces `balances.past_due` | Any caller holding the internal service token. Through the gateway, csr/admin only |
+
+The two columns of that last cell are the whole point: the gateway restricts the
+role (`services/gateway/app/main.py` → `auth.can_move_money`), and servicing
+enforces nothing of the sort itself. A caller that reaches servicing directly on
+the compose network with the shared token is subject to no role rule at all.
 
 Verified against `services/servicing-service/app/main.py`: both take
 `x_user_role` as an **optional header and never read it**. The comment on
@@ -53,11 +72,17 @@ no second approver, no ledger entry."*
 What that means concretely, and why it is D8 rather than a hardening nicety:
 
 - **no second person** — one staff account can zero a borrower's balance alone;
-- **no record of who** — the prior value is overwritten in place, so after the
-  fact the system cannot say what the balance was or who changed it;
+- **no record of who** — `adjust_balance` overwrites `balances.balance` in place
+  and names nobody. *What changed:* the movement is no longer lost. Migration
+  0035's compatibility bridge (`capture_legacy_balance_delta`) mirrors every
+  committed direct write into `ledger_entries` as a `legacy_direct_write`, so the
+  prior value is now recoverable. That entry carries `actor_id = NULL`, because
+  the endpoint never knew who was calling — the ledger records **what** moved,
+  and the identity D8 asks for still does not exist;
 - **no record of why** — there is no reason field on either path;
-- **no role restriction** — a CSR and an administrator are indistinguishable to
-  these endpoints.
+- **no role restriction at the service** — a CSR and an administrator are
+  indistinguishable to these endpoints. The gateway distinguishes them; servicing
+  does not, and the gateway is not the only way to reach servicing.
 
 PR #22 closed the *network* half of this: both routes now require
 `X-Internal-Token`, so they are not reachable from outside the compose network.

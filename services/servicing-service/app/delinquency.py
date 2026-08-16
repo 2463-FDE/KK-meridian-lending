@@ -5,9 +5,16 @@ Late fee is a flat $35 regardless of the 'whichever is less' policy rule
 anywhere — a payment goes straight off principal in balance.apply_payment,
 never fees->interest->principal (D14, unrelated, still open).
 
-Decimal math now (D12 fix, same pattern as balance.py) -- past_due still
-travels to/from the DOUBLE PRECISION column as float; the addition itself is
-exact now.
+Decimal math (D12 fix, same pattern as balance.py). `balances.past_due` is
+`NUMERIC(14,2)` -- this docstring used to say the column was still
+`DOUBLE PRECISION`, which the D12 migration had already made false.
+
+The assessment below writes `balances` directly, like the other legacy writers
+in this service. 0035's compatibility bridge captures the delta into
+`ledger_entries`, so the movement is recorded; it is a machine-originated fee
+with no human behind it, which is why it is outside the maker-checker workflow
+by design (`specs/0002-maker-checker-self-approval.md` §8) rather than merely
+un-approved.
 """
 from decimal import Decimal
 

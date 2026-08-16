@@ -319,7 +319,11 @@ BEGIN
     RAISE NOTICE 'seed: % Model B offers, all footing.', got;
 END $$;
 
--- Balances: single mutable float column (no ledger — debt preserved).
+-- Balances: seeded directly, then reconciled by the ledger's opening-balance cutover
+-- (ADR 0010 / db/migrations/0035), which records where each seeded balance started.
+-- This comment said "single mutable float column (no ledger — debt preserved)": the
+-- ledger has existed since 0035, and the columns have been NUMERIC since D12, so the
+-- line was wrong twice over.
 INSERT INTO balances (loan_id, balance, past_due)
 SELECT l.id,
   round((l.principal * (0.30 + ((l.id % 60) / 100.0)))::numeric, 2)::double precision,

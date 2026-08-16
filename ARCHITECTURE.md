@@ -145,7 +145,14 @@ fails fast rather than hanging the request, and replaying an already-captured pa
 never reaches the check, because it authorizes nothing.
 
 **What this does not close.** `DEBT.md` **D8** is about who may *authorize* a money
-movement — no role check, no second approver, no ledger entry — and remains fully open.
+movement, and it is **partly closed** — the sentence here described all of it as open
+long after two thirds of it landed. What landed: a role rule at the gateway
+(`gateway/app/auth.py::can_move_money`, csr/admin only) and a ledger entry for every
+movement, including the direct writes 0035's compatibility bridge captures. What is
+still open, and is the whole of D8 now: **servicing validates no human principal**
+(`adjust_balance` and `waive_fee` take `x_user_role` and never read it) and **no second
+approver exists**, so one account still moves a balance alone and the captured ledger
+entry names nobody.
 That is a different question from who can *reach* the endpoint, which is what the token
 answers; closing either leaves the other open, and an earlier draft conflated them by
 citing D8 as if it tracked the token gap.
@@ -156,7 +163,7 @@ citing D8 as if it tracked the token gap.
 |---------|------|------|-----------------------|
 | `gateway` | 8000 | FastAPI + httpx + Redis | Session auth (`/auth/*`), role/ownership enforcement, reverse-proxy. Per-client-IP rate limiting (fixed window, fails open on a Redis outage). Forwards the resolved identity as `X-User-Id`/`X-User-Role`, stripping any inbound `X-User-*` the caller sent itself. See "Auth & roles" for the per-route tiers. |
 | `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (intake logs `app_id`/`applicant_id` only, never the request payload — enforced by `tests/test_intake_pii_not_logged.py`; this cell previously claimed a request-logging middleware in `logging_config.py` logged full POST bodies, which is false — no such middleware has ever existed, see `DEBT.md` D5c), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the fair-lending ZIP screen. |
-| `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge to the balance — still a single mutable column, no ledger. No host port; every money-moving route requires `X-Internal-Token` (`adjust-balance`, `waive-fee`, `late-fee`, `apply-payment`, legacy `/payments`). Read routes stay ownership-checked at the gateway. |
+| `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge by writing an immutable `ledger_entries` row; `balances` is the projection that trigger maintains (ADR 0010, `db/migrations/0035`). This cell said "still a single mutable column, no ledger" — a wording variant of the claim corrected further down this same file, which is why the regression pins now match the concept rather than one phrasing. No host port; every money-moving route requires `X-Internal-Token` (`adjust-balance`, `waive-fee`, `late-fee`, `apply-payment`, legacy `/payments`). Read routes stay ownership-checked at the gateway. |
 | `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`, scoped to the application it ran for. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR (`DEBT.md` D11). No host port; `POST /kyc/check` requires `X-Internal-Token` — this cell read "Host-published **and** does not check `X-Internal-Token`", which was the bypass described in the boundary note above. |
 | `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`). **Compute-only — persists nothing.** Origination is the sole writer of both `decisions` and the append-only `decision_events` audit row, written atomically after its own finality recheck (PR #6). The bureau call goes through a `BureauClient` seam that forwards an idempotency key so a retry after an ambiguous timeout recovers the original pull. Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
 | `disclosure-service` | 8005 | FastAPI + SQLAlchemy + psycopg2 | TILA/Reg-Z offer + APR + amortization (Decimal internally, float at the API boundary). `POST /offers` atomically checks decision approval and inserts (`INSERT ... SELECT ... FROM decisions WHERE outcome='approve'`) and is non-mutating on conflict (`ON CONFLICT DO NOTHING` + read-back) — a retry can never rewrite an already-disclosed loan's terms, even across a fee-rule change. `fee_pct_used` is snapshotted per offer. No host port; requires `X-Internal-Token`. |
@@ -248,7 +255,9 @@ notably `0005_money_columns_to_numeric.sql`, `0008_offer_decision_link.sql` +
 
 Money columns are `NUMERIC` (D12 fix — every dollar-amount column used to be `DOUBLE
 PRECISION`; `employment_years` stayed float since it's a duration, not money). `balances`
-is still a single mutable column (no ledger). `decisions` records the outcome only;
+is a projection of `ledger_entries`, maintained by 0035's trigger rather than
+overwritten by its last writer — this line read "is still a single mutable column (no
+ledger)" after that shipped. `decisions` records the outcome only;
 `decision_events` (Week 3) is a separate **append-only** audit row per decision — inputs,
 model score/version, top features, reason codes — so a decision can be proven, not just
 asserted. `offers.decision_id` is now FK'd to `decisions.app_id` with a **unique**

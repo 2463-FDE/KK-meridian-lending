@@ -153,15 +153,32 @@ def test_new_kyc_service_still_accepts_a_payload_carrying_identity_fields():
     """
     from app.schemas import ApplicationIn  # noqa: F401  (origination side)
 
-    import sys
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve()
-                           .parents[3] / "services" / "kyc-service"))
-    try:
-        from app.schemas import CipCheckIn as _KycIn
-    except Exception:                                          # pragma: no cover
-        pytest.skip("kyc-service package not importable from here")
-    finally:
-        sys.path.pop(0)
+    # Loaded by PATH, under a name of its own. The previous version inserted
+    # kyc-service's directory into sys.path and did `from app.schemas import
+    # CipCheckIn` -- but `app` is already in sys.modules as ORIGINATION's package
+    # by the time any test runs, and sys.path is only consulted for a module that
+    # is not already imported. So the import resolved to origination's own
+    # `app.schemas`, raised ImportError on `CipCheckIn`, and the `except` turned
+    # the failure into `pytest.skip("kyc-service package not importable")`.
+    #
+    # It skipped on every run, on every machine, including CI -- printing an `s`
+    # that reads exactly like a pass, on the one test that proves old origination
+    # can still talk to new kyc-service during a rolling deploy. The skip was not
+    # an environment limitation; it was this import strategy failing and
+    # apologising for the environment.
+    import importlib.util
+    import pathlib
+
+    kyc_schemas = (pathlib.Path(__file__).resolve().parents[3]
+                   / "services" / "kyc-service" / "app" / "schemas.py")
+    assert kyc_schemas.is_file(), (
+        f"kyc-service schemas not found at {kyc_schemas} -- this test compares two "
+        f"services' contracts and cannot be satisfied by skipping"
+    )
+    spec = importlib.util.spec_from_file_location("kyc_service_schemas", kyc_schemas)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _KycIn = module.CipCheckIn
 
     fat = _KycIn(application_id=1, applicant_id=1, name="Robin", dob="1985-02-11",
                  ssn="999-00-0042", address="1 Test Street", entity_type=None)

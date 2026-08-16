@@ -1,17 +1,38 @@
 # Runbook: dropping `payments.pan` and `payments.cvv`
 
-This is the **contract** half of an expand-and-contract migration. It destroys
+> ## ⚠️ Already executed. This is a record, not a pending task.
+>
+> `0031` has run: `payments` has no `pan` and no `cvv`, `db/init/001_schema.sql`
+> creates neither, and servicing's `_display_last4` reads `last4` only — the
+> fallback this runbook was written to protect **no longer exists**. Verify
+> before acting on anything below:
+>
+> ```bash
+> python db/tools/check_no_pan_readers.py --verbose   # exits 0
+> psql "$DATABASE_URL" -c "\d payments"               # no pan, no cvv
+> ```
+>
+> Kept because the sequencing is the reusable part — the next expand/contract on
+> a money table follows this shape. Every present-tense sentence below describes
+> the system **as it was before the drop**, and is retained for that reason.
+> Re-running these steps against the current database is not a no-op: step 5's
+> `ALTER` would fail on columns that are already gone, and an operator reading
+> the danger section below would be diagnosing a fallback that was removed.
+
+This was the **contract** half of an expand-and-contract migration. It destroys
 data and can break running services. It is not a migration to run because it is
 next in the folder.
 
-## Why this is dangerous, specifically
+## Why this was dangerous, specifically
+
+*(State before the drop. The fallback described here has since been removed.)*
 
 `db/migrations/0031_drop_payments_pan_cvv.sql` drops two columns. Servicing's
-payment-history endpoint reads `payment.pan` as a fallback for rows written
-before tokenization, so **any instance still running the pre-cutover image
-starts returning errors the moment the `ALTER` commits**. During a rolling
-restart, instances running the previous image are exactly what is serving
-traffic.
+payment-history endpoint **then read** `payment.pan` as a fallback for rows
+written before tokenization, so **any instance still running the pre-cutover
+image would start returning errors the moment the `ALTER` committed**. During a
+rolling restart, instances running the previous image are exactly what is
+serving traffic.
 
 The migration runner applies every `*.sql` in filename order. So if the expand
 migration (`0029`) and this one reach the same database in the same deploy,

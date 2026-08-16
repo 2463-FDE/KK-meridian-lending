@@ -298,7 +298,15 @@ CREATE TABLE IF NOT EXISTS loans (
     )
 );
 
--- Mutable balance: one column, overwritten in place. No ledger, no transaction history.
+-- Balance PROJECTION. `ledger_entries` (below, ADR 0010 / db/migrations/0035) is the
+-- record of what moved; the projection trigger maintains these columns by composing
+-- signed deltas, so two concurrent movements compose instead of one overwriting the
+-- other. This comment read "No ledger, no transaction history" in the same file that
+-- creates the ledger 34 lines later.
+--
+-- Three legacy writers still UPDATE these columns directly. Their deltas are captured
+-- into the ledger by the compatibility bridge, and the guard that would reject a direct
+-- write ships disabled until those writers are converted (ADR 0010 steps 3 and 5).
 CREATE TABLE IF NOT EXISTS balances (
     loan_id     INTEGER PRIMARY KEY REFERENCES loans(id),
     balance     NUMERIC(14,2) NOT NULL,    -- D12: was DOUBLE PRECISION, UPDATE-d in place

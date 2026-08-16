@@ -22,12 +22,28 @@ open through a different door:
      `POST /applications/{id}/decision` is reachable directly and does not care
      what intake returned.
 
-A transient failure must still behave as it always did. A KYC outage is not
-grounds for refusing to take an application, so a timeout or a 5xx keeps the
-soft fallback. The distinction between the two is the whole fix, so both
-directions are asserted -- a test that only proved the 401 case would pass just
-as well on a version that failed intake for every KYC error, which would be its
-own outage.
+Both directions are asserted, because a test that only proved the 401 case would
+pass just as well on a version that failed intake for every KYC error.
+
+**What "the other direction" actually is, corrected.** Two tests here used to be
+named `test_a_timeout_still_takes_the_application` and
+`test_a_kyc_5xx_still_takes_the_application`, and their docstrings said a KYC
+outage must not stop someone applying, "deliberately preserved". They passed --
+but only because `_RecordingDb.kyc_row_persisted` defaults to True, so the
+authoritative `FROM kyc_checks` lookup at the end of `submit_application` found a
+row. They were describing a fallback the production code no longer has.
+
+Production is fail-closed on the ROW, not on the exception type. A timeout or a
+5xx takes the soft path through `except Exception`, and then the CIP-row check
+runs: if no row landed, the application is marked `kyc_unverified` and intake
+returns 503 whatever the exception was. The only reason a timeout can still end
+in `200 submitted` is that kyc-service committed its row before the client gave
+up -- a real and ordinary outcome, and a much narrower claim than "an outage does
+not stop an application".
+
+So the two tests are renamed for the condition they actually hold (a persisted
+row), and the case they were mistaken for -- a first submission, timing out, with
+no row -- is asserted separately and directly.
 """
 import httpx
 import pytest
@@ -129,27 +145,75 @@ def test_the_persisted_application_is_marked_not_left_ambiguous(intake, monkeypa
     assert "status = 'submitted'" in sql
 
 
-def test_a_timeout_still_takes_the_application(intake, monkeypatch):
-    """A KYC outage must not stop someone applying. This is the behaviour the
-    original broad `except` existed for, and it is deliberately preserved."""
+def test_a_timeout_whose_kyc_row_landed_anyway_takes_the_application(intake, monkeypatch):
+    """The client gave up; kyc-service committed its row before it did.
+
+    This is the ONLY shape in which a timeout still ends in `200 submitted`, and
+    naming the precondition is the point: the fixture's
+    `kyc_row_persisted = True` is not scaffolding here, it is the condition under
+    test. Under the previous name this read as "a KYC outage never stops an
+    application", which is not what the code does -- see
+    `test_a_timeout_with_no_persisted_row_refuses_the_intake` below.
+
+    The application is taken because the compliance evidence exists; the response
+    reports all-false CIP because this process never saw the verdict.
+    """
+    intake.kyc_row_persisted = True
     _kyc_raises(monkeypatch, httpx.ConnectTimeout("kyc-service timed out"))
 
     result = applications_router.submit_application(applications_router.ApplicationIn(**_BODY))
 
     assert result["status"] == "submitted"
     assert result["kyc"].name_verified is False
-    assert not intake.status_updates(), "a transient failure must not mark the application"
+    assert not intake.status_updates(), (
+        "a transient failure that left a CIP row behind must not mark the application"
+    )
 
 
-def test_a_kyc_5xx_still_takes_the_application(intake, monkeypatch):
+def test_a_timeout_with_no_persisted_row_refuses_the_intake(intake, monkeypatch):
+    """A first submission, kyc-service unreachable, no CIP row anywhere.
+
+    The case the old timeout test was read as covering and never touched. There
+    is no compliance evidence for this applicant, so intake fails closed: the
+    already-committed application row is marked `kyc_unverified` and the caller
+    gets a resumable 503 rather than a `submitted` it could never advance.
+
+    Asserted on the response the caller receives, not on the log line, because
+    the defect this guards against is precisely a failure that looks like
+    success.
+    """
+    intake.kyc_row_persisted = False
+    _kyc_raises(monkeypatch, httpx.ConnectTimeout("kyc-service timed out"))
+
+    with pytest.raises(applications_router.HTTPException) as excinfo:
+        applications_router.submit_application(applications_router.ApplicationIn(**_BODY))
+
+    assert excinfo.value.status_code == 503
+    detail = excinfo.value.detail
+    assert detail["error"] == "identity_verification_unavailable"
+    assert detail["app_id"] == 8484
+    assert detail["resume_token"], "the failure carried no handle to retry with"
+
+    updates = intake.status_updates()
+    assert updates, "the application was left looking like a normal submission"
+    assert applications_router.KYC_UNVERIFIED_STATUS in updates[0][1]
+
+
+def test_a_kyc_5xx_whose_row_landed_is_taken_and_left_to_the_decision_gate(intake, monkeypatch):
     """A server-side error is kyc-service's problem, not a credential problem.
 
     500 is deliberately NOT grouped with 503. A 503 from kyc-service is its
     specific "I could not record this" signal, which tells us there is no
-    compliance row; a 500 tells us nothing, so the application is taken and the
-    decision gate -- which reads the database rather than trusting a status code
-    -- decides whether it may advance.
+    compliance row; a 500 tells us nothing, so with a row on file the
+    application is taken and the decision gate -- which reads the database rather
+    than trusting a status code -- decides whether it may advance.
+
+    With no row on file a 500 refuses like everything else, which
+    `test_rolling_deploy_compatibility.py::test_no_status_can_produce_a_submitted_application_without_a_row`
+    asserts over 422/500/502/418. The precondition is in the name here so the two
+    are not read as contradicting each other.
     """
+    intake.kyc_row_persisted = True
     _kyc_raises(monkeypatch, _http_error(500))
 
     result = applications_router.submit_application(applications_router.ApplicationIn(**_BODY))

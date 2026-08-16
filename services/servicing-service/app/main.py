@@ -1,9 +1,18 @@
 """Servicing service (LSS) — FastAPI.
 
 Read API (loan list / detail / schedule / payment history) uses SQLAlchemy. The
-money-moving endpoints (payments, balance adjust, fee waiver) keep their original raw
-implementation and accept ANY authenticated caller — no role check, no maker-checker.
-(weak authz — kept on purpose)
+money-moving endpoints (payments, balance adjust, fee waiver) keep their original
+raw implementation.
+
+Authorization, stated as it now stands: every money route requires
+`X-Internal-Token` and the service refuses to start without a usable one, and the
+gateway restricts adjust-balance / waive-fee / late-fee to csr/admin. What this
+service itself does not do is identify the human — it reads no principal, ignores
+the `x_user_role` header it accepts, and enforces no second approver (D8). This
+docstring used to describe the money endpoints as open to any authenticated
+caller with no check of any kind, which stopped being true once the token and the
+gateway rule landed, and was never the right description of who may authorise a
+movement.
 """
 import logging
 import os
@@ -279,9 +288,27 @@ class PaymentIn(BaseModel):
 def post_payment(body: PaymentIn,
                  x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
     _require_internal(x_internal_token)
-    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2,
-    # unrelated to the PCI/D5 fix above -- left as-is, same scope boundary
-    # payment-service's own idempotency fix drew.)
+    # The vendor's legacy duplicate of payment-service's /payments, and the half
+    # of D2 that is still open. No idempotency key is accepted or checked.
+    #
+    # A retry inserts another payment record and applies the loan balance again.
+    # It double-records and double-applies; it does not perform another processor
+    # charge -- this route calls no processor at all, so the borrower's card is
+    # untouched and what is wrong is the loan balance and the payment history.
+    # Worth stating precisely, because the two defects need different fixes and
+    # this comment used to name the wrong one. payment-service's own /payments
+    # was fixed (idempotency_key, partial unique index, apply-once); this one was
+    # never ported.
+    #
+    # Two things bound it, and neither closes it: the internal token above, and
+    # the gateway, which matches no rule for this path and 404s rather than
+    # proxying it -- so a browser or a staff session cannot reach it at all. It
+    # is reachable by a service already inside the compose network holding the
+    # shared token, and for that caller both duplications are real.
+    #
+    # Having no processor is also why its rows are labelled
+    # capture_source='servicing_legacy' and excluded from reconciliation (D7).
+    # Characterized by servicing-service/tests/test_legacy_payments_is_not_idempotent.py.
     return payments.charge(
         body.loan_id, body.processor_token, body.last4, body.brand, body.amount, body.name, body.method
     )
@@ -297,8 +324,14 @@ def apply_payment(loan_id: int, body: ApplyPaymentIn,
                   x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
     _require_internal(x_internal_token)
     # This is the apply path called by payment-service AFTER it captures the charge (the
-    # LSS half of the split payment flow). It still does the unlocked read-modify-write
-    # (D3) straight off principal with no waterfall (D14) — preserved exactly as-is.
+    # LSS half of the split payment flow). It no longer does an unlocked
+    # read-modify-write: apply_payment_once writes an immutable ledger entry and
+    # the projection trigger composes the delta into `balances`, which is what
+    # closed D3. This comment asserted the opposite for as long as the fix has
+    # been merged, immediately above the call that fixed it.
+    #
+    # Still straight off principal, with no waterfall (D14) -- that half of the
+    # old comment is accurate and stays.
     # Review fix: idempotent by payment_id now (balance.apply_payment_once) --
     # payment-service retries this call on a same-key retry if a prior attempt
     # never confirmed, so a duplicate call here must not double-apply.
@@ -332,7 +365,16 @@ def adjust_balance(loan_id: int, body: AdjustIn,
                    x_user_role: Optional[str] = Header(None),
                    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
     _require_internal(x_internal_token)
-    # ANY authenticated user. No role check, no second approver, no ledger entry. (debt D8)
+    # D8, stated as it now stands rather than as it was first reported.
+    #
+    # `x_user_role` above is accepted and never read -- this handler applies no
+    # authorisation rule of its own, and one caller can move money alone with no
+    # approver. That is the open part.
+    #
+    # What is no longer true: the gateway restricts this route to csr/admin
+    # (gateway/app/auth.py::can_move_money), and the write is captured in the
+    # ledger by 0035's compatibility bridge, so the prior value is recoverable.
+    # The captured entry names no actor, because nothing here knows one.
     return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
 
 
@@ -345,7 +387,9 @@ def waive_fee(loan_id: int, body: WaiveIn,
               x_user_role: Optional[str] = Header(None),
               x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
     _require_internal(x_internal_token)
-    # ANY authenticated user can waive a fee. No maker-checker. (debt D8)
+    # Same position as adjust-balance above: no approver and no human principal
+    # here (D8, open); csr/admin enforced at the gateway and the delta captured
+    # in the ledger by 0035 (both landed). The role header is not consulted.
     return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}
 
 
