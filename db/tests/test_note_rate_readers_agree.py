@@ -169,6 +169,45 @@ def test_no_service_source_reads_the_retired_column():
     )
 
 
+def test_no_browser_test_queries_the_retired_column():
+    """The same check, over `frontend/e2e`, because the Python sweep could not
+    see it and CI found what it missed.
+
+    `test_no_service_source_reads_the_retired_column` scans service source only.
+    The e2e specs query the real database directly to verify what was boarded,
+    so they read the schema exactly as a deployed service does -- and one of
+    them still selected `apr` from `loans` after every service had been
+    converted. It failed in CI, on this PR, which is the honest reason this
+    test exists rather than a class of defect anticipated in advance.
+
+    `offers.apr` is a real disclosed APR and those queries stay.
+    """
+    e2e = REPO / "frontend" / "e2e"
+    offenders = []
+    scanned = 0
+    for path in sorted(e2e.rglob("*.ts")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        scanned += 1
+        # Join adjacent string literals first. The query that broke CI is split
+        # across two of them -- `"SELECT apr, ... "` + `"... FROM loans ..."` --
+        # so a per-literal scan sees `apr` and `loans` in different strings and
+        # reports nothing. Mutation-testing this check is what exposed that: the
+        # first version passed with the bad query put back.
+        text = re.sub(r'"\s*\+\s*"', "", text)
+        for statement in re.findall(r'"[^"]*\bloans\b[^"]*"', text, re.IGNORECASE):
+            if re.search(r"\boffers\b", statement, re.IGNORECASE):
+                continue
+            if _QUALIFIED_LOAN_APR.search(statement) or _BARE_APR.search(statement):
+                offenders.append(
+                    f"{path.relative_to(REPO).as_posix()}: {statement[:90]}")
+
+    assert scanned, "no e2e specs found -- the sweep is looking in the wrong place"
+    assert not offenders, (
+        "an e2e spec still queries `loans.apr`, which no longer exists:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 def test_the_scan_can_still_see_the_offer_column():
     """Guard the guard. The check above passes trivially if the scanner stopped
     finding anything at all -- a changed AST shape, a moved directory. `offers.apr`

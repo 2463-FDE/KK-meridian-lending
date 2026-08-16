@@ -87,7 +87,7 @@ test("boarding copies the displayed payment plan onto the loan", async ({ page }
   await client.connect();
   try {
     const loan = await client.query(
-      "SELECT apr, term_months, regular_payment, regular_payment_count, final_payment, "
+      "SELECT note_rate_pct, term_months, regular_payment, regular_payment_count, final_payment, "
       + "schedule_version FROM loans WHERE app_id = $1",
       [appId],
     );
@@ -100,7 +100,10 @@ test("boarding copies the displayed payment plan onto the loan", async ({ page }
     expect(row.schedule_version).toBe("B1");
     // The boarded rate is the contractual NOTE rate, not the disclosed APR.
     // 7.99 vs 10.072 for this vector, so a confusion between them fails here.
-    expect(Number(row.apr)).toBe(7.99);
+    // The column is `note_rate_pct` since the D19 contract step
+    // (db/migrations/0039); it was `apr`, which is what made the confusion
+    // possible. The offer's `apr` below is a real disclosed APR and stays.
+    expect(Number(row.note_rate_pct)).toBe(7.99);
   } finally {
     await client.end();
   }
