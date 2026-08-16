@@ -177,7 +177,8 @@ def test_a_rejection_writes_no_entry_and_the_proposal_is_kept(db, loan):
     with _cursor(db) as cur:
         cur.execute(
             "UPDATE pending_movements SET resolution = 'rejected', resolved_by = 2, "
-            "resolved_role = 'underwriter', resolved_at = now() WHERE id = %s", (movement,))
+            "resolved_role = 'underwriter', resolved_at = now(), "
+            "resolved_threshold = 500.00 WHERE id = %s", (movement,))
     db.commit()
 
     with _cursor(db) as cur:
@@ -259,7 +260,8 @@ def test_a_resolved_proposal_cannot_be_resolved_again(db, loan):
         with _cursor(db) as cur:
             cur.execute(
                 "UPDATE pending_movements SET resolution = 'rejected', resolved_by = 3, "
-                "resolved_role = 'admin', resolved_at = now() WHERE id = %s", (movement,))
+                "resolved_role = 'admin', resolved_at = now(), "
+                "resolved_threshold = 500.00 WHERE id = %s", (movement,))
     db.rollback()
 
 
@@ -285,7 +287,8 @@ def test_a_rejected_proposal_cannot_gain_an_entry(db, loan):
     with _cursor(db) as cur:
         cur.execute(
             "UPDATE pending_movements SET resolution = 'rejected', resolved_by = 2, "
-            "resolved_role = 'underwriter', resolved_at = now() WHERE id = %s", (movement,))
+            "resolved_role = 'underwriter', resolved_at = now(), "
+            "resolved_threshold = 500.00 WHERE id = %s", (movement,))
     db.commit()
     with pytest.raises(psycopg2.errors.RaiseException):
         _insert_entry(db, movement, loan)
@@ -337,8 +340,8 @@ def test_a_proposal_can_never_be_deleted(db, loan, state):
         with _cursor(db) as cur:
             cur.execute(
                 "UPDATE pending_movements SET resolution = 'rejected', resolved_by = 2, "
-                "resolved_role = 'underwriter', resolved_at = now() WHERE id = %s",
-                (movement,))
+                "resolved_role = 'underwriter', resolved_at = now(), "
+                "resolved_threshold = 500.00 WHERE id = %s", (movement,))
     db.commit()
     with pytest.raises(psycopg2.errors.RaiseException) as exc:
         with _cursor(db) as cur:
@@ -471,3 +474,149 @@ def test_the_schema_hardcodes_no_configured_limit():
             assert figure not in pending.split("COMMIT")[0], (
                 f"{name} encodes the configured limit {figure} in the schema"
             )
+
+
+# --- review round 1: the four findings, each with the case that found it -------
+
+
+def test_a_resolution_cannot_attach_a_ledger_entry_in_the_same_statement(db, loan):
+    """PM-LINK-001, the blocker.
+
+    The transition trigger only restricted `ledger_entry_id` once the row was
+    ALREADY resolved. On the first resolution a caller could set `resolution`,
+    the resolver fields and `ledger_entry_id` together -- and nothing checked
+    that the entry it named belonged to this proposal. Invariants 6 and 7 were
+    enforced on the entry's way in and not on the proposal's way out.
+
+    Requiring a separate update is what makes the reciprocal checkable: the
+    entry must exist first, and by then it carries a `pending_movement_id`.
+    """
+    other = _propose(db, loan)
+    _approve(db, other)
+    other_entry = _insert_entry(db, other, loan)
+    with _cursor(db) as cur:
+        cur.execute("UPDATE pending_movements SET ledger_entry_id = %s WHERE id = %s",
+                    (other_entry, other))
+    db.commit()
+
+    movement = _propose(db, loan)
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        with _cursor(db) as cur:
+            cur.execute(
+                "UPDATE pending_movements SET resolution = 'approved', resolved_by = 2, "
+                "resolved_role = 'underwriter', resolved_at = now(), "
+                "resolved_threshold = 500.00, ledger_entry_id = %s WHERE id = %s",
+                (other_entry, movement))
+    assert "same statement that resolves it" in str(exc.value)
+    db.rollback()
+
+
+def test_a_proposal_cannot_link_another_proposals_entry(db, loan):
+    """PM-LINK-001, the half the deferred check owns.
+
+    Non-null was not enough. Attaching a foreign entry in a separate update now
+    fails at COMMIT, when the reciprocal is verified in both directions.
+    """
+    first = _propose(db, loan)
+    _approve(db, first)
+    first_entry = _insert_entry(db, first, loan)
+    with _cursor(db) as cur:
+        cur.execute("UPDATE pending_movements SET ledger_entry_id = %s WHERE id = %s",
+                    (first_entry, first))
+    db.commit()
+
+    second = _propose(db, loan)
+    _approve(db, second, resolver=3, role="admin")
+    with _cursor(db) as cur:
+        cur.execute("UPDATE pending_movements SET ledger_entry_id = %s WHERE id = %s",
+                    (first_entry, second))
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        db.commit()
+    assert "does not name it" in str(exc.value)
+    db.rollback()
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "\t", "\n  \t "])
+def test_a_blank_reason_is_refused(db, loan, reason):
+    """PM-REASON-001. `NOT NULL` admits '' and whitespace.
+
+    The reason is the evidence D8 names as missing; an empty one is the same
+    absence wearing a value. Spec 0002 AC-17 refuses absent, empty and
+    whitespace-only alike, so the constraint matches on a non-space character
+    rather than trimming spaces only.
+    """
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        _propose(db, loan, reason=reason)
+    assert "pending_reason_not_blank" in str(exc.value)
+    db.rollback()
+
+
+def test_a_resolution_must_record_the_threshold_it_was_judged_against(db, loan):
+    """PM-THRESHOLD-001. Spec 0002 AC-22.
+
+    The column existed and was nullable, so a resolution could commit recording
+    no bar at all -- which is precisely what the column exists to prevent. A
+    history of approvals is unreadable if the limit moved and nothing says when.
+    """
+    movement = _propose(db, loan)
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        with _cursor(db) as cur:
+            cur.execute(
+                "UPDATE pending_movements SET resolution = 'approved', resolved_by = 2, "
+                "resolved_role = 'underwriter', resolved_at = now() WHERE id = %s",
+                (movement,))
+    assert "resolution_complete" in str(exc.value)
+    db.rollback()
+
+
+def test_an_unresolved_proposal_may_not_carry_a_threshold(db, loan):
+    """The other direction: a bar recorded before anyone judged against it is a
+    number with no decision behind it."""
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        with _cursor(db) as cur:
+            cur.execute(
+                "INSERT INTO pending_movements (loan_id, component, amount, entry_type, "
+                "reason, requested_by, requested_role, resolved_threshold) "
+                "VALUES (%s, 'principal', -10.00, 'adjustment', 'premature bar', 1, "
+                "'csr', 500.00)", (loan,))
+    db.rollback()
+
+
+@pytest.mark.parametrize("component, amount, entry_type, constraint", [
+    ("principal", "0", "adjustment", "pending_amount_nonzero"),
+    ("fees", "10.00", "fee_waived", "pending_fee_waiver_reduces"),
+    ("interest", "10.00", "adjustment", "pending_component"),
+    ("principal", "-10.00", "fee_waived", "pending_"),
+])
+def test_a_proposal_the_ledger_could_never_execute_is_refused_at_creation(
+        db, loan, component, amount, entry_type, constraint):
+    """PM-TERMS-001.
+
+    The queue accepted proposals the ledger can never write -- a zero movement, a
+    positive waiver, an adjustment against interest -- which would have failed at
+    execution, after a second person had reviewed and accepted them. ADR 0011 §3b
+    is explicit that an approver should never be shown a request the system was
+    always going to reject.
+
+    These mirror ADR 0010's executable ledger constraints, so the refusal happens
+    where the requester can act on it.
+    """
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        _propose(db, loan, component=component, amount=amount, entry_type=entry_type)
+    assert constraint in str(exc.value)
+    db.rollback()
+
+
+def test_the_proposals_the_ledger_CAN_execute_are_still_accepted(db, loan):
+    """Guards the four refusals above: a rule that rejected everything would
+    satisfy all of them and stop the control working entirely."""
+    for component, amount, entry_type in (
+        ("principal", "-250.00", "adjustment"),
+        ("principal", "250.00", "adjustment"),
+        ("fees", "-40.00", "adjustment"),
+        ("fees", "-40.00", "fee_waived"),
+    ):
+        movement = _propose(db, loan, component=component, amount=amount,
+                            entry_type=entry_type)
+        assert movement, f"{entry_type} on {component} for {amount} was refused"
+    db.rollback()

@@ -914,12 +914,32 @@ CREATE TABLE IF NOT EXISTS pending_movements (
     resolved_threshold NUMERIC(14,2),
 
     CONSTRAINT no_self_approval CHECK (resolved_by IS NULL OR resolved_by <> requested_by),
+    -- PM-THRESHOLD-001: `resolved_threshold` is part of a complete resolution.
+    -- It was nullable and absent from this constraint, so a resolution could
+    -- commit without recording the bar it was judged against -- which is the one
+    -- thing spec 0002 AC-22 says the column exists to preserve, and a history of
+    -- approvals is unreadable if the bar moved and nothing says when.
     CONSTRAINT resolution_complete CHECK (
         (resolution IS NULL
-            AND resolved_by IS NULL AND resolved_role IS NULL AND resolved_at IS NULL)
+            AND resolved_by IS NULL AND resolved_role IS NULL AND resolved_at IS NULL
+            AND resolved_threshold IS NULL)
      OR (resolution IS NOT NULL
             AND resolved_by IS NOT NULL AND resolved_role IS NOT NULL
-            AND resolved_at IS NOT NULL)
+            AND resolved_at IS NOT NULL AND resolved_threshold IS NOT NULL)
+    ),
+    -- PM-REASON-001: `NOT NULL` admits '' and '   '. The reason is the evidence
+    -- D8 names as missing, and an empty one is the same absence wearing a value.
+    -- Matched on a non-space character rather than btrim() so tabs and newlines
+    -- are covered too.
+    CONSTRAINT pending_reason_not_blank CHECK (reason ~ '[^[:space:]]'),
+    -- PM-TERMS-001: a proposal the ledger can never execute must not reach an
+    -- approver's queue. These mirror ADR 0010's executable constraints, so the
+    -- refusal happens at creation with a message the requester can act on,
+    -- rather than at approval -- after a second person has reviewed and accepted
+    -- a request the system was always going to reject.
+    CONSTRAINT pending_amount_nonzero CHECK (amount <> 0),
+    CONSTRAINT pending_fee_waiver_reduces CHECK (
+        entry_type <> 'fee_waived' OR amount < 0
     ),
     -- "an approval produces exactly one ledger entry, a rejection produces none"
     -- is NOT a CHECK. It cannot be: the entry is inserted after the row is marked
@@ -931,7 +951,17 @@ CREATE TABLE IF NOT EXISTS pending_movements (
     -- Same component vocabulary as the ledger. Without this a proposal could
     -- name a component the ledger cannot hold, and the mismatch would surface
     -- only at approval -- after a human had reviewed and accepted it.
-    CONSTRAINT pending_component CHECK (component IN ('principal','interest','fees')),
+    -- The ledger holds an `adjustment` against principal or fees only
+    -- (`ledger_type_matches_component`, ADR 0010). `interest` is in the
+    -- vocabulary for the components the ledger CAN hold generally, and an
+    -- interest adjustment is not one of them -- so proposing one would queue a
+    -- movement that fails at execution. Spec 0002 REQ-VAL-2 lists all three; the
+    -- narrowing to what is executable is recorded there rather than left as a
+    -- silent difference between the document and the database.
+    CONSTRAINT pending_component CHECK (
+        (entry_type = 'adjustment'  AND component IN ('principal','fees'))
+     OR (entry_type = 'fee_waived'  AND component = 'fees')
+    ),
 
     -- A fee waiver moves fees. ADR 0010 fixes `fee_waived` to the `fees`
     -- component, so a proposal naming another describes a movement the ledger
@@ -1017,6 +1047,22 @@ BEGIN
         RAISE EXCEPTION 'the substance of a pending movement is immutable';
     END IF;
 
+    -- PM-LINK-001. The link may not be attached on the SAME update that resolves
+    -- the proposal. Until this, the first resolution could set `resolution` and
+    -- `ledger_entry_id` together -- and nothing checked that the entry it pointed
+    -- at belonged to THIS proposal, so an approval could commit citing another
+    -- proposal's ledger row. Invariants 6 and 7 were enforced on the entry's way
+    -- in and not on the proposal's way out.
+    --
+    -- Forcing a separate update is what makes the reciprocal checkable: the entry
+    -- must already exist, and by then it carries a `pending_movement_id` the
+    -- deferred check below compares against this row.
+    IF OLD.resolution IS NULL AND NEW.ledger_entry_id IS NOT NULL THEN
+        RAISE EXCEPTION 'a pending movement may not gain a ledger entry link in '
+                        'the same statement that resolves it -- insert the entry '
+                        'first, then attach it';
+    END IF;
+
     IF OLD.resolution IS NOT NULL THEN
         -- Already resolved. Exactly ONE further write is legal: attaching the
         -- ledger entry this approval produced, once, from NULL. An earlier
@@ -1100,6 +1146,20 @@ BEGIN
     IF final_resolution IS DISTINCT FROM 'approved' AND final_entry IS NOT NULL THEN
         RAISE EXCEPTION 'movement % is %, so it must have no ledger entry',
                         NEW.id, COALESCE(final_resolution, 'pending');
+    END IF;
+
+    -- PM-LINK-001. Non-null is not enough: the entry must be THIS proposal's.
+    -- Checked in both directions, because each catches a different mistake --
+    -- a proposal pointing at a foreign entry, and an entry whose own
+    -- `pending_movement_id` names someone else.
+    IF final_entry IS NOT NULL THEN
+        PERFORM 1 FROM ledger_entries
+         WHERE id = final_entry AND pending_movement_id = NEW.id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'movement % points at ledger entry %, which does not '
+                            'name it -- an approval may only link the entry it '
+                            'authorised', NEW.id, final_entry;
+        END IF;
     END IF;
     RETURN NULL;
 END $$ LANGUAGE plpgsql;

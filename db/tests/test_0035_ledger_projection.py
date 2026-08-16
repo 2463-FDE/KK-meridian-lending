@@ -172,7 +172,8 @@ def _an_approved_proposal(db, loan, amount, component="principal",
         "requested_by, requested_role) VALUES (%s, %s, %s, %s, 'ledger rule test', 1, 'csr') "
         "RETURNING id", (loan, component, amount, entry_type))[0]["id"]
     _exec(db, "UPDATE pending_movements SET resolution='approved', resolved_by=2, "
-              "resolved_role='underwriter', resolved_at=now() WHERE id=%s", (movement,))
+              "resolved_role='underwriter', resolved_at=now(), resolved_threshold=500.00 "
+              "WHERE id=%s", (movement,))
     return movement
 
 
@@ -361,54 +362,84 @@ def test_an_entry_cannot_be_changed_or_removed(db, statement):
     ("payment", 10.00),          # a payment that increases what is owed
     ("fee_assessed", -10.00),    # a fee that reduces it
     ("disbursement", -10.00),
-    ("fee_waived", 10.00),
 ])
-def test_a_wrong_signed_entry_is_refused(db, entry_type, amount):
-    """The sign rule, reached rather than short-circuited.
-
-    Since 0036 a `fee_waived` entry must name an approved proposal, and that
-    trigger runs BEFORE INSERT -- so without a proposal this case would be
-    refused for the wrong reason and would keep passing if the sign constraint
-    were dropped. The proposal is created so the CHECK under test is what fires.
-    """
+def test_a_wrong_signed_machine_entry_is_refused(db, entry_type, amount):
+    """The sign rule on the types no proposal governs."""
     loan = _a_loan(db)
-    component = "fees" if entry_type == "fee_waived" else "principal"
-    movement = (_an_approved_proposal(db, loan, amount, component=component,
-                                      entry_type=entry_type)
-                if entry_type in ("adjustment", "fee_waived") else None)
     with pytest.raises(psycopg2.errors.CheckViolation):
         _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
-                  "actor_id, actor_role, pending_movement_id) "
-                  "VALUES (%s, %s, %s, %s, 1, 'csr', %s)",
-              (loan, component, amount, entry_type, movement))
+                  "actor_id, actor_role) VALUES (%s, 'principal', %s, %s, 1, 'csr')",
+              (loan, amount, entry_type))
     db.rollback()
 
 
-def test_an_adjustment_may_go_either_way(db):
-    """The one type that may, which is exactly why it is the one needing a
-    second approver (ADR 0011)."""
+def test_a_wrong_signed_waiver_cannot_even_be_proposed(db):
+    """The sign rule for a waiver now bites one level earlier.
+
+    `ledger_sign_matches_type` still refuses a positive `fee_waived` entry. But
+    since 0036 such an entry can only exist by naming an approved proposal, and
+    `pending_fee_waiver_reduces` refuses to create that proposal at all -- so the
+    request never reaches an approver, which is what ADR 0011 §3b asks for.
+
+    Asserted where it now happens rather than where it used to: a test that
+    kept expecting the ledger to refuse would have been satisfied by the
+    proposal's refusal and would have kept passing with the ledger constraint
+    dropped.
+    """
     loan = _a_loan(db)
-    for amount in (12.00, -12.00):
-        movement = _an_approved_proposal(db, loan, amount)
-        entry = _exec(db,
-            "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
-            "actor_id, actor_role, pending_movement_id) "
-            "VALUES (%s, 'principal', %s, 'adjustment', 1, 'csr', %s) RETURNING id",
-            (loan, amount, movement))[0]["id"]
-        _link_entry(db, movement, entry)
-    db.commit()
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        _exec(db,
+            "INSERT INTO pending_movements (loan_id, component, amount, entry_type, "
+            "reason, requested_by, requested_role) "
+            "VALUES (%s, 'fees', 10.00, 'fee_waived', 'wrong direction', 1, 'csr')",
+            (loan,))
+    assert "pending_fee_waiver_reduces" in str(exc.value)
+    db.rollback()
 
 
-def test_a_zero_entry_is_refused(db):
-    """A movement of nothing is not a movement, and it would make the ledger
-    unreadable as a history."""
+def test_the_ledger_still_refuses_a_positive_waiver_on_its_own(db):
+    """Guards the guard above: the ledger constraint must not have been dropped
+    just because the proposal now catches it first. Inserted with the proposal
+    check bypassed, which is the only way to reach it."""
     loan = _a_loan(db)
-    movement = _an_approved_proposal(db, loan, 0)
-    with pytest.raises(psycopg2.errors.CheckViolation):
+    _exec(db, "ALTER TABLE pending_movements DROP CONSTRAINT pending_fee_waiver_reduces")
+    movement = _an_approved_proposal(db, loan, 10.00, component="fees",
+                                     entry_type="fee_waived")
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
         _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
                   "actor_id, actor_role, pending_movement_id) "
-                  "VALUES (%s, 'principal', 0, 'adjustment', 1, 'csr', %s)",
+                  "VALUES (%s, 'fees', 10.00, 'fee_waived', 1, 'csr', %s)",
               (loan, movement))
+    assert "ledger_sign_matches_type" in str(exc.value)
+    db.rollback()
+
+
+def test_a_zero_movement_cannot_be_proposed(db):
+    """A movement of nothing is not a movement, and it would make the ledger
+    unreadable as a history.
+
+    Refused at creation since 0036 (`pending_amount_nonzero`), which is where a
+    requester can act on the message. The ledger's own `amount <> 0` still holds
+    and is checked below.
+    """
+    loan = _a_loan(db)
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        _exec(db,
+            "INSERT INTO pending_movements (loan_id, component, amount, entry_type, "
+            "reason, requested_by, requested_role) "
+            "VALUES (%s, 'principal', 0, 'adjustment', 'nothing at all', 1, 'csr')",
+            (loan,))
+    assert "pending_amount_nonzero" in str(exc.value)
+    db.rollback()
+
+
+def test_the_ledger_still_refuses_a_zero_entry_on_its_own(db):
+    """Guard the guard: the ledger constraint must survive the proposal one."""
+    loan = _a_loan(db)
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
+                  "VALUES (%s, 'fees', 0, 'fee_assessed')", (loan,))
+    assert "amount" in str(exc.value)
     db.rollback()
 
 
@@ -557,36 +588,40 @@ def test_a_human_entry_type_cannot_even_be_proposed_with_a_wrong_component(
         db, entry_type, component, amount):
     """0036 moved this guarantee up a level, and made it stronger.
 
-    `ledger_type_matches_component` still refuses these entries. But since an
-    adjustment or fee waiver may now only enter the ledger naming an APPROVED
-    PROPOSAL, the combination has to survive `pending_movements` first -- and it
-    cannot: `pending_fee_waiver_is_fees` refuses a waiver against principal, and
-    `pending_component` refuses a component the ledger cannot hold.
+    `ledger_type_matches_component` still refuses these entries. But an
+    adjustment or fee waiver may now only enter the ledger naming an approved
+    proposal, and `pending_component` refuses to create one whose component the
+    ledger could not hold -- a waiver against principal, or an adjustment against
+    interest, which the ledger does not represent at all.
 
     So the incoherent request never reaches an approver's queue, which is the
-    point ADR 0011 makes about refusing at creation rather than at approval: a
-    human should never be shown a request the system was always going to reject.
+    point ADR 0011 §3b makes about refusing at creation: a human should never be
+    shown a request the system was always going to reject.
     """
     loan = _a_loan(db)
-    if entry_type == "fee_waived":
-        with pytest.raises(psycopg2.errors.CheckViolation):
-            _exec(db,
-                "INSERT INTO pending_movements (loan_id, component, amount, entry_type, "
-                "reason, requested_by, requested_role) "
-                "VALUES (%s, %s, %s, %s, 'wrong component', 1, 'csr')",
-                (loan, component, amount, entry_type))
-        db.rollback()
-        return
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        _exec(db,
+            "INSERT INTO pending_movements (loan_id, component, amount, entry_type, "
+            "reason, requested_by, requested_role) "
+            "VALUES (%s, %s, %s, %s, 'wrong component', 1, 'csr')",
+            (loan, component, amount, entry_type))
+    assert "pending_component" in str(exc.value) or "fee_waiver" in str(exc.value)
+    db.rollback()
 
-    # `adjustment` on `interest` IS a legal proposal -- correcting accrued
-    # interest is a real correction -- so the refusal comes from the ledger,
-    # which does not hold interest adjustments. Both layers are exercised.
-    movement = _an_approved_proposal(db, loan, amount, component=component,
-                                     entry_type=entry_type)
-    with pytest.raises(psycopg2.errors.CheckViolation):
-        _exec(db, "INSERT INTO ledger_entries(loan_id,component,amount,entry_type,actor_id,"
-                  "actor_role,pending_movement_id) VALUES(%s,%s,%s,%s,1,'admin',%s)",
-              (loan, component, amount, entry_type, movement))
+
+def test_the_ledger_still_refuses_a_mismatched_human_component_on_its_own(db):
+    """Guard the guard: with the proposal constraint dropped, the ledger's own
+    rule must still refuse an adjustment against interest."""
+    loan = _a_loan(db)
+    _exec(db, "ALTER TABLE pending_movements DROP CONSTRAINT pending_component")
+    movement = _an_approved_proposal(db, loan, 10, component="interest",
+                                     entry_type="adjustment")
+    with pytest.raises(psycopg2.errors.CheckViolation) as exc:
+        _exec(db, "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, "
+                  "actor_id, actor_role, pending_movement_id) "
+                  "VALUES (%s, 'interest', 10, 'adjustment', 1, 'admin', %s)",
+              (loan, movement))
+    assert "ledger_type_matches_component" in str(exc.value)
     db.rollback()
 
 
