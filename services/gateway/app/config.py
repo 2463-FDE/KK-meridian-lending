@@ -114,3 +114,105 @@ def validate_internal_token(environment: str | None = None, token: str | None = 
                 f"INTERNAL_SERVICE_TOKEN contains the placeholder {pattern!r}, so it "
                 "is a description of a secret rather than one. " + hint
             )
+
+
+def _pem_from_env(raw: str) -> str:
+    """A PEM as it survives an environment variable.
+
+    `.env` and `docker compose` are line-based, so a multi-line PEM is written
+    with its newlines escaped -- and NOTHING decodes an escape on the way back
+    out. `os.getenv` hands over the literal two-character sequence, which is not
+    a PEM, and `load_pem_*` refuses it with `InvalidByte(0, 92)` -- byte 92 being
+    the backslash.
+
+    This function is that decode. It was missing while three comments in this
+    change claimed it existed: bootstrap wrote escaped keys, both services read
+    them raw, and every money route would have refused with a 401 that looks like
+    an authorization problem rather than a configuration one. Caught by running
+    the documented bootstrap and trying to load what it wrote.
+
+    Both shapes are accepted, because both are real: a secrets manager or a
+    mounted file supplies genuine newlines, and `.env` supplies escapes.
+    """
+    return raw.replace("\\n", "\n") if "\\n" in raw else raw
+
+
+# --- signed human principal (spec 0002 REQ-ID-3) ------------------------------
+#
+# The gateway is the only component that turns a Redis session into a person, so
+# it is the only one that can honestly say who is acting. It signs that statement
+# with a key nothing else holds; every other service verifies with the public
+# half and therefore cannot forge one. See app/principal.py.
+#
+# No default, for the same reason INTERNAL_SERVICE_TOKEN has none: a key
+# committed here is not a key. Unlike the shared token, though, a *weak* value is
+# not the risk -- a malformed one is, because it fails at mint time, on a staff
+# request, in production. So it is parsed at boot rather than trusted.
+PRINCIPAL_SIGNING_KEY = _pem_from_env(os.getenv("PRINCIPAL_SIGNING_KEY", ""))
+
+#: Who the assertion is from, and who it is for. Both are checked by the
+#: verifier: an assertion minted for one service must not be replayable at
+#: another, which is the whole reason it carries an audience.
+ASSERTION_ISSUER = os.getenv("ASSERTION_ISSUER", "meridian-gateway")
+ASSERTION_AUDIENCE_SERVICING = "servicing-service"
+
+#: Seconds. Long enough to survive a slow proxied hop, short enough that a
+#: captured assertion is worthless before anyone could use it. Minted per
+#: request -- this is not a session, and lengthening it to avoid re-minting
+#: would turn it into one.
+ASSERTION_TTL_SECONDS = int(os.getenv("ASSERTION_TTL_SECONDS", "120"))
+
+
+class PrincipalKeyError(RuntimeError):
+    """Raised at startup when PRINCIPAL_SIGNING_KEY is missing or unusable."""
+
+
+def validate_principal_signing_key(environment: str | None = None,
+                                   key_pem: str | None = None) -> None:
+    """Refuse to start without a usable Ed25519 private key.
+
+    Same fail-closed shape as `validate_internal_token`, and same treatment of an
+    unset ENVIRONMENT: a container boots without one, so "unset" is production.
+
+    A dev environment may run without a key, and that is deliberate -- most of
+    this repo's local work never touches a money route, and requiring key
+    generation to run the app would be answered by pasting a key into the
+    repository, which is the outcome this rule exists to prevent. What a dev
+    environment may NOT do is mint an unsigned or half-signed assertion: with no
+    key, minting raises and the money routes refuse, so the failure is loud and
+    local rather than silent and shipped.
+    """
+    env = (environment if environment is not None else ENVIRONMENT).lower()
+    value = key_pem if key_pem is not None else PRINCIPAL_SIGNING_KEY
+    hint = (
+        "Generate a pair with `python db/tools/generate_principal_keypair.py`, "
+        "put PRINCIPAL_SIGNING_KEY in the gateway's environment and "
+        "PRINCIPAL_VERIFY_KEY in servicing's. The private half must never reach "
+        "another service -- if it does, every service can mint a human again and "
+        "the signature proves nothing."
+    )
+    if not value:
+        if env in _DEV_ENVIRONMENTS:
+            return
+        raise PrincipalKeyError(
+            "PRINCIPAL_SIGNING_KEY is unset and ENVIRONMENT is not a development "
+            f"environment (ENVIRONMENT={env!r}). " + hint
+        )
+
+    # Present-but-broken is checked in every environment, dev included: a key
+    # that fails to parse fails at mint time, which is a staff request in
+    # production and a mystery 500 locally.
+    from cryptography.hazmat.primitives import serialization
+
+    try:
+        key = serialization.load_pem_private_key(value.encode("utf-8"), password=None)
+    except Exception as exc:  # noqa: BLE001
+        raise PrincipalKeyError(
+            f"PRINCIPAL_SIGNING_KEY is not a readable PEM private key "
+            f"({type(exc).__name__}). " + hint
+        ) from exc
+    if key.__class__.__name__ != "Ed25519PrivateKey":
+        raise PrincipalKeyError(
+            f"PRINCIPAL_SIGNING_KEY is a {key.__class__.__name__}; Ed25519 is "
+            f"required so the verifier can pin a single algorithm. " + hint
+        )

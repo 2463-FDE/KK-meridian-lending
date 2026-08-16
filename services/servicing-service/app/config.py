@@ -101,3 +101,104 @@ def validate_internal_token(environment: str | None = None, token: str | None = 
                 f"INTERNAL_SERVICE_TOKEN contains the placeholder {pattern!r}, so it "
                 "is a description of a secret rather than one. " + hint
             )
+
+
+def _pem_from_env(raw: str) -> str:
+    """A PEM as it survives an environment variable.
+
+    `.env` and `docker compose` are line-based, so a multi-line PEM is written
+    with its newlines escaped -- and NOTHING decodes an escape on the way back
+    out. `os.getenv` hands over the literal two-character sequence, which is not
+    a PEM, and `load_pem_*` refuses it with `InvalidByte(0, 92)` -- byte 92 being
+    the backslash.
+
+    This function is that decode. It was missing while three comments in this
+    change claimed it existed: bootstrap wrote escaped keys, both services read
+    them raw, and every money route would have refused with a 401 that looks like
+    an authorization problem rather than a configuration one. Caught by running
+    the documented bootstrap and trying to load what it wrote.
+
+    Both shapes are accepted, because both are real: a secrets manager or a
+    mounted file supplies genuine newlines, and `.env` supplies escapes.
+    """
+    return raw.replace("\\n", "\n") if "\\n" in raw else raw
+
+
+# --- signed human principal (spec 0002 REQ-ID-3) ------------------------------
+#
+# The PUBLIC half of the gateway's signing pair. This service verifies human
+# principals and cannot mint one -- that asymmetry is the control. If this value
+# were ever the private key, every service holding it could forge an admin, which
+# is precisely the shared-secret weakness the signature replaces.
+#
+# No default: an absent key must fail closed at the money routes, not silently
+# admit unverified callers.
+PRINCIPAL_VERIFY_KEY = _pem_from_env(os.getenv("PRINCIPAL_VERIFY_KEY", ""))
+
+#: Who a valid assertion must come from, and who it must be addressed to. An
+#: assertion minted for another audience is refused here even though its
+#: signature is perfectly good -- that is what stops one captured off a different
+#: hop being replayed at this one.
+ASSERTION_ISSUER = os.getenv("ASSERTION_ISSUER", "meridian-gateway")
+ASSERTION_AUDIENCE = os.getenv("ASSERTION_AUDIENCE", "servicing-service")
+
+#: Ceiling on `exp - iat`, checked independently of expiry. Expiry alone only
+#: asks "is this still valid?"; this asks "was it ever allowed to be valid this
+#: long?" -- which is what catches a gateway misconfigured to a week-long TTL, or
+#: a leaked key being used to mint long-lived assertions.
+ASSERTION_MAX_LIFETIME_SECONDS = int(os.getenv("ASSERTION_MAX_LIFETIME_SECONDS", "300"))
+
+
+class PrincipalKeyError(RuntimeError):
+    """Raised at startup when PRINCIPAL_VERIFY_KEY is present but unusable."""
+
+
+def validate_principal_verify_key(environment: str | None = None,
+                                  key_pem: str | None = None) -> None:
+    """Refuse to start on a missing or unusable verification key.
+
+    Mirrors `validate_internal_token`, including its treatment of an unset
+    ENVIRONMENT as production. A dev environment may run without a key: the
+    money routes then refuse every request for want of a verifiable principal,
+    which is loud and local. What no environment may do is boot with a key that
+    does not parse, or with a PRIVATE key here -- the first fails at request
+    time on a staff action, and the second silently restores the ability of this
+    service to mint the identities it is supposed to only check.
+    """
+    env = (environment if environment is not None else ENVIRONMENT).lower()
+    value = key_pem if key_pem is not None else PRINCIPAL_VERIFY_KEY
+    hint = (
+        "Generate a pair with `python db/tools/generate_principal_keypair.py`. "
+        "PRINCIPAL_VERIFY_KEY is the PUBLIC half; the private half belongs to the "
+        "gateway alone."
+    )
+
+    if value and "PRIVATE KEY" in value:
+        raise PrincipalKeyError(
+            "PRINCIPAL_VERIFY_KEY holds a PRIVATE key. This service must not be "
+            "able to mint a principal -- only the gateway may. " + hint
+        )
+
+    if not value:
+        if env in _DEV_ENVIRONMENTS:
+            return
+        raise PrincipalKeyError(
+            "PRINCIPAL_VERIFY_KEY is unset and ENVIRONMENT is not a development "
+            f"environment (ENVIRONMENT={env!r}). Money-moving routes cannot verify "
+            f"who is acting. " + hint
+        )
+
+    from cryptography.hazmat.primitives import serialization
+
+    try:
+        key = serialization.load_pem_public_key(value.encode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise PrincipalKeyError(
+            f"PRINCIPAL_VERIFY_KEY is not a readable PEM public key "
+            f"({type(exc).__name__}). " + hint
+        ) from exc
+    if key.__class__.__name__ != "Ed25519PublicKey":
+        raise PrincipalKeyError(
+            f"PRINCIPAL_VERIFY_KEY is a {key.__class__.__name__}; Ed25519 is "
+            f"required so the verifier can pin a single algorithm. " + hint
+        )

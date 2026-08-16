@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
-from . import auth, config, db
+from . import auth, config, db, principal
 from .config import (
     DECISION_URL,
     DISCLOSURE_URL,
@@ -48,6 +48,10 @@ log = logging.getLogger("gateway")
 # Fail at boot rather than per-request if the internal token is unusable
 # (PR #18 review). Import-time so an unusable deployment never serves traffic.
 config.validate_internal_token()
+# The key that lets this gateway say WHO is acting. Validated at boot for the
+# same reason as the token: a malformed key fails at mint time, which is a staff
+# money request in production.
+config.validate_principal_signing_key()
 
 app = FastAPI(title="Meridian Gateway (BFF)", version="2.0.0")
 
@@ -143,7 +147,8 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
     # was availability rather than escalation, but it was a stranger's switch.
     headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "authorization", "x-internal-token")
+        if k.lower() not in ("host", "content-length", "authorization",
+                             "x-internal-token", "x-principal-assertion")
         and not k.lower().startswith("x-user-")
     }
     if user:
@@ -289,8 +294,28 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
         # staff but has no business moving money; is_staff() alone let an
         # underwriter POST straight to these routes even though the servicing UI
         # never shows them the button.
+        #
+        # The check below is no longer the only one. Servicing verifies the
+        # signed assertion minted here and applies the same csr/admin rule
+        # itself, so this hop is defence in depth rather than the boundary: a
+        # caller that skips the gateway entirely is now refused by servicing
+        # instead of arriving unauthenticated-as-a-human with a shared token.
         if auth.can_move_money(user):
-            return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
+            money_headers = dict(svc)
+            try:
+                money_headers[principal.HEADER] = principal.mint(user)
+            except config.PrincipalKeyError as exc:
+                # Fail closed, and say which thing is broken. Without this the
+                # failure surfaces either as a crypto traceback (500, a mystery)
+                # or as a 401 from servicing, which points the operator at the
+                # wrong service entirely. A money route with no way to say who is
+                # acting must refuse, not degrade.
+                log.error("cannot mint a principal assertion: %s", exc)
+                raise HTTPException(
+                    status_code=503, detail="identity signing unavailable",
+                ) from exc
+            return await _proxy(SERVICING_URL, f"/{path}", request, user,
+                                extra_headers=money_headers)
         raise HTTPException(status_code=403, detail="csr/admin only")
 
     if path == "reconciliation/peek":

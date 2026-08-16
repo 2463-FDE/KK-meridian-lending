@@ -44,15 +44,42 @@ def test_the_two_routes_still_have_no_approval(route):
     )
 
 
-def test_the_role_header_is_still_accepted_and_unused():
-    """The specific shape of D8: the endpoints take a role and never read it,
-    which is worse than not taking one -- it looks like an authorisation check."""
+def test_servicing_now_verifies_the_principal_it_used_to_ignore():
+    """This assertion has been inverted, and the inversion is the point.
+
+    It used to require that `adjust_balance` accept `x_user_role` and never check
+    a role -- true while the csr/admin rule lived only at the gateway, and the
+    exact shape of D8's identity half. The guard was written to fail when
+    maker-checker landed, with the failure as the instruction to rewrite §1.
+
+    Half of that arrived: servicing now verifies a gateway-signed principal and
+    applies csr/admin itself. Left alone, this test would have gone on *requiring*
+    the old system -- pinning "servicing checks nothing" as truth and failing any
+    attempt to correct the spec. A guard that outlives its subject stops
+    protecting the document and starts protecting the mistake.
+
+    So it now pins the CURRENT boundary, and will fail the same way again when the
+    approval step lands -- at which point the residue in §1 must shrink to nothing.
+    """
     src = SERVICING_MAIN.read_text(encoding="utf-8")
     adjust = src[src.index("def adjust_balance("):]
-    adjust = adjust[:adjust.index("@app.post", 1)] if "@app.post" in adjust[1:] else adjust[:600]
-    assert "x_user_role" in adjust, "adjust_balance no longer accepts a role header"
-    assert "_STAFF_ROLES" not in adjust and "require_staff" not in adjust.lower(), (
-        "adjust_balance now checks the role -- spec 0002 §1 must be updated"
+    adjust = adjust[:adjust.index("@app.post", 1)] if "@app.post" in adjust[1:] else adjust[:1500]
+
+    assert "require_money_principal" in adjust, (
+        "adjust_balance no longer verifies a human principal -- if the role check "
+        "moved back to the gateway alone, spec 0002 section 1 is wrong again and "
+        "the direct-to-servicing bypass is reopened"
+    )
+    assert "x_principal_assertion" in adjust, (
+        "the handler does not take the signed assertion, so whatever it verifies "
+        "is not coming from the gateway"
+    )
+    # The header is still accepted, and still not trusted: it is passed to the
+    # guard only so a disagreement with the signature can be refused.
+    assert "x_user_role" in adjust, "the role header is no longer even inspected"
+    assert "claimed_role=x_user_role" in adjust, (
+        "x_user_role is read without being cross-checked against the signature -- "
+        "that is the bypass spec 0002 REQ-ID-8 forbids"
     )
 
 
@@ -177,10 +204,78 @@ def test_the_spec_requires_a_non_forgeable_server_validated_principal():
         assert phrase in text, f"identity boundary omits {phrase!r}"
 
 
-def test_the_spec_is_honest_that_the_principal_mechanism_is_not_implemented():
+def test_the_spec_is_honest_about_what_is_built_and_what_is_not():
+    """The spec must claim exactly what exists -- in both directions.
+
+    This used to require the sentence "no signed principal assertion", which was
+    true when written and became false when the assertion shipped. Requiring it
+    made the document uncorrectable: the spec could not be brought in line with
+    the code without failing its own guard, and the guard stayed green while the
+    system changed underneath it. That is the failure mode the file exists to
+    prevent, achieved by the file itself.
+
+    What is durable is not a status sentence but the PAIRING: whatever the spec
+    says about identity must match whether `require_money_principal` exists, and
+    the approval control must still be described as absent while
+    `pending_movements` does not exist.
+    """
     text = SPEC.read_text(encoding="utf-8")
-    assert "no signed principal assertion" in text
-    assert "does not claim the present headers satisfy it" in " ".join(text.split())
+    flat = " ".join(text.split())
+    servicing = SERVICING_MAIN.read_text(encoding="utf-8")
+
+    principal_is_built = "require_money_principal" in servicing
+    assert principal_is_built, (
+        "servicing no longer verifies a principal; this test's premise has "
+        "changed and the spec's identity section must be re-examined"
+    )
+    # Each present-tense claim is named and refused individually. The first
+    # version of this check allowed the stale sentence whenever the word
+    # "previously" appeared ANYWHERE in the document -- which it does, a dozen
+    # times, in unrelated history. That is a guard that passes over the prose it
+    # is guarding, and the review caught it doing exactly that: three stale
+    # paragraphs survived a round because one distant word satisfied the test.
+    #
+    # A claim may still be QUOTED as history. What it may not be is asserted, so
+    # the check is: does this sentence appear outside a past-tense frame?
+    stale_now = [
+        "no signed principal assertion",
+        "the required boundary does not exist yet",
+        "is not a check servicing itself makes",
+        "as a header today and never read it",
+        "servicing validates no human principal",
+    ]
+    lowered = flat.lower()
+    offenders = []
+    for claim in stale_now:
+        index = lowered.find(claim)
+        while index != -1:
+            window = lowered[max(0, index - 220):index]
+            quoted = window.count('"') % 2 == 1
+            past = any(marker in window for marker in (
+                "previously", "used to", "it read", "described", "past tense",
+                "before the signed principal", "when it was written",
+            ))
+            if not (quoted or past):
+                offenders.append(claim)
+                break
+            index = lowered.find(claim, index + len(claim))
+    assert not offenders, (
+        f"the spec asserts these as current fact: {offenders}. Servicing verifies "
+        f"a gateway-signed principal and applies csr/admin itself -- see "
+        f"services/servicing-service/app/principal.py. State them as history or "
+        f"delete them."
+    )
+
+    # And the half that is genuinely absent must still be described as absent.
+    assert "pending_movements" not in servicing, (
+        "servicing references pending_movements -- the approval control may be "
+        "implemented, so section 1 must be rewritten again"
+    )
+    assert "is not implemented" in flat or "not implemented" in flat, (
+        "the spec no longer says the approval control is unimplemented, while no "
+        "pending_movements table exists -- that is the overclaim this repository "
+        "has already shipped twice"
+    )
 
 
 def test_forged_headers_with_a_valid_service_token_are_covered():
