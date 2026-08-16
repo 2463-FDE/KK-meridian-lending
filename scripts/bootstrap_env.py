@@ -32,6 +32,41 @@ ENV = REPO / ".env"
 EXAMPLE = REPO / ".env.example"
 
 
+def _one_line(pem: str) -> str:
+    """A PEM as a single .env value.
+
+    `.env` is line-based and a PEM is not, so the newlines are escaped. Both
+    services decode the escape before parsing, and a key that fails to parse is a
+    boot failure rather than a per-request surprise.
+    """
+    return pem.strip().replace("\n", "\\n")
+
+
+def _generate_principal_keypair() -> tuple[str, str]:
+    """An Ed25519 pair: private for the gateway, public for servicing.
+
+    Imported lazily so this script still runs on a checkout whose service
+    requirements have not been installed -- bootstrap is the first thing a new
+    developer runs, and failing on an import would send them to fix the wrong
+    problem.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private = Ed25519PrivateKey.generate()
+    return (
+        private.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode(),
+        private.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode(),
+    )
+
+
 def _set_if_missing(text: str, key: str, value: str) -> tuple[str, bool]:
     """Set `key` only when it is absent or empty. Returns (text, changed)."""
     if re.search(rf"^{re.escape(key)}=.+$", text, re.M):
@@ -52,8 +87,26 @@ def main() -> int:
     text = ENV.read_text(encoding="utf-8")
     text, token_added = _set_if_missing(text, "INTERNAL_SERVICE_TOKEN", secrets.token_urlsafe(32))
     text, env_added = _set_if_missing(text, "ENVIRONMENT", "development")
+
+    # The principal signing pair, for the same reason and on the same terms as
+    # the token: compose requires both halves, nothing in the repository is a
+    # usable key, and whoever holds the private half can mint an admin.
+    #
+    # Generated together so they always match. A mismatched pair is the worst of
+    # the failure modes -- everything boots, and every money route refuses with a
+    # 401 that looks like an authorization problem rather than a key problem.
+    #
+    # PEM is multi-line and .env is not, so newlines are escaped; both services
+    # decode them before parsing.
+    private_pem, public_pem = _generate_principal_keypair()
+    text, signing_added = _set_if_missing(
+        text, "PRINCIPAL_SIGNING_KEY", _one_line(private_pem))
+    text, verify_added = _set_if_missing(
+        text, "PRINCIPAL_VERIFY_KEY", _one_line(public_pem))
     ENV.write_text(text, encoding="utf-8")
 
+    if signing_added or verify_added:
+        print("generated the principal signing pair (local only -- never commit it)")
     if token_added:
         print("generated INTERNAL_SERVICE_TOKEN (local only -- never commit it)")
     if env_added:

@@ -103,6 +103,27 @@ def validate_internal_token(environment: str | None = None, token: str | None = 
             )
 
 
+def _pem_from_env(raw: str) -> str:
+    """A PEM as it survives an environment variable.
+
+    `.env` and `docker compose` are line-based, so a multi-line PEM is written
+    with its newlines escaped -- and NOTHING decodes an escape on the way back
+    out. `os.getenv` hands over the literal two-character sequence, which is not
+    a PEM, and `load_pem_*` refuses it with `InvalidByte(0, 92)` -- byte 92 being
+    the backslash.
+
+    This function is that decode. It was missing while three comments in this
+    change claimed it existed: bootstrap wrote escaped keys, both services read
+    them raw, and every money route would have refused with a 401 that looks like
+    an authorization problem rather than a configuration one. Caught by running
+    the documented bootstrap and trying to load what it wrote.
+
+    Both shapes are accepted, because both are real: a secrets manager or a
+    mounted file supplies genuine newlines, and `.env` supplies escapes.
+    """
+    return raw.replace("\\n", "\n") if "\\n" in raw else raw
+
+
 # --- signed human principal (spec 0002 REQ-ID-3) ------------------------------
 #
 # The PUBLIC half of the gateway's signing pair. This service verifies human
@@ -112,7 +133,7 @@ def validate_internal_token(environment: str | None = None, token: str | None = 
 #
 # No default: an absent key must fail closed at the money routes, not silently
 # admit unverified callers.
-PRINCIPAL_VERIFY_KEY = os.getenv("PRINCIPAL_VERIFY_KEY", "")
+PRINCIPAL_VERIFY_KEY = _pem_from_env(os.getenv("PRINCIPAL_VERIFY_KEY", ""))
 
 #: Who a valid assertion must come from, and who it must be addressed to. An
 #: assertion minted for another audience is refused here even though its

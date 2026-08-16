@@ -116,6 +116,27 @@ def validate_internal_token(environment: str | None = None, token: str | None = 
             )
 
 
+def _pem_from_env(raw: str) -> str:
+    """A PEM as it survives an environment variable.
+
+    `.env` and `docker compose` are line-based, so a multi-line PEM is written
+    with its newlines escaped -- and NOTHING decodes an escape on the way back
+    out. `os.getenv` hands over the literal two-character sequence, which is not
+    a PEM, and `load_pem_*` refuses it with `InvalidByte(0, 92)` -- byte 92 being
+    the backslash.
+
+    This function is that decode. It was missing while three comments in this
+    change claimed it existed: bootstrap wrote escaped keys, both services read
+    them raw, and every money route would have refused with a 401 that looks like
+    an authorization problem rather than a configuration one. Caught by running
+    the documented bootstrap and trying to load what it wrote.
+
+    Both shapes are accepted, because both are real: a secrets manager or a
+    mounted file supplies genuine newlines, and `.env` supplies escapes.
+    """
+    return raw.replace("\\n", "\n") if "\\n" in raw else raw
+
+
 # --- signed human principal (spec 0002 REQ-ID-3) ------------------------------
 #
 # The gateway is the only component that turns a Redis session into a person, so
@@ -127,7 +148,7 @@ def validate_internal_token(environment: str | None = None, token: str | None = 
 # committed here is not a key. Unlike the shared token, though, a *weak* value is
 # not the risk -- a malformed one is, because it fails at mint time, on a staff
 # request, in production. So it is parsed at boot rather than trusted.
-PRINCIPAL_SIGNING_KEY = os.getenv("PRINCIPAL_SIGNING_KEY", "")
+PRINCIPAL_SIGNING_KEY = _pem_from_env(os.getenv("PRINCIPAL_SIGNING_KEY", ""))
 
 #: Who the assertion is from, and who it is for. Both are checked by the
 #: verifier: an assertion minted for one service must not be replayable at

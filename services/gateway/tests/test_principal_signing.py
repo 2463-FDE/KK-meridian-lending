@@ -360,3 +360,67 @@ def test_a_read_route_carries_no_assertion(staff_session):
     assert resp.status_code == 200
     forwarded = {k.lower(): v for k, v in (_CapturingClient.last_headers or {}).items()}
     assert "x-principal-assertion" not in forwarded
+
+
+# --- the shape a key arrives in ----------------------------------------------
+
+
+def test_a_pem_survives_a_single_line_env_var():
+    """`.env` is line-based and a PEM is not.
+
+    `scripts/bootstrap_env.py` writes the key with its newlines escaped, and
+    nothing decoded them: `os.getenv` returns the literal two-character sequence,
+    `load_pem_private_key` refuses it with `InvalidByte(0, 92)` -- 92 being the
+    backslash -- and every money route would have failed with a 401 that looks
+    like an authorization problem rather than a configuration one.
+
+    Three comments in this change claimed the decode existed before it did. It
+    was found by running the documented bootstrap and trying to load what it
+    wrote, which is the only reason this test exists rather than the claim.
+    """
+    private_pem, _ = _keypair()
+    escaped = private_pem.strip().replace("\n", "\\n")
+    assert "\\n" in escaped and "\n" not in escaped, "the fixture is not a one-liner"
+
+    decoded = config._pem_from_env(escaped)
+    serialization.load_pem_private_key(decoded.encode(), password=None)
+
+
+def test_a_pem_with_real_newlines_is_left_alone():
+    """Both shapes are real: a secrets manager or a mounted file supplies genuine
+    newlines, and mangling those would break the deployment that did it right."""
+    private_pem, _ = _keypair()
+    assert config._pem_from_env(private_pem) == private_pem
+
+
+def test_the_bootstrap_generates_a_pair_that_actually_matches():
+    """A mismatched pair is the worst failure mode: everything boots, and every
+    money route refuses with a 401 that reads as an authorization problem.
+
+    The bootstrap's own functions are exercised rather than the script as a
+    whole -- it writes to the repository's `.env` by design (its paths are
+    resolved from the script, not the cwd), and a test that ran it for real would
+    either rewrite a developer's keys or prove nothing about the code path.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "bootstrap_env_under_test", REPO / "scripts" / "bootstrap_env.py")
+    bootstrap = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bootstrap)
+
+    private_pem, public_pem = bootstrap._generate_principal_keypair()
+
+    # Through the one-line form bootstrap actually writes, and back out through
+    # the decoder the services actually use -- the round trip that was broken.
+    private = serialization.load_pem_private_key(
+        config._pem_from_env(bootstrap._one_line(private_pem)).encode(), password=None)
+    public = serialization.load_pem_public_key(
+        config._pem_from_env(bootstrap._one_line(public_pem)).encode())
+    assert private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    ) == public.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    ), "bootstrap wrote a private and public key that are not a pair"
