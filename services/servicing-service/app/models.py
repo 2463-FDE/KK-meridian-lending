@@ -14,11 +14,26 @@ below by composing signed deltas. This docstring said "still a single mutable
 balance column (no ledger)" for as long as the ledger has existed.
 
 What is still true, and is why the model looks unchanged: the columns are read
-the same way, the projection keeps them current, and three legacy writers
-(`balance.apply_payment`, `adjust_balance`, `waive_fee`) still UPDATE them
-directly. Those writes are captured into the ledger by 0035's compatibility
-bridge, and ADR 0010's guard against direct writes stays disabled until they are
-converted.
+the same way, and the projection keeps them current.
+
+**The remaining direct writers are `balance.apply_payment`, `adjust_balance`
+and `waive_fee`, and none of them is reachable from a route.** `apply_payment`
+was superseded by `apply_payment_once`; `adjust_balance` and `waive_fee` were
+superseded by the maker-checker proposal flow, where the APPROVAL writes the
+ledger entry. They are unreferenced code that would still UPDATE these columns
+if anything called them.
+
+This list previously named those three and omitted `delinquency.assess_late_fee`,
+which was the one direct writer a route could actually reach -- a writer list
+that reads complete while missing one, which is the defect shape this repository
+keeps producing. It now writes a `fee_assessed` ledger entry instead (ADR 0010
+step 3).
+
+ADR 0010's guard against direct writes stays disabled until the three above are
+retired or converted. **Note that the compatibility bridge is not a safety net
+on every database:** `balances_capture_legacy_delta` is created by
+`db/migrations/0035` and is absent from `db/init/001_schema.sql`, so a freshly
+built database captures nothing -- a direct write there is simply unrecorded.
 
 ADR 0008 (Week 5 tokenization) removed card storage entirely. This model no
 longer declares `pan`/`cvv`, and payment-service never receives a raw PAN/CVV to
