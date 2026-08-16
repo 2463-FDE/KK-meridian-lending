@@ -39,13 +39,15 @@ def _all_migrations():
 def _run_sql(conn, schema, sql):
     with conn.cursor() as cur:
         cur.execute(f"SET search_path TO {schema}")
-        # 0031 refuses to run without this acknowledgement -- it destroys data
-        # and can break servicing instances still reading payments.pan. A test
+        # 0031 and 0039 refuse to run without these acknowledgements -- both are
+        # contract-half migrations that destroy data and can break instances
+        # still reading the dropped column (`payments.pan`, `loans.apr`). A test
         # harness IS the operator here, so it acknowledges explicitly rather
-        # than the gate being weakened to let automation through. Set on every
+        # than the gates being weakened to let automation through. Set on every
         # statement because a GUC set with SET is session-scoped and these
         # helpers do not assume one long-lived session.
         cur.execute("SET meridian.pan_drop_acknowledged = 'yes'")
+        cur.execute("SET meridian.loans_apr_drop_acknowledged = 'yes'")
         cur.execute(sql)
     conn.commit()
 
@@ -67,12 +69,60 @@ def _has_executable_sql(sql: str) -> bool:
     return bool(stripped.strip())
 
 
+# Migrations that cannot run unattended, and the operator step each one
+# requires first. Keyed by filename prefix, run immediately before that file.
+#
+# These are NOT fixes to the migrations and must never grow into a way of
+# getting a red chain green. Each entry is a HUMAN decision that the migration
+# deliberately refuses to make, transcribed for a synthetic database whose
+# history this repository authored.
+_OPERATOR_STEPS = {
+    # `docs/RUNBOOK-loans-apr-contract.md` step 2. 0039 refuses while any loan
+    # has an unproven `note_rate_pct`, and the legacy fixture has exactly one:
+    # loan 1, whose offer's payment (407.00) does not reproduce from its rate
+    # (5.946% over 24mo bills 398.68), so 0030 could not prove the offer and
+    # 0038 could not back-fill from it. That refusal is correct and is asserted
+    # directly in `db/tests/test_0039_drop_loans_apr.py`.
+    #
+    # A real operator resolves it from the signed disclosure or the servicing
+    # history. Here the fixture IS the history -- `_build_legacy_schema` wrote
+    # that loan at 5.946% and nothing else ever billed it -- so the answer is
+    # known rather than guessed, and it is recorded here where a reader can see
+    # it is a fixture premise and not a rule the migration applies.
+    #
+    # Nothing generalises from this. On a real database the same UPDATE would be
+    # relabelling a possibly-disclosed APR as a contractual term, which is what
+    # the gate exists to stop.
+    # Guarded on the column's existence, because this same helper builds paths
+    # that never had `apr` at all -- a fresh `db/init` database run through the
+    # migration runner, and a replay of the whole chain after 0039 has already
+    # dropped it. On those paths there is nothing to resolve and the step is a
+    # no-op, which is different from the step being unnecessary.
+    "0039": """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = current_schema()
+                   AND table_name = 'loans' AND column_name = 'apr'
+            ) THEN
+                EXECUTE 'UPDATE loans SET note_rate_pct = 5.946 '
+                        ' WHERE note_rate_pct IS NULL AND apr = 5.946';
+            END IF;
+        END $$;
+    """,
+}
+
+
 def _apply_all_migrations(conn, schema):
     """Every migration, in filename order -- the real upgrade sequence."""
     for path in _all_migrations():
         sql = path.read_text()
         if not _has_executable_sql(sql):
             continue
+        step = _OPERATOR_STEPS.get(path.name.split("_")[0])
+        if step:
+            _run_sql(conn, schema, step)
         _run_sql(conn, schema, sql)
 
 
@@ -107,6 +157,11 @@ def _build_legacy_schema(conn, schema):
             amount_financed NUMERIC(14,2), total_of_payments NUMERIC(14,2),
             created_at TIMESTAMPTZ DEFAULT now());
         -- no UNIQUE on app_id yet: 0015 adds it
+        -- `apr`, NOT `note_rate_pct`. This is the LEGACY shape -- the database as
+        -- it was before the migration chain ran -- and `note_rate_pct` is what
+        -- 0038 adds and 0039 makes NOT NULL. Naming the new column here would
+        -- make the convergence tests assert against a starting point that never
+        -- existed, and would silently skip the two migrations being tested.
         CREATE TABLE loans (id SERIAL PRIMARY KEY, app_id INTEGER, applicant_name TEXT,
             principal NUMERIC(14,2) NOT NULL, apr NUMERIC(7,3) NOT NULL,
             term_months INTEGER NOT NULL, status TEXT DEFAULT 'current',

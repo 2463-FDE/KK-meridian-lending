@@ -42,7 +42,7 @@ SELECT g, (ARRAY['approve','approve','approve','deny','refer'])[1 + ((g * 2) % 5
 FROM generate_series(7000, 7299) g;
 
 -- Loans for every FUNDED application (loan id = app id, mirroring the anchor convention).
-INSERT INTO loans (id, app_id, applicant_name, principal, apr, term_months, status)
+INSERT INTO loans (id, app_id, applicant_name, principal, note_rate_pct, term_months, status)
 SELECT a.id, a.id, ap.name, a.amount,
   round((7.99 + (a.id % 16))::numeric, 3)::double precision,
   a.term_months,
@@ -303,13 +303,14 @@ BEGIN
           unfooted;
     END IF;
 
-    -- 5. the offer's note rate is the rate its loan is billed at. loans.apr
-    --    holds the CONTRACTUAL rate despite the column name (D19); a mismatch
+    -- 5. the offer's note rate is the rate its loan is billed at. The loan
+    --    column is `note_rate_pct` since D19's contract step and says so; it was
+    --    `apr`, a name describing the wrong regulated figure. A mismatch here
     --    means the borrower is billed at a rate the disclosure did not price.
     SELECT count(*) INTO rate_mismatch FROM offers o
       JOIN loans l ON l.app_id = o.app_id
      WHERE o.app_id BETWEEN 7000 AND 7299
-       AND round(o.note_rate_pct, 3) <> round(l.apr::numeric, 3);
+       AND round(o.note_rate_pct, 3) <> round(l.note_rate_pct::numeric, 3);
     IF rate_mismatch > 0 THEN
         RAISE EXCEPTION
           'seed: % offer(s) whose note rate differs from the rate their loan bills',

@@ -174,14 +174,14 @@ def test_the_refusal_is_recoverable_once_the_offer_exists(real_db):
     resp = _accept(token)
     assert resp.status_code == 200, resp.text
 
-    loans = _sql(real_db, "SELECT id, apr FROM loans WHERE app_id = 1")
+    loans = _sql(real_db, "SELECT id, note_rate_pct FROM loans WHERE app_id = 1")
     assert len(loans) == 1
     # The boarded rate is the CONTRACTUAL note rate, not the disclosed APR --
     # servicing amortizes what it is given, so this is what the borrower is
     # billed at (PR #10 review). Asserting the disclosed APR here is precisely
     # the confusion that shipped a schedule 13.59/month above the disclosure.
-    assert float(loans[0]["apr"]) == pytest.approx(_NOTE_RATE_PCT, abs=1e-3)
-    assert float(loans[0]["apr"]) != pytest.approx(_COMPLETE_TERMS["apr"], abs=1e-3)
+    assert float(loans[0]["note_rate_pct"]) == pytest.approx(_NOTE_RATE_PCT, abs=1e-3)
+    assert float(loans[0]["note_rate_pct"]) != pytest.approx(_COMPLETE_TERMS["apr"], abs=1e-3)
     assert _sql(real_db, "SELECT count(*)::int AS n FROM balances WHERE loan_id = %s",
                 (loans[0]["id"],))[0]["n"] == 1
 
@@ -190,7 +190,7 @@ def test_the_refusal_is_recoverable_once_the_offer_exists(real_db):
 
 def _amortized_payment(principal: float, annual_rate_pct: float, term_months: int) -> float:
     """The payment servicing will bill, computed the way servicing computes it
-    (`servicing-service/app/schedule.py` amortizes `loans.apr`). Written out
+    (`servicing-service/app/schedule.py` amortizes `loans.note_rate_pct`). Written out
     here rather than imported, so this test does not pass just because two
     services share one helper."""
     r = annual_rate_pct / 100 / 12
@@ -217,13 +217,13 @@ def test_the_boarded_loan_bills_the_disclosed_monthly_payment(real_db):
 
     assert _accept(token).status_code == 200
 
-    loan = _sql(real_db, "SELECT principal, apr, term_months FROM loans WHERE app_id = 1")[0]
-    billed = _amortized_payment(float(loan["principal"]), float(loan["apr"]), loan["term_months"])
+    loan = _sql(real_db, "SELECT principal, note_rate_pct, term_months FROM loans WHERE app_id = 1")[0]
+    billed = _amortized_payment(float(loan["principal"]), float(loan["note_rate_pct"]), loan["term_months"])
 
     assert billed == pytest.approx(float(disclosed["monthly_payment"]), abs=0.01), (
         f"boarded loan bills {billed:.2f}/month against a disclosure of "
         f"{float(disclosed['monthly_payment']):.2f} -- servicing is amortizing "
-        f"{loan['apr']} where the contractual rate is {disclosed['note_rate_pct']}"
+        f"{loan['note_rate_pct']} where the contractual rate is {disclosed['note_rate_pct']}"
     )
 
 
@@ -274,17 +274,17 @@ def test_rv2_vector_boards_the_note_rate_and_bills_the_disclosed_payment(real_db
 
     assert _accept(token).status_code == 200
 
-    loan = _sql(real_db, "SELECT principal, apr, term_months FROM loans WHERE app_id = 1")[0]
+    loan = _sql(real_db, "SELECT principal, note_rate_pct, term_months FROM loans WHERE app_id = 1")[0]
 
     # 7. the NOTE rate is what reached servicing, not the APR
-    assert float(loan["apr"]) == pytest.approx(7.99, abs=1e-3), (
-        f"boarded {loan['apr']} -- servicing must amortize the 7.99 note rate, "
+    assert float(loan["note_rate_pct"]) == pytest.approx(7.99, abs=1e-3), (
+        f"boarded {loan['note_rate_pct']} -- servicing must amortize the 7.99 note rate, "
         f"not the 10.072 APR"
     )
-    assert float(loan["apr"]) != pytest.approx(10.072, abs=1e-3)
+    assert float(loan["note_rate_pct"]) != pytest.approx(10.072, abs=1e-3)
 
     # 8. servicing reproduces the disclosed payment
-    billed = _amortized_payment(float(loan["principal"]), float(loan["apr"]), loan["term_months"])
+    billed = _amortized_payment(float(loan["principal"]), float(loan["note_rate_pct"]), loan["term_months"])
     assert billed == pytest.approx(rv2["monthly_payment"], abs=0.01), (
         f"servicing would bill {billed:.2f} against a disclosed 469.98"
     )
@@ -300,9 +300,9 @@ def test_boarding_uses_the_note_rate_not_the_disclosed_apr(real_db):
 
     assert _accept(token).status_code == 200
 
-    loan = _sql(real_db, "SELECT apr FROM loans WHERE app_id = 1")[0]
-    assert float(loan["apr"]) == pytest.approx(float(offer["note_rate_pct"]), abs=1e-3)
-    assert float(loan["apr"]) != pytest.approx(float(offer["apr"]), abs=1e-3)
+    loan = _sql(real_db, "SELECT note_rate_pct FROM loans WHERE app_id = 1")[0]
+    assert float(loan["note_rate_pct"]) == pytest.approx(float(offer["note_rate_pct"]), abs=1e-3)
+    assert float(loan["note_rate_pct"]) != pytest.approx(float(offer["apr"]), abs=1e-3)
 
 
 def test_an_offer_with_no_recorded_note_rate_is_refused_rather_than_guessed(real_db):
@@ -481,7 +481,7 @@ def test_boarding_copies_the_contractual_schedule_onto_the_loan(real_db):
                  "SELECT monthly_payment, regular_payment_count, final_payment, "
                  "term_months, schedule_version, note_rate_pct FROM offers WHERE app_id = 1")[0]
     loan = _sql(real_db,
-                "SELECT apr, term_months, regular_payment, regular_payment_count, "
+                "SELECT note_rate_pct, term_months, regular_payment, regular_payment_count, "
                 "final_payment, schedule_version FROM loans WHERE app_id = 1")[0]
 
     assert loan["regular_payment"] == offer["monthly_payment"]
@@ -492,8 +492,8 @@ def test_boarding_copies_the_contractual_schedule_onto_the_loan(real_db):
     # And the rate boarded is still the contractual note rate, not the
     # disclosed APR -- the two are deliberately different in this fixture, so
     # a confusion between them fails here rather than passing by coincidence.
-    assert float(loan["apr"]) == _NOTE_RATE_PCT
-    assert float(loan["apr"]) != _COMPLETE_TERMS["apr"]
+    assert float(loan["note_rate_pct"]) == _NOTE_RATE_PCT
+    assert float(loan["note_rate_pct"]) != _COMPLETE_TERMS["apr"]
 
     # The copy satisfies the schedule constraints, which is not automatic: the
     # count/term identity is checked against the LOAN's term, so a boarding bug

@@ -92,6 +92,11 @@ def _legacy_database(conn):
                 total_of_payments NUMERIC(14,2),
                 accepted_at TIMESTAMPTZ
             );
+            -- `apr`, NOT `note_rate_pct`. This is the PRE-0030 shape, and the
+            -- whole subject of this file is that the column called `apr` could
+            -- hold either a note rate or a disclosed APR. 0038 added
+            -- `note_rate_pct` and 0039 dropped `apr`; naming the new column
+            -- here would erase the ambiguity these tests exist to check.
             CREATE TABLE loans (
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER UNIQUE,
@@ -109,7 +114,7 @@ def _legacy_database(conn):
             --   1 seeded-style: loans.apr IS the note rate (11.25%)
             --   2 seeded-style: loans.apr IS the note rate (22.99%)
             --   3 never boarded: no loan, so nothing to recover
-            --   4 boarded by the PRE-CHANGE path: loans.apr holds the DISCLOSED
+            --   4 boarded by the PRE-CHANGE path: loans.note_rate_pct holds the DISCLOSED
             --     APR (5.196) while the payments were calculated at 7.99% --
             --     reading it as the note rate is the reviewed defect
             INSERT INTO offers (app_id, decision_id, fee_pct_used, apr, finance_charge,
@@ -219,11 +224,11 @@ def test_the_migration_is_idempotent_over_the_backfill(conn):
 
 
 def test_a_disclosed_apr_in_loans_apr_is_not_taken_as_the_note_rate(conn):
-    """`loans.apr` has held two different things, and only one of them is a rate.
+    """`loans.note_rate_pct` has held two different things, and only one of them is a rate.
 
     The pre-change acceptance path copied `offers.apr` -- the DISCLOSED APR --
     into that column, so an $18,000/48-month offer written at a contractual
-    7.99% boarded `loans.apr = 5.196`. Backfilling from it indiscriminately
+    7.99% boarded `loans.note_rate_pct = 5.196`. Backfilling from it indiscriminately
     would record 5.196% as the contractual fact the UI now displays: precisely
     the APR/note-rate conflation this migration exists to end. Review finding on
     PR #10.

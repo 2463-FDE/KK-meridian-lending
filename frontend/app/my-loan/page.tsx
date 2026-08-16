@@ -12,11 +12,11 @@ interface LoanRow {
   applicant_name: string;
   borrower?: string;
   principal: number;
-  // Servicing exposes the CONTRACTUAL note rate under its accurate name.
-  // The database column behind it is still `loans.apr` (legacy, tracked as
-  // D19); the API is where that name stops. This is NOT the disclosed
-  // federal APR -- that lives on the offer, and is the larger of the two
-  // once a prepaid fee exists.
+  // Servicing exposes the CONTRACTUAL note rate under its accurate name, and
+  // since the D19 contract step (db/migrations/0039) the database column is
+  // called `note_rate_pct` too -- the API is no longer where a legacy name
+  // stops. This is NOT the disclosed federal APR: that lives on the offer, and
+  // is the larger of the two once a prepaid fee exists.
   note_rate_pct: number | null;
   note_rate_proven?: boolean;
   term_months: number;
@@ -138,11 +138,14 @@ function MyLoanContent() {
                   </div>
                   <div className="dl-row">
                     <dt>Interest rate</dt>
-                    {/* Null means the contractual rate was never recorded for
-                        this loan -- it was boarded before the schedule was
-                        stored, and `loans.apr` holds the disclosed APR for
-                        those rows. Saying so is honest; printing that number
-                        would state a rate the borrower was never quoted. */}
+                    {/* The fallback is defensive, not expected. Null used to
+                        mean the contractual rate was never recorded: the loan
+                        was boarded before the schedule was stored, and
+                        `loans.apr` held the disclosed APR for those rows, which
+                        would have stated a rate the borrower was never quoted.
+                        `db/migrations/0039` made `note_rate_pct` NOT NULL after
+                        every such row was resolved, so the API now has a rate
+                        for every loan. */}
                     <dd>
                       {l.note_rate_pct != null
                         ? pct(l.note_rate_pct)

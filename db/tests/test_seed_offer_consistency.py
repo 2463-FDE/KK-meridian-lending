@@ -13,9 +13,9 @@ therefore fails here rather than sitting unnoticed.
 
 Independence note. The expected payment is derived from `applications.amount`,
 `offers.note_rate_pct` and `applications.term_months` -- not from the stored
-payment, and not from `loans.apr`. `loans.apr` is separately asserted to equal
-the offer's note rate, so the servicing check is not "compare loans.apr against a
-payment generated from loans.apr".
+payment, and not from `loans.note_rate_pct`. `loans.note_rate_pct` is separately asserted to equal
+the offer's note rate, so the servicing check is not "compare loans.note_rate_pct against a
+payment generated from loans.note_rate_pct".
 """
 import os
 import pathlib
@@ -146,7 +146,7 @@ def seeded_offers(seeded_db):
         cur.execute(
             "SELECT o.app_id, a.amount, a.term_months, o.note_rate_pct, o.apr, "
             "       o.monthly_payment, o.amount_financed, o.finance_charge, "
-            "       o.total_of_payments, o.fee_pct_used, l.apr AS loan_rate, "
+            "       o.total_of_payments, o.fee_pct_used, l.note_rate_pct AS loan_rate, "
             "       o.regular_payment_count, o.final_payment, o.schedule_version, "
             "       o.term_months AS offer_term_months "
             "FROM offers o "
@@ -399,10 +399,20 @@ def test_each_bulk_apr_belongs_to_its_own_row_not_its_rate_term_group(seeded_off
     )
 
 
-def test_loans_apr_holds_the_note_rate_not_the_disclosed_apr(seeded_offers):
-    """`loans.apr` is the contractual rate despite its name (D19). Asserted
-    against the OFFER's note rate rather than inferred from a payment generated
-    from loans.apr itself -- otherwise the check would be circular."""
+def test_the_seeded_loan_rate_is_the_note_rate_not_the_disclosed_apr(seeded_offers):
+    """`loans.note_rate_pct` holds the contractual rate, not the disclosed APR.
+
+    The test predates the column: it was `test_loans_apr_holds_the_note_rate_...`,
+    because the column was called `apr` and the invariant had to be enforced by
+    assertion since the name said the opposite (D19). `db/migrations/0039`
+    renamed it, so the name and the value finally agree -- but the assertion
+    stays, because a seed writer can still put the wrong figure in a
+    well-named column.
+
+    Asserted against the OFFER's note rate rather than inferred from a payment
+    generated from `loans.note_rate_pct` itself -- otherwise the check would be
+    circular.
+    """
     for o in seeded_offers:
         if o["loan_rate"] is None:
             continue
@@ -410,11 +420,11 @@ def test_loans_apr_holds_the_note_rate_not_the_disclosed_apr(seeded_offers):
         note = Decimal(str(o["note_rate_pct"]))
         apr_v = Decimal(str(o["apr"]))
         assert abs(loan_rate - note) <= Decimal("0.001"), (
-            f"app {o['app_id']}: loans.apr is {loan_rate} but the offer's note "
+            f"app {o['app_id']}: loans.note_rate_pct is {loan_rate} but the offer's note "
             f"rate is {note} -- servicing would bill terms nobody disclosed"
         )
         assert abs(loan_rate - apr_v) > Decimal("0.001"), (
-            f"app {o['app_id']}: loans.apr equals the disclosed APR {apr_v} -- "
+            f"app {o['app_id']}: loans.note_rate_pct equals the disclosed APR {apr_v} -- "
             f"the disclosed APR must never reach servicing as a billing rate"
         )
 
@@ -431,7 +441,7 @@ def test_servicing_reproduces_the_disclosed_payment_from_the_boarded_rate(seeded
         disclosed = Decimal(str(o["monthly_payment"]))
         assert abs(billed - disclosed) <= PAYMENT_TOLERANCE, (
             f"app {o['app_id']}: servicing bills {billed} against a disclosed "
-            f"{disclosed} at loans.apr={o['loan_rate']}"
+            f"{disclosed} at loans.note_rate_pct={o['loan_rate']}"
         )
 
 

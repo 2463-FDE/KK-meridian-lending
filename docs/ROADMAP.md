@@ -30,8 +30,9 @@ below explain how it was derived.
 - **Highest priority:** `G-D14` — the payment waterfall. It is the last gap that
   changes what a borrower is charged, and it needs an authoritative interest
   model before allocation can mean anything.
-- **Then:** `G-D14` (payment waterfall on the landed component ledger) and
-  `G-D19` (`loans.apr` holds the note rate, and the column name still says APR).
+- **Then:** `G-D14` (payment waterfall on the landed component ledger). `G-D19`
+  closed with `db/migrations/0039`: the column is now `loans.note_rate_pct`, and
+  it is NOT NULL.
 - **Durable status:** Weeks 1–5 are landed — the canonical processor-backed
   payment path is idempotent and servicing's processorless duplicate has been
   retired, so payment creation has exactly one path again; Week 6 has the token
@@ -190,7 +191,7 @@ feature landed in a different week than its brief, both labels appear in the
 Week column as `brief → shipped`. No row is guessed: where the two disagree it is
 because a merged PR says so.
 
-**Counts (31 requirements): 29 Done · 2 Partial · 0 Not started · 0 Blocked ·
+**Counts (31 requirements): 30 Done · 1 Partial · 0 Not started · 0 Blocked ·
 0 Deferred.** The count is derived from the matrix below.
 
 **What moved, and when.** The audit pass moved Week 1's Decimal row
@@ -237,7 +238,7 @@ production implementation.
 | 6 | Lost-update proof on the shared column | A real-PostgreSQL test pins concurrent payment behavior | **Done** | Ledger projection replaces the former unlocked payment read-modify-write path: `balance.py::apply_payment_once` inserts the entry, `db/migrations/0035_ledger_entries.sql`'s `project_ledger_entry()` composes the signed delta into `balances` | `servicing-service/tests/test_balance_lost_update_real_postgres.py` (5 cases) asserts both concurrent payments survive; `db/tests/test_0035_ledger_projection.py` (64 cases) proves parity. **Both executed against PostgreSQL 16.14 on 2026-08-15, all 69 cases passing.** They skipped on the first pass, when no database was reachable, and the row cited CI for them; they are no longer a claim resting on a skip. CI run `31759960436` on this exact commit corroborates, jobs `db-migrations` and `backend (servicing-service)` green | None for the lost update. Residual, distinct from D3: `balance.py::apply_payment` and `::waive_fee` return a figure computed before their own UPDATE, so the *returned* balance can be stale under concurrency while the stored one is correct | — | — |
 | 6 | Legacy-comprehension ADR (RBAC + maker-checker + ledger) | An accepted ADR proposing the three | **Done** | `adr/0010-append-only-ledger-for-servicing-balances.md`; `adr/0011-maker-checker-for-servicing-adjustments.md` | `db/tests/test_ledger_adr_sequence_is_consistent.py`, `test_adr_0011_enforcement_runs_on_postgres.py`, `test_docs_citations_resolve.py` | None for the architecture decision; implementation stages remain tracked by their own rows | — | — |
 | 6 | Payment waterfall (fees → interest → principal) | A payment is applied in the regulated order | **Partial** | `balance.py:38` applies straight off principal | `test_apply_payment_idempotency.py` pins today's behaviour, not the correct one | `DEBT.md` **D14**, open | Medium | Sequence after the ledger — a waterfall needs per-component rows |
-| 6 | `loans.apr` names what it holds | The column and the UI agree on which regulated rate is displayed | **Partial** | API renamed (`note_rate_pct` alias); three frontend views relabelled; seeds corrected. **`db/migrations/0038` adds `loans.note_rate_pct`**, back-filled only where the offer agrees or `schedule_version` proves the boarding path — everything else stays NULL rather than being relabelled. Both boarding paths dual-write; both readers prefer the new column and keep the `schedule_version` fallback for the deploy window | `db/tests/test_0038_loans_note_rate_expand.py` (10, incl. the disclosed-APR refusal and the rolling-deploy row), `db/tests/test_note_rate_readers_agree.py`, `db/tests/test_seed_offer_consistency.py::test_loans_apr_holds_the_note_rate_not_the_disclosed_apr` | **D19** — `loans.apr` still exists. The contract step drops it and removes the fallback in the two readers, once every deployed reader is proven to use the new name | Medium | Rename via migration + every query/model/fixture that names it |
+| 6 | `loans.apr` names what it holds | The column and the UI agree on which regulated rate is displayed | **Done** | **`db/migrations/0039` drops `loans.apr` and makes `note_rate_pct NOT NULL`**, behind two gates: it refuses while any loan has an unproven rate (naming the rows, and warning that copying `apr` across records a disclosed APR as a contractual term), and it requires an explicit operator acknowledgement that no deployed image still reads the column. `db/migrations/0038` did the expand half. Every reader, both boarding paths, `db/init/001_schema.sql`, the seeds and the ORM models now use the new name; the gateway response has no `apr` field either. `db/tools`-free by design -- the reader list is derived from source, not maintained by hand | `db/tests/test_0039_drop_loans_apr.py` (19, incl. both gate refusals, the rollback-on-refusal, the near-miss acknowledgement, and migrated-vs-fresh schema parity; all three guards mutation-tested), `db/tests/test_0038_loans_note_rate_expand.py` (10), `db/tests/test_note_rate_readers_agree.py`, `services/gateway/tests/test_auth_and_routes.py::test_lss_loans_list_never_publishes_a_field_called_apr` | None. **Bound of the claim:** this fixes the name and the ambiguity, and recomputes no money -- the disclosed APR's own correctness is D6/D16. `offers.apr` is untouched and correctly named. Operator sequencing and the unproven-row decision are `docs/RUNBOOK-loans-apr-contract.md` | — | — |
 
 ### Remaining gaps, grouped
 
@@ -280,7 +281,6 @@ list from the running app, and a sixth route added without a check fails it.
 
 #### Medium
 
-- **G-D19** — `loans.apr` holds the note rate (`DEBT.md` D19). API and UI are corrected; the column is not. *AC:* rename via migration, plus every query, model and fixture that names it.
 - **G-D14** — no payment waterfall (`DEBT.md` D14). The ledger dependency is satisfied; component-order implementation remains.
 
 #### Debt
@@ -289,8 +289,13 @@ Register entries in scope for Weeks 1–6 and still open, cited by their own IDs
 no new numbers minted here: **D8** (a validated human
 principal and a second approver are not implemented — the network, gateway-role
 and ledger thirds of the original entry have landed), **D14** (no waterfall),
-**D19** (column name, partly fixed), **D20** (bounded, not fixed — the static-SQL
-premise is enforced by test instead).
+**D20** (bounded, not fixed — the static-SQL premise is enforced by test
+instead).
+
+**D19 has left this list.** The expand/contract pair landed: `0038` added
+`loans.note_rate_pct` and back-filled only provable rows, `0039` dropped `apr`
+behind an unproven-rate gate and an operator acknowledgement. See
+`docs/RUNBOOK-loans-apr-contract.md`.
 
 **D2 has left this list too**, with the endpoint that kept it open. It is closed
 on both paths now: one keyed creation path, and no second one.
@@ -331,9 +336,11 @@ the authoritative source and lifecycle of outstanding interest, what happens whe
 a payment exceeds everything owed, and the rounding and allocation rule at
 component boundaries.
 
-After that, `G-D19` — `loans.apr` holds the note rate, and the column name still
-says APR. Expand and contract, because legacy rows may hold a disclosed APR that
-was never a note rate and must not be relabelled.
+`G-D19` was done this way and is closed: expand and contract, because legacy
+rows may hold a disclosed APR that was never a note rate and must not be
+relabelled. `0038` added `loans.note_rate_pct` and back-filled it only where the
+value could be proven; `0039` dropped `apr` and made the new column NOT NULL,
+refusing while any rate was still unproven rather than guessing at one.
 
 ### Historical note — G-KYC, and why it took two passes
 

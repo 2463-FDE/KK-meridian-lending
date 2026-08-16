@@ -83,7 +83,7 @@ def _a_loan(conn, *, status="current", balance="1000.00", past_due="80.00",
     applicant = _exec(conn, "INSERT INTO applicants (name) VALUES ('T') RETURNING id")[0]["id"]
     app = _exec(conn, "INSERT INTO applications (applicant_id, amount, term_months, status) "
                       "VALUES (%s, 5000, 24, 'funded') RETURNING id", (applicant,))[0]["id"]
-    loan = _exec(conn, "INSERT INTO loans (app_id, applicant_name, principal, apr, "
+    loan = _exec(conn, "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, "
                        "term_months, status) VALUES (%s, 'T', 5000.00, 7.99, 24, %s) "
                        "RETURNING id", (app, status))[0]["id"]
     if serviced:
