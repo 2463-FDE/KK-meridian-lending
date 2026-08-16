@@ -39,9 +39,9 @@
 > stale claim. **The ledger exists** (`db/migrations/0035_ledger_entries.sql`),
 > so §2's "approval writes the ledger entry" has somewhere to write. **A role
 > restriction exists at the gateway** — `services/gateway/app/auth.py::can_move_money`
-> limits `adjust-balance` / `waive-fee` / `late-fee` to csr/admin. Neither is
-> maker-checker: one person still moves money alone, and the gateway's role check
-> is not a check servicing itself makes.
+> limits `adjust-balance` / `waive-fee` / `late-fee` to csr/admin, and servicing
+> now applies the same rule itself against the verified principal. Neither is
+> maker-checker: **one person still moves money alone.**
 >
 > `db/tests/test_spec_0002_describes_the_real_system.py` asserts that, from both
 > directions: §1's description of today's system must stay true, and this
@@ -222,14 +222,20 @@ string in a header", and maker-checker becomes a naming convention.
   staff maker-checker proposal. Machine-originated payments and fee assessments
   remain outside this workflow as stated in §8.
 
-### The required boundary does not exist yet
+### The required boundary — why reading the header was never the answer
 
-Servicing's money routes take `x_user_role` as a header today and never read it.
-The tempting implementation is to start reading it — and that is a bypass, not a
-fix: any caller holding the internal token could then set `X-User-Role: admin` and
-approve. The token is a *service* credential shared by every backend, not a *user*
-credential, so it authenticates the caller as "a service on this network" and says
-nothing about which human is acting.
+*Past tense throughout: this described the system before the signed principal
+landed, and it is kept because the reasoning is what a future verifier needs.*
+
+Servicing's money routes **took** `x_user_role` as a header and never read it.
+The tempting implementation **was** to start reading it — and that would have
+been a bypass, not a fix: any caller holding the internal token could then have
+set `X-User-Role: admin` and approved. The token is a *service* credential shared
+by every backend, not a *user* credential, so it authenticates the caller as "a
+service on this network" and says nothing about which human is acting. **That is
+still true of the token, and is why the header is still not trusted**: it is
+passed to `require_money_principal` only so that a value disagreeing with the
+signature can be refused outright (REQ-ID-8).
 
 **This section described a gap that has since been closed, and is kept because
 the reasoning is what the next verifier will need.** When it was written, the

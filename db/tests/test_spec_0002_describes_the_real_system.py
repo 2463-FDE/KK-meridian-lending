@@ -228,10 +228,42 @@ def test_the_spec_is_honest_about_what_is_built_and_what_is_not():
         "servicing no longer verifies a principal; this test's premise has "
         "changed and the spec's identity section must be re-examined"
     )
-    assert "no signed principal assertion" not in flat or "previously" in flat, (
-        "the spec still states there is no signed principal assertion. There is: "
-        "services/gateway/app/principal.py mints one and "
-        "services/servicing-service/app/principal.py verifies it."
+    # Each present-tense claim is named and refused individually. The first
+    # version of this check allowed the stale sentence whenever the word
+    # "previously" appeared ANYWHERE in the document -- which it does, a dozen
+    # times, in unrelated history. That is a guard that passes over the prose it
+    # is guarding, and the review caught it doing exactly that: three stale
+    # paragraphs survived a round because one distant word satisfied the test.
+    #
+    # A claim may still be QUOTED as history. What it may not be is asserted, so
+    # the check is: does this sentence appear outside a past-tense frame?
+    stale_now = [
+        "no signed principal assertion",
+        "the required boundary does not exist yet",
+        "is not a check servicing itself makes",
+        "as a header today and never read it",
+        "servicing validates no human principal",
+    ]
+    lowered = flat.lower()
+    offenders = []
+    for claim in stale_now:
+        index = lowered.find(claim)
+        while index != -1:
+            window = lowered[max(0, index - 220):index]
+            quoted = window.count('"') % 2 == 1
+            past = any(marker in window for marker in (
+                "previously", "used to", "it read", "described", "past tense",
+                "before the signed principal", "when it was written",
+            ))
+            if not (quoted or past):
+                offenders.append(claim)
+                break
+            index = lowered.find(claim, index + len(claim))
+    assert not offenders, (
+        f"the spec asserts these as current fact: {offenders}. Servicing verifies "
+        f"a gateway-signed principal and applies csr/admin itself -- see "
+        f"services/servicing-service/app/principal.py. State them as history or "
+        f"delete them."
     )
 
     # And the half that is genuinely absent must still be described as absent.
