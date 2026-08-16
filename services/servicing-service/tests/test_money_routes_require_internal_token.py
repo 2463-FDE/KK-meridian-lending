@@ -101,23 +101,53 @@ def test_an_unset_server_token_fails_closed(monkeypatch, no_writes):
             assert client.post(path, json=body, headers=headers).status_code == 401, path
 
 
-def test_the_token_still_admits_the_legitimate_callers(monkeypatch):
-    """The guard is worthless if it also breaks the gateway and payment-service.
+def test_the_token_still_admits_the_machine_caller(monkeypatch):
+    """The guard is worthless if it also breaks payment-service.
 
-    Only the authorization boundary is exercised; the money layer is stubbed so
+    `apply-payment` is the machine path: payment-service calls it after it
+    captures a charge, and there is no human behind it. Spec 0002 §8 keeps
+    machine-originated movements outside the staff workflow deliberately, so a
+    valid service token is the whole requirement here.
+
+    Only the authorization boundary is exercised; the money layer is stubbed, so
     this asserts "the request was allowed through", not any balance arithmetic.
     """
-    monkeypatch.setattr(main.balance, "adjust_balance", lambda loan_id, v: 42.0)
-    monkeypatch.setattr(main.balance, "waive_fee", lambda loan_id, v: 7.0)
-    monkeypatch.setattr(main.delinquency, "assess_late_fee", lambda loan_id: 35.0)
     monkeypatch.setattr(main.balance, "apply_payment_once", lambda p, l, a: (99.0, True))
 
     auth = {"X-Internal-Token": TOKEN}
-    assert client.post("/accounts/1/adjust-balance", json={"new_balance": 1.0}, headers=auth).status_code == 200
-    assert client.post("/accounts/1/waive-fee", json={"amount": 1.0}, headers=auth).status_code == 200
-    assert client.post("/accounts/1/late-fee", headers=auth).status_code == 200
     assert client.post("/accounts/1/apply-payment",
                        json={"amount": 1.0, "payment_id": 1}, headers=auth).status_code == 200
+
+
+def test_the_token_alone_no_longer_admits_the_staff_money_routes(monkeypatch):
+    """This test used to assert the opposite, and the change is the point.
+
+    It required a valid token to produce 200 on adjust-balance, waive-fee and
+    late-fee -- which was the correct contract while the csr/admin rule lived
+    only at the gateway, and is exactly the hole G-SERVICING-ROLE closed: every
+    backend holds this token, so "a service reached me" said nothing about which
+    human was acting.
+
+    Those three routes now need a gateway-signed principal as well. The token
+    still authenticates the *service*; it no longer stands in for a person. The
+    full identity matrix -- forged headers, wrong audience, expired, algorithm
+    confusion, role refusals -- is in
+    `test_money_routes_require_a_verified_human.py`; this case exists so the
+    change to THIS file's contract is visible where the old assertion lived.
+    """
+    def _boom(*a, **kw):                                     # pragma: no cover
+        raise AssertionError("a request with no verified human reached the money layer")
+
+    monkeypatch.setattr(main.balance, "adjust_balance", _boom)
+    monkeypatch.setattr(main.balance, "waive_fee", _boom)
+    monkeypatch.setattr(main.delinquency, "assess_late_fee", _boom)
+
+    auth = {"X-Internal-Token": TOKEN}
+    assert client.post("/accounts/1/adjust-balance", json={"new_balance": 1.0},
+                       headers=auth).status_code == 401
+    assert client.post("/accounts/1/waive-fee", json={"amount": 1.0},
+                       headers=auth).status_code == 401
+    assert client.post("/accounts/1/late-fee", headers=auth).status_code == 401
 
 
 def test_mismatched_payment_replay_returns_conflict(monkeypatch):
