@@ -56,7 +56,7 @@ def db(monkeypatch):
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute((REPO / "db" / "init" / "001_schema.sql").read_text(encoding="utf-8"))
         cur.execute(
-            "INSERT INTO loans (id, applicant_name, principal, apr, term_months) "
+            "INSERT INTO loans (id, applicant_name, principal, note_rate_pct, term_months) "
             "VALUES (4471, 'Sam Okafor', 9000, 5.946, 24)"
         )
         # The one capture we did record, keyed by the processor's reference.

@@ -72,7 +72,7 @@ def _seed_schema(conn):
                 app_id INTEGER,
                 applicant_name TEXT,
                 principal NUMERIC(14,2) NOT NULL,
-                apr NUMERIC(7,3) NOT NULL,
+                note_rate_pct NUMERIC(7,3) NOT NULL,
                 term_months INTEGER NOT NULL,
                 status TEXT DEFAULT 'current'
             );
@@ -100,7 +100,7 @@ def test_0015_migration_succeeds_on_duplicate_loans_with_no_payments(conn):
         cur.execute("INSERT INTO applications (id) VALUES (1)")
         # Two loans boarded for the same application -- the exact race.
         cur.execute(
-            "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+            "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, term_months) "
             "VALUES (1, 'Jane Borrower', 9000, 7.99, 24), "
             "(1, 'Jane Borrower', 9000, 7.99, 24) RETURNING id"
         )
@@ -140,7 +140,7 @@ def test_0015_migration_keeps_the_loan_with_real_payment_history(conn):
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("INSERT INTO applications (id) VALUES (1)")
         cur.execute(
-            "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+            "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, term_months) "
             "VALUES (1, 'Jane Borrower', 9000, 7.99, 24), "
             "(1, 'Jane Borrower', 9000, 7.99, 24) RETURNING id"
         )
@@ -178,7 +178,7 @@ def test_0015_migration_is_a_noop_on_data_with_no_duplicates(conn):
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute("INSERT INTO applications (id) VALUES (1), (2)")
         cur.execute(
-            "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+            "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, term_months) "
             "VALUES (1, 'Jane Borrower', 9000, 7.99, 24), "
             "(2, 'John Borrower', 5000, 6.5, 36), "
             "(NULL, 'Legacy Borrower', 1000, 5.0, 12), "

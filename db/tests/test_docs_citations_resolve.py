@@ -40,6 +40,7 @@ DOCS = [
     REPO / "docs" / "DEBT.md",
     REPO / "docs" / "runbook.md",
     REPO / "docs" / "RUNBOOK-pan-cvv-contract.md",
+    REPO / "docs" / "RUNBOOK-loans-apr-contract.md",
 ]
 DOCS += sorted((REPO / "adr").glob("*.md"))
 DOCS += sorted((REPO / "specs").glob("*.md"))

@@ -92,6 +92,11 @@ def _legacy_database(conn):
                 total_of_payments NUMERIC(14,2),
                 accepted_at TIMESTAMPTZ
             );
+            -- `apr`, NOT `note_rate_pct`. This is the PRE-0030 shape, and the
+            -- whole subject of this file is that the column called `apr` could
+            -- hold either a note rate or a disclosed APR. 0038 added
+            -- `note_rate_pct` and 0039 dropped `apr`; naming the new column
+            -- here would erase the ambiguity these tests exist to check.
             CREATE TABLE loans (
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER UNIQUE,
@@ -219,7 +224,7 @@ def test_the_migration_is_idempotent_over_the_backfill(conn):
 
 
 def test_a_disclosed_apr_in_loans_apr_is_not_taken_as_the_note_rate(conn):
-    """`loans.apr` has held two different things, and only one of them is a rate.
+    """`loans.apr` held two different things, and only one of them was a note rate.
 
     The pre-change acceptance path copied `offers.apr` -- the DISCLOSED APR --
     into that column, so an $18,000/48-month offer written at a contractual

@@ -72,22 +72,24 @@ test("REFER resolved by staff approval yields one offer, one loan, and an audita
       { timeout: 15_000 },
     ).toBe(1);
 
-    const loan = await client.query("SELECT id, apr, principal, term_months FROM loans WHERE app_id = $1", [appId]);
+    const loan = await client.query("SELECT id, note_rate_pct, principal, term_months FROM loans WHERE app_id = $1", [appId]);
     expect(loan.rowCount).toBe(1);
 
     // PR #10 review: this used to assert loans.apr == offers.apr, which encoded
     // the very confusion that review found -- once apr became the true actuarial
     // rate, boarding it meant servicing amortized above the disclosed payment.
+    // The loan column is now `note_rate_pct` (D19, db/migrations/0039); the
+    // offer's `apr` stays, because there it is a real disclosed APR.
     // The boarded rate is the CONTRACTUAL note rate, and the property worth
     // asserting is that billing it reproduces the disclosed payment.
     const offer = await client.query(
       "SELECT apr, note_rate_pct, monthly_payment FROM offers WHERE app_id = $1",
       [appId],
     );
-    expect(Number(loan.rows[0].apr)).toBeCloseTo(Number(offer.rows[0].note_rate_pct), 3);
+    expect(Number(loan.rows[0].note_rate_pct)).toBeCloseTo(Number(offer.rows[0].note_rate_pct), 3);
     expect(Number(offer.rows[0].apr)).toBeGreaterThan(Number(offer.rows[0].note_rate_pct));
 
-    const r = Number(loan.rows[0].apr) / 100 / 12;
+    const r = Number(loan.rows[0].note_rate_pct) / 100 / 12;
     const n = loan.rows[0].term_months;
     const f = Math.pow(1 + r, n);
     const billed = (Number(loan.rows[0].principal) * r * f) / (f - 1);

@@ -416,7 +416,7 @@ def test_every_seeded_loan_carries_its_contractual_schedule():
     The loan inserts in db/init predate the Model B schedule columns, so on a
     fresh `docker compose up` every seeded loan had NULL
     regular_payment/count/final_payment/schedule_version. Servicing then hid
-    each loan's note rate -- nothing proved `loans.apr` held a contractual rate
+    each loan's note rate -- nothing proved `loans.note_rate_pct` held a contractual rate
     -- and rendered its schedule as a reconstruction, on a database whose offers
     contain an exact B1 contract. Migrations are not replayed over fresh init,
     so 003_seed_bulk.sql copies each loan's schedule from its own offer.

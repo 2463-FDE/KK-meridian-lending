@@ -85,28 +85,42 @@ def test_last4_is_used_even_when_a_legacy_pan_is_present():
     assert _display_last4(_PostBackfillRow()) == "•••• 4242"
 # --- a legacy loan's APR is not a note rate ----------------------------------
 
-def test_a_loan_without_a_stored_schedule_reports_no_note_rate():
-    """`loans.apr` means different things depending on how the loan was boarded.
+def test_every_loan_now_reports_a_proven_note_rate():
+    """The rate is read from a column that can only hold one figure.
 
-    The pre-change acceptance path copied `offers.apr` -- the DISCLOSED APR --
-    into that column: 5.196% for a contract priced at 7.99%. An unconditional
-    alias therefore printed 5.196% to those borrowers as "Interest rate (note
-    rate)", a contractual term they were never quoted, while migration 0030
-    refuses to trust the same column. Reviewed on PR #10.
+    **This test asserted the opposite until the D19 contract step, and the
+    history is why it now reads this way.** `loans.apr` held two different
+    regulated figures: the pre-change acceptance path copied `offers.apr` -- the
+    DISCLOSED APR -- into it, 5.196% for a contract priced at 7.99%. An
+    unconditional alias printed 5.196% to those borrowers as "Interest rate
+    (note rate)", a contractual term they were never quoted, so this function
+    reported a rate ONLY when `schedule_version` proved the current boarding
+    path had written a contractual one, and this test pinned that refusal.
 
-    `schedule_version` is written only by the current boarding path, which also
-    copies the contractual rate, so it is the evidence the value means what the
-    API calls it.
+    Migration 0038 moved that inference into the data, and 0039 dropped `apr`
+    and made `note_rate_pct` NOT NULL -- refusing to run while any loan lacked a
+    proven rate. So the ambiguous column no longer exists and neither does the
+    unproven case. Withholding a rate now would hide a number the borrower is
+    entitled to see, on evidence (`schedule_version`) that no longer carries any
+    meaning about which figure is stored.
+
+    The enforcement moved with it: what stops an unknown rate is now the NOT NULL
+    constraint, checked by `db/tests/test_0039_drop_loans_apr.py`, not a branch
+    here. See `db/tests/test_note_rate_readers_agree.py` for the reader sweep.
     """
     from app.routers.loans import _proven_note_rate
 
     class _Loan:
-        apr = 5.196
+        note_rate_pct = 5.196
         schedule_version = None
 
     rate, proven = _proven_note_rate(_Loan())
-    assert rate is None, "an unproven APR was reported as the contractual rate"
-    assert proven is False
+    assert rate == 5.196, (
+        "a loan with no schedule_version reported no rate -- since the contract "
+        "step there is no unproven rate to withhold, and withholding one would "
+        "hide a number the borrower is entitled to see"
+    )
+    assert proven is True
 
 
 def test_a_loan_boarded_with_its_contract_reports_the_note_rate():
@@ -114,7 +128,7 @@ def test_a_loan_boarded_with_its_contract_reports_the_note_rate():
     from app.routers.loans import _proven_note_rate
 
     class _Loan:
-        apr = 7.99
+        note_rate_pct = 7.99
         schedule_version = "B1"
 
     rate, proven = _proven_note_rate(_Loan())

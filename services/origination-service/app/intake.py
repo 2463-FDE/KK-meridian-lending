@@ -320,16 +320,18 @@ def board_to_servicing(app_id: int, applicant_name: str, principal: float,
     but a silently complete-looking all-NULL write is exactly what it permits.
     """
     loan = db.query(
-        # D19 expand: BOTH columns, same value. `annual_rate_pct` is and always
-        # was the contractual note rate on this path -- `apr` is the legacy name,
-        # `note_rate_pct` is the honest one, and writing both is what lets the
-        # old column be dropped later without a flag day. The dual write ends at
-        # the contract step, when `apr` goes.
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, note_rate_pct, "
+        # D19 contract: ONE rate column, and it says what it holds.
+        #
+        # `annual_rate_pct` is and always was the contractual NOTE RATE on this
+        # path -- it was written to a column called `apr`, which under the
+        # pre-change path held the DISCLOSED APR instead. 0038 added
+        # `note_rate_pct` and this insert wrote both; 0039 dropped `apr`, so the
+        # dual write is over and the name no longer lies about the figure.
+        "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, "
         "term_months, regular_payment, regular_payment_count, final_payment, "
         "schedule_version) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (app_id, applicant_name, principal, annual_rate_pct, annual_rate_pct,
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct,
          term_months, regular_payment, regular_payment_count, final_payment,
          schedule_version),
     )
@@ -361,15 +363,16 @@ def board_to_servicing_tx(cur, app_id: int, applicant_name: str, principal: floa
     and the offer is thereafter immutable.
     """
     cur.execute(
-        # D19 expand: both columns, same value -- see board_to_servicing above.
-        # This is the transactional twin of that insert, and a dual write that
-        # existed on only one of the two boarding paths would leave whichever
-        # loans went through the other one unreadable after the contract step.
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, note_rate_pct, "
+        # D19 contract: the transactional twin of the insert above, and it moved
+        # in lockstep with it through both migrations. A column change applied to
+        # only one of the two boarding paths leaves whichever loans went through
+        # the other one carrying a NULL rate -- which 0039's gate 1 then refuses
+        # to drop `apr` over, turning a missed edit here into a blocked release.
+        "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, "
         "term_months, regular_payment, regular_payment_count, final_payment, "
         "schedule_version) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (app_id, applicant_name, principal, annual_rate_pct, annual_rate_pct,
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct,
          term_months, regular_payment, regular_payment_count, final_payment,
          schedule_version),
     )
