@@ -241,10 +241,17 @@ def _triggers(conn, schema, table):
     different control wearing the same name -- and `DEFERRABLE` matters more
     still: a constraint trigger checked per statement instead of at commit
     forbids ordinary work that is in balance by the time it commits.
+
+    `tgenabled` is in the tuple because `ALTER TABLE ... DISABLE TRIGGER` leaves
+    the trigger in `pg_trigger`, fully defined and never firing. Without it a
+    disabled control compares equal to a live one, which is the "exists by name"
+    failure this whole aspect was added to catch, one level down. (Review of
+    PR #39.)
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT t.tgname, p.proname, t.tgtype, t.tgdeferrable, t.tginitdeferred "
+            "SELECT t.tgname, p.proname, t.tgtype, t.tgdeferrable, "
+            "       t.tginitdeferred, t.tgenabled "
             "  FROM pg_trigger t "
             "  JOIN pg_class c ON c.oid = t.tgrelid "
             "  JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -254,7 +261,7 @@ def _triggers(conn, schema, table):
         )
         return {
             r["tgname"]: (r["proname"], r["tgtype"], r["tgdeferrable"],
-                          r["tginitdeferred"])
+                          r["tginitdeferred"], r["tgenabled"])
             for r in cur.fetchall()
         }
 
@@ -387,6 +394,36 @@ def _tables(conn, schema):
 # never silently narrow the other, because neither is a list any more.
 
 
+def _assert_same_tables(conn, left, right):
+    """Both schemas must hold the SAME set of tables, and return it.
+
+    Deriving the list from one side only is the defect this file set out to
+    kill, one level up: if a migration path creates a table `db/init` does not,
+    the per-table loops never visit it and every aspect passes. The extra table
+    is invisible in exactly the way `_CONVERGENCE_TABLES` made `balances` and
+    `ledger_entries` invisible -- a list that reads complete while missing one,
+    written as a derivation instead of a literal. (Review of PR #39, TBL-001.)
+
+    Reported by name and in both directions, so a failure says which side has
+    what rather than only that the counts differ.
+    """
+    left_tables = set(_tables(conn, SCHEMAS[left]))
+    right_tables = set(_tables(conn, SCHEMAS[right]))
+
+    assert len(left_tables) > 8, (
+        f"only {len(left_tables)} tables found on the {left} path -- the "
+        f"comparison is not reading the schema, so a pass proves nothing"
+    )
+    missing = sorted(left_tables - right_tables)
+    extra = sorted(right_tables - left_tables)
+    assert not missing and not extra, (
+        f"the {left} and {right} paths hold different tables -- "
+        f"missing from {right}: {missing or 'none'}; "
+        f"present only on {right}: {extra or 'none'}"
+    )
+    return tuple(sorted(left_tables))
+
+
 def _build_all_paths(conn):
     _build_fresh_init(conn, SCHEMAS["fresh"])
 
@@ -411,11 +448,7 @@ def test_init_based_paths_converge_on_every_aspect(conn, other, aspect):
     keys, indexes and defaults -- one parametrized case per aspect so a failure
     names which kind of divergence it is."""
     _build_all_paths(conn)
-    tables = _tables(conn, SCHEMAS["fresh"])
-    assert len(tables) > 8, (
-        f"only {len(tables)} tables found on the fresh path -- the comparison "
-        f"is not reading the schema, so a pass here proves nothing"
-    )
+    tables = _assert_same_tables(conn, "fresh", other)
     for table in tables:
         expected = _shape(conn, SCHEMAS["fresh"], table)[aspect]
         actual = _shape(conn, SCHEMAS[other], table)[aspect]
@@ -451,11 +484,7 @@ def test_legacy_upgrade_reaches_the_same_shape_as_a_fresh_install(conn, aspect):
     that is exactly the drift being looked for.
     """
     _build_all_paths(conn)
-    tables = _tables(conn, SCHEMAS["fresh"])
-    assert len(tables) > 8, (
-        f"only {len(tables)} tables found on the fresh path -- the comparison "
-        f"is not reading the schema, so a pass here proves nothing"
-    )
+    tables = _assert_same_tables(conn, "fresh", "legacy")
     for table in tables:
         expected = _shape(conn, SCHEMAS["fresh"], table)[aspect]
         actual = _shape(conn, SCHEMAS["legacy"], table)[aspect]
@@ -524,10 +553,17 @@ def test_the_ledger_controls_exist_on_a_fresh_install(conn):
     # ordinary constraint it would fire per statement and refuse a transaction
     # that is in balance by the time it commits -- the same control by name,
     # rejecting correct work.
-    _, _, deferrable, initially_deferred = triggers["balances_ledger_parity"]
+    _, _, deferrable, initially_deferred, _ = triggers["balances_ledger_parity"]
     assert deferrable and initially_deferred, (
         "balances_ledger_parity is not DEFERRABLE INITIALLY DEFERRED"
     )
+
+    # And every one of them must be ENABLED. `ALTER TABLE ... DISABLE TRIGGER`
+    # leaves the row in `pg_trigger` fully defined and never firing, so a
+    # name-only check reports a control that does nothing. 'O' is the default
+    # (fires on origin), 'D' is disabled.
+    for name, spec in triggers.items():
+        assert spec[4] != "D", f"{name} exists but is DISABLED"
 
 
 def test_the_four_previously_colliding_constraints_are_guarded(conn):
