@@ -18,8 +18,11 @@ skip without `DATABASE_URL`.
 
 What is genuinely still open here, so nothing below reads as finished:
 
-  * **No waterfall (D14).** Every payment posts one `principal` entry for its
-    whole amount. Fees and interest are never touched.
+  * **The waterfall applies to `apply_payment_once` only (D14).** That path
+    splits a payment fees -> accrued interest -> principal, in the order
+    `policies/fee_schedule.md` publishes. `apply_payment` below does NOT --
+    it is dead code, reached by no route, and converting it is part of ADR
+    0010's writer retirement rather than this change.
   * **No maker-checker (D8).** `adjust_balance` and `waive_fee` move money on
     one person's say-so, and this module is given no principal to record.
   * **Legacy writers are still direct.** `apply_payment`, `adjust_balance` and
@@ -36,7 +39,7 @@ What is genuinely still open here, so nothing below reads as finished:
 from decimal import Decimal
 
 from .logging_config import get_logger
-from . import db
+from . import db, waterfall
 
 log = get_logger("balance")
 
@@ -75,8 +78,10 @@ def apply_payment(loan_id: int, amount: float) -> float:
     is dead code that still writes money, which is exactly the kind of thing that
     should be named rather than left to be discovered.
 
-    No waterfall -- the whole amount comes off the balance, never
-    fees->interest->principal (D14).
+    No waterfall here -- the whole amount comes off the balance, never
+    fees->interest->principal. The live path (`apply_payment_once`) does apply
+    it; this one is not reached by any route, and giving dead code a second
+    implementation of the allocation would be two places to keep in step.
 
     The stored balance is safe under concurrency: the UPDATE below is a relative
     delta, so two of these compose rather than one overwriting the other, and
@@ -164,18 +169,74 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
             )
             return persisted["balance"], False
 
+        # --- the waterfall (D14) ------------------------------------------
+        #
+        # This used to write ONE `principal` entry for the whole amount, so a
+        # borrower carrying a late fee had their payment reduce principal while
+        # the fee stayed owed and kept the loan delinquent.
+        #
+        # `policies/fee_schedule.md` publishes the order as the source of truth:
+        # fees -> accrued interest -> principal. The ledger has been able to
+        # hold the split since 0035 (uniqueness is per `(payment_id,
+        # component)`, not per payment), and `ledger_payment_allocation_exact`
+        # already requires a payment's entries to sum to the captured amount --
+        # deferred to commit, which is what lets several land in one
+        # transaction. `waterfall.allocate` asserts the same sum before any of
+        # them is written.
         cur.execute(
-            "INSERT INTO ledger_entries "
-            "(loan_id, component, amount, entry_type, payment_id) "
-            "VALUES (%s, 'principal', -%s, 'payment', %s)",
-            (loan_id, amount, payment_id),
+            "SELECT l.principal, l.note_rate_pct, l.term_months, "
+            "       l.regular_payment, l.final_payment, l.schedule_version, "
+            "       l.opened_at, b.balance, COALESCE(b.past_due, 0) AS past_due "
+            "  FROM loans l JOIN balances b ON b.loan_id = l.id "
+            " WHERE l.id = %s",
+            (loan_id,),
         )
+        loan_rows = cur.fetchall()
+        if not loan_rows:
+            raise LookupError(f"no balances row for loan_id={loan_id}")
+        loan = loan_rows[0]
+
+        # Interest already applied, taken from the ledger rather than a column:
+        # the ledger is the record of what was actually applied, so this cannot
+        # drift from it and no new state has to be kept in step. Payments are
+        # negative, so negating the sum gives the amount paid.
+        cur.execute(
+            "SELECT COALESCE(-SUM(amount), 0) AS paid FROM ledger_entries "
+            " WHERE loan_id = %s AND component = 'interest'",
+            (loan_id,),
+        )
+        interest_paid = cur.fetchall()[0]["paid"]
+
+        allocation = waterfall.allocate(
+            amount,
+            fees_owed=loan["past_due"],
+            interest_owed=waterfall.interest_owed(
+                loan, interest_already_paid=interest_paid),
+            principal_owed=loan["balance"],
+        )
+
+        # One row per component that actually moved. A zero entry is refused by
+        # `CHECK (amount <> 0)` anyway, and would claim a movement that did not
+        # happen.
+        for component, part in allocation.components():
+            cur.execute(
+                "INSERT INTO ledger_entries "
+                "(loan_id, component, amount, entry_type, payment_id) "
+                "VALUES (%s, %s, %s, 'payment', %s)",
+                (loan_id, component, -part, payment_id),
+            )
+
         cur.execute("SELECT balance FROM balances WHERE loan_id = %s", (loan_id,))
         rows = cur.fetchall()
         if not rows:
             raise LookupError(f"no balances row for loan_id={loan_id}")
         new_balance = rows[0]["balance"]
-        log.info("applied payment loan_id=%s new_balance=%s", loan_id, new_balance)
+        log.info(
+            "applied payment loan_id=%s fees=%s interest=%s principal=%s "
+            "new_balance=%s",
+            loan_id, allocation.fees, allocation.interest, allocation.principal,
+            new_balance,
+        )
     return new_balance, True
 
 

@@ -177,6 +177,27 @@ def pg():
         cur.execute(f"SET search_path TO {SCHEMA}")
         cur.execute(
             """
+            -- `loans` exists here because the waterfall (D14) reads the loan's
+            -- stored contractual schedule to work out interest owed. Every
+            -- `balances` row has one in production -- there is a foreign key --
+            -- so a fixture without it was modelling a database that cannot
+            -- exist, and would have hidden a broken join rather than caught it.
+            --
+            -- `schedule_version` is NULL on purpose: these tests are about
+            -- concurrency, not allocation, and a loan with no stored schedule
+            -- owes no derivable interest, so the whole payment goes to
+            -- principal exactly as it did before the waterfall landed.
+            CREATE TABLE loans (
+                id                    INTEGER PRIMARY KEY,
+                principal             NUMERIC(14,2),
+                note_rate_pct         NUMERIC(7,3),
+                term_months           INTEGER,
+                regular_payment       NUMERIC(14,2),
+                regular_payment_count INTEGER,
+                final_payment         NUMERIC(14,2),
+                schedule_version      TEXT,
+                opened_at             TIMESTAMPTZ DEFAULT now()
+            );
             CREATE TABLE balances (
                 loan_id    INTEGER PRIMARY KEY,
                 balance    NUMERIC(14,2) NOT NULL,
@@ -226,6 +247,8 @@ def pg():
                 FOR EACH ROW EXECUTE FUNCTION project_test_ledger();
             """
         )
+        cur.execute("INSERT INTO loans (id, principal, note_rate_pct, term_months) "
+                    "VALUES (1, %s, 7.99, 48)", (OPENING_BALANCE,))
         cur.execute("INSERT INTO balances (loan_id, balance) VALUES (1, %s)", (OPENING_BALANCE,))
         cur.execute(
             "INSERT INTO payments(id,loan_id,amount) VALUES (%s,1,%s),(%s,1,%s)",
