@@ -41,7 +41,7 @@ _TERM = 24
 
 def _contract_loan(**overrides):
     base = dict(
-        id=1, app_id=1, principal=_PRINCIPAL, apr=_NOTE_RATE, term_months=_TERM,
+        id=1, app_id=1, principal=_PRINCIPAL, note_rate_pct=_NOTE_RATE, term_months=_TERM,
         regular_payment=None, regular_payment_count=_TERM - 1,
         final_payment=None, schedule_version="B1", status="current",
     )
@@ -58,7 +58,7 @@ def _legacy_loan(**overrides):
     """Boarded before 0030: all four schedule columns NULL together, which
     loans_schedule_all_or_nothing makes the only legal absent state."""
     base = dict(
-        id=2, app_id=2, principal=_PRINCIPAL, apr=_NOTE_RATE, term_months=_TERM,
+        id=2, app_id=2, principal=_PRINCIPAL, note_rate_pct=_NOTE_RATE, term_months=_TERM,
         regular_payment=None, regular_payment_count=None,
         final_payment=None, schedule_version=None, status="current",
     )
@@ -222,7 +222,7 @@ def test_a_legacy_reconstruction_matches_the_display_generator():
     rather than the difference being invisible behind the caveat."""
     loan = _legacy_loan()
     out = _call(loan)
-    expected = schedule.amortization(loan.principal, loan.apr, loan.term_months)
+    expected = schedule.amortization(loan.principal, loan.note_rate_pct, loan.term_months)
     assert [r.payment for r in out.schedule] == [r["payment"] for r in expected]
 
 

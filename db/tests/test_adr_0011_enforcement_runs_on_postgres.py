@@ -65,7 +65,7 @@ CREATE TABLE loans (
     id             SERIAL PRIMARY KEY,
     applicant_name TEXT,
     principal      NUMERIC(14,2),
-    apr            NUMERIC(6,3),
+    note_rate_pct NUMERIC(6,3),
     term_months    INTEGER
 );
 
@@ -95,7 +95,7 @@ ALTER TABLE ledger_entries ADD CONSTRAINT ledger_actor_required CHECK (
     OR (actor_id IS NOT NULL AND actor_role IS NOT NULL)
 );
 
-INSERT INTO loans (id, applicant_name, principal, apr, term_months)
+INSERT INTO loans (id, applicant_name, principal, note_rate_pct, term_months)
 VALUES (4471, 'Sam Okafor', 9000, 5.946, 24),
        (5582, 'Dana Whitfield', 12000, 6.240, 36);
 """

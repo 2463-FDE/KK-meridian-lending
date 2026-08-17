@@ -240,7 +240,7 @@ def test_lss_loans_list_borrower_gets_own_scoped_results(monkeypatch):
             assert params == (1,)
             return [{
                 "id": 5, "applicant_name": "Maria Gonzalez", "principal": 10000.0,
-                "apr": 12.5, "term_months": 36, "status": "current",
+                "note_rate_pct": 12.5, "term_months": 36, "status": "current",
                 "balance": 9000.0, "past_due": 0.0, "opened_at": None,
             }]
 
@@ -266,7 +266,7 @@ def test_lss_loans_list_borrower_decimal_rows_serialize(monkeypatch):
             assert params == (1,)
             return [{
                 "id": 5, "applicant_name": "Maria Gonzalez",
-                "principal": Decimal("10000.00"), "apr": Decimal("12.500"),
+                "principal": Decimal("10000.00"), "note_rate_pct": Decimal("12.500"),
                 "term_months": 36, "status": "current",
                 "balance": Decimal("9000.00"), "past_due": Decimal("0.00"),
                 "opened_at": None,
@@ -286,7 +286,7 @@ def test_lss_loans_list_borrower_decimal_rows_serialize(monkeypatch):
 def _borrower_row(**overrides):
     row = {
         "id": 5, "applicant_name": "Maria Gonzalez",
-        "principal": Decimal("10000.00"), "apr": Decimal("12.500"),
+        "principal": Decimal("10000.00"), "note_rate_pct": Decimal("12.500"),
         "schedule_version": "B1", "term_months": 36, "status": "current",
         "balance": Decimal("9000.00"), "past_due": Decimal("0.00"),
         "opened_at": None,
@@ -308,31 +308,45 @@ def _borrower_list(monkeypatch, row):
 
 
 def test_lss_loans_list_borrower_reports_a_proven_note_rate(monkeypatch):
-    """A loan boarded with its contractual schedule has a rate worth naming.
-
-    `schedule_version` is written only by the current boarding path, which also
-    copies the contractual note rate into `loans.apr` -- so it is the evidence
-    that the column means what the API calls it.
-    """
+    """The rate the borrower sees is the contractual one, from a column that can
+    only hold that figure since the D19 contract step (db/migrations/0039)."""
     item = _borrower_list(monkeypatch, _borrower_row())
     assert item["note_rate_pct"] == 12.5
     assert item["note_rate_proven"] is True
 
 
-def test_lss_loans_list_borrower_withholds_an_unproven_note_rate(monkeypatch):
-    """A pre-change loan's `apr` is the DISCLOSED APR, not the note rate.
+def test_lss_loans_list_borrower_reports_a_rate_without_a_schedule_version(monkeypatch):
+    """This test asserted the OPPOSITE until the contract step, and the history
+    is the point.
 
-    That path copied `offers.apr` into this column -- 5.196% for a contract
-    priced at 7.99% -- so relabelling it printed a contractual rate the borrower
-    was never quoted. Unknown stays unknown. Reviewed on PR #10.
+    `loans.apr` held two different regulated figures: the pre-change path copied
+    `offers.apr` -- the DISCLOSED APR, 5.196% for a contract priced at 7.99% --
+    into the column servicing amortizes. So this route reported a rate only when
+    `schedule_version` proved the current boarding path had written a
+    contractual one, and withheld it otherwise. Reviewed on PR #10.
+
+    0038 moved that inference into the data and 0039 dropped `apr`, making
+    `note_rate_pct` NOT NULL. `schedule_version` no longer says anything about
+    WHICH figure is stored, so withholding on it would now hide a number the
+    borrower is entitled to see, for no reason a reader could reconstruct.
     """
     item = _borrower_list(
-        monkeypatch, _borrower_row(apr=Decimal("5.196"), schedule_version=None)
+        monkeypatch,
+        _borrower_row(note_rate_pct=Decimal("7.990"), schedule_version=None),
     )
-    assert item["note_rate_pct"] is None, "an unproven rate was reported as contractual"
-    assert item["note_rate_proven"] is False
-    # And the misleading value is not smuggled out under the old name either.
-    assert item.get("apr") in (None, 5.196) or "apr" not in item
+    assert item["note_rate_pct"] == 7.99
+    assert item["note_rate_proven"] is True
+
+
+def test_lss_loans_list_never_publishes_a_field_called_apr(monkeypatch):
+    """The name was the defect, so it must not survive in the response either.
+
+    A borrower-facing field called `apr` carrying a note rate is the same
+    conflation D19 exists to end, one layer up from the database -- and this is
+    the layer the borrower actually reads.
+    """
+    item = _borrower_list(monkeypatch, _borrower_row())
+    assert "apr" not in item, f"the retired name is still published: {sorted(item)}"
 
 
 def test_lss_loans_list_borrower_without_applicant_id_is_forbidden(monkeypatch):

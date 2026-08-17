@@ -68,7 +68,7 @@ _VALID_LOAN = {
     "app_id": 1,
     "applicant_name": "Robin Fictional",
     "principal": 9000.00,
-    "apr": 7.990,
+    "note_rate_pct": 7.990,
     "term_months": 24,
     "regular_payment": 407.00,
     "regular_payment_count": 23,

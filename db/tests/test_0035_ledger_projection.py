@@ -730,7 +730,7 @@ def test_a_loan_boarded_after_migration_gets_an_opening_delta(db):
     """Origination's live boarding path INSERTs loans then balances. The
     transitional bridge must cover that new row, not only updates to rows that
     happened to exist when migration 0035 took its snapshot."""
-    loan = _exec(db, "INSERT INTO loans(app_id,principal,apr,term_months,status) "
+    loan = _exec(db, "INSERT INTO loans(app_id,principal,note_rate_pct,term_months,status) "
                      "VALUES(NULL,725,10,12,'current') RETURNING id")[0]["id"]
     _exec(db, "INSERT INTO balances(loan_id,balance,past_due) VALUES(%s,725,15)", (loan,))
     db.commit()
@@ -847,7 +847,7 @@ def test_a_payment_racing_the_backfill_is_captured_once_and_converges():
 
 
 def test_negative_legacy_state_can_be_opened_without_inventing_history(db):
-    loan = _exec(db, "INSERT INTO loans(app_id,principal,apr,term_months,status) "
+    loan = _exec(db, "INSERT INTO loans(app_id,principal,note_rate_pct,term_months,status) "
                      "VALUES(NULL,100,10,12,'current') RETURNING id")[0]["id"]
     _exec(db, "INSERT INTO balances(loan_id,balance,past_due) VALUES(%s,-25,-3)", (loan,))
     db.commit()
@@ -860,7 +860,7 @@ def test_negative_legacy_state_can_be_opened_without_inventing_history(db):
 
 def _orphan_loan(conn):
     """A loan with no `balances` row -- the shape that exposed the defect."""
-    rows = _exec(conn, "INSERT INTO loans (app_id, principal, apr, term_months, status) "
+    rows = _exec(conn, "INSERT INTO loans (app_id, principal, note_rate_pct, term_months, status) "
                        "VALUES (NULL, 1000, 10, 12, 'active') RETURNING id")
     return rows[0]["id"]
 

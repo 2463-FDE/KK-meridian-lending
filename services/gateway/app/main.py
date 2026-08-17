@@ -210,8 +210,7 @@ def _borrower_loans(applicant_id: int) -> dict:
     filter of its own). Same shape as servicing-service's Page[LoanListItem]
     so the frontend needs no special-casing for the borrower path."""
     rows = db.query(
-        "SELECT l.id, l.applicant_name, l.principal, l.apr, l.note_rate_pct, "
-        "       l.schedule_version, "
+        "SELECT l.id, l.applicant_name, l.principal, l.note_rate_pct, "
         "       l.term_months, l.status, "
         "       COALESCE(b.balance, 0) AS balance, COALESCE(b.past_due, 0) AS past_due, "
         "       l.opened_at "
@@ -232,25 +231,23 @@ def _borrower_loans(applicant_id: int) -> dict:
             # Decimal. Cast to float at this boundary, same fix as everywhere
             # else a raw-DB-read money value crosses a JSON response/request.
             "principal": float(r["principal"]),
-            # `loans.apr` means different things depending on how the loan was
+            # D19 contract (db/migrations/0039): one column, no inference.
+            #
+            # `loans.apr` MEANT different things depending on how the loan was
             # boarded: the contractual note rate under the current path, the
             # DISCLOSED APR under the pre-change one (5.196% for a contract
-            # priced at 7.99%). `schedule_version` is set only by the current
-            # path, so it is the evidence the value means what the API calls
-            # it -- the same rule servicing-service applies. Reported only where
-            # it is proven; unknown stays unknown rather than printing a rate
-            # the borrower was never quoted. Reviewed on PR #10.
-            # D19 expand: prefer the column that says what it holds; fall back
-            # to the `apr`+`schedule_version` inference for rows an
-            # older-image instance boarded after 0038 ran, which are proven but
-            # have an empty new column. Same rule as
-            # `servicing-service/app/routers/loans.py::_proven_note_rate`, and
-            # the fallback goes at the contract step in both places.
-            "note_rate_pct": (
-                float(r["note_rate_pct"]) if r.get("note_rate_pct") is not None
-                else float(r["apr"]) if r.get("schedule_version") else None),
-            "note_rate_proven": (
-                r.get("note_rate_pct") is not None or bool(r.get("schedule_version"))),
+            # priced at 7.99%). So this read preferred `note_rate_pct` and fell
+            # back to `apr` only where `schedule_version` proved which figure
+            # was stored, reporting nothing otherwise rather than printing a
+            # rate the borrower was never quoted (reviewed on PR #10).
+            #
+            # `apr` is gone and `note_rate_pct` is NOT NULL, so there is nothing
+            # to fall back to and nothing that can be unproven -- the same
+            # simplification servicing's `_proven_note_rate` just made. The
+            # `note_rate_proven` field stays in the response because clients
+            # branch on it.
+            "note_rate_pct": float(r["note_rate_pct"]),
+            "note_rate_proven": True,
             "term_months": r["term_months"],
             "status": r["status"],
             "balance": float(r["balance"]),

@@ -155,7 +155,7 @@ def _full_schema_sql():
             app_id INTEGER UNIQUE,
             applicant_name TEXT,
             principal NUMERIC(14,2) NOT NULL,
-            apr NUMERIC(7,3) NOT NULL,
+            note_rate_pct NUMERIC(7,3) NOT NULL,
             -- D19 expand (db/migrations/0038). Added because boarding now
             -- dual-writes it -- and this hand-copied DDL diverged the moment it
             -- did: ten tests failed with "column note_rate_pct does not exist".
@@ -166,7 +166,6 @@ def _full_schema_sql():
             -- it IS a copy and it will drift again. What makes that survivable is
             -- that the drift failed loudly rather than passing on a shape
             -- production would reject.
-            note_rate_pct NUMERIC(7,3),
             term_months INTEGER NOT NULL,
             -- The Model B contract as boarded (db/migrations/0030), WITH its
             -- constraints. Copying only the columns would let these tests pass

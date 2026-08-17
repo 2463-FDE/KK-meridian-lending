@@ -80,7 +80,7 @@ def setup_conn():
                 id SERIAL PRIMARY KEY,
                 app_id INTEGER UNIQUE REFERENCES applications(id),
                 principal NUMERIC(14,2) NOT NULL,
-                apr NUMERIC(7,3) NOT NULL,
+                note_rate_pct NUMERIC(7,3) NOT NULL,
                 term_months INTEGER NOT NULL,
                 applicant_name TEXT
             );
@@ -206,7 +206,7 @@ def _accept_attempt(app_id, raw_token, barrier=None):
                 (app_id,),
             )
             c.execute(
-                "INSERT INTO loans (app_id, principal, apr, term_months, applicant_name) "
+                "INSERT INTO loans (app_id, principal, note_rate_pct, term_months, applicant_name) "
                 "VALUES (%s, 9000, %s, 24, 'Test Borrower') RETURNING id",
                 (app_id, offer["apr"]),
             )

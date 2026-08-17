@@ -89,36 +89,58 @@ ALTER TABLE offers
 --
 --     This is scale-free: it asks about the row's own resolving power instead of
 --     comparing dollars against a fixed threshold. Reviewed on PR #10.
-WITH candidate AS (
-    SELECT o.id                                        AS offer_id,
-           o.monthly_payment                           AS stored_payment,
-           l.apr                                       AS candidate_rate,
-           -- the payment this rate implies
-           CASE
-             WHEN l.apr = 0 THEN l.principal / l.term_months
-             ELSE (l.principal * (l.apr / 100 / 12))
-                  / (1 - power(1 + (l.apr / 100 / 12), -l.term_months))
-           END                                         AS payment_at_rate,
-           -- and the payment 0.125pp away, to measure this row's resolving power
-           (l.principal * ((l.apr + 0.125) / 100 / 12))
-             / (1 - power(1 + ((l.apr + 0.125) / 100 / 12), -l.term_months))
-                                                       AS payment_at_rate_plus
-      FROM offers o
-      JOIN loans  l ON l.app_id = o.app_id   -- offers.app_id is UNIQUE: at most one row per loan
-     WHERE o.note_rate_pct IS NULL
-       AND l.apr IS NOT NULL
-       AND l.principal IS NOT NULL
-       AND l.principal > 0
-       AND l.term_months IS NOT NULL
-       AND l.term_months > 0
-       AND o.monthly_payment IS NOT NULL
-)
-UPDATE offers o
-   SET note_rate_pct = c.candidate_rate
-  FROM candidate c
- WHERE o.id = c.offer_id
-   AND abs(c.payment_at_rate - c.stored_payment) <= 0.005          -- (1) agreement
-   AND abs(c.payment_at_rate_plus - c.payment_at_rate) > 0.005;    -- (2) separability
+-- Guarded and run through EXECUTE: once 0039 has removed `loans.apr`, a replay
+-- of this file would otherwise abort on a column that no longer exists, and
+-- db/tests/test_migration_paths_converge.py replays the whole chain twice. Same
+-- treatment 0029 needed after 0031 dropped `payments.pan`, for the same reason.
+--
+-- The statement itself is unchanged, including the column name. A migration is a
+-- record of what was done to the database at the time; rewriting it to say
+-- `note_rate_pct` would describe a back-fill that never happened, and would
+-- claim this file could prove a rate from a column that did not yet exist.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'loans'
+           AND column_name = 'apr'
+    ) THEN
+        RAISE NOTICE '0030: loans.apr already removed (0039 has run); the note-rate back-fill has nothing to read.';
+        RETURN;
+    END IF;
+
+    EXECUTE $sql$        WITH candidate AS (
+            SELECT o.id                                        AS offer_id,
+                   o.monthly_payment                           AS stored_payment,
+                   l.apr                                       AS candidate_rate,
+                   -- the payment this rate implies
+                   CASE
+                     WHEN l.apr = 0 THEN l.principal / l.term_months
+                     ELSE (l.principal * (l.apr / 100 / 12))
+                          / (1 - power(1 + (l.apr / 100 / 12), -l.term_months))
+                   END                                         AS payment_at_rate,
+                   -- and the payment 0.125pp away, to measure this row's resolving power
+                   (l.principal * ((l.apr + 0.125) / 100 / 12))
+                     / (1 - power(1 + ((l.apr + 0.125) / 100 / 12), -l.term_months))
+                                                               AS payment_at_rate_plus
+              FROM offers o
+              JOIN loans  l ON l.app_id = o.app_id   -- offers.app_id is UNIQUE: at most one row per loan
+             WHERE o.note_rate_pct IS NULL
+               AND l.apr IS NOT NULL
+               AND l.principal IS NOT NULL
+               AND l.principal > 0
+               AND l.term_months IS NOT NULL
+               AND l.term_months > 0
+               AND o.monthly_payment IS NOT NULL
+        )
+        UPDATE offers o
+           SET note_rate_pct = c.candidate_rate
+          FROM candidate c
+         WHERE o.id = c.offer_id
+           AND abs(c.payment_at_rate - c.stored_payment) <= 0.005          -- (1) agreement
+           AND abs(c.payment_at_rate_plus - c.payment_at_rate) > 0.005;    -- (2) separability$sql$;
+END $$;
 
 -- Everything else stays NULL on purpose. An unboarded legacy offer has no
 -- second record of what it was priced at, and there is no way to recover it

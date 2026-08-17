@@ -92,13 +92,15 @@ INSERT INTO offers (app_id, note_rate_pct, fee_pct_used, apr,
   (6014, 11.25, 0.0300, 12.590, 17101.83, 1093.37, 48500.00, 65601.83, 59, 1093.00, 60, 'B1', 50000);
 -- END GENERATED OFFER ROWS
 
--- `loans.apr` holds the CONTRACTUAL note rate despite the column name (D19) --
--- it is what servicing/schedule.py::amortization() bills from. 4471 and 6011
+-- `loans.note_rate_pct` holds the contractual rate servicing bills from. It was
+-- called `apr` until D19's contract step (db/migrations/0039) -- a name that
+-- described the wrong regulated figure, which is the whole reason these values
+-- had to be audited row by row. 4471 and 6011
 -- previously carried 7.142, a stale disclosed-APR value, so amortizing them
 -- reproduced neither the disclosed payment nor anything else. They now match
 -- their offer's note_rate_pct, which is the invariant
 -- db/tests/test_seed_offer_consistency.py enforces for every row.
-INSERT INTO loans (id, app_id, applicant_name, principal, apr, term_months, status) VALUES
+INSERT INTO loans (id, app_id, applicant_name, principal, note_rate_pct, term_months, status) VALUES
   (4471, 4471, 'Maria Gonzalez', 18000,  7.990, 48, 'current'),
   (5582, 5582, 'Darnell Webb',   12000,  9.990, 36, 'current'),
   (6011, 6011, 'Priya Raman',    15000,  7.990, 36, 'current'),
