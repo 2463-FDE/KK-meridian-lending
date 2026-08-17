@@ -26,9 +26,25 @@ MIGRATIONS_DIR = REPO_ROOT / "db" / "migrations"
 
 # Schema-only init files. 002/003 are seed DATA -- irrelevant to a schema
 # comparison, and 003 depends on rows 002 seeds.
+#
+# **007 was missing from this list, and that was the defect.** It reads as a
+# back-fill -- it opens the ledger for seeded loans -- but it also DEFINES
+# `capture_legacy_balance_delta` and `balances_cannot_be_deleted_during_cutover`
+# and attaches all three ledger controls on `balances`. Leaving it out meant the
+# "fresh" schema these comparisons were built on had the ledger tables and the
+# projection but none of its controls: a database no operator has ever run,
+# because the real init path applies every file in this directory in order.
+#
+# The comparison was therefore validating a fiction. Every aspect matched,
+# because the migrated path was being compared against a fresh path that had
+# been quietly hollowed out.
+#
+# With no seeds present 007's back-fill is a no-op, so including it costs
+# nothing and makes "fresh" mean what it says.
 INIT_SCHEMA_FILES = (
     "001_schema.sql", "004_decision_events.sql",
     "005_manual_reviews.sql", "006_decision_attempts.sql",
+    "007_ledger_opening_balances.sql",
 )
 
 
