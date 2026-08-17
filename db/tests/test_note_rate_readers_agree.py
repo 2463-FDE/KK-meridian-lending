@@ -88,6 +88,40 @@ def _gateway_rule() -> str:
 _QUALIFIED_LOAN_APR = re.compile(r"\b(l|loans)\.apr\b", re.IGNORECASE)
 _BARE_APR = re.compile(r"\bapr\b", re.IGNORECASE)
 _LOAN_ATTR = re.compile(r"^(loan|l|row|r)$|loan$", re.IGNORECASE)
+# A statement whose WRITE TARGET is `offers`. Its `SET`/column-list names cannot
+# be table-qualified -- `SET offers.apr = ...` is a syntax error in Postgres --
+# so "qualify it" is not advice that can be followed there, and a bare `apr` in
+# such a statement unambiguously belongs to `offers`.
+_WRITES_OFFERS = re.compile(r"\b(?:UPDATE|INSERT\s+INTO)\s+offers\b", re.IGNORECASE)
+
+
+def _reads_retired_loan_apr(sql: str) -> bool:
+    """Does this statement read `apr` off `loans`?
+
+    The rule, in order:
+
+      1. Not about loans at all               -> no.
+      2. `l.apr` / `loans.apr`                -> yes, unambiguous.
+      3. Writes to `offers`                   -> no; a bare `apr` there is the
+         offer's and cannot be qualified.
+      4. Any remaining UNQUALIFIED `apr`      -> yes.
+
+    Rule 4 is deliberately strict. It used to skip any statement naming both
+    tables, which left `SELECT apr FROM loans JOIN offers ...` unflagged -- the
+    exact query that breaks once `apr` is gone from `loans`, and the one most
+    likely to be written by someone reaching for the offer's APR. A qualified
+    read passes by SAYING which table it means; a bare one is reported even if
+    it turns out to be the offer's, because a reader cannot tell either and the
+    fix is one word. (Review of PR #37.)
+    """
+    if not re.search(r"\bloans\b", sql, re.IGNORECASE):
+        return False
+    if _QUALIFIED_LOAN_APR.search(sql):
+        return True
+    if _WRITES_OFFERS.search(sql):
+        return False
+    return bool(_BARE_APR.search(re.sub(r"\b\w+\.apr\b", "", sql,
+                                        flags=re.IGNORECASE)))
 
 
 def _docstring_nodes(tree):
@@ -142,19 +176,8 @@ def test_no_service_source_reads_the_retired_column():
         rel = path.relative_to(REPO).as_posix()
 
         for sql in _sql_strings_touching_loans(tree):
-            # `l.apr` / `loans.apr` is unambiguous wherever it appears.
-            if _QUALIFIED_LOAN_APR.search(sql):
-                offenders.append(f"{rel}: SQL reads loans.apr -- {sql[:90]!r}")
-                continue
-            # A bare `apr` is only about loans if the statement does not also
-            # name offers, where `apr` is a real disclosed APR that stays. A
-            # statement naming both is left alone: there is no reliable way to
-            # tell from text which table a bare column belongs to, and this
-            # test's job is to be checkable, not clever.
-            if _BARE_APR.search(sql) and not re.search(r"\boffers\b", sql,
-                                                       re.IGNORECASE):
-                offenders.append(
-                    f"{rel}: SQL names loans and a bare apr -- {sql[:90]!r}")
+            if _reads_retired_loan_apr(sql):
+                offenders.append(f"{rel}: SQL reads apr off loans -- {sql[:90]!r}")
 
         for read in _loan_apr_attribute_reads(tree):
             offenders.append(f"{rel}: {read}")
@@ -206,6 +229,47 @@ def test_no_browser_test_queries_the_retired_column():
         "an e2e spec still queries `loans.apr`, which no longer exists:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_the_scanner_catches_the_shapes_it_is_meant_to():
+    """The scanner is checked against known-bad and known-good SQL directly.
+
+    Every other test here passes when the codebase is clean, which is also what
+    a broken scanner does. These cases pin the rule itself, and the third is the
+    hole review of PR #37 found: a statement naming BOTH tables used to be
+    skipped entirely, so `SELECT apr FROM loans JOIN offers ...` -- the one
+    query most likely to be written by someone reaching for the offer's APR and
+    getting the loan's -- sailed through.
+    """
+    flagged = _reads_retired_loan_apr
+
+    must_flag = [
+        "SELECT l.apr FROM loans l",
+        "SELECT apr FROM loans WHERE id = 1",
+        # The hole the review found: names both tables, so it used to be skipped.
+        "SELECT apr, note_rate_pct FROM loans JOIN offers ON offers.app_id = loans.app_id",
+        "SELECT loans.apr FROM loans JOIN offers ON offers.app_id = loans.app_id",
+    ]
+    must_pass = [
+        "SELECT note_rate_pct FROM loans",
+        "SELECT o.apr FROM loans l JOIN offers o ON o.app_id = l.app_id",
+        "SELECT offers.apr FROM offers JOIN loans ON loans.app_id = offers.app_id",
+        "SELECT apr FROM offers WHERE app_id = 1",
+        # A write to `offers` whose SET column CANNOT be qualified -- Postgres
+        # rejects `SET offers.apr = ...` outright, so 'qualify it' is not advice
+        # that can be followed. This is the real statement in
+        # `disclosure-service/app/routers/offers.py`, which the first version of
+        # the tightened rule reported as a retired-column read.
+        "WITH repaired AS (UPDATE offers o SET note_rate_pct = %s, apr = %s "
+        "WHERE app_id = %s RETURNING o.id) SELECT id FROM repaired "
+        "JOIN loans ON loans.app_id = %s",
+        "INSERT INTO offers (app_id, apr, note_rate_pct) "
+        "SELECT app_id, %s, %s FROM loans WHERE id = %s",
+    ]
+    for sql in must_flag:
+        assert flagged(sql), f"the scanner missed a retired-column read: {sql!r}"
+    for sql in must_pass:
+        assert not flagged(sql), f"the scanner reported a legitimate query: {sql!r}"
 
 
 def test_the_scan_can_still_see_the_offer_column():

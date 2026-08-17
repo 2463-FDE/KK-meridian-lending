@@ -203,7 +203,8 @@ def test_a_positive_prepaid_fee_puts_the_apr_above_the_note_rate(seeded_offers):
 
 def test_the_payment_is_reproduced_from_principal_note_rate_and_term(seeded_offers):
     """Recomputed from the application's own amount and term -- not read back
-    from the stored payment, and not from loans.apr."""
+    from the stored payment, and not from `loans.note_rate_pct` (which was
+    called `loans.apr` when this test was written)."""
     for o in seeded_offers:
         expected = _payment_unrounded(
             Decimal(str(o["amount"])), Decimal(str(o["note_rate_pct"])), o["term_months"]
