@@ -94,10 +94,21 @@ def assess_late_fee(loan_id: int) -> float:
 
 
 def _has_balances_row(loan_id: int) -> bool:
-    """Read on a SEPARATE connection, deliberately.
+    """Read on a SEPARATE connection, deliberately -- but the same DATABASE_URL.
 
-    The transaction that raised is aborted, so no further statement can run on
-    its cursor -- `current transaction is aborted` is all it would return, and
-    the diagnosis would be wrong every time.
+    Separate, because the transaction that raised is aborted: no further
+    statement can run on its cursor, so `current transaction is aborted` is all
+    it would return and the diagnosis would be wrong every time.
+
+    `db.transaction()` rather than `db.query()`, because `query()` runs on the
+    module-level connection shared by the whole process. That connection is
+    opened once, on whatever `search_path` it happened to get, and it is NOT the
+    connection the write ran on. Asking it about `balances` answers a question
+    about a different database than the one that just refused the insert --
+    which is exactly the wrong thing for an error path to do, and it surfaced as
+    `relation "balances" does not exist` in CI while passing locally, where the
+    default schema happened to have the table.
     """
-    return bool(db.query("SELECT 1 FROM balances WHERE loan_id = %s", (loan_id,)))
+    with db.transaction() as cur:
+        cur.execute("SELECT 1 FROM balances WHERE loan_id = %s", (loan_id,))
+        return bool(cur.fetchall())
