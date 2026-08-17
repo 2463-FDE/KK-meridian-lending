@@ -264,3 +264,71 @@ def test_a_replayed_payment_does_not_post_the_split_twice(db):
 
     assert applied is False
     assert _entries(loan_id) == first, "a replay wrote the split a second time"
+
+
+# --- what can put an `interest` entry in the ledger ---------------------------
+#
+# `interest_owed` deducts the sum of ALL `interest` entries, not just payments.
+# I raised that against myself as a review question: if a staff adjustment could
+# credit interest, would a later payment over-allocate to principal?
+#
+# It cannot happen, and the reason is the schema rather than anything in
+# `waterfall.py`. These two tests pin the invariant the derivation rests on, so
+# that if a future change makes interest adjustments possible, the thing that
+# breaks is a test naming this assumption rather than a borrower's allocation.
+
+
+def test_an_interest_entry_cannot_be_written_without_an_approved_proposal(db):
+    """An `adjustment` must name the `pending_movements` row that authorised it
+    (ADR 0011). So no interest entry can appear by a direct write."""
+    with pytest.raises(psycopg2.Error) as exc:
+        with db.cursor() as cur:
+            cur.execute(f"SET search_path TO {SCHEMA}")
+            cur.execute(
+                "INSERT INTO ledger_entries "
+                "(loan_id, component, amount, entry_type, reason, actor_id, "
+                " actor_role) "
+                "VALUES (%s, 'interest', -10.00, 'adjustment', 't', 1, 'admin')",
+                (_loan(db),))
+    assert "proposal" in str(exc.value).lower()
+
+
+def test_an_interest_adjustment_cannot_even_be_proposed(db):
+    """And the proposal route is closed too: `pending_component` allows an
+    adjustment against principal or fees only.
+
+    Together with the test above, that means the ONLY entry type that can put an
+    `interest` row in the ledger is a payment -- which is what makes
+    `interest_owed`'s deduction correct: it can only ever be subtracting
+    interest a borrower actually paid.
+    """
+    loan_id = _loan(db)
+    with pytest.raises(psycopg2.Error) as exc:
+        with db.cursor() as cur:
+            cur.execute(f"SET search_path TO {SCHEMA}")
+            cur.execute(
+                "INSERT INTO pending_movements "
+                "(loan_id, component, amount, entry_type, reason, requested_by, "
+                " requested_role) "
+                "VALUES (%s, 'interest', -10.00, 'adjustment', 'test', 1, 'admin')",
+                (loan_id,))
+    message = str(exc.value)
+    # Named specifically. An earlier version of this test used the wrong column
+    # name and failed with `UndefinedColumn` -- it would have "passed" against a
+    # looser assertion while proving nothing about the constraint.
+    assert "pending_component" in message, (
+        f"refused, but not by the constraint under test: {message}")
+
+
+def test_a_payment_is_the_only_thing_that_wrote_interest(db):
+    """Guard the guard: the two refusals above are only meaningful if a payment
+    genuinely does write an interest entry."""
+    from app import balance
+
+    loan_id = _loan(db)
+    payment_id = _payment(db, loan_id, Decimal("500.00"))
+    balance.apply_payment_once(payment_id, loan_id, Decimal("500.00"))
+
+    kinds = _rows("SELECT DISTINCT entry_type FROM ledger_entries "
+                  " WHERE loan_id = %s AND component = 'interest'", (loan_id,))
+    assert [k["entry_type"] for k in kinds] == ["payment"]
