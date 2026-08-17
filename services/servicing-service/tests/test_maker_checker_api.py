@@ -354,6 +354,44 @@ def test_late_fee_still_requires_a_human_and_still_works(keys, monkeypatch):
     assert response.status_code == 200, response.text
 
 
+def test_late_fee_on_a_loan_with_no_balance_is_a_404_not_a_500(keys, monkeypatch):
+    """LF-API-500. The refusal has to reach the caller AS a refusal.
+
+    `assess_late_fee` raises `LoanHasNoBalances` when the fee would land on a
+    loan with no `balances` row. The route called it directly, and
+    `@app.exception_handler(Exception)` turns anything uncaught into
+    `{"detail": "internal error"}` with status 500 -- so the caller saw an
+    opaque server error.
+
+    That made the change it was part of false. The old code returned 35.0 for a
+    loan whose balance never moved; replacing a wrong number with a server error
+    is not the visible refusal it was replaced for, and an operator reading a
+    500 has no way to tell a missing balance from a crash.
+
+    The previous test in this file only covered the success path, and the
+    conversion's own tests exercise the helper rather than the route -- so
+    nothing had ever asserted what a caller receives. Reviewed on PR #38.
+    """
+    def _refuse(loan_id):
+        raise main.delinquency.LoanHasNoBalances(
+            f"no balances row for loan_id={loan_id}")
+
+    monkeypatch.setattr(main.delinquency, "assess_late_fee", _refuse)
+    response = _client().post("/accounts/1/late-fee",
+                              headers=_headers(keys, sub="2", role="csr"))
+
+    assert response.status_code == 404, response.text
+    detail = response.json()["detail"]
+    # Not the generic handler's body: that is the failure this test exists for,
+    # and a 404 carrying "internal error" would be the same defect renumbered.
+    assert detail != "internal error", (
+        "the refusal reached the caller through the catch-all handler"
+    )
+    assert "balance" in detail.lower(), (
+        f"the 404 does not say what was missing: {detail!r}"
+    )
+
+
 # --- review round 1 -------------------------------------------------------------
 
 

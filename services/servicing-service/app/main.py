@@ -444,7 +444,28 @@ def late_fee(loan_id: int,
     )
     log.info("late-fee loan_id=%s by subject=%s role=%s",
              loan_id, actor.subject, actor.role)
-    return {"loan_id": loan_id, "past_due": delinquency.assess_late_fee(loan_id)}
+    try:
+        past_due = delinquency.assess_late_fee(loan_id)
+    except delinquency.LoanHasNoBalances:
+        # 404, and mapped HERE rather than left to the global handler.
+        #
+        # Without this the refusal reaches the caller as `{"detail": "internal
+        # error"}` with status 500, because `@app.exception_handler(Exception)`
+        # catches everything. That would make the whole point of the refusal
+        # false: the previous code returned 35.0 for a loan whose balance never
+        # moved, and replacing a wrong number with an opaque server error is not
+        # the visible refusal it was replaced for. Reviewed on PR #38.
+        #
+        # 404 rather than 409: nothing about the request conflicts with the
+        # loan's state -- the balance this fee would be assessed against does
+        # not exist. A conflict code would tell the caller to retry later, which
+        # will never help.
+        log.warning("late-fee refused loan_id=%s -- no balances row", loan_id)
+        raise HTTPException(
+            status_code=404,
+            detail=f"loan {loan_id} has no balance to assess a fee against",
+        )
+    return {"loan_id": loan_id, "past_due": past_due}
 
 
 @app.get("/reconciliation/peek")
