@@ -13,11 +13,11 @@ interface Loan {
   id: string | number;
   applicant_name: string;
   principal: number;
-  // Servicing exposes the CONTRACTUAL note rate under its accurate name.
-  // The database column behind it is still `loans.apr` (legacy, tracked as
-  // D19); the API is where that name stops. This is NOT the disclosed
-  // federal APR -- that lives on the offer, and is the larger of the two
-  // once a prepaid fee exists.
+  // Servicing exposes the CONTRACTUAL note rate under its accurate name, and
+  // since the D19 contract step (db/migrations/0039) the database column is
+  // called `note_rate_pct` too -- the API is no longer where a legacy name
+  // stops. This is NOT the disclosed federal APR: that lives on the offer, and
+  // is the larger of the two once a prepaid fee exists.
   note_rate_pct: number | null;
   note_rate_proven?: boolean;
   term_months: number;
@@ -323,9 +323,12 @@ function LoanDetailContent() {
           </div>
           <div className="dl-row">
             <dt>Interest rate (note rate)</dt>
-            {/* Reported only where boarding recorded the contract. For a
-                pre-0030 loan `loans.apr` is the DISCLOSED APR, so naming it
-                the note rate would be wrong -- see servicing schemas. */}
+            {/* The fallback is defensive, not expected. It used to be the
+                normal case for a pre-0030 loan, where `loans.apr` held the
+                DISCLOSED APR and naming it the note rate would have been
+                wrong. `db/migrations/0039` made `note_rate_pct` NOT NULL, so
+                the API has a rate for every loan -- this branch now only
+                catches a response that is missing the field entirely. */}
             <dd>
               {loan?.note_rate_pct != null
                 ? pct(loan.note_rate_pct)

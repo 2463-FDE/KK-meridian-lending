@@ -92,7 +92,7 @@ def _schema_sql():
             app_id INTEGER UNIQUE,
             applicant_name TEXT,
             principal NUMERIC(14,2) NOT NULL,
-            apr NUMERIC(7,3) NOT NULL,
+            note_rate_pct NUMERIC(7,3) NOT NULL,
             term_months INTEGER NOT NULL,
             status TEXT DEFAULT 'current',
             opened_at TIMESTAMPTZ DEFAULT now()
@@ -570,7 +570,7 @@ def _board(conn, app_id, *, principal=9000, rate=7.99, term=24):
     """
     _rows(
         conn,
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
+        "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, term_months) "
         "VALUES (%s, 'Boarded Borrower', %s, %s, %s)",
         (app_id, principal, rate, term),
     )

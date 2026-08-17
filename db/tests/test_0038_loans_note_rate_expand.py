@@ -44,11 +44,19 @@ def _exec(conn, sql, params=None):
 
 @pytest.fixture
 def db():
-    """A database at the state BEFORE 0038, so the migration can be applied to it.
+    """A database at the state BEFORE 0038, reconstructed rather than borrowed.
 
-    `db/init/001_schema.sql` already carries the new column (the fresh path), so
-    it is dropped again here -- otherwise every case would be testing a database
-    that never needed the migration, and the back-fill would never run.
+    `db/init/001_schema.sql` is the CURRENT shape: `note_rate_pct NOT NULL` and
+    no `apr` at all, because 0039 dropped it. The state this migration operates
+    on -- an `apr` column holding one of two different regulated figures, and no
+    note-rate column -- no longer exists anywhere in the tree.
+
+    So it is rebuilt here: add `apr`, drop `note_rate_pct`. That is what a test
+    for a superseded migration has to do once the contract step lands, and
+    writing it out is better than the alternative of deleting the test: 0038 is
+    what a real deployment will run against a real legacy database, and its
+    refusal to relabel a disclosed APR as a note rate is the thing most worth
+    keeping proof of.
     """
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
@@ -61,6 +69,7 @@ def db():
             cur.execute(f"SET search_path TO {SCHEMA}")
             cur.execute((INIT / name).read_text(encoding="utf-8"))
         conn.commit()
+    _exec(conn, "ALTER TABLE loans ADD COLUMN apr NUMERIC(7,3)")
     _exec(conn, "ALTER TABLE loans DROP COLUMN note_rate_pct")
     conn.commit()
     yield conn

@@ -78,7 +78,7 @@ def loan(db):
             "VALUES (%s, 5000, 24, 'funded') RETURNING id", (applicant,))
         application = cur.fetchone()["id"]
         cur.execute(
-            "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months, status) "
+            "INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, term_months, status) "
             "VALUES (%s, 'Test Borrower', 5000.00, 7.990, 24, 'current') RETURNING id",
             (application,))
         loan_id = cur.fetchone()["id"]
@@ -368,7 +368,7 @@ def test_an_entry_that_differs_from_its_proposal_is_refused(db, loan, field, val
             cur.execute("INSERT INTO applications (applicant_id, amount, term_months, status) "
                         "VALUES (%s, 1000, 12, 'funded') RETURNING id", (other_applicant,))
             other_app = cur.fetchone()["id"]
-            cur.execute("INSERT INTO loans (app_id, applicant_name, principal, apr, "
+            cur.execute("INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct, "
                         "term_months, status) "
                         "VALUES (%s, 'Other', 1000.00, 7.990, 12, 'current') RETURNING id",
                         (other_app,))

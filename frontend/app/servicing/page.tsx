@@ -11,11 +11,11 @@ interface LoanRow {
   id: string | number;
   applicant_name: string;
   principal: number;
-  // Servicing exposes the CONTRACTUAL note rate under its accurate name.
-  // The database column behind it is still `loans.apr` (legacy, tracked as
-  // D19); the API is where that name stops. This is NOT the disclosed
-  // federal APR -- that lives on the offer, and is the larger of the two
-  // once a prepaid fee exists.
+  // Servicing exposes the CONTRACTUAL note rate under its accurate name, and
+  // since the D19 contract step (db/migrations/0039) the database column is
+  // called `note_rate_pct` too -- the API is no longer where a legacy name
+  // stops. This is NOT the disclosed federal APR: that lives on the offer, and
+  // is the larger of the two once a prepaid fee exists.
   note_rate_pct: number;
   term_months: number;
   status: string;

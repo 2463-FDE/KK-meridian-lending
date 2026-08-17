@@ -261,19 +261,19 @@ CREATE TABLE IF NOT EXISTS loans (
     app_id          INTEGER UNIQUE,
     applicant_name  TEXT,
     principal       NUMERIC(14,2) NOT NULL,   -- D12: was DOUBLE PRECISION
-    apr             NUMERIC(7,3) NOT NULL,     -- D12: was DOUBLE PRECISION
-    -- D19 expand (db/migrations/0038). The contractual rate the payment stream
-    -- is priced at and servicing amortizes -- which is what `apr` above has
-    -- ACTUALLY held since the current boarding path, despite its name. The two
-    -- coexist during the expand phase: `apr` is dropped in the contract step,
-    -- once every deployed reader is proven to use this column.
+    -- The contractual rate the payment stream is priced at and servicing
+    -- amortizes (D19; db/migrations/0038 expand, 0039 contract).
     --
-    -- Nullable on purpose. A legacy row boarded by the pre-change path holds the
-    -- DISCLOSED APR in `apr` (5.196% for a contract priced at 7.99%), and
-    -- nothing in such a row says which figure it is -- so it stays unknown
-    -- rather than being relabelled as a contractual term the borrower was never
-    -- quoted.
-    note_rate_pct   NUMERIC(7,3),
+    -- This column replaced `apr`, which was the defect: it held THIS value on
+    -- loans boarded by the current path and the DISCLOSED APR on legacy ones --
+    -- 5.196% for a contract priced at 7.99%, because the disclosed figure
+    -- carries the prepaid fee. Servicing amortizes the column, so billing the
+    -- disclosed figure would charge a borrower above their own disclosure.
+    --
+    -- NOT NULL: 0039 refused to drop `apr` while any loan lacked a proven rate,
+    -- so a boarding path that forgets this now fails at the INSERT instead of
+    -- creating a loan whose rate nobody knows.
+    note_rate_pct   NUMERIC(7,3) NOT NULL,
     -- The contract as boarded (db/migrations/0030). Servicing bills THESE
     -- amounts; recomputing them from principal/rate/term is what drifts.
     regular_payment       NUMERIC(14,2),

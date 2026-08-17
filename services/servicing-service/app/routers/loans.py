@@ -66,37 +66,23 @@ def _display_last4(payment) -> str | None:
 
 
 def _proven_note_rate(loan) -> tuple:
-    """(rate, proven) for a loan, from whether boarding recorded the contract.
+    """(rate, proven) for a loan. One column, one answer.
 
-    Two sources, in order of evidence.
+    `loans.note_rate_pct` says what it holds and is NOT NULL since the contract
+    step (db/migrations/0039), which refused to run while any loan lacked a
+    proven rate. So there is nothing left to infer and nothing left to fall back
+    to -- the tuple's second element is kept because callers branch on it, and
+    because a future source of unproven rates would need it again.
 
-    `loans.note_rate_pct` (D19 expand, db/migrations/0038) says what it holds, so
-    a value there is the answer. It is NULL for two different reasons and both
-    are handled below.
-
-    `loans.apr` is the legacy column and holds the contractual note rate when the
-    loan was boarded by the current path, but the DISCLOSED APR when it was
-    boarded by the pre-change one -- 5.196% for a contract priced at 7.99%.
-    `schedule_version` is set only by the current path, so it is the evidence
-    that the value means what the API calls it.
-
-    **The fallback is what makes the deploy safe, and it is temporary.** After
-    0038 runs, an instance still on the previous image boards loans writing `apr`
-    and a schedule but not `note_rate_pct` -- a row whose rate IS proven and
-    whose new column is empty. Reading only the new column would report "not
-    recorded" for a loan this service can describe exactly. It goes at the
-    contract step, once no deployed writer can produce such a row.
-
-    Where neither source proves anything, the rate is not reported at all:
-    unknown stays unknown, and the UI says "not recorded" rather than printing a
-    number the borrower was never quoted. Reviewed on PR #10.
+    **What this used to be, because the sequence is the point.** It read
+    `loans.apr` and reported it only when `schedule_version` proved the boarding
+    path had written a contractual rate there -- `apr` held the DISCLOSED APR
+    under the pre-change path (5.196% for a contract priced at 7.99%), so
+    reporting it unconditionally would have stated a term the borrower never
+    agreed to. 0038 moved that inference into the data, 0039 removed the column
+    it was inferring from, and this is what is left.
     """
-    recorded = getattr(loan, "note_rate_pct", None)
-    if recorded is not None:
-        return float(recorded), True
-    if loan.schedule_version:
-        return float(loan.apr), True
-    return None, False
+    return float(loan.note_rate_pct), True
 
 
 @router.get("", response_model=Page[LoanListItem])
@@ -165,7 +151,11 @@ def loan_schedule(loan_id: int, session: Session = Depends(get_session)):
     # test of the group.
     if loan.schedule_version is not None:
         rows = schedule.amortization_from_contract(
-            loan.principal, loan.apr, loan.term_months,
+            # The NOTE RATE, explicitly. This read was `loan.apr` -- correct for
+            # a loan boarded by the current path and wrong for a legacy one,
+            # where that column held the disclosed APR and the schedule would
+            # have been expanded at a rate the borrower was never quoted.
+            loan.principal, loan.note_rate_pct, loan.term_months,
             loan.regular_payment, loan.final_payment,
         )
         # The closing balance is not clamped, so a contract whose stored amounts
@@ -199,7 +189,13 @@ def loan_schedule(loan_id: int, session: Session = Depends(get_session)):
     # Claiming these are the agreed terms is the specific dishonesty this branch
     # exists to avoid; the reconstruction may differ from what was actually
     # billed if the generator has changed since.
-    rows = schedule.amortization(loan.principal, loan.apr, loan.term_months)
+    # Reconstructed at the NOTE RATE. Before 0039 this used `loan.apr`, which
+    # for exactly the loans reaching this branch -- no schedule on record, i.e.
+    # the legacy ones -- was the figure most likely to be a disclosed APR. The
+    # reconstruction was being built at the wrong rate for the rows least able to
+    # afford it, which is why 0039 refused to drop the column until every loan
+    # carried a proven note rate instead.
+    rows = schedule.amortization(loan.principal, loan.note_rate_pct, loan.term_months)
     log.info(
         "reconstructed schedule for a pre-0030 loan loan_id=%s -- no contractual "
         "terms on record", loan_id,

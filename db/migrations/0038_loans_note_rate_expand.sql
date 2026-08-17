@@ -37,30 +37,58 @@ COMMENT ON COLUMN loans.note_rate_pct IS
 
 -- --- the back-fill, by evidence, strongest first ------------------------------
 --
--- 1. THE OFFER SAYS SO. `offers.note_rate_pct` is the contractual rate as
---    disclosed, and migration 0030 populated it only where IT could be proven --
---    so a value there is already evidence, not a copy. Where the loan's own
---    `apr` agrees with it, the loan was boarded by a path that copied the note
---    rate, and both agree on what that rate was.
-UPDATE loans l
-   SET note_rate_pct = o.note_rate_pct
-  FROM offers o
- WHERE o.app_id = l.app_id
-   AND l.note_rate_pct IS NULL
-   AND o.note_rate_pct IS NOT NULL
-   AND round(o.note_rate_pct, 3) = round(l.apr, 3);
+-- Both rules below read `loans.apr`, which 0039 removes. They are guarded and
+-- run through EXECUTE so a replay of the chain after the contract step is a
+-- no-op rather than an abort -- the same treatment 0029 needed once 0031
+-- dropped `payments.pan`, and `db/tests/test_migration_paths_converge.py`
+-- replays the whole chain twice.
+--
+-- The statements themselves are unchanged, `apr` included. This file is the
+-- record of a back-fill performed FROM that column; renaming it would describe
+-- work that never happened, and would claim this migration could read a column
+-- that only exists after it.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'loans'
+           AND column_name = 'apr'
+    ) THEN
+        RAISE NOTICE '0038: loans.apr already removed (0039 has run); nothing to back-fill from.';
+        RETURN;
+    END IF;
 
--- 2. THE SCHEDULE SAYS SO. `schedule_version` is set only by the current
---    boarding path, which writes the contractual rate into `apr`. Its presence
---    is the structural evidence that the value means what the API calls it --
---    the same rule `servicing-service/app/routers/loans.py::_proven_note_rate`
---    and the gateway's borrower query already apply at read time. This moves
---    that inference into the data, once, instead of re-deriving it per request.
-UPDATE loans
-   SET note_rate_pct = apr
- WHERE note_rate_pct IS NULL
-   AND schedule_version IS NOT NULL
-   AND apr IS NOT NULL;
+    -- 1. THE OFFER SAYS SO. `offers.note_rate_pct` is the contractual rate as
+    --    disclosed, and migration 0030 populated it only where IT could be
+    --    proven -- so a value there is already evidence, not a copy. Where the
+    --    loan's own `apr` agrees with it, the loan was boarded by a path that
+    --    copied the note rate, and both agree on what that rate was.
+    EXECUTE $sql$
+        UPDATE loans l
+           SET note_rate_pct = o.note_rate_pct
+          FROM offers o
+         WHERE o.app_id = l.app_id
+           AND l.note_rate_pct IS NULL
+           AND o.note_rate_pct IS NOT NULL
+           AND round(o.note_rate_pct, 3) = round(l.apr, 3)
+    $sql$;
+
+    -- 2. THE SCHEDULE SAYS SO. `schedule_version` is set only by the current
+    --    boarding path, which writes the contractual rate into `apr`. Its
+    --    presence is the structural evidence that the value means what the API
+    --    calls it -- the rule `servicing-service/app/routers/loans.py` and the
+    --    gateway's borrower query applied at read time until 0039 made it
+    --    unnecessary. This moves that inference into the data, once, instead of
+    --    re-deriving it per request.
+    EXECUTE $sql$
+        UPDATE loans
+           SET note_rate_pct = apr
+         WHERE note_rate_pct IS NULL
+           AND schedule_version IS NOT NULL
+           AND apr IS NOT NULL
+    $sql$;
+END $$;
 
 -- 3. EVERYTHING ELSE STAYS NULL. Deliberately: a legacy row with no schedule and
 --    no agreeing offer may hold either figure, and there is no way to tell from
