@@ -280,7 +280,7 @@ def _shape(conn, schema, table):
 
 
 def _functions(conn, schema):
-    """Every function in the schema, by name and argument signature.
+    """Every function in the schema, by name, argument signature and result type.
 
     Schema-wide rather than per-table, because a trigger function is not owned
     by a table and a missing one is invisible in any per-table comparison. Two
@@ -288,21 +288,29 @@ def _functions(conn, schema):
     (`capture_legacy_balance_delta`, `balances_cannot_be_deleted_during_cutover`)
     as well as missing triggers.
 
+    The RETURN TYPE is compared too. Without it, `resolve_pending_movement`
+    declared `RETURNS bigint` on one path matches `RETURNS text` on another:
+    same name, same arguments, and a caller reading the result gets a different
+    type depending on how its database was built. That function hands back a
+    ledger entry id, so the divergence would be real rather than cosmetic.
+    (Review of PR #39, FUNC-001.)
+
     Bodies are deliberately NOT compared. `db/init` and `db/migrations` are
     independent copies of the same definitions -- 007 says so about itself -- and
     holding them to byte-identical bodies would fail on a reformatted comment
     while still passing on a control that was never attached to anything. The
-    name and signature are what a trigger definition depends on; whether the
+    name, signature and result type are what a caller depends on; whether the
     control actually fires is what the trigger comparison above tests.
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args "
+            "SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args, "
+            "       pg_get_function_result(p.oid) AS result "
             "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
             " WHERE n.nspname = %s",
             (schema,),
         )
-        return {(r["proname"], r["args"]) for r in cur.fetchall()}
+        return {(r["proname"], r["args"], r["result"]) for r in cur.fetchall()}
 
 
 # --- the four paths -----------------------------------------------------------
