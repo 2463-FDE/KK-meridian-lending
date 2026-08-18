@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import RequireRole from "../../components/RequireRole";
-import { apiGet, apiPost, getUser } from "../../lib/api";
+import { apiGet, apiPost } from "../../lib/api";
 import { usd, shortDate } from "../../lib/format";
 
 /**
@@ -58,17 +58,35 @@ function ApprovalsQueue() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
 
-  const me = getUser();
+  // The VERIFIED principal, from `GET /auth/me` -- deliberately not `getUser()`.
+  //
+  // `getUser()` reads localStorage, which is mutable by anyone at the keyboard
+  // and can outlive the session it describes. Every claim this page makes about
+  // authority is derived from identity: which role is offered the controls, and
+  // whether a row is your own. Deriving them from a cached object means the
+  // screen publishes a claim its own data source cannot back -- a tampered or
+  // stale `role` shows a CSR the Approve button, and a wrong `id` makes your own
+  // proposal look resolvable. Neither can actually move money (servicing checks
+  // the signed principal), but a control that offers an authority the caller
+  // does not have is the exact failure this page exists to remove.
+  //
+  // `RequireRole` already fetches /auth/me to decide whether to render at all;
+  // it keeps only a yes/no. This asks for the answer it discarded.
+  const [me, setMe] = useState<{ id: string | number; role: string } | null>(null);
+
   // A CSR may read this queue and resolve nothing (specs/0002, role matrix).
-  // Rendering the buttons for them would promise an authority the server will
-  // refuse -- and the refusal would arrive only after the click.
+  // Null until /auth/me answers, so no control is offered on a guess.
   const mayResolve = me?.role === "underwriter" || me?.role === "admin";
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = (await apiGet("/lss/movements")) as { movements?: Movement[] };
+      const [who, res] = await Promise.all([
+        apiGet("/auth/me") as Promise<{ id: string | number; role: string }>,
+        apiGet("/lss/movements") as Promise<{ movements?: Movement[] }>,
+      ]);
+      setMe(who);
       setMovements(res.movements ?? []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "The queue could not be loaded.");
@@ -120,7 +138,9 @@ function ApprovalsQueue() {
         <div className="card empty">Nothing is waiting for approval.</div>
       ) : (
         movements.map((m) => {
-          const mine = String(m.requested_by) === String(me?.id ?? "");
+          // `me` is null until /auth/me answers. Guarded explicitly rather than
+          // relying on `String(undefined)` never colliding with a real id.
+          const mine = me != null && String(m.requested_by) === String(me.id);
           return (
             <section className="card" key={m.id}>
               <div className="card-head">

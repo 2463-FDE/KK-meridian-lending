@@ -122,6 +122,65 @@ test("the approvals queue refuses self-approval in the browser, and the row stay
   }
 });
 
+test("a tampered cached role does not hand a CSR the resolve controls", async ({ page }) => {
+  // Review finding APQ-003. The page used to read its own identity from
+  // `getUser()` -- i.e. from localStorage, which anyone at the keyboard can
+  // edit and which can outlive the session it describes. `RequireRole` does
+  // verify the session against `GET /auth/me`, but it keeps only a yes/no, so
+  // the role and id driving the buttons came from the cache regardless.
+  //
+  // Nothing here could actually move money: servicing decides authority from a
+  // signed principal the browser cannot forge, and would refuse. But a screen
+  // that OFFERS an authority the caller does not have is the precise failure
+  // this page was built to remove, so the controls must follow the verified
+  // answer, not the cached one.
+  const client = dbClient();
+  await client.connect();
+  let movementId: number | null = null;
+  try {
+    const loanId = await aCurrentLoan(client);
+    const underwriterId = await userId(client, "underwriter");
+    movementId = await raiseProposal(client, loanId, underwriterId, "underwriter");
+
+    await signInAsStaff(page, "csr");
+
+    // Tamper with the cache the page used to trust: claim to be an admin.
+    // The bearer token is left untouched, so the SERVER still sees a CSR --
+    // which is exactly the disagreement the page has to resolve in the
+    // server's favour.
+    await page.evaluate(() => {
+      const raw = window.localStorage.getItem("meridian.user");
+      if (!raw) throw new Error("no cached user to tamper with");
+      const user = JSON.parse(raw);
+      user.role = "admin";
+      user.id = 999999;
+      window.localStorage.setItem("meridian.user", JSON.stringify(user));
+    });
+
+    await page.goto("/approvals");
+
+    const card = page.locator("section.card", { hasText: `Movement ${movementId}` });
+    await expect(card).toBeVisible({ timeout: 15_000 });
+    // Verified role is still csr, so still no controls -- the tampered cache
+    // changed nothing.
+    await expect(card.getByRole("button", { name: "Approve" })).toHaveCount(0);
+    await expect(card.getByRole("button", { name: "Reject" })).toHaveCount(0);
+    await expect(card.getByText("Your role can see this queue but not resolve it")).toBeVisible();
+
+    const row = await resolutionOf(client, movementId);
+    expect(row.resolution, "a tampered cache must not resolve anything").toBeNull();
+  } finally {
+    if (movementId !== null) {
+      const adminId = await userId(client, "admin");
+      await client.query(
+        "SELECT resolve_pending_movement($1, $2, 'admin', 'rejected', $3, $4)",
+        [movementId, adminId, "500.00", ["current"]],
+      );
+    }
+    await client.end();
+  }
+});
+
 test("a CSR can read the approvals queue and is offered no way to resolve it", async ({ page }) => {
   const client = dbClient();
   await client.connect();
