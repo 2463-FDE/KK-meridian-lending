@@ -27,12 +27,13 @@ Every `D<n>` / `RF-<n>` citation in the tables below is defined in
 This is the durable work queue. The detailed matrix and dated audit evidence
 below explain how it was derived.
 
-- **Highest priority:** `G-D14` — the payment waterfall. It is the last gap that
-  changes what a borrower is charged, and it needs an authoritative interest
-  model before allocation can mean anything.
-- **Then:** `G-D14` (payment waterfall on the landed component ledger). `G-D19`
-  closed with `db/migrations/0039`: the column is now `loans.note_rate_pct`, and
-  it is NOT NULL.
+- **No Weeks 1–6 gaps remain open.** `G-D14` closed last: a payment is now
+  split fees → interest → principal by `waterfall.allocate`, one ledger entry per
+  component. `G-D19` closed with `db/migrations/0039` — the column is
+  `loans.note_rate_pct` and it is NOT NULL.
+- **What is bounded rather than finished** is stated on each row: the waterfall
+  refuses an overpayment rather than absorbing it, and ADR 0010's step-5 write
+  guard is still unattached because three unreferenced direct writers remain.
 - **Durable status:** Weeks 1–5 are landed — the canonical processor-backed
   payment path is idempotent and servicing's processorless duplicate has been
   retired, so payment creation has exactly one path again; Week 6 has the token
@@ -191,7 +192,7 @@ feature landed in a different week than its brief, both labels appear in the
 Week column as `brief → shipped`. No row is guessed: where the two disagree it is
 because a merged PR says so.
 
-**Counts (31 requirements): 30 Done · 1 Partial · 0 Not started · 0 Blocked ·
+**Counts (31 requirements): 31 Done · 0 Partial · 0 Not started · 0 Blocked ·
 0 Deferred.** The count is derived from the matrix below.
 
 **What moved, and when.** The audit pass moved Week 1's Decimal row
@@ -237,7 +238,7 @@ production implementation.
 | 6 | Maker-checker on money-affecting actions | No single account can move money unilaterally | **Done** | `servicing-service/app/maker_checker.py` (propose/queue/resolve), `db/migrations/0037_resolve_pending_movement.sql` (the only path that resolves: locks the row, one transition, refuses self-approval, revalidates the target inside the lock, writes one entry from the locked proposal with the approver as actor), `db/migrations/0036` (the schema). `adjust-balance` and `waive-fee` return 202 and move nothing | `db/tests/test_0037_resolve_pending_movement.py` (23, incl. a two-connection approval race), `db/tests/test_0036_pending_movements.py` (41), `servicing-service/tests/test_maker_checker_api.py` (role matrix, refuse-at-creation, identity, machine paths). All against PostgreSQL 16.14 | None for the control. **Scoped limitations, named not implied:** the threshold, cap and permitted statuses are cohort/demo configuration and not Lending Operations policy; the maker's scope is REQ-VAL-14 option 2 (no staff-to-loan model exists); no notification or delegation (spec 0002 §8) | — | — |
 | 6 | Lost-update proof on the shared column | A real-PostgreSQL test pins concurrent payment behavior | **Done** | Ledger projection replaces the former unlocked payment read-modify-write path: `balance.py::apply_payment_once` inserts the entry, `db/migrations/0035_ledger_entries.sql`'s `project_ledger_entry()` composes the signed delta into `balances` | `servicing-service/tests/test_balance_lost_update_real_postgres.py` (5 cases) asserts both concurrent payments survive; `db/tests/test_0035_ledger_projection.py` (64 cases) proves parity. **Both executed against PostgreSQL 16.14 on 2026-08-15, all 69 cases passing.** They skipped on the first pass, when no database was reachable, and the row cited CI for them; they are no longer a claim resting on a skip. CI run `31759960436` on this exact commit corroborates, jobs `db-migrations` and `backend (servicing-service)` green | None for the lost update. Residual, distinct from D3: `balance.py::apply_payment` and `::waive_fee` return a figure computed before their own UPDATE, so the *returned* balance can be stale under concurrency while the stored one is correct | — | — |
 | 6 | Legacy-comprehension ADR (RBAC + maker-checker + ledger) | An accepted ADR proposing the three | **Done** | `adr/0010-append-only-ledger-for-servicing-balances.md`; `adr/0011-maker-checker-for-servicing-adjustments.md` | `db/tests/test_ledger_adr_sequence_is_consistent.py`, `test_adr_0011_enforcement_runs_on_postgres.py`, `test_docs_citations_resolve.py` | None for the architecture decision; implementation stages remain tracked by their own rows | — | — |
-| 6 | Payment waterfall (fees → interest → principal) | A payment is applied in the regulated order | **Partial** | `balance.py:38` applies straight off principal | `test_apply_payment_idempotency.py` pins today's behaviour, not the correct one | `DEBT.md` **D14**, open | Medium | Sequence after the ledger — a waterfall needs per-component rows |
+| 6 | Payment waterfall (fees → interest → principal) | A payment is applied in the regulated order | **Done** | `services/servicing-service/app/waterfall.py` allocates fees -> interest -> principal in the order `policies/fee_schedule.md` publishes; `balance.apply_payment_once` writes one `ledger_entries` row per component that moved. Interest owed is derived from the loan's stored contractual schedule less interest already posted -- no new state, no accrual job, no day-count convention invented. `ledger_payment_allocation_exact` (deferred to commit) already required a payment's entries to sum to the captured amount, and the allocation satisfies it | `tests/test_payment_waterfall.py` (26 cases: order, short payments, the payoff boundary, exact cents, credits), `tests/test_payment_waterfall_posts_components.py` (8, real PostgreSQL on a schema built from `db/init`: the split reaches the ledger, the projection moves both `balance` and `past_due`, a refused overpayment leaves no entry and no idempotency marker, a replay does not post the split twice). Reverting to the single-entry write fails 4 of the 8 | None for the allocation. **Three bounds, stated:** an overpayment is refused rather than absorbed (an open Lending Operations question); a loan with no stored schedule owes no derivable interest, so its payment goes to fees then principal; `balance.apply_payment` is not converted -- it is dead code reached by no route and belongs to ADR 0010's writer retirement | — | — |
 | 6 | `loans.apr` names what it holds | The column and the UI agree on which regulated rate is displayed | **Done** | **`db/migrations/0039` drops `loans.apr` and makes `note_rate_pct NOT NULL`**, behind two gates: it refuses while any loan has an unproven rate (naming the rows, and warning that copying `apr` across records a disclosed APR as a contractual term), and it requires an explicit operator acknowledgement that no deployed image still reads the column. `db/migrations/0038` did the expand half. Every reader, both boarding paths, `db/init/001_schema.sql`, the seeds and the ORM models now use the new name; the gateway response has no `apr` field either. `db/tools`-free by design -- the reader list is derived from source, not maintained by hand | `db/tests/test_0039_drop_loans_apr.py` (19, incl. both gate refusals, the rollback-on-refusal, the near-miss acknowledgement, and migrated-vs-fresh schema parity; all three guards mutation-tested), `db/tests/test_0038_loans_note_rate_expand.py` (10), `db/tests/test_note_rate_readers_agree.py`, `services/gateway/tests/test_auth_and_routes.py::test_lss_loans_list_never_publishes_a_field_called_apr` | None. **Bound of the claim:** this fixes the name and the ambiguity, and recomputes no money -- the disclosed APR's own correctness is D6/D16. `offers.apr` is untouched and correctly named. Operator sequencing and the unproven-row decision are `docs/RUNBOOK-loans-apr-contract.md` | — | — |
 
 ### Remaining gaps, grouped
@@ -281,16 +282,18 @@ list from the running app, and a sixth route added without a check fails it.
 
 #### Medium
 
-- **G-D14** — no payment waterfall (`DEBT.md` D14). The ledger dependency is satisfied; component-order implementation remains.
 
 #### Debt
 
 Register entries in scope for Weeks 1–6 and still open, cited by their own IDs —
 no new numbers minted here: **D8** (a validated human
 principal and a second approver are not implemented — the network, gateway-role
-and ledger thirds of the original entry have landed), **D14** (no waterfall),
-**D20** (bounded, not fixed — the static-SQL premise is enforced by test
-instead).
+and ledger thirds of the original entry have landed), **D20** (bounded, not
+fixed — the static-SQL premise is enforced by test instead).
+
+**D14 has left this list.** The waterfall landed: `waterfall.allocate` splits a
+payment fees → interest → principal in the order `policies/fee_schedule.md`
+publishes, and `apply_payment_once` writes one ledger entry per component.
 
 **D19 has left this list.** The expand/contract pair landed: `0038` added
 `loans.note_rate_pct` and back-filled only provable rows, `0039` dropped `apr`
@@ -309,32 +312,33 @@ and closing it did not touch D11.
 
 ## Start next
 
-**G-D14 — the payment waterfall, and the interest model it needs first.**
+**Weeks 1–6 are closed. What is next is bounded work, not gaps.**
 
-Every gap that decides *who may move money* is closed. What is left changes what
-a borrower is charged, and it cannot be built honestly in one step.
+Every requirement in the matrix reads **Done**. Three pieces of named, bounded
+work remain, and none of them is a Weeks 1–6 acceptance criterion:
 
-A payment is still applied straight off principal. Applying it fees → interest →
-principal requires an authoritative answer to "how much interest is outstanding
-right now", and this system does not have one: there is no `interest_due`, no
-accrual, and an `interest` ledger entry currently projects nowhere. Writing three
-ledger rows in that order would look like a waterfall and allocate against a
-number nobody maintains, which is the shape of overclaim this repository has
-already had to correct twice.
+1. **ADR 0010 step 5 — the write guard.** `balances_are_trigger_maintained`
+   ships as a function with no trigger attached, because `balance.apply_payment`,
+   `adjust_balance` and `waive_fee` would still write the column directly. All
+   three are unreferenced by any route; retiring them is what makes the guard
+   attachable, and it is the last step of the ledger cutover.
+2. **The late fee's own policy rule.** `policies/fee_schedule.md` publishes "$35
+   flat, or 5% of the past-due amount, whichever is **less**"; the code charges a
+   flat $35 (`delinquency.LATE_FEE_FLAT`). The policy file itself flags that the
+   code drifted. It is arithmetic against a published rule, not a decision.
+3. **Overpayment handling.** The waterfall refuses a payment larger than
+   everything owed. Applying the excess to principal or holding it as unapplied
+   credit are both real answers with different consequences for the borrower,
+   and Lending Operations owns that decision.
 
-So it is two pieces of work, in order:
-
-1. **The interest/accrual foundation** — an authoritative source for outstanding
-   interest, with a writer, a projection or rebuild rule, a migration, the
-   fresh-schema mirror and non-vacuous tests. No column that nothing maintains.
-2. **G-D14 itself** — exact Decimal allocation across fees, interest and
-   principal, allocating no more than each outstanding component, summing exactly
-   to the captured payment, idempotent on retry and correct under concurrency.
-
-**Three decisions are needed before step 1**, and this file will not invent them:
-the authoritative source and lifecycle of outstanding interest, what happens when
-a payment exceeds everything owed, and the rounding and allocation rule at
-component boundaries.
+**How G-D14 was closed, since the sequencing was the difficulty.** The order was
+never the open question — `policies/fee_schedule.md` publishes it. What was
+missing was a source for "accrued interest", and the answer avoided inventing
+one: interest owed is derived from the loan's own stored contractual schedule,
+less the interest already posted to the ledger. No `interest_due` column, no
+accrual job, no day-count convention, and nothing that "looks like a waterfall
+and allocates against a number nobody maintains" — which is what this section
+previously warned against, correctly.
 
 `G-D19` was done this way and is closed: expand and contract, because legacy
 rows may hold a disclosed APR that was never a note rate and must not be

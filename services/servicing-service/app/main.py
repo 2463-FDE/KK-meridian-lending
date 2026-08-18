@@ -24,7 +24,8 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Literal, Optional
 
-from . import balance, config, db, delinquency, maker_checker, principal, reconciliation
+from . import (balance, config, db, delinquency, maker_checker, principal,
+               reconciliation, waterfall)
 from .logging_config import get_logger
 from .routers import loans
 
@@ -292,8 +293,11 @@ def apply_payment(loan_id: int, body: ApplyPaymentIn,
     # closed D3. This comment asserted the opposite for as long as the fix has
     # been merged, immediately above the call that fixed it.
     #
-    # Still straight off principal, with no waterfall (D14) -- that half of the
-    # old comment is accurate and stays.
+    # The waterfall applies here (D14): the amount is split fees -> accrued
+    # interest -> principal, in the order `policies/fee_schedule.md` publishes,
+    # and one ledger entry is written per component that actually moved. This
+    # comment said "still straight off principal, with no waterfall" until that
+    # became untrue.
     # Review fix: idempotent by payment_id now (balance.apply_payment_once) --
     # payment-service retries this call on a same-key retry if a prior attempt
     # never confirmed, so a duplicate call here must not double-apply.
@@ -301,6 +305,16 @@ def apply_payment(loan_id: int, body: ApplyPaymentIn,
         new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
     except balance.PaymentReplayConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except waterfall.PaymentExceedsAmountOwed as exc:
+        # 409, and mapped here rather than left to the catch-all handler, which
+        # would return `{"detail": "internal error"}` with a 500 and tell the
+        # caller nothing. What happens to an overpayment is an open Lending
+        # Operations question (see waterfall.py); refusing states that instead
+        # of picking an answer silently, so the caller is told the payment was
+        # larger than everything owed and by how much.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except waterfall.AmountIsNotWholeCents as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "loan_id": loan_id,
         "applied_amount": body.amount,

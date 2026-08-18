@@ -16,6 +16,8 @@ db.transaction() rolling both statements back together.
 """
 from contextlib import contextmanager
 
+from decimal import Decimal
+
 import pytest
 
 from app import balance
@@ -37,6 +39,10 @@ class _FakeCursor:
         return self._last_result
 
 
+def _D(v):
+    return v if isinstance(v, Decimal) else Decimal(str(v))
+
+
 class _FakeDb:
     """Stands in for app.db -- one balances row, plus a payment_applications
     table keyed on payment_id (PRIMARY KEY -> INSERT ... ON CONFLICT DO
@@ -44,8 +50,13 @@ class _FakeDb:
     constraint from db/migrations/0013). transaction() mimics real Postgres
     rollback: state changes made inside the block are reverted if it raises."""
 
-    def __init__(self, balance=0.0):
+    def __init__(self, balance=0.0, past_due=0.0):
         self.balance = balance
+        # The waterfall (D14) reads what is owed before allocating. Zero fees
+        # and no stored schedule mean nothing is owed but principal, so the
+        # whole payment goes to principal -- which is what these idempotency
+        # tests were written against and must keep asserting.
+        self.past_due = past_due
         self.applications = {}
         self.ledger = set()
         self.payment_statuses = {}
@@ -69,12 +80,31 @@ class _FakeDb:
                      "balance": self.balance}]
         if stmt.startswith("SELECT balance"):
             return [{"balance": self.balance}]
+        if stmt.startswith("SELECT l.principal"):
+            # The loan the waterfall reads. `schedule_version` is None, so no
+            # contractual interest can be derived and none is owed.
+            return [{"principal": self.balance, "note_rate_pct": 7.99,
+                     "term_months": 48, "regular_payment": None,
+                     "final_payment": None, "schedule_version": None,
+                     "opened_at": None, "balance": self.balance,
+                     "past_due": self.past_due}]
+        if "COALESCE(-SUM(amount), 0)" in stmt:
+            return [{"paid": 0}]
         if stmt.startswith("INSERT INTO ledger_entries"):
-            loan_id, amount, payment_id = params
-            if payment_id in self.ledger:
-                raise RuntimeError("duplicate ledger payment")
-            self.ledger.add(payment_id)
-            self.balance -= amount
+            # One row per component since the waterfall landed, so the key is
+            # (payment_id, component) -- mirroring the real unique index from
+            # db/migrations/0035, which is per component and not per payment
+            # precisely so a payment can be split.
+            loan_id, component, amount, payment_id = params
+            if (payment_id, component) in self.ledger:
+                raise RuntimeError("duplicate ledger payment component")
+            self.ledger.add((payment_id, component))
+            # The real column is NUMERIC and the entry amount arrives as a
+            # Decimal, so the fake keeps the same type rather than mixing.
+            if component == "principal":
+                self.balance = float(_D(self.balance) + _D(amount))
+            elif component == "fees":
+                self.past_due = float(_D(self.past_due) + _D(amount))
             return []
         if "SET balance" in stmt:
             self.balance = params[0]

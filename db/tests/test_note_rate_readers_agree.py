@@ -362,6 +362,16 @@ def test_a_new_reader_cannot_appear_unnoticed():
         "services/origination-service/app/routers/applications.py",
         "services/disclosure-service/app/routers/offers.py",
         "services/disclosure-service/app/models.py",
+        # The waterfall (D14) reads `loans.note_rate_pct` to derive the interest
+        # a payment is allocated against, and `balance.py` passes the loan row to
+        # it. Checked against the rule this file enforces before being listed:
+        # neither withholds a rate, neither branches on `schedule_version` to
+        # decide WHICH figure the column holds, and both read the same NOT NULL
+        # column the other two readers do. They consume the rate for arithmetic
+        # rather than reporting it to a borrower, so there is no second answer to
+        # disagree with.
+        "services/servicing-service/app/waterfall.py",
+        "services/servicing-service/app/balance.py",
         # These name `offers.note_rate_pct`, which has existed since 0030 and is
         # a different column from the one on loans. Listed rather than filtered
         # out by a path rule, because "it is probably the offer one" is the kind
