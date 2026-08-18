@@ -1,9 +1,15 @@
 # ADR 0011: Maker-checker for servicing balance adjustments
 
-- **Status:** Accepted. **Schema landed** in `db/migrations/0036_pending_movements.sql`
-  (step 1); the approval function and the API cutover are step 2 and are not built
-  yet, so **D8 remains open** — one person can still move a balance alone.
-- **Date:** 2026-08-12 (schema landed 2026-08-16)
+- **Status:** Accepted and **fully implemented**. All three steps have landed:
+  the schema in `db/migrations/0036_pending_movements.sql` (step 1), the approval
+  function in `db/migrations/0037_resolve_pending_movement.sql` (step 2), and the
+  API cutover in `services/servicing-service/app/maker_checker.py` (step 3), which
+  turned `adjust-balance` and `waive-fee` into proposals that move no money.
+  **D8 is closed** — no one person can move a balance alone through the
+  application. See `docs/DEBT.md` D8 for what that does and does not cover, and
+  *Limitations* below for the direct-`INSERT` boundary, which the cutover does
+  not change.
+- **Date:** 2026-08-12 (steps 1-3 all landed 2026-08-16, PRs #34 and #35)
 - **Depends on:** ADR 0010, and on the signed human principal that
   `services/servicing-service/app/principal.py` verifies — a proposal's
   `requested_by` and an approval's `resolved_by` are meaningless without an
