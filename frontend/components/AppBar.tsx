@@ -54,6 +54,7 @@ export default function AppBar() {
           { href: "/", label: "Home" },
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
+          { href: "/approvals", label: "Approvals" },
           { href: "/policy-chat", label: "Policy Chat" },
         ];
       case "underwriter":
@@ -61,6 +62,7 @@ export default function AppBar() {
           { href: "/", label: "Home" },
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
+          { href: "/approvals", label: "Approvals" },
           { href: "/policy-chat", label: "Policy Chat" },
         ];
       case "admin":
@@ -69,6 +71,7 @@ export default function AppBar() {
           { href: "/admin", label: "Overview" },
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
+          { href: "/approvals", label: "Approvals" },
           { href: "/policy-chat", label: "Policy Chat" },
         ];
       default:
