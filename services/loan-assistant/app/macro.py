@@ -68,6 +68,16 @@ log = logging.getLogger(__name__)
 
 _BLS_V1_URL = "https://api.bls.gov/publicAPI/v1/timeseries/data"
 
+#: Where a HUMAN verifies the figure, which is not where the code fetches it.
+#:
+#: The citation URL used to be the API endpoint -- the same address the fetch
+#: uses. Following it returns a wall of raw JSON, which is not verification for
+#: the person the citation exists for: a reader who cannot read JSON learns
+#: nothing, and a reader who can still has to hunt for the period. The BLS
+#: publishes a series viewer for exactly this, with the figure, the period and
+#: the revision footnotes rendered.
+_BLS_SERIES_PAGE = "https://data.bls.gov/timeseries"
+
 # What each supported BLS series IS. A series id alone carries no caption, and a
 # caption invented for the wrong series is exactly the failure this whole
 # feature exists to avoid: a number an officer can check, described as something
@@ -93,7 +103,7 @@ class MacroSignal:
     value: float         # 4.2
     unit: str            # "percent"
     period: str          # "June 2026" -- the period the figure describes
-    url: str             # where a reader can verify it
+    url: str             # the BLS series page a HUMAN can read, not the API
 
     def cite(self) -> str:
         return (
@@ -124,7 +134,7 @@ class StubMacroProvider:
             value=self._value,
             unit="percent",
             period="stub period",
-            url=f"{_BLS_V1_URL}/{MACRO_SERIES_ID}",
+            url=f"{_BLS_SERIES_PAGE}/{MACRO_SERIES_ID}",
         )
 
 
@@ -334,6 +344,8 @@ class BlsMacroProvider:
             )
             return None
         self.fetch_count += 1
+        # The address the code FETCHES from. The citation below deliberately
+        # points somewhere else -- see `_BLS_SERIES_PAGE`.
         url = f"{_BLS_V1_URL}/{MACRO_SERIES_ID}"
         try:
             resp = httpx.get(url, timeout=MACRO_TIMEOUT_SECONDS)
@@ -376,7 +388,7 @@ class BlsMacroProvider:
                 value=float(latest["value"]),
                 unit=unit,
                 period=f"{latest['periodName']} {latest['year']}",
-                url=url,
+                url=f"{_BLS_SERIES_PAGE}/{MACRO_SERIES_ID}",
             )
         except Exception as exc:  # noqa: BLE001
             # A shape change upstream must not surface as a 500 on a summary.
