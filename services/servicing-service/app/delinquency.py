@@ -1,11 +1,16 @@
 """Delinquency + late fees.
 
-Late fee is a flat $35 regardless of the 'whichever is less' policy rule
-(unrelated logic bug, not fixed here — the rule is a policy question, not an
-arithmetic one). No payment waterfall is defined anywhere: a payment posts one
-`principal` entry for its whole amount in `balance.apply_payment_once`, never
-fees->interest->principal (D14, unrelated, still open). This docstring named
-`balance.apply_payment`, which no route has reached since the idempotent path
+The late fee follows its published schedule: the SMALLER of $35 and five per
+cent of the arrears (`late_fee_for`). For months only the flat figure was
+implemented, which overcharged every borrower whose arrears were below $700,
+because the flat fee is the larger of the two under that threshold. This
+docstring called that "a policy question, not an arithmetic one" -- it was
+arithmetic against a rule already published, and describing it as undecided is
+what let it sit.
+
+A payment is applied fees -> accrued interest -> principal by
+`waterfall.allocate` (D14, closed). This docstring named `balance.apply_payment`
+as the payment path, which no route has reached since the idempotent path
 replaced it.
 
 Decimal math (D12 fix, same pattern as balance.py). `balances.past_due` is
@@ -91,7 +96,8 @@ def late_fee_for(past_due) -> Decimal:
     pct = (arrears * LATE_FEE_PCT_OF_PAST_DUE).quantize(CENT, rounding=ROUND_DOWN)
     fee = min(LATE_FEE_FLAT, pct)
     if fee <= 0:
-        # Arrears under $0.10: five per cent rounds below a cent. Found by
+        # Arrears under $0.20: five per cent is under a cent once rounded
+        # down. Found by
         # running the boundary rather than by reading the rule.
         raise NoFeeIsDue(
             f"past_due is {arrears}; five per cent of it rounds to {pct}")
@@ -147,24 +153,3 @@ def assess_late_fee(loan_id: int) -> float:
 
     log.info("assessed late fee loan_id=%s -> past_due %s", loan_id, new_past_due)
     return new_past_due
-
-
-def _has_balances_row(loan_id: int) -> bool:
-    """Read on a SEPARATE connection, deliberately -- but the same DATABASE_URL.
-
-    Separate, because the transaction that raised is aborted: no further
-    statement can run on its cursor, so `current transaction is aborted` is all
-    it would return and the diagnosis would be wrong every time.
-
-    `db.transaction()` rather than `db.query()`, because `query()` runs on the
-    module-level connection shared by the whole process. That connection is
-    opened once, on whatever `search_path` it happened to get, and it is NOT the
-    connection the write ran on. Asking it about `balances` answers a question
-    about a different database than the one that just refused the insert --
-    which is exactly the wrong thing for an error path to do, and it surfaced as
-    `relation "balances" does not exist` in CI while passing locally, where the
-    default schema happened to have the table.
-    """
-    with db.transaction() as cur:
-        cur.execute("SELECT 1 FROM balances WHERE loan_id = %s", (loan_id,))
-        return bool(cur.fetchall())

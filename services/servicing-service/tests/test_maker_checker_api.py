@@ -354,6 +354,39 @@ def test_late_fee_still_requires_a_human_and_still_works(keys, monkeypatch):
     assert response.status_code == 200, response.text
 
 
+def test_late_fee_on_a_current_loan_is_a_409_not_a_500(keys, monkeypatch):
+    """LF-API-NOFEE. A refusal must reach the caller AS a refusal.
+
+    `late_fee_for` raises `NoFeeIsDue` when the published schedule yields no fee
+    -- a loan with no arrears, a credit balance, or arrears so small that five
+    per cent is under a cent. The route caught only `LoanHasNoBalances`, so
+    `@app.exception_handler(Exception)` turned this into
+    `{"detail": "internal error"}` with status 500.
+
+    **This is the second time this shape has appeared in this repository.**
+    PR #38's review caught `LoanHasNoBalances` doing exactly the same thing, and
+    the late-fee change then added a new named exception without a landing pad.
+    A named refusal with no route mapping is indistinguishable from a crash to
+    whoever called, so the test is written at the route rather than the helper.
+    """
+    def _refuse(loan_id):
+        raise main.delinquency.NoFeeIsDue(
+            f"past_due is 0.00; the schedule charges nothing")
+
+    monkeypatch.setattr(main.delinquency, "assess_late_fee", _refuse)
+    response = _client().post("/accounts/1/late-fee",
+                              headers=_headers(keys, sub="2", role="csr"))
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail != "internal error", (
+        "the refusal reached the caller through the catch-all handler"
+    )
+    assert "charges nothing" in detail, (
+        f"the 409 does not say why no fee was charged: {detail!r}"
+    )
+
+
 def test_late_fee_on_a_loan_with_no_balance_is_a_404_not_a_500(keys, monkeypatch):
     """LF-API-500. The refusal has to reach the caller AS a refusal.
 

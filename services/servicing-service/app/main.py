@@ -460,6 +460,24 @@ def late_fee(loan_id: int,
              loan_id, actor.subject, actor.role)
     try:
         past_due = delinquency.assess_late_fee(loan_id)
+    except delinquency.NoFeeIsDue as exc:
+        # 409, and mapped HERE for the same reason as the 404 below.
+        #
+        # **This is the second time this exact shape has appeared.** PR #38's
+        # review caught `LoanHasNoBalances` falling through to the catch-all
+        # handler as a 500; this PR added a new named exception and repeated it.
+        # A named refusal with no landing pad at the route is indistinguishable
+        # from a crash to whoever called.
+        #
+        # 409 rather than 404 or 200: the loan exists and the request is
+        # well-formed -- what refuses it is the loan's own state, which is a
+        # conflict. It matches `PaymentExceedsAmountOwed` on the apply-payment
+        # route, where a staff member likewise asked for a money movement the
+        # rules do not permit. A 200 would be worse: a caller who asked to
+        # charge a fee and got a success with no fee has to inspect the body to
+        # learn nothing happened.
+        log.info("late-fee declined loan_id=%s -- %s", loan_id, exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except delinquency.LoanHasNoBalances:
         # 404, and mapped HERE rather than left to the global handler.
         #

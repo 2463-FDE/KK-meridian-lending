@@ -36,7 +36,7 @@ def test_a_small_arrears_balance_is_charged_five_per_cent_not_thirty_five(arrear
     assert late_fee_for(arrears) == D(expected)
 
 
-def test_the_flat_fee_would_have_overcharged_by_thirty_dollars(): 
+def test_the_flat_fee_would_have_overcharged_by_thirty_dollars():
     """Stated as the amount, because that is what a borrower experiences."""
     charged_before = LATE_FEE_FLAT
     charged_now = late_fee_for("100.00")
