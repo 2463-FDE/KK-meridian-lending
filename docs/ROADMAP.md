@@ -37,8 +37,8 @@ below explain how it was derived.
 - **Durable status:** Weeks 1–5 are landed — the canonical processor-backed
   payment path is idempotent and servicing's processorless duplicate has been
   retired, so payment creation has exactly one path again; Week 6 has the token
-  boundary, the gateway role rule and the ledger, but
-  not a validated human principal or maker-checker enforcement; Week 7 has
+  boundary, the gateway role rule, the ledger, a gateway-signed human principal
+  and maker-checker enforcement; Week 7 has
   reconciliation but not a cross-service trace ID; Weeks 8–10 retain the scoped
   gaps in the table below.
 
@@ -79,7 +79,7 @@ during Week 4); those are marked where they occur.
 | 3 | AI scorer wrapper + append-only decision memory | ✅ Landed |
 | 4 | Auto-disclosure on approval + KG traversal | ✅ Landed |
 | 5 | Card tokenization + payment reconciliation | ✅ Landed |
-| 6 | Servicing RBAC / ledger / maker-checker | 🟡 RBAC and append-only ledger landed; maker-checker is specified but not implemented |
+| 6 | Servicing RBAC / ledger / maker-checker | ✅ Landed — RBAC, append-only ledger, and maker-checker enforced by `no_self_approval` plus `resolve_pending_movement` (migrations 0036/0037) |
 | 7 | Trace ID + scoped reconciliation control | 🟡 Scheduled transaction-level reconciliation landed; cross-service trace ID remains open |
 | 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
 | 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
@@ -286,9 +286,7 @@ list from the running app, and a sixth route added without a check fails it.
 #### Debt
 
 Register entries in scope for Weeks 1–6 and still open, cited by their own IDs —
-no new numbers minted here: **D8** (a validated human
-principal and a second approver are not implemented — the network, gateway-role
-and ledger thirds of the original entry have landed), **D20** (bounded, not
+no new numbers minted here: **D20** (bounded, not
 fixed — the static-SQL premise is enforced by test instead).
 
 **D14 has left this list.** The waterfall landed: `waterfall.allocate` splits a
@@ -824,10 +822,10 @@ hides the Servicing nav from borrowers but enforces nothing server-side.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Servicing | Any authenticated user, any role, could adjust any balance or waive any fee — no role check, no second approver | 🟡 Partially fixed, self-directed, ahead of this week's own build: the gateway now enforces staff-only on these actions server-side (41 passing tests, live-verified) | "Trusted reps" isn't a permissions model — a compromised or careless single account could zero out any loan with no second check |
+| 1 | Servicing | Any authenticated user, any role, could adjust any balance or waive any fee — no role check, no second approver | ✅ Fixed — three layers, landed in order: the gateway enforces staff-only server-side; servicing itself verifies WHO is acting from a gateway-signed assertion it cannot forge (`require_staff_principal`, PR #33); and `adjust-balance`/`waive-fee` now raise proposals that a *different* authorised person must approve, with `no_self_approval` refusing the same person on both halves (PRs #34/#35). **Bound:** any staff principal may propose against any serviced loan — there is no staff-to-loan assignment in this schema — and a direct database write bypasses it, since every service connects as the schema-owning role | "Trusted reps" isn't a permissions model — a compromised or careless single account could zero out any loan with no second check |
 | 2 | Servicing | No ledger — `balance` was overwritten in place and prior values disappeared | ✅ Fixed — ADR 0010 step 2, migration 0035, and the fresh-install mirror add immutable entries plus a balance projection and cutover capture | The audit trail and projection are now database-enforced and covered by real-PostgreSQL parity/concurrency tests |
-| 3 | Servicing | No maker-checker / segregation of duties on any money-affecting action | ⬜ Open | A single person moving money with no second approver is a real internal-controls gap, not just a technical one |
-| 4 | Servicing / Gateway | Frontend hides the Servicing nav from borrowers, but the actual endpoints accept any authenticated caller regardless — security-by-UI-obscurity | 🟡 Partially fixed — the gateway now enforces the real check server-side (see #1); the UI hiding was already harmless once the backend check exists, but was previously the *only* thing stopping anyone | Hiding a button is not a permission system — the real gate has to live where the request actually lands |
+| 3 | Servicing | No maker-checker / segregation of duties on any money-affecting action | ✅ Fixed — `adjust-balance` and `waive-fee` raise proposals that move nothing; a different authorised person resolves them, and `no_self_approval` refuses the same person on both halves (migrations 0036/0037, spec 0002, ADR 0011) | A single person moving money with no second approver is a real internal-controls gap, not just a technical one |
+| 4 | Servicing / Gateway | Frontend hides the Servicing nav from borrowers, but the actual endpoints accept any authenticated caller regardless — security-by-UI-obscurity | ✅ Fixed — the real gate now lives where the request lands, twice over: the gateway rejects non-staff, and servicing re-verifies the signed principal rather than trusting the caller (see #1). Hiding the nav is now cosmetic rather than load-bearing | Hiding a button is not a permission system — the real gate has to live where the request actually lands |
 
 **A correction worth stating plainly — the client's own reproduction is
 verified wrong, checked directly against `servicing-service/app/balance.py`:**
@@ -845,8 +843,8 @@ report (who can call each money-affecting endpoint today, how balance
 actually mutates, the corrected concurrency scenario above), characterization
 tests pinning today's behavior as a baseline, one failing test proving the
 *correctly-paired* lost update, and an ADR proposing RBAC + maker-checker +
-an append-only ledger. **The ledger and its ADR have since landed; maker-checker
-remains specification-only.** Gateway RBAC still does not replace the required
+an append-only ledger. **The ledger, its ADR and maker-checker have all since
+landed — the specification was written first and the enforcement followed.** Gateway RBAC still does not replace the required
 server-validated human principal at the servicing trust boundary.
 
 ---
@@ -1001,9 +999,10 @@ own central task): the assumption that "Weeks 3/6/7 are all spec-only, not
 built" is **not fully accurate**, checked today:
 - **Week 3** — `decision_events` is real, tested, shipped code, **merged to
   `main`** (PR #5, 2026-07-30). Landed, not spec.
-- **Week 6** — gateway RBAC and the append-only ledger have landed. ADR 0011 and
-  spec 0002 define maker-checker and its non-forgeable-principal boundary, but
-  they explicitly do not claim production enforcement.
+- **Week 6** — gateway RBAC, the append-only ledger and maker-checker have all
+  landed. ADR 0011 and spec 0002 defined maker-checker and its
+  non-forgeable-principal boundary first; migrations 0036/0037 then enforced it,
+  and money now moves only on a second person's approval.
 - **Week 7** — Prometheus/Grafana and the scoped, scheduled reconciliation
   control have landed. The cross-service trace ID remains open.
 - **Week 4** — merged to `main` (PR #6, 2026-08-05), including the
