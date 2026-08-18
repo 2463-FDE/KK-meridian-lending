@@ -86,3 +86,46 @@ def test_policy_chat_returns_200_on_success(monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["answer"] == "The late fee is $35."
+
+
+# --- the 422 body is what a loan officer reads --------------------------------
+
+def test_summary_refusal_returns_the_readable_detail_not_the_developer_string(monkeypatch):
+    """The route must return `exc.detail`, not `str(exc)`.
+
+    Written at the ROUTE deliberately, and it took two attempts to make it
+    real. The first version asserted on the exception object, so reverting the
+    route to `str(exc)` left every test passing while the UI went back to
+    showing `app_id=7577 is missing ['income', 'employment_years']`. The second
+    used the wrong path (`/summary/{id}`), got a 404, and skipped its own
+    assertions behind an `if status == 422`. Both were caught by checking, not
+    by reading.
+    """
+    import httpx
+    from app.llm_client import LLMInsufficientDataError
+
+    def _refuse(app_data):
+        raise LLMInsufficientDataError(
+            "app_id=7577 is missing ['income', 'employment_years'] — refusing",
+            detail=("No summary: this application has no recorded income or "
+                    "employment history. A risk summary without it would be "
+                    "guesswork, so none was generated."),
+        )
+
+    class _Resp:
+        status_code = 200
+        def json(self): return {"id": 7577, "amount": 500, "term_months": 12}
+        def raise_for_status(self): pass
+
+    monkeypatch.setattr(main, "summarize_application", _refuse)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    resp = client.post("/applications/7577/summary",
+                       headers={"X-User-Role": "underwriter"})
+
+    # Unconditional: a wrong status is a failure, not a reason to skip.
+    assert resp.status_code == 422, f"expected 422, got {resp.status_code}: {resp.text}"
+    body = resp.json()["detail"]
+    assert "app_id=" not in body, f"internal identifier reached the UI: {body!r}"
+    assert "[" not in body, f"Python list literal reached the UI: {body!r}"
+    assert "guesswork" in body

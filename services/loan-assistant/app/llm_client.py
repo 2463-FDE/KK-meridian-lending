@@ -122,10 +122,35 @@ class LLMResponseError(Exception):
     pass
 
 
+#: What a person is told, and what the log records, are different jobs.
+#:
+#: One string used to do both: the API returned `app_id=7577 is missing
+#: ['income', 'employment_years'] — refusing to let the model describe risk
+#: from data it never saw`, rendered verbatim in the UI. A loan officer met a
+#: Python list literal and an `app_id=` prefix, which reads as a crash rather
+#: than a decision -- and undercuts the trust the refusal itself earns.
+#:
+#: So the exception carries BOTH: `.detail` for the reader, `str(exc)` for the
+#: log and the developer. Neither is a translation of the other.
+_FIELD_LABELS = {
+    "income": "income",
+    "employment_years": "employment history",
+}
+
+
 class LLMInsufficientDataError(Exception):
-    """Raised when the source application is missing the data the summary depends on
-    (income, employment_years — both nullable columns). Fails loudly instead of
-    letting the model invent a risk chip from data it never saw."""
+    """The application lacks the data a risk summary depends on.
+
+    `income` and `employment_years` are both nullable. Fails loudly instead of
+    letting the model invent a risk statement from data it never saw -- a
+    fluent paragraph about capacity to repay, generated from the amount and
+    term alone, would read as authoritative to the officer who acts on it.
+    """
+
+    def __init__(self, message: str, *, detail: str):
+        super().__init__(message)
+        #: Plain English, safe to render to a loan officer.
+        self.detail = detail
 
 
 class LLMConfigError(Exception):
@@ -764,10 +789,19 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         # right there in the application would reasonably believe income
         # data was lost, not just employment_years. Name only what's
         # actually absent.
+        missing = _missing_risk_grounding_fields(app_data)
+        readable = " or ".join(_FIELD_LABELS.get(f, f) for f in missing)
         raise LLMInsufficientDataError(
+            # For the log and the developer: identifies the row and the fields.
             f"app_id={app_data.get('id', 'unknown')} is missing "
-            f"{_missing_risk_grounding_fields(app_data)} — refusing to let the "
-            "model describe risk from data it never saw."
+            f"{missing} — refusing to let the model describe risk from data it "
+            "never saw.",
+            # For the loan officer reading it on screen.
+            detail=(
+                f"No summary: this application has no recorded {readable}. "
+                "A risk summary without it would be guesswork, so none was "
+                "generated."
+            ),
         )
 
     # One grounded external signal (app/macro.py). Fetched before the cost
