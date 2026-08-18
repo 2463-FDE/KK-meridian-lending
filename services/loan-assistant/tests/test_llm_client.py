@@ -281,3 +281,53 @@ def test_strip_markdown_fences_strips_json_fence():
 def test_strip_markdown_fences_strips_bare_fence():
     fenced = '```\n{"a": 1}\n```'
     assert llm_client.strip_markdown_fences(fenced) == '{"a": 1}'
+
+
+# --- the refusal is read by a loan officer, not by a developer -----------------
+
+def test_the_refusal_detail_is_plain_english():
+    """The 422 body is rendered verbatim in the UI.
+
+    It used to be `app_id=7577 is missing ['income', 'employment_years'] —
+    refusing to let the model describe risk from data it never saw`: a Python
+    list literal and an `app_id=` prefix, in front of a loan officer. That reads
+    as a crash rather than a decision, which undercuts the trust the refusal
+    itself earns. Reported by a reviewer who hit it in the running app.
+    """
+    from app.llm_client import LLMInsufficientDataError, summarize_application
+
+    try:
+        summarize_application({"id": 7577, "amount": 500, "term_months": 12})
+    except LLMInsufficientDataError as exc:
+        assert "app_id=" not in exc.detail, "the reader is shown an internal identifier"
+        assert "[" not in exc.detail, "the reader is shown a Python list literal"
+        assert "income" in exc.detail and "employment history" in exc.detail
+        assert "guesswork" in exc.detail
+    else:
+        raise AssertionError("no refusal was raised")
+
+
+def test_the_log_message_still_names_the_row_and_the_fields():
+    """Guard the guard. Making the detail readable must not cost the developer
+    the identifier and the field names -- the two strings are different jobs,
+    not a translation of one another."""
+    from app.llm_client import LLMInsufficientDataError, summarize_application
+
+    try:
+        summarize_application({"id": 7577, "amount": 500, "term_months": 12})
+    except LLMInsufficientDataError as exc:
+        assert "app_id=7577" in str(exc)
+        assert "income" in str(exc) and "employment_years" in str(exc)
+
+
+def test_only_the_absent_field_is_named_to_the_reader():
+    """A summary refused for a missing employment history must not tell the
+    officer their income data is gone -- income is right there."""
+    from app.llm_client import LLMInsufficientDataError, summarize_application
+
+    try:
+        summarize_application({"id": 5678, "amount": 9000, "term_months": 24,
+                               "income": 60000})
+    except LLMInsufficientDataError as exc:
+        assert "employment history" in exc.detail
+        assert "no recorded income" not in exc.detail

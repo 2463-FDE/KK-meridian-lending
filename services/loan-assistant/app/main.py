@@ -103,7 +103,11 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     try:
         summary = summarize_application(app_data)
     except LLMInsufficientDataError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # The reader gets `exc.detail`; the log keeps the field names and the
+        # app_id. A 422 body rendered straight into the UI is read by a loan
+        # officer, not by whoever wrote the guard.
+        log.info("summary refused: %s", exc)
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     except LLMCostGuardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LLMTimeoutError as exc:
