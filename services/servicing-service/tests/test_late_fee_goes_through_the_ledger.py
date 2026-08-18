@@ -13,6 +13,7 @@ mock would assert my own arithmetic back at me and prove none of it.
 import os
 import pathlib
 import urllib.parse
+from decimal import Decimal
 
 import psycopg2
 import psycopg2.extras
@@ -31,6 +32,15 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 # tests below vacuous. With no seed data 007's back-fill is a no-op.
 INIT_FILES = ("001_schema.sql", "007_ledger_opening_balances.sql")
 SCHEMA = "servicing_late_fee_ledger_test"
+
+#: Arrears the fixture starts with, and the fee the published schedule charges
+#: on them. `policies/fee_schedule.md` is "$35 flat, or 5% of the past-due
+#: amount, whichever is **less**", so on $200 of arrears the fee is $10.00 --
+#: not the $35 this file assumed while only the flat half was implemented.
+#: Chosen below the $700 crossover deliberately: that is the range the flat fee
+#: overcharged, so these tests exercise the corrected half.
+ARREARS = Decimal("200.00")
+EXPECTED_FEE = Decimal("10.00")
 
 # The app's own connection, pinned to the test schema. `db.transaction()` opens
 # a fresh connection from DATABASE_URL rather than reusing a module-level one
@@ -125,8 +135,8 @@ def loan(schema, monkeypatch):
             (app_id,))
         loan_id = cur.fetchone()["id"]
         cur.execute(
-            "INSERT INTO balances (loan_id, balance, past_due) VALUES (%s, 9000, 0)",
-            (loan_id,))
+            "INSERT INTO balances (loan_id, balance, past_due) VALUES (%s, 9000, %s)",
+            (loan_id, ARREARS))
     return loan_id
 
 
@@ -145,6 +155,19 @@ def _entries(loan_id):
         "SELECT component, amount, entry_type, reason, actor_id, actor_role, "
         "       payment_id "
         "  FROM ledger_entries WHERE loan_id = %s ORDER BY id", (loan_id,))
+
+
+def _fee_entries_after(loan_id, before):
+    """Fee entries the ASSESSMENT wrote, i.e. those not present beforehand.
+
+    The fixture seeds arrears with a direct `balances` write, so 0035's
+    compatibility bridge correctly records a `legacy_direct_write` for the
+    opening amount. That entry is setup, not subject. Comparing against a
+    snapshot keeps the `legacy_direct_write` assertion meaningful -- filtering
+    that type out by name would make the very test that looks for it vacuous,
+    which is a mistake this file has already made once.
+    """
+    return [e for e in _fee_entries(loan_id) if e not in before]
 
 
 def _fee_entries(loan_id):
@@ -169,14 +192,15 @@ def _past_due(loan_id):
 def test_it_writes_a_fee_assessed_entry(loan):
     from app import delinquency
 
+    before = _fee_entries(loan)
     delinquency.assess_late_fee(loan)
 
-    entries = _fee_entries(loan)
+    entries = _fee_entries_after(loan, before)
     assert len(entries) == 1, f"expected exactly one fee entry, got {entries}"
     entry = entries[0]
     assert entry["entry_type"] == "fee_assessed"
     assert entry["component"] == "fees"
-    assert float(entry["amount"]) == delinquency.LATE_FEE_FLAT
+    assert Decimal(str(entry["amount"])) == EXPECTED_FEE
 
 
 def test_it_survives_the_write_guard_that_forbids_direct_balance_writes(loan, schema):
@@ -221,7 +245,7 @@ def test_it_survives_the_write_guard_that_forbids_direct_balance_writes(loan, sc
         before = _past_due(loan)
         delinquency.assess_late_fee(loan)
         assert _past_due(loan) == pytest.approx(
-            before + delinquency.LATE_FEE_FLAT)
+            float(Decimal(str(before)) + EXPECTED_FEE))
     finally:
         with schema.cursor() as cur:
             cur.execute(f"SET search_path TO {SCHEMA}")
@@ -256,9 +280,10 @@ def test_it_writes_no_legacy_direct_write_entry(loan):
         "a direct write and would pass regardless"
     )
 
+    before = _fee_entries(loan)
     delinquency.assess_late_fee(loan)
 
-    kinds = [e["entry_type"] for e in _fee_entries(loan)]
+    kinds = [e["entry_type"] for e in _fee_entries_after(loan, before)]
     assert "legacy_direct_write" not in kinds, (
         f"the fee still reached past_due by a direct UPDATE: {kinds}"
     )
@@ -271,7 +296,7 @@ def test_past_due_moves_by_exactly_the_fee(loan):
     returned = delinquency.assess_late_fee(loan)
     after = _past_due(loan)
 
-    assert after == pytest.approx(before + delinquency.LATE_FEE_FLAT)
+    assert after == pytest.approx(float(Decimal(str(before)) + EXPECTED_FEE))
     assert returned == pytest.approx(after), (
         "the returned past_due disagrees with the stored one"
     )
@@ -291,11 +316,11 @@ def test_the_projection_is_what_moves_past_due(loan):
             cur.execute(
                 "INSERT INTO ledger_entries (loan_id, component, amount, entry_type) "
                 "VALUES (%s, 'fees', %s, 'fee_assessed')",
-                (loan, delinquency.LATE_FEE_FLAT))
+                (loan, EXPECTED_FEE))
     finally:
         conn.close()
 
-    assert _past_due(loan) == pytest.approx(before + delinquency.LATE_FEE_FLAT)
+    assert _past_due(loan) == pytest.approx(float(Decimal(str(before)) + EXPECTED_FEE))
 
 
 def test_repeated_assessments_accumulate(loan):
@@ -304,12 +329,19 @@ def test_repeated_assessments_accumulate(loan):
     unique index. The absence of a payment_id here is deliberate."""
     from app import delinquency
 
-    delinquency.assess_late_fee(loan)
+    before = _fee_entries(loan)
+    first = delinquency.assess_late_fee(loan)
     delinquency.assess_late_fee(loan)
 
-    entries = _fee_entries(loan)
+    entries = _fee_entries_after(loan, before)
     assert len(entries) == 2
-    assert _past_due(loan) == pytest.approx(2 * delinquency.LATE_FEE_FLAT)
+    # The second fee is priced off the arrears the FIRST one created -- $210 of
+    # arrears, so $10.50 rather than another $10.00. That compounding is what
+    # "5% of the past-due amount" means, and it only appears once the
+    # percentage half of the rule exists.
+    assert first == pytest.approx(float(ARREARS + EXPECTED_FEE))
+    assert _past_due(loan) == pytest.approx(
+        float(ARREARS + EXPECTED_FEE + Decimal("10.50")))
 
 
 def test_the_entry_names_no_actor(loan):
