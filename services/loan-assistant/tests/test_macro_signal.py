@@ -764,3 +764,40 @@ def test_walking_through_label_words_still_stops_at_an_unrelated_subject(monkeyp
     )
 
     assert "22%" in result.summary
+
+
+# --- the citation has to be readable by the person it is for -------------------
+
+def test_the_citation_url_is_a_human_page_not_the_api():
+    """A "Verify at U.S. Bureau of Labor Statistics" link that returns raw JSON
+    is not verification.
+
+    The citation URL used to be the API endpoint -- literally the same address
+    the fetch uses -- so following it produced a wall of JSON. The reader the
+    citation exists for is a loan officer or a compliance reviewer, not a
+    developer with a JSON viewer; for them, that link proved nothing.
+
+    Found by clicking it.
+    """
+    from app import macro
+
+    signal = macro.StubMacroProvider().fetch()
+    assert signal.url.startswith("https://data.bls.gov/timeseries/"), (
+        f"citation points at {signal.url!r}, which is not a page a person can read"
+    )
+    assert "api.bls.gov" not in signal.url, (
+        "the citation points at the API endpoint, which returns raw JSON"
+    )
+    assert macro.MACRO_SERIES_ID in signal.url, (
+        "the citation does not name the series it cites"
+    )
+
+
+def test_the_fetch_still_uses_the_api_endpoint():
+    """Guard the guard. The two URLs are deliberately different, and changing
+    the citation must not quietly change where the data comes from."""
+    from app import macro
+
+    assert macro._BLS_V1_URL.startswith("https://api.bls.gov/")
+    assert macro._BLS_SERIES_PAGE.startswith("https://data.bls.gov/")
+    assert macro._BLS_V1_URL != macro._BLS_SERIES_PAGE
