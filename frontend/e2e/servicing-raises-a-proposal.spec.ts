@@ -36,16 +36,40 @@ async function aLoanWithBalances(client: Client): Promise<number> {
   return res.rows[0].id;
 }
 
-/** A loan whose fees can absorb `atLeast` -- a waiver cannot take fees below zero. */
+/**
+ * A loan whose fees can absorb `atLeast` -- a waiver cannot take fees below zero.
+ *
+ * This CREATES the state instead of hunting for it, and that is the fix for a
+ * real failure rather than a preference. The first version searched for a loan
+ * already carrying enough fees. That passed locally, where months of manual
+ * testing had left one, and failed on CI's clean seed with "no current loan
+ * carries at least 15 in fees" -- the test depending on accumulated local state
+ * is exactly the "works on my machine" trap, and CI was right to catch it.
+ *
+ * The top-up is a `fee_assessed` entry, which is a MACHINE entry type: it needs
+ * no proposal and no actor, so seeding it neither exercises nor weakens the
+ * maker-checker path this spec is about. Direct DB setup for a narrow state
+ * precondition, which is what the review said it is still for.
+ */
 async function aLoanWithFees(client: Client, atLeast: number): Promise<number> {
-  const res = await client.query(
-    `SELECT e.loan_id FROM ledger_entries e JOIN loans l ON l.id = e.loan_id
-      WHERE e.component = 'fees' AND l.status = 'current'
-      GROUP BY e.loan_id HAVING sum(e.amount) >= $1
-      ORDER BY e.loan_id LIMIT 1`, [atLeast]);
-  expect(res.rows.length,
-    `no current loan carries at least ${atLeast} in fees, so a waiver cannot be tested`).toBe(1);
-  return res.rows[0].loan_id;
+  const loanId = await aLoanWithBalances(client);
+  const owed = await client.query(
+    `SELECT COALESCE(sum(amount), 0) AS fees FROM ledger_entries
+      WHERE loan_id = $1 AND component = 'fees'`, [loanId]);
+  const current = Number(owed.rows[0].fees);
+  if (current < atLeast) {
+    await client.query(
+      `INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason)
+       VALUES ($1, 'fees', $2, 'fee_assessed', 'e2e fixture: fees to waive')`,
+      [loanId, atLeast - current + 10],
+    );
+  }
+  const after = await client.query(
+    `SELECT COALESCE(sum(amount), 0) AS fees FROM ledger_entries
+      WHERE loan_id = $1 AND component = 'fees'`, [loanId]);
+  expect(Number(after.rows[0].fees),
+    "the fixture must leave enough fees for the waiver to be legal").toBeGreaterThanOrEqual(atLeast);
+  return loanId;
 }
 
 /** Balances BEFORE and AFTER must be identical: a proposal moves no money. */
