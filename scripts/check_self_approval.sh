@@ -74,24 +74,47 @@ cannot() { echo; echo "CANNOT RUN: $1"; exit 2; }
 
 psql_() { docker compose exec -T postgres psql -U meridian -d meridian "$@" 2>&1; }
 
+# A working JSON parser, found by RUNNING each candidate rather than by asking
+# whether the name exists.
+#
+# `command -v python3` is not enough, and this is not hypothetical: on Windows
+# with Git Bash, `python3` resolves to the Microsoft Store app-execution alias,
+# which IS on PATH, exits 0, and prints "Python was not found; run without
+# arguments to install from the Microsoft Store" instead of parsing anything.
+# A script that merely preferred `python3` would break there while looking
+# correct. Equally, most macOS and Linux hosts ship `python3` and no `python`
+# at all -- review finding SA-002, where this exited 2 on a host that had a
+# perfectly good interpreter under the other name.
+#
+# So each candidate is handed real JSON and must return the right answer.
+PYBIN=""
+for _c in python3 python py; do
+  command -v "$_c" >/dev/null 2>&1 || continue
+  if [ "$(printf '{"k":42}' | "$_c" -c "import sys,json;print(json.load(sys.stdin)['k'])" 2>/dev/null)" = "42" ]; then
+    PYBIN="$_c"; break
+  fi
+done
+
+jq_() { "$PYBIN" -c "$1" 2>/dev/null; }
+
 login() {
   curl -s -X POST "$GW/auth/login" -H 'Content-Type: application/json' \
     -d "{\"username\":\"$1\",\"password\":\"password\"}" \
-    | python -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null
+    | jq_ "import sys,json;print(json.load(sys.stdin).get('token',''))"
 }
 
 # --- preconditions, each failing as "could not run" rather than "control broken"
 
 command -v docker >/dev/null || cannot "docker is not on PATH"
-command -v python >/dev/null || cannot "python is not on PATH (used only to read JSON)"
+[ -n "$PYBIN" ] || cannot "no working Python found (tried python3, python, py) -- used only to read JSON"
 
 # Seeded demo logins (db/init/002_seed.sql). Local training data, never real.
 UW="$(login underwriter)"
 AD="$(login admin)"
 [ -n "$UW" ] && [ -n "$AD" ] || cannot "could not log in -- is the stack up? (docker compose ps)"
 
-UWID=$(curl -s "$GW/auth/me" -H "Authorization: Bearer $UW" | python -c "import sys,json;print(json.load(sys.stdin)['id'])" 2>/dev/null)
-ADID=$(curl -s "$GW/auth/me" -H "Authorization: Bearer $AD" | python -c "import sys,json;print(json.load(sys.stdin)['id'])" 2>/dev/null)
+UWID=$(curl -s "$GW/auth/me" -H "Authorization: Bearer $UW" | jq_ "import sys,json;print(json.load(sys.stdin)['id'])")
+ADID=$(curl -s "$GW/auth/me" -H "Authorization: Bearer $AD" | jq_ "import sys,json;print(json.load(sys.stdin)['id'])")
 [ -n "$UWID" ] && [ -n "$ADID" ] || cannot "could not resolve the acting user ids from /auth/me"
 
 # The threshold is READ from the running service, never assumed. Writing a
@@ -106,7 +129,7 @@ THRESHOLD=$(docker compose exec -T servicing-service printenv MAKER_CHECKER_ADMI
 LOAN="${LOAN_ID:-$(psql_ -tAc "SELECT l.id FROM loans l JOIN balances b ON b.loan_id = l.id WHERE l.status = 'current' ORDER BY l.id LIMIT 1" | tr -d '\r')}"
 [ -n "$LOAN" ] || cannot "no serviced 'current' loan with a balances row to propose against"
 
-echo "gateway=$GW  loan=$LOAN  threshold=$THRESHOLD  requester=$UWID  approver=$ADID"
+echo "gateway=$GW  loan=$LOAN  threshold=$THRESHOLD  requester=$UWID  approver=$ADID  json=$PYBIN"
 
 # --- the check itself
 
@@ -115,7 +138,7 @@ raise_proposal() {   # $1 = what this proposal is for; echoes the movement id
   raw=$(curl -s -X POST "$GW/lss/accounts/$LOAN/adjust-balance" \
     -H "Authorization: Bearer $UW" -H 'Content-Type: application/json' \
     -d "{\"component\":\"fees\",\"amount\":10.0,\"reason\":\"self-approval control check -- $1\"}")
-  mid=$(echo "$raw" | python -c "import sys,json;print(json.load(sys.stdin).get('movement_id',''))" 2>/dev/null)
+  mid=$(echo "$raw" | jq_ "import sys,json;print(json.load(sys.stdin).get('movement_id',''))")
   [ -n "$mid" ] || cannot "could not raise a proposal ($1): $raw"
   echo "$mid"
 }
