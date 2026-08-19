@@ -592,6 +592,16 @@ Expand and contract, the same shape as the PAN/CVV removal (`0029` → `0031`),
 which is in this repository specifically because a big-bang drop on a money table
 is not recoverable.
 
+**This table is the delivery PLAN, kept as written. Where it now stands:** PR-1
+to PR-4 have landed, and so has PR-6. PR-5 is
+**split** — the two staff writers converted (they raise a proposal and the
+approval writes the entry, ADR 0011), so PR-3's gate sentence calling them
+"still direct writers until PR-5" no longer describes the code; what has **not**
+landed is the last clause of PR-5, the direct-write guard on `balances`, which
+waits on retiring the remaining unreferenced direct writers. Stated here rather
+than edited into the rows below, because a plan rewritten to match the outcome
+stops being evidence of what was decided in advance.
+
 | PR | What lands | Gate before the next PR |
 |---|---|---|
 | **PR-1** | The failing test for the lost update, against today's code | It fails, and the failure is the correctly-paired race — not the client's wrong repro |

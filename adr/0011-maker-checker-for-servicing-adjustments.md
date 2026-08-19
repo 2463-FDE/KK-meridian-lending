@@ -91,16 +91,17 @@ changes who is allowed to move money and what evidence that leaves. A reviewer
 who accepts the first and wants to argue about the second should be able to.
 
 **Where this lands in 0010's sequence, stated in both documents so they cannot
-drift apart.** This ADR is **PR-4**, and it comes *before* the staff paths move
-to the ledger:
+drift apart.** This ADR is **PR-4**, and it came *before* the staff paths moved
+to the ledger. The sequence is no longer a plan — it is a record, with one step
+still open:
 
-| Step | What happens |
-|---|---|
-| PR-3 | The three machine writers convert. `adjust_balance` and `waive_fee` still write `balances` directly. |
-| **PR-4** | **This ADR.** `pending_movements`, `resolve_pending_movement()`, maker-checker on adjust and waive. |
-| PR-5 | `adjust_balance` and `waive_fee` convert to ledger entries, then the direct-write guard is attached. |
+| Step | What happens | State |
+|---|---|---|
+| PR-3 | The three machine writers convert. `adjust_balance` and `waive_fee` still write `balances` directly. | **Landed** |
+| **PR-4** | **This ADR.** `pending_movements`, `resolve_pending_movement()`, maker-checker on adjust and waive. | **Landed** — `db/migrations/0036_pending_movements.sql`, `db/migrations/0037_resolve_pending_movement.sql` |
+| PR-5 | `adjust_balance` and `waive_fee` convert to ledger entries, then the direct-write guard is attached. | **Split.** The routed staff endpoints converted — `services/servicing-service/app/maker_checker.py` raises a proposal and the *approval* writes the entry, so neither route writes `balances` directly any more. The **direct-write guard on `balances` is not attached**: only `balances_capture_legacy_delta`, `balances_reject_delete_during_cutover` and `balances_ledger_parity` are, and the guard waits on retiring the remaining unreferenced direct writers. |
 
-The order is not interchangeable. Converting the staff paths first would write
+The order was not interchangeable. Converting the staff paths first would write
 unapproved staff money movements into an append-only table that cannot be
 corrected -- a worse permanent record than the mutable column they write today.
 And 0010's "the projection is the only writer of `balances`" is not true until
