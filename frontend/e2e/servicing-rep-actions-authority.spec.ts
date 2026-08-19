@@ -24,6 +24,19 @@ async function aLoanWithBalances(client: Client): Promise<number> {
   return res.rows[0].id;
 }
 
+/** The serviced loan belonging to a given applicant -- see the borrower test. */
+async function aLoanOwnedBy(client: Client, applicantId: number): Promise<number> {
+  const res = await client.query(
+    `SELECT l.id FROM loans l
+       JOIN applications a ON a.id = l.app_id
+       JOIN balances b ON b.loan_id = l.id
+      WHERE a.applicant_id = $1 AND l.status = 'current'
+      ORDER BY l.id LIMIT 1`, [applicantId]);
+  expect(res.rows.length,
+    `applicant ${applicantId} must own a serviced 'current' loan for the borrower case`).toBe(1);
+  return res.rows[0].id;
+}
+
 const ADJUST = "Propose a balance adjustment";
 const WAIVE = "Propose a fee waiver";
 
@@ -75,7 +88,13 @@ test("a borrower who rewrites their cached role is offered no money controls", a
   const client = dbClient();
   await client.connect();
   try {
-    const loanId = await aLoanWithBalances(client);
+    // The loan MARIA OWNS, not merely the first serviced loan. The gateway
+    // enforces owner-or-staff on `GET /lss/loans/{id}`, so a borrower sent to
+    // someone else's loan is refused and the page never renders -- the test
+    // would then pass because nothing loaded, proving nothing about who is
+    // offered the controls. That holds locally by luck (maria owns the
+    // lowest-numbered serviced loan here) and would not survive a reseed.
+    const loanId = await aLoanOwnedBy(client, 1);
 
     await page.evaluate(() => {
       const raw = window.localStorage.getItem("meridian.user");
