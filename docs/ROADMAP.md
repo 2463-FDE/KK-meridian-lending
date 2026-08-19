@@ -320,11 +320,7 @@ work remain, and none of them is a Weeks 1–6 acceptance criterion:
    `adjust_balance` and `waive_fee` would still write the column directly. All
    three are unreferenced by any route; retiring them is what makes the guard
    attachable, and it is the last step of the ledger cutover.
-2. **The late fee's own policy rule.** `policies/fee_schedule.md` publishes "$35
-   flat, or 5% of the past-due amount, whichever is **less**"; the code charges a
-   flat $35 (`delinquency.LATE_FEE_FLAT`). The policy file itself flags that the
-   code drifted. It is arithmetic against a published rule, not a decision.
-3. **Overpayment handling.** The waterfall refuses a payment larger than
+2. **Overpayment handling.** The waterfall refuses a payment larger than
    everything owed. Applying the excess to principal or holding it as unapplied
    credit are both real answers with different consequences for the borrower,
    and Lending Operations owns that decision.
