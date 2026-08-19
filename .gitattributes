@@ -1,0 +1,10 @@
+# Shell scripts must keep LF endings in every working tree, on every platform.
+#
+# `core.autocrlf=true` is the Windows default and rewrites checkouts to CRLF.
+# The blob stays LF, so CI is unaffected -- but the file an operator actually
+# runs is the working copy, and a CRLF `#!/usr/bin/env bash` fails with
+# "bad interpreter: no such file or directory" the moment it is run under WSL,
+# a container, or any Linux host. `scripts/check_self_approval.sh` exists to be
+# run by an operator after a deploy, so that failure would land exactly where
+# the script is meant to help.
+*.sh text eol=lf

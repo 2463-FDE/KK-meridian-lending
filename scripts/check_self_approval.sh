@@ -67,6 +67,12 @@ GW="${GATEWAY_URL:-http://localhost:8000}"
 PASS=0
 FAIL=0
 
+# Every check below is written as if/else rather than `cond && ok || bad`
+# (ShellCheck SC2015). The short form runs the `||` branch when EITHER the
+# condition or `ok` itself fails, so a future edit that let `ok` return non-zero
+# would record the same check as a pass AND a fail. Harmless today -- an
+# assignment always returns 0 -- but this script's only product is a trustworthy
+# tally, and a tally that can double-count is the wrong thing to leave loaded.
 ok()     { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad()    { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 step()   { echo; echo "=== $1"; }
@@ -111,11 +117,15 @@ command -v docker >/dev/null || cannot "docker is not on PATH"
 # Seeded demo logins (db/init/002_seed.sql). Local training data, never real.
 UW="$(login underwriter)"
 AD="$(login admin)"
-[ -n "$UW" ] && [ -n "$AD" ] || cannot "could not log in -- is the stack up? (docker compose ps)"
+if [ -z "$UW" ] || [ -z "$AD" ]; then
+  cannot "could not log in -- is the stack up? (docker compose ps)"
+fi
 
 UWID=$(curl -s "$GW/auth/me" -H "Authorization: Bearer $UW" | jq_ "import sys,json;print(json.load(sys.stdin)['id'])")
 ADID=$(curl -s "$GW/auth/me" -H "Authorization: Bearer $AD" | jq_ "import sys,json;print(json.load(sys.stdin)['id'])")
-[ -n "$UWID" ] && [ -n "$ADID" ] || cannot "could not resolve the acting user ids from /auth/me"
+if [ -z "$UWID" ] || [ -z "$ADID" ]; then
+  cannot "could not resolve the acting user ids from /auth/me"
+fi
 
 # The threshold is READ from the running service, never assumed. Writing a
 # figure in here would put a second copy of a configured money value in the
@@ -158,30 +168,40 @@ BODY=$(curl -s -o /tmp/_sa2 -w '%{http_code}' -X POST "$GW/lss/movements/$M_API/
   -H "Authorization: Bearer $UW" -H 'Content-Type: application/json' \
   -d '{"resolution":"rejected"}')
 echo "        HTTP $BODY  $(cat /tmp/_sa2)"
-[ "$BODY" = "403" ] && ok "the API refused the requester" \
-                    || bad "expected HTTP 403 from the API, got $BODY"
+if [ "$BODY" = "403" ]; then
+  ok "the API refused the requester"
+else
+  bad "expected HTTP 403 from the API, got $BODY"
+fi
 
 step "STEP 3  bypass the API: resolve_pending_movement() on #$M_FN as the requester"
 OUT=$(psql_ -c "SELECT resolve_pending_movement($M_FN, $UWID, 'underwriter', 'rejected', $THRESHOLD, ARRAY['current']);")
 echo "$OUT" | grep -iE "^ERROR" | head -1 | sed 's/^/        /'
-echo "$OUT" | grep -qi "may not resolve it" \
-  && ok "the function refused the requester" \
-  || bad "the function did NOT refuse the requester -- read its output above"
+if echo "$OUT" | grep -qi "may not resolve it"; then
+  ok "the function refused the requester"
+else
+  bad "the function did NOT refuse the requester -- read its output above"
+fi
 
 step "STEP 4  bypass the function: raw UPDATE straight at #$M_SQL"
 OUT=$(psql_ -c "UPDATE pending_movements SET resolution='rejected', resolved_by=$UWID, resolved_role='underwriter', resolved_at=now(), resolved_threshold=$THRESHOLD WHERE id=$M_SQL;")
 echo "$OUT" | grep -iE "^ERROR" | head -1 | sed 's/^/        /'
-echo "$OUT" | grep -qi "no_self_approval" \
-  && ok "the CHECK constraint refused it -- enforced by the schema, not the application" \
-  || bad "constraint no_self_approval did NOT fire -- read the output above"
+if echo "$OUT" | grep -qi "no_self_approval"; then
+  ok "the CHECK constraint refused it -- enforced by the schema, not the application"
+else
+  bad "constraint no_self_approval did NOT fire -- read the output above"
+fi
 
 step "STEP 5  a DIFFERENT person (admin, user $ADID) resolves #$M_OK -- this MUST succeed"
 BODY=$(curl -s -o /tmp/_sa5 -w '%{http_code}' -X POST "$GW/lss/movements/$M_OK/resolve" \
   -H "Authorization: Bearer $AD" -H 'Content-Type: application/json' \
   -d '{"resolution":"rejected"}')
 echo "        HTTP $BODY  $(cat /tmp/_sa5)"
-[ "$BODY" = "200" ] && ok "a second person could resolve it -- the control refuses the right thing, not everything" \
-                    || bad "a second approver could NOT resolve (HTTP $BODY) -- the control may be refusing everyone"
+if [ "$BODY" = "200" ]; then
+  ok "a second person could resolve it -- the control refuses the right thing, not everything"
+else
+  bad "a second approver could NOT resolve (HTTP $BODY) -- the control may be refusing everyone"
+fi
 
 step "STEP 6  close the probe proposals, then show the audit trail"
 # The three probes should still be pending, because every layer refused them.
