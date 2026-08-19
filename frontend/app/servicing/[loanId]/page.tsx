@@ -567,8 +567,10 @@ function LoanDetailContent() {
         </p>
       </div>
 
-      {/* Rep actions — shown only to CSR/admin, and the gateway backs that up: */}
-      {/* /lss/accounts/{id}/adjust-balance|waive-fee are staff-only server-side. */}
+      {/* Proposal actions — shown to the verified staff proposal roles (csr,   */}
+      {/* underwriter, admin: specs/0002's role matrix and PROPOSER_ROLES), and  */}
+      {/* the gateway backs that up: /lss/accounts/{id}/adjust-balance|waive-fee */}
+      {/* are staff-only server-side. Neither raises money — both propose.       */}
       {canRepActions ? (
         <>
           <h2>Servicing rep actions</h2>
