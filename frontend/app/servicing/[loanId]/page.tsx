@@ -52,6 +52,29 @@ function errMsg(err: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * What to say after a proposal is raised.
+ *
+ * The old copy said "Balance adjusted to $X." / "Fee of $X waived." Since #35
+ * neither call moves money: they return 202 with `balance_moved: false` and a
+ * pending movement id. Telling an operator the balance changed, when it has
+ * not and may never, is the worst version of this wrong -- they would stop
+ * chasing the approval the change actually depends on.
+ *
+ * The movement id is included because it is the thing an operator quotes when
+ * asking a colleague to review it.
+ */
+function proposalMsg(proposal: unknown): string {
+  const id =
+    proposal && typeof proposal === "object" && "movement_id" in proposal
+      ? String((proposal as { movement_id: unknown }).movement_id)
+      : null;
+  return (
+    (id ? `Proposal ${id} raised. ` : "Proposal raised. ") +
+    "No money has moved — a different member of staff has to approve it first."
+  );
+}
+
 export default function LoanDetailPage() {
   // Shared page: staff reach it from /servicing's portfolio list, borrowers
   // reach it from /my-loan's "View account & make a payment" link -- so
@@ -93,8 +116,16 @@ function LoanDetailContent() {
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
-  const [newBalance, setNewBalance] = useState("");
+  // A signed DELTA on a named component, never a target balance. `AdjustIn`
+  // dropped `new_balance` outright in #35 (spec 0002 REQ-VAL-1): "set the
+  // balance to 250.00" cannot be reviewed without knowing what it is now, and
+  // what it is now can change between the review and the approval. This form
+  // sent the retired field until this commit, so every attempt 422'd.
+  const [adjustComponent, setAdjustComponent] = useState<"principal" | "fees">("principal");
+  const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustReason, setAdjustReason] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
+  const [waiveReason, setWaiveReason] = useState("");
   // POST /payments now requires an idempotency_key (review fix -- a retry or
   // a double-click used to double-charge). Minted once and reused across
   // retries of the SAME submit attempt; a fresh one is minted only after the
@@ -224,13 +255,19 @@ function LoanDetailContent() {
     setActionMsg(null);
     try {
       // Gateway now enforces staff-only here regardless of who calls it.
-      await apiPost(`/lss/accounts/${loanId}/adjust-balance`, {
-        new_balance: parseFloat(newBalance || "0"),
+      const proposal = await apiPost(`/lss/accounts/${loanId}/adjust-balance`, {
+        component: adjustComponent,
+        amount: parseFloat(adjustAmount || "0"),
+        reason: adjustReason.trim(),
       });
-      setActionMsg(`Balance adjusted to ${usd(newBalance)}.`);
-      await refreshBalanceAndHistory();
+      setActionMsg(proposalMsg(proposal));
+      // Deliberately NOT refreshing the balance: nothing moved. Re-reading it
+      // here would show the same figure next to a success message, which reads
+      // as "the adjustment was applied and made no difference".
+      setAdjustAmount("");
+      setAdjustReason("");
     } catch (err) {
-      setActionErr(errMsg(err, "Balance adjustment failed."));
+      setActionErr(errMsg(err, "The adjustment could not be proposed."));
     } finally {
       setActionBusy(false);
     }
@@ -242,13 +279,23 @@ function LoanDetailContent() {
     setActionMsg(null);
     try {
       // Gateway now enforces staff-only here regardless of who calls it.
-      await apiPost(`/lss/accounts/${loanId}/waive-fee`, {
-        amount: parseFloat(waiveAmount || "0"),
+      //
+      // Negated here, and this is a presentation choice rather than a rule of
+      // our own: a waiver REDUCES what the borrower owes, so the API requires a
+      // negative amount and refuses a positive one outright. Asking an operator
+      // to type "-25" to waive $25 invites the sign error the refusal exists to
+      // catch, so the field takes what they mean and the client sends what the
+      // contract states.
+      const entered = parseFloat(waiveAmount || "0");
+      const proposal = await apiPost(`/lss/accounts/${loanId}/waive-fee`, {
+        amount: entered > 0 ? -entered : entered,
+        reason: waiveReason.trim(),
       });
-      setActionMsg(`Fee of ${usd(waiveAmount)} waived.`);
-      await refreshBalanceAndHistory();
+      setActionMsg(proposalMsg(proposal));
+      setWaiveAmount("");
+      setWaiveReason("");
     } catch (err) {
-      setActionErr(errMsg(err, "Fee waiver failed."));
+      setActionErr(errMsg(err, "The fee waiver could not be proposed."));
     } finally {
       setActionBusy(false);
     }
@@ -492,47 +539,102 @@ function LoanDetailContent() {
       {canRepActions ? (
         <>
           <h2>Servicing rep actions</h2>
+          <p className="hint">
+            Both actions raise a proposal for someone else to approve. Neither
+            moves money on its own, and you cannot approve your own.
+          </p>
           <div className="grid grid-2">
             <div className="card">
               <div className="card-title" style={{ marginBottom: 10 }}>
-                Adjust balance
+                Propose a balance adjustment
               </div>
-              <label>New balance (USD)</label>
+              <label htmlFor="adjust-component">Component</label>
+              <select
+                id="adjust-component"
+                value={adjustComponent}
+                onChange={(e) =>
+                  setAdjustComponent(e.target.value as "principal" | "fees")
+                }
+              >
+                {/* The API accepts exactly these two for an adjustment
+                    (maker_checker.COMPONENTS_BY_TYPE). `interest` is absent
+                    deliberately -- it is accrued, not adjusted. */}
+                <option value="principal">Principal</option>
+                <option value="fees">Fees</option>
+              </select>
+              <label htmlFor="adjust-amount" style={{ marginTop: 10 }}>
+                Change (USD)
+              </label>
               <input
+                id="adjust-amount"
                 type="number"
                 step="0.01"
-                value={newBalance}
-                onChange={(e) => setNewBalance(e.target.value)}
-                placeholder={loan ? String(loan.balance) : "0.00"}
+                value={adjustAmount}
+                onChange={(e) => setAdjustAmount(e.target.value)}
+                placeholder="0.00"
+              />
+              <p className="hint">
+                A change, not a new total. Positive increases what the borrower
+                owes; negative reduces it.
+              </p>
+              <label htmlFor="adjust-reason" style={{ marginTop: 10 }}>
+                Reason
+              </label>
+              <input
+                id="adjust-reason"
+                type="text"
+                value={adjustReason}
+                onChange={(e) => setAdjustReason(e.target.value)}
+                placeholder="Why this adjustment is correct"
               />
               <button
                 className="btn-ghost btn-block"
                 style={{ marginTop: 14 }}
                 onClick={adjustBalance}
-                disabled={actionBusy || !newBalance}
+                /* Reason is required and immutable once written -- the approver
+                   is otherwise asked to authorise a number with no account of
+                   why. Blocked here so the operator does not lose the amount
+                   they typed to a 422. */
+                disabled={actionBusy || !adjustAmount || !adjustReason.trim()}
               >
-                Adjust balance
+                Submit for approval
               </button>
             </div>
             <div className="card">
               <div className="card-title" style={{ marginBottom: 10 }}>
-                Waive fee
+                Propose a fee waiver
               </div>
-              <label>Waiver amount (USD)</label>
+              <label htmlFor="waive-amount">Waiver amount (USD)</label>
               <input
+                id="waive-amount"
                 type="number"
                 step="0.01"
+                min="0"
                 value={waiveAmount}
                 onChange={(e) => setWaiveAmount(e.target.value)}
                 placeholder="0.00"
+              />
+              <p className="hint">
+                How much to take off the borrower&apos;s fees. Enter it as a
+                positive figure.
+              </p>
+              <label htmlFor="waive-reason" style={{ marginTop: 10 }}>
+                Reason
+              </label>
+              <input
+                id="waive-reason"
+                type="text"
+                value={waiveReason}
+                onChange={(e) => setWaiveReason(e.target.value)}
+                placeholder="Why this fee should be waived"
               />
               <button
                 className="btn-ghost btn-block"
                 style={{ marginTop: 14 }}
                 onClick={waiveFee}
-                disabled={actionBusy || !waiveAmount}
+                disabled={actionBusy || !waiveAmount || !waiveReason.trim()}
               >
-                Waive fee
+                Submit for approval
               </button>
             </div>
           </div>
