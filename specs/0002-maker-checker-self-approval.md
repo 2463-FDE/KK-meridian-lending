@@ -15,8 +15,12 @@
   creates `ledger_entries`, its immutability trigger and the projection that
   maintains `balances`. So this spec's dependency is satisfied — an approved
   proposal now has a real table to write into. ADR 0011's `pending_movements` is
-  still a design, not a migration. This spec is written against 0011 as
-  finalised: the proposal carries `requested_role` and `resolved_role`, its
+  **no longer a design**: `db/migrations/0036_pending_movements.sql` creates the
+  table with its transition trigger and the `no_self_approval` constraint,
+  `db/migrations/0037_resolve_pending_movement.sql` adds the approval function,
+  and `services/servicing-service/app/maker_checker.py` is the API cutover that
+  turned `adjust-balance` and `waive-fee` into proposals. This spec is written
+  against 0011 as finalised, and the code now matches it: the proposal carries `requested_role` and `resolved_role`, its
   substance including `reason` and `requested_at` is frozen by the transition
   trigger, and the commit-time rule re-reads the proposal rather than the queued
   row
@@ -752,10 +756,13 @@ under load or error is not a control.
 
 ## 9. The limit of this control, stated up front
 
-**A direct `INSERT` into `ledger_entries` bypasses all of it.** Every service
-connects as the schema-owning role, so `REVOKE` does not stick (ADR 0002, ADR
-0006) — the same constraint that makes the append-only trigger necessary makes
-privilege-based enforcement unavailable.
+**A direct `INSERT` into `ledger_entries` bypasses the application resolve path
+— but not the proposal-matching trigger.** Every service connects as the
+schema-owning role, so `REVOKE` does not stick (ADR 0002, ADR 0006) — the same
+constraint that makes the append-only trigger necessary makes privilege-based
+enforcement unavailable. What that does NOT mean is that the control can be
+sidestepped wholesale: the paragraph below is not a consolation, it is the
+actual boundary, and this sentence used to claim more than it.
 
 What the validation trigger *does* guarantee is narrower and real: an
 `adjustment` or `fee_waived` entry cannot exist without naming an approved
