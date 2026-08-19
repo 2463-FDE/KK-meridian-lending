@@ -276,10 +276,25 @@ The admin threshold is read from the running `servicing-service`, never written
 into the script: a second copy of a configured money value is free to drift from
 the deployed one.
 
-**What it leaves behind.** One proposal, rejected by admin. `pending_movements`
-refuses deletes by design -- a proposal is the evidence of what staff asked for
--- so the row stays, resolved, and each run adds one. **No money moves:** a
-rejection writes no ledger entry, which step 6 prints rather than asserting.
+**Every self-resolution probe asks for `rejected`, never `approved`.** The guard
+is on *who* resolves (`resolved_by <> requested_by`), not on which resolution is
+asked for, so a self-rejection is refused by the same rule and tests the same
+thing -- while an approval that slipped through would write a ledger entry and
+move money. The only environment where one could slip through is the broken one
+this script exists to find, so the check must be harmless *by construction*
+rather than by trusting the control it is measuring:
+`0037_resolve_pending_movement.sql` returns NULL on `rejected` **before**
+reaching its `INSERT INTO ledger_entries`.
+
+Each probe also gets its **own** proposal. A layer that breached and resolved a
+shared row would make every later layer fail with "already resolved" -- an
+invented finding masking the real one.
+
+**What it leaves behind.** Four proposals, all resolved (rejected), none
+approved. `pending_movements` refuses deletes by design -- a proposal is the
+evidence of what staff asked for -- so the rows stay, and each run adds four.
+**No money moves,** and that holds even if every control in the system is
+broken. Step 6 prints `ledger_entry_id` rather than asserting it.
 
 **What it does not cover.** It proves one person cannot approve their own
 proposal. It does not address two colleagues colluding, and it is not a defence

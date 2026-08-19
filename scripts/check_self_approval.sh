@@ -23,6 +23,23 @@
 # everyone would pass 1-3 exactly as a working one does, so a check that only
 # ever confirms refusal cannot tell "the control works" from "nothing works".
 #
+# EVERY SELF-RESOLUTION PROBE ASKS FOR `rejected`, NEVER `approved`. This is the
+# difference between a diagnostic and a hazard, and it was review finding
+# SA-001 against the first version of this script. The guard is on WHO resolves
+# -- `resolved_by <> requested_by` -- not on which resolution is asked for, so a
+# self-REJECTION is refused by exactly the same rule and tests exactly the same
+# thing. But an APPROVAL that slipped through would write a ledger entry and
+# move money, and the only environment where one could slip through is the
+# broken one this script exists to find. A verifier that damages the system
+# precisely when it detects damage is worse than no verifier. Asking for
+# `rejected` makes the check harmless BY CONSTRUCTION, rather than by trusting
+# the control it is measuring.
+#
+# EACH PROBE GETS ITS OWN PROPOSAL. If one layer breached and resolved a shared
+# row, every later layer would fail with "already resolved" -- a second,
+# invented finding masking the real one, and possibly a PASS for the wrong
+# reason.
+#
 # EXIT CODE IS THE CONTRACT, same shape as the reconciliation control:
 #
 #   0  verified       -- self-approval refused at every layer, second approver works
@@ -33,11 +50,12 @@
 # Exit 1 and exit 2 mean different things and must not be collapsed: "the
 # control is broken" and "I could not tell" call for different responses.
 #
-# WHAT IT LEAVES BEHIND. One proposal, rejected by admin. `pending_movements`
-# refuses deletes by design -- a proposal is the evidence of what staff asked
-# for -- so the row stays, resolved. NO MONEY MOVES at any point: a rejection
-# writes no ledger entry, which step 6 prints so you can see it rather than
-# take it on faith.
+# WHAT IT LEAVES BEHIND. Four proposals, all resolved (rejected), none approved.
+# `pending_movements` refuses deletes by design -- a proposal is the evidence of
+# what staff asked for -- so the rows stay. NO MONEY MOVES at any point, and
+# that holds even if every control in the system is broken, because no probe
+# ever asks for an approval. Step 6 prints `ledger_entry_id` so you can see that
+# rather than take it on faith.
 #
 # Usage:  bash scripts/check_self_approval.sh
 # Env:    GATEWAY_URL (default http://localhost:8000)
@@ -49,9 +67,9 @@ GW="${GATEWAY_URL:-http://localhost:8000}"
 PASS=0
 FAIL=0
 
-ok()    { echo "  PASS  $1"; PASS=$((PASS+1)); }
-bad()   { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
-step()  { echo; echo "=== $1"; }
+ok()     { echo "  PASS  $1"; PASS=$((PASS+1)); }
+bad()    { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
+step()   { echo; echo "=== $1"; }
 cannot() { echo; echo "CANNOT RUN: $1"; exit 2; }
 
 psql_() { docker compose exec -T postgres psql -U meridian -d meridian "$@" 2>&1; }
@@ -92,53 +110,70 @@ echo "gateway=$GW  loan=$LOAN  threshold=$THRESHOLD  requester=$UWID  approver=$
 
 # --- the check itself
 
-step "STEP 1  underwriter (user $UWID) raises a proposal on loan $LOAN"
-RAW=$(curl -s -X POST "$GW/lss/accounts/$LOAN/adjust-balance" \
-  -H "Authorization: Bearer $UW" -H 'Content-Type: application/json' \
-  -d '{"component":"fees","amount":10.0,"reason":"self-approval control check"}')
-MID=$(echo "$RAW" | python -c "import sys,json;print(json.load(sys.stdin).get('movement_id',''))" 2>/dev/null)
-MOVED=$(echo "$RAW" | python -c "import sys,json;print(json.load(sys.stdin).get('balance_moved','?'))" 2>/dev/null)
-[ -n "$MID" ] || cannot "could not raise a proposal: $RAW"
-ok "raised movement #$MID   (balance_moved=$MOVED -- raising moves no money)"
+raise_proposal() {   # $1 = what this proposal is for; echoes the movement id
+  local raw mid
+  raw=$(curl -s -X POST "$GW/lss/accounts/$LOAN/adjust-balance" \
+    -H "Authorization: Bearer $UW" -H 'Content-Type: application/json' \
+    -d "{\"component\":\"fees\",\"amount\":10.0,\"reason\":\"self-approval control check -- $1\"}")
+  mid=$(echo "$raw" | python -c "import sys,json;print(json.load(sys.stdin).get('movement_id',''))" 2>/dev/null)
+  [ -n "$mid" ] || cannot "could not raise a proposal ($1): $raw"
+  echo "$mid"
+}
 
-step "STEP 2  the SAME underwriter tries to approve it, via the API (no browser)"
-BODY=$(curl -s -o /tmp/_sa2 -w '%{http_code}' -X POST "$GW/lss/movements/$MID/resolve" \
+step "STEP 1  underwriter (user $UWID) raises four proposals on loan $LOAN"
+M_API=$(raise_proposal "api layer")
+M_FN=$(raise_proposal "function layer")
+M_SQL=$(raise_proposal "table layer")
+M_OK=$(raise_proposal "second-approver success")
+PROBES="$M_API $M_FN $M_SQL"
+ok "raised #$M_API #$M_FN #$M_SQL #$M_OK   (all pending -- raising moves no money)"
+
+step "STEP 2  the SAME underwriter tries to resolve #$M_API via the API (no browser)"
+# `rejected`, not `approved` -- see the header. Same guard, and no ledger entry
+# even if the guard has been removed.
+BODY=$(curl -s -o /tmp/_sa2 -w '%{http_code}' -X POST "$GW/lss/movements/$M_API/resolve" \
   -H "Authorization: Bearer $UW" -H 'Content-Type: application/json' \
-  -d '{"resolution":"approved"}')
+  -d '{"resolution":"rejected"}')
 echo "        HTTP $BODY  $(cat /tmp/_sa2)"
 [ "$BODY" = "403" ] && ok "the API refused the requester" \
                     || bad "expected HTTP 403 from the API, got $BODY"
 
-step "STEP 3  bypass the API: call resolve_pending_movement() as the requester"
-OUT=$(psql_ -c "SELECT resolve_pending_movement($MID, $UWID, 'underwriter', 'approved', $THRESHOLD, ARRAY['current']);")
+step "STEP 3  bypass the API: resolve_pending_movement() on #$M_FN as the requester"
+OUT=$(psql_ -c "SELECT resolve_pending_movement($M_FN, $UWID, 'underwriter', 'rejected', $THRESHOLD, ARRAY['current']);")
 echo "$OUT" | grep -iE "^ERROR" | head -1 | sed 's/^/        /'
 echo "$OUT" | grep -qi "may not resolve it" \
   && ok "the function refused the requester" \
   || bad "the function did NOT refuse the requester -- read its output above"
 
-step "STEP 4  bypass the function: raw UPDATE straight at the table"
-OUT=$(psql_ -c "UPDATE pending_movements SET resolution='approved', resolved_by=$UWID, resolved_role='underwriter', resolved_at=now(), resolved_threshold=$THRESHOLD WHERE id=$MID;")
+step "STEP 4  bypass the function: raw UPDATE straight at #$M_SQL"
+OUT=$(psql_ -c "UPDATE pending_movements SET resolution='rejected', resolved_by=$UWID, resolved_role='underwriter', resolved_at=now(), resolved_threshold=$THRESHOLD WHERE id=$M_SQL;")
 echo "$OUT" | grep -iE "^ERROR" | head -1 | sed 's/^/        /'
 echo "$OUT" | grep -qi "no_self_approval" \
   && ok "the CHECK constraint refused it -- enforced by the schema, not the application" \
   || bad "constraint no_self_approval did NOT fire -- read the output above"
 
-step "STEP 5  a DIFFERENT person (admin, user $ADID) resolves it -- this MUST succeed"
-BODY=$(curl -s -o /tmp/_sa5 -w '%{http_code}' -X POST "$GW/lss/movements/$MID/resolve" \
+step "STEP 5  a DIFFERENT person (admin, user $ADID) resolves #$M_OK -- this MUST succeed"
+BODY=$(curl -s -o /tmp/_sa5 -w '%{http_code}' -X POST "$GW/lss/movements/$M_OK/resolve" \
   -H "Authorization: Bearer $AD" -H 'Content-Type: application/json' \
   -d '{"resolution":"rejected"}')
 echo "        HTTP $BODY  $(cat /tmp/_sa5)"
 [ "$BODY" = "200" ] && ok "a second person could resolve it -- the control refuses the right thing, not everything" \
                     || bad "a second approver could NOT resolve (HTTP $BODY) -- the control may be refusing everyone"
 
-step "STEP 6  the audit trail -- who asked, who decided"
+step "STEP 6  close the probe proposals, then show the audit trail"
+# The three probes should still be pending, because every layer refused them.
+# Resolve them as admin so they do not sit in the queue for ever. If one is
+# already resolved, a layer breached and step 2, 3 or 4 has already said so.
+for m in $PROBES; do
+  psql_ -c "SELECT resolve_pending_movement($m, $ADID, 'admin', 'rejected', $THRESHOLD, ARRAY['current']);" >/dev/null 2>&1
+done
 psql_ -c "SELECT id, requested_by, requested_role, resolved_by, resolved_role, resolution, ledger_entry_id
-            FROM pending_movements WHERE id = $MID;" | head -5
-echo "        ledger_entry_id empty: a rejection writes no entry, so no money moved."
+            FROM pending_movements WHERE id IN ($M_API, $M_FN, $M_SQL, $M_OK) ORDER BY id;" | head -9
+echo "        Every ledger_entry_id is empty: nothing was approved, so no money moved."
 
 echo
 echo "======================================================="
-echo "  $PASS passed, $FAIL failed   (movement #$MID)"
+echo "  $PASS passed, $FAIL failed   (movements #$M_API #$M_FN #$M_SQL #$M_OK)"
 if [ "$FAIL" = "0" ]; then
   echo "  VERIFIED: self-approval is refused at every layer, and a"
   echo "  different approver still works."
