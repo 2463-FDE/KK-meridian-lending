@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
-import { apiGet, apiPost, getUser } from "../../../lib/api";
+import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
 import { tokenizeCard } from "../../../lib/tokenize";
 
@@ -134,15 +134,48 @@ function LoanDetailContent() {
   // same key on the next retry instead of starting a new, undetectable charge.
   const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => crypto.randomUUID());
 
-  // Only CSR/admin SEE the money-moving rep actions (adjust balance / waive
-  // fee). This is now backed by a real server-side gate too (gateway/app/
-  // main.py's /lss/accounts/{id}/adjust-balance|waive-fee are staff-only,
-  // regardless of loan ownership) -- hiding the buttons here is a UX
-  // nicety on top of that, not the only thing stopping a non-staff caller.
+  // Who SEES the proposal forms, decided from the VERIFIED principal.
+  //
+  // Two things were wrong with computing this from `getUser()`, and the first
+  // is the one that matters. This page is reachable by borrowers -- they arrive
+  // from /my-loan's "View account" link, which is why `RequireRole` admits them
+  // -- and `getUser()` reads localStorage. A borrower who edits
+  // `meridian.user.role` to "csr" was shown the money forms. Nothing moved:
+  // the gateway refuses a non-staff caller on these routes regardless. But
+  // offering a control the caller has no authority to use is the same defect
+  // the approvals queue was corrected for (APQ-003), and it is worse here,
+  // because the page is one borrowers are meant to be on.
+  //
+  // The second: the set was wrong. `specs/0002` §"role matrix" grants "Raise a
+  // proposal" to csr, underwriter AND admin -- "any staff member may ask" --
+  // and both server layers agree (`gateway`'s `_PROPOSAL_ACTIONS` branch admits
+  // any staff principal, `maker_checker.PROPOSER_ROLES` is all three). Only the
+  // browser disagreed, so an underwriter was denied a capability the
+  // specification of record grants and the server would have allowed.
+  //
+  // These are not two changes. They are one expression that has to be right:
+  // the proposer set, read from an identity the caller cannot edit.
   const [canRepActions, setCanRepActions] = useState(false);
   useEffect(() => {
-    const role = getUser()?.role;
-    setCanRepActions(role === "csr" || role === "admin");
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = (await apiGet("/auth/me")) as { role?: string };
+        if (cancelled) return;
+        // Mirrors maker_checker.PROPOSER_ROLES. `late-fee` is NOT offered on
+        // this page, so this set covers proposals only -- it must not be
+        // reused for a control that moves money on one person's say-so.
+        setCanRepActions(
+          me.role === "csr" || me.role === "underwriter" || me.role === "admin");
+      } catch {
+        // Unverifiable identity offers nothing. Failing closed is the whole
+        // point: the previous version failed OPEN on whatever the cache said.
+        if (!cancelled) setCanRepActions(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const loadAll = useCallback(async () => {
@@ -534,8 +567,10 @@ function LoanDetailContent() {
         </p>
       </div>
 
-      {/* Rep actions — shown only to CSR/admin, and the gateway backs that up: */}
-      {/* /lss/accounts/{id}/adjust-balance|waive-fee are staff-only server-side. */}
+      {/* Proposal actions — shown to the verified staff proposal roles (csr,   */}
+      {/* underwriter, admin: specs/0002's role matrix and PROPOSER_ROLES), and  */}
+      {/* the gateway backs that up: /lss/accounts/{id}/adjust-balance|waive-fee */}
+      {/* are staff-only server-side. Neither raises money — both propose.       */}
       {canRepActions ? (
         <>
           <h2>Servicing rep actions</h2>
