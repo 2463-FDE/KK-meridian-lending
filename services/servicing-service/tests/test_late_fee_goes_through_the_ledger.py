@@ -441,3 +441,87 @@ def test_a_loan_with_no_balances_row_is_refused(schema, monkeypatch):
         # The `schema` fixture drops the whole schema, so no row-by-row cleanup
         # and no closing the connection it owns.
         pass
+
+
+def test_two_concurrent_assessments_agree_with_running_them_one_after_another(
+        loan, schema, monkeypatch):
+    """A real two-connection race, because this change is what made it matter.
+
+    While the fee was a flat $35, concurrency here was harmless: the amount did
+    not depend on the arrears, so two assessments produced $35 twice whether
+    they overlapped or not. Pricing off `past_due` breaks that equivalence -- a
+    posted fee raises `past_due` (`project_ledger_entry` adds a `fees` entry
+    straight onto it), so a serialised second assessment prices off a higher
+    figure than an overlapping one does.
+
+    The property under test is therefore NOT "no double fee" -- whether the
+    schedule permits charging twice is a policy question this repository has not
+    answered, and the test does not invent one. It is that the two ORDERINGS
+    AGREE: run concurrently, the total must match running them back to back.
+
+    Threads and two real connections, not a mocked lock. `FOR UPDATE` is a
+    database behaviour, and a test that fakes it proves nothing about the
+    deployed path.
+    """
+    import threading
+    from decimal import ROUND_DOWN
+    from app import db as app_db
+    from app import delinquency
+    from app.delinquency import LATE_FEE_PCT_OF_PAST_DUE
+
+    monkeypatch.setattr(app_db, "DATABASE_URL", SCHEMA_URL)
+    loan_id = loan
+
+    # Arrears deliberately BELOW the $700 crossover, where the fee tracks the
+    # balance. At or above it both assessments return the $35 cap, the race
+    # becomes invisible, and this test would pass without the lock.
+    start = Decimal("200")
+
+    def _reset():
+        with schema.cursor() as cur:
+            cur.execute(f"SET search_path TO {SCHEMA}")
+            cur.execute("UPDATE balances SET past_due = %s WHERE loan_id = %s",
+                        (start, loan_id))
+
+    def _pct(of: Decimal) -> Decimal:
+        return (of * LATE_FEE_PCT_OF_PAST_DUE).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+    # Guard the guard: if the fee were balance-INDEPENDENT the equality below
+    # would hold trivially and prove nothing.
+    first, second = _pct(start), _pct(start + _pct(start))
+    assert second > first, "the fixture no longer exercises balance-dependent pricing"
+
+    _reset()
+    errors = []
+
+    def assess():
+        try:
+            delinquency.assess_late_fee(loan_id)
+        except Exception as exc:  # noqa: BLE001 -- surfaced below, never swallowed
+            errors.append(exc)
+
+    threads = [threading.Thread(target=assess) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"an assessment raised instead of waiting for the lock: {errors}"
+    assert not any(t.is_alive() for t in threads), "an assessment deadlocked on the row lock"
+    concurrent_total = Decimal(str(_past_due(loan_id))) - start
+
+    # The same two assessments, strictly one after the other, from the same
+    # starting state -- the answer the concurrent run has to match.
+    _reset()
+    delinquency.assess_late_fee(loan_id)
+    delinquency.assess_late_fee(loan_id)
+    serial_total = Decimal(str(_past_due(loan_id))) - start
+
+    assert serial_total == first + second, (
+        f"expected {first} then {second} priced off the raised arrears, got {serial_total}"
+    )
+    assert concurrent_total == serial_total, (
+        f"two overlapping assessments added {concurrent_total} where running them one "
+        f"after the other adds {serial_total} -- both priced off the same stale arrears, "
+        f"so the second fee is short by what the first had already added"
+    )

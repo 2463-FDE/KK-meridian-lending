@@ -127,15 +127,33 @@ def assess_late_fee(loan_id: int) -> float:
     The flat figure alone overcharged every borrower whose arrears were below
     $700.
 
-    The arrears are read INSIDE the same transaction as the insert, because the
-    amount now depends on them: reading on another connection could price the
-    fee off a balance that had already moved. What this does not do is lock the
-    row -- two concurrent assessments can still price off the same arrears and
-    both post. That is the pre-existing shape of this path, the ledger composes
-    both deltas rather than losing one, and closing it is a separate change.
+    The arrears are read INSIDE the same transaction as the insert, and the row
+    is LOCKED while it is read, because the amount now depends on it.
+
+    The lock is not inherited caution -- it is this change's own debt. While the
+    fee was a flat $35 it did not matter that two concurrent assessments read
+    the same `past_due`: the amount did not depend on the number they read, so
+    the concurrent result and the serialised result were identical ($35 twice,
+    either way). Pricing off arrears breaks that equivalence. A posted fee
+    raises `past_due` -- `project_ledger_entry` adds a `fees` entry straight
+    onto it -- so serialised, the second assessment prices off the higher figure;
+    unlocked and concurrent, both price off the stale lower one. That divergence
+    did not exist before this commit, so it is not pre-existing debt to be waved
+    at a future PR. `FOR UPDATE` makes the second assessment wait and re-read,
+    which is what makes the two orders agree again.
+
+    What this still does NOT do is decide whether a second assessment should
+    happen at all. Two sequential assessments on one day now each price
+    correctly, and the ledger composes both deltas; whether the schedule permits
+    charging twice is a policy question `policies/fee_schedule.md` does not
+    answer, and this function will not invent an answer to it.
     """
     with db.transaction() as cur:
-        cur.execute("SELECT past_due FROM balances WHERE loan_id = %s", (loan_id,))
+        # FOR UPDATE: see the docstring. Locks this loan's balances row for the
+        # rest of the transaction, so a concurrent assessment blocks here and
+        # then reads the arrears this one leaves behind.
+        cur.execute(
+            "SELECT past_due FROM balances WHERE loan_id = %s FOR UPDATE", (loan_id,))
         rows = cur.fetchall()
         if not rows:
             raise LoanHasNoBalances(f"no balances row for loan_id={loan_id}")
