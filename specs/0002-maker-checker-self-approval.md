@@ -756,10 +756,13 @@ under load or error is not a control.
 
 ## 9. The limit of this control, stated up front
 
-**A direct `INSERT` into `ledger_entries` bypasses all of it.** Every service
-connects as the schema-owning role, so `REVOKE` does not stick (ADR 0002, ADR
-0006) — the same constraint that makes the append-only trigger necessary makes
-privilege-based enforcement unavailable.
+**A direct `INSERT` into `ledger_entries` bypasses the application resolve path
+— but not the proposal-matching trigger.** Every service connects as the
+schema-owning role, so `REVOKE` does not stick (ADR 0002, ADR 0006) — the same
+constraint that makes the append-only trigger necessary makes privilege-based
+enforcement unavailable. What that does NOT mean is that the control can be
+sidestepped wholesale: the paragraph below is not a consolation, it is the
+actual boundary, and this sentence used to claim more than it.
 
 What the validation trigger *does* guarantee is narrower and real: an
 `adjustment` or `fee_waived` entry cannot exist without naming an approved
