@@ -238,6 +238,54 @@ service and evaluated every 30s; the rules are visible at
   reports `ok` -- and reintroducing it silently, on a file already known to be
   malformed, is the worst moment to do it.
 
+## Verifying maker-checker on a running system
+
+`scripts/check_self_approval.sh` answers a question CI cannot: is the
+self-approval control live in the environment running **right now** -- after a
+deploy, a config change, a database restore, or in front of somebody who wants
+to see it rather than read about it. A passing CI badge and a deployed system
+are different claims.
+
+```bash
+bash scripts/check_self_approval.sh          # exit code is the contract
+#   0  verified       -- refused at every layer, and a second approver works
+#   1  FAILED         -- a layer did not refuse. A control finding, not a flake
+#   2  could not run  -- stack down, cannot log in, threshold unreadable
+```
+
+Exit 1 and exit 2 are deliberately distinct: *"the control is broken"* and
+*"I could not tell"* call for different responses, and collapsing them is how a
+control that never ran gets read as a control that passed -- the same defect
+`reconciliation.peek` had before D7.
+
+It removes one layer per step, so "the button was just disabled" is not an
+available explanation:
+
+| Step | What it removes | Refused by |
+|---|---|---|
+| 2 | the browser | the API, as the person who raised it |
+| 3 | the API | `resolve_pending_movement()` |
+| 4 | the function | `CHECK no_self_approval`, in the schema |
+| 5 | *nothing* | **must SUCCEED** for a different approver |
+
+Step 5 is what makes the rest mean anything. A system that refused *everyone*
+would pass steps 2-4 exactly as a working one does, so a check that only ever
+confirms refusal cannot distinguish "the control works" from "nothing works".
+
+The admin threshold is read from the running `servicing-service`, never written
+into the script: a second copy of a configured money value is free to drift from
+the deployed one.
+
+**What it leaves behind.** One proposal, rejected by admin. `pending_movements`
+refuses deletes by design -- a proposal is the evidence of what staff asked for
+-- so the row stays, resolved, and each run adds one. **No money moves:** a
+rejection writes no ledger entry, which step 6 prints rather than asserting.
+
+**What it does not cover.** It proves one person cannot approve their own
+proposal. It does not address two colleagues colluding, and it is not a defence
+against someone holding the schema-owning database credentials -- see ADR 0011,
+*Limitations*, for what the schema still bounds in that case.
+
 ## Known operational pain (unresolved)
 
 - **Payment retries — FIXED, keep watching.** The processor occasionally times out and
