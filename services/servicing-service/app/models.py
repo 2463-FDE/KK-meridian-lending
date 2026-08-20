@@ -118,3 +118,32 @@ class Payment(Base):
     method: Mapped[str | None] = mapped_column(String, default="card")
     auth_status: Mapped[str] = mapped_column(String, default="captured")
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LedgerEntry(Base):
+    """The immutable record of one balance movement (db/migrations/0035).
+
+    Mapped read-only in practice: nothing in this service writes a ledger entry
+    through the ORM. `balance.py` and `delinquency.py` insert with explicit SQL
+    inside a transaction, because the projection trigger and the composite
+    foreign key are the things that make an entry safe, and an ORM flush would
+    invite someone to build one without them.
+
+    Deliberately a SUBSET of the columns. `reason`, `actor_id` and `actor_role`
+    belong to adjustments and waivers, and `correlation_id` to the cross-service
+    trace; the read path this model serves is "where did this payment go", so
+    mapping more would widen every SELECT for no reader. Same discipline as
+    `Payment` above, which does not map `processor_ref` or `capture_source`.
+    """
+
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    loan_id: Mapped[int] = mapped_column(ForeignKey("loans.id"))
+    component: Mapped[str] = mapped_column(String)
+    # Signed: a payment is stored NEGATIVE because that is what it does to the
+    # balance. Readers that show it to a borrower flip the sign at the boundary.
+    amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
+    entry_type: Mapped[str] = mapped_column(String)
+    payment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    occurred_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -213,17 +213,57 @@ def loan_schedule(loan_id: int, session: Session = Depends(get_session)):
     )
 
 
+def _allocations_by_payment(session: Session, loan_id: int) -> dict:
+    """What each payment actually paid, read from the ledger it wrote.
+
+    Returns {payment_id: {component: amount}} for this loan's `payment` entries,
+    with amounts flipped to positive: a payment is stored as a NEGATIVE delta
+    because that is what it does to the balance, and "you paid -120.00 towards
+    fees" is not a sentence to put in front of a borrower.
+
+    **Read, never recomputed.** Calling `waterfall.allocate` here would produce a
+    second opinion about a movement that already happened, and the two could
+    disagree the moment a fee is waived or a schedule corrected -- the borrower
+    would then be shown an allocation that never occurred. The ledger rows are
+    what moved the balance; they are the only faithful answer.
+
+    Scoped to `entry_type = 'payment'` on purpose. A fee assessment, a waiver and
+    an approved adjustment all move the same components, and folding them in
+    would report money the borrower did not pay as part of what they paid.
+    """
+    rows = session.execute(
+        select(models.LedgerEntry.payment_id,
+               models.LedgerEntry.component,
+               func.sum(models.LedgerEntry.amount))
+        .where(models.LedgerEntry.loan_id == loan_id,
+               models.LedgerEntry.entry_type == "payment",
+               models.LedgerEntry.payment_id.isnot(None))
+        .group_by(models.LedgerEntry.payment_id, models.LedgerEntry.component)
+    ).all()
+    allocations: dict = {}
+    for payment_id, component, total in rows:
+        allocations.setdefault(payment_id, {})[component] = -float(total)
+    return allocations
+
+
 @router.get("/{loan_id}/payments", response_model=PaymentsOut)
 def loan_payments(loan_id: int, session: Session = Depends(get_session)):
     rows = session.scalars(
         select(models.Payment).where(models.Payment.loan_id == loan_id)
         .order_by(models.Payment.created_at.desc())
     ).all()
-    items = [
-        PaymentItem(
+    allocations = _allocations_by_payment(session, loan_id)
+    items = []
+    for p in rows:
+        # Absent, not zero. A payment with no ledger entries was applied before
+        # the ledger existed (or never applied at all), and the honest answer to
+        # "how much went to interest" is "we do not know", not "none".
+        split = allocations.get(p.id)
+        items.append(PaymentItem(
             id=p.id, amount=p.amount, method=p.method, masked_pan=_display_last4(p),
             created_at=p.created_at.isoformat() if p.created_at else None,
-        )
-        for p in rows
-    ]
+            applied_to_fees=split.get("fees", 0.0) if split else None,
+            applied_to_interest=split.get("interest", 0.0) if split else None,
+            applied_to_principal=split.get("principal", 0.0) if split else None,
+        ))
     return PaymentsOut(loan_id=loan_id, items=items)
