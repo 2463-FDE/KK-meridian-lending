@@ -23,8 +23,7 @@ you still cannot rely on.
 **Finding**
 
 - Servicing money routes authenticate the **calling service**
-- They do not enforce separation between the person **proposing** and the person
-  **approving** a money change
+- They do not separate the person **proposing** from the person **approving**
 - One account can adjust a balance or waive a fee alone
 
 **Action**
