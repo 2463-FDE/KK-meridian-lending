@@ -272,8 +272,13 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         "amount": amount, "loan_id": loan_id,
         "idempotency_key": idempotency_key,
     })
-    log.info("POST /payments charge req=%s correlation_id=%s -> ok",
-             safe_req, correlation_id)
+    # Deliberately WITHOUT the correlation id. At this point the request has not
+    # been resolved to a row, so on a retry the id minted above is about to be
+    # discarded in favour of the stored one -- and a log line carrying a
+    # discarded id is worse than one carrying none. It looks like evidence and
+    # returns nothing when an operator greps it. Reviewed on PR #56
+    # (CORR-LOG-001). The canonical line is emitted below, once the row is known.
+    log.info("POST /payments charge req=%s -> ok", safe_req)
 
     # Review fix: atomic check-and-write, same ON CONFLICT DO NOTHING + read-
     # back pattern disclosure-service's create_offer uses. A duplicate request
@@ -291,6 +296,10 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
     if inserted:
         row = inserted[0]
         payment_id = row["id"]
+        # The line an operator greps. Emitted after the row exists, so the id in
+        # it always matches a payments row.
+        log.info("payment accepted correlation_id=%s payment_id=%s loan_id=%s",
+                 correlation_id, payment_id, row["loan_id"])
         # Review fix: this is the actual authorization call -- a made-up
         # processor_token is declined here, not silently trusted. Only a
         # confirmed approval reaches _apply_via_servicing; a decline never
@@ -301,7 +310,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                                               correlation_id=correlation_id)
         except ChargeDeclinedError as exc:
             db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
-            log.warning("charge declined payment_id=%s: %s", payment_id, exc)
+            log.warning("charge declined payment_id=%s correlation_id=%s: %s",
+                        payment_id, correlation_id, exc)
             return {
                 "payment_id": payment_id, "loan_id": row["loan_id"],
                 "status": "failed", "applied_amount": float(row["amount"]),
@@ -365,6 +375,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # path is the one an incident actually exercises. Falls back to the fresh
         # value only for a row written before this column existed.
         correlation_id = row.get("correlation_id") or correlation_id
+        log.info("payment recognised as a repeat correlation_id=%s payment_id=%s "
+                 "loan_id=%s", correlation_id, row["id"], row["loan_id"])
         payment_id = row["id"]
         # Review fix: row["amount"] comes back from Postgres as a Decimal
         # (psycopg2 NUMERIC mapping) while `amount` here is a plain float --
@@ -397,8 +409,9 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             # the "processor approved, then we crashed" case.
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
-                "still pending authorization, checking processor before retrying",
-                safe_key, payment_id,
+                "correlation_id=%s still pending authorization, checking processor "
+                "before retrying",
+                safe_key, payment_id, correlation_id,
             )
             # ONE lookup for all three facts this branch needs -- that the
             # processor holds the charge, when it took the money, and which
@@ -410,8 +423,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             if existing:
                 log.info(
                     "processor already has an authorization on record for "
-                    "idempotency_key=%s -> payment_id=%s, reusing it instead of "
-                    "re-charging", safe_key, payment_id,
+                    "idempotency_key=%s -> payment_id=%s correlation_id=%s, reusing "
+                    "it instead of re-charging", safe_key, payment_id, correlation_id,
                 )
                 auth_id = existing.authorization_id
                 # The PROCESSOR's capture time, not ours.
@@ -446,7 +459,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                                               correlation_id=correlation_id)
                 except ChargeDeclinedError as exc:
                     db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
-                    log.warning("charge declined on retry payment_id=%s: %s", payment_id, exc)
+                    log.warning("charge declined on retry payment_id=%s correlation_id=%s: %s",
+                                payment_id, correlation_id, exc)
                     return {
                         "payment_id": payment_id, "loan_id": row["loan_id"],
                         "status": "failed", "applied_amount": float(row["amount"]),
@@ -481,8 +495,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             # apply-payment is idempotent by payment_id (db/migrations/0013).
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
-                "not yet applied, retrying apply",
-                safe_key, payment_id,
+                "correlation_id=%s not yet applied, retrying apply",
+                safe_key, payment_id, correlation_id,
             )
             # Review fix: reconcile against the ORIGINALLY stored loan_id, not
             # the retry request's own loan_id parameter -- a retry that (by
@@ -494,8 +508,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             applied = True
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> returning original "
-                "payment_id=%s (already applied)",
-                safe_key, payment_id,
+                "payment_id=%s correlation_id=%s (already applied)",
+                safe_key, payment_id, correlation_id,
             )
 
     return {

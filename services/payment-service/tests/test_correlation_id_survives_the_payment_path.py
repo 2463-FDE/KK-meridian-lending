@@ -306,3 +306,76 @@ def test_two_separate_payments_get_two_identifiers(db, servicing):
     second = db.stored_correlation_id(2)
 
     assert first != second
+
+
+def test_no_log_line_carries_an_id_that_matches_no_row(db, monkeypatch, caplog):
+    """Reviewed finding CORR-LOG-001, and the failure it describes exactly.
+
+    The id has to be minted before the INSERT, because the processor call needs
+    it and `payment_id` does not exist yet. On a RETRY that pre-mint is thrown
+    away in favour of the stored one -- so any line logged before the row is
+    resolved is indexed under an id that matches no `payments` row and no
+    `ledger_entries` row.
+
+    An operator grepping that id finds nothing, on the one path this PR calls
+    the realistic incident. A dead id in a trace is worse than no id: it looks
+    like evidence and returns an empty result.
+
+    So the assertion is not "the canonical id appears somewhere" -- it is that
+    NO `pay_` value appears anywhere in the retry's output except the canonical
+    one.
+    """
+    import logging
+    import re as _re
+
+    def _boom(*a, **k):
+        raise RuntimeError("servicing is unreachable")
+
+    monkeypatch.setattr(payments.httpx, "post", _boom)
+    assert client.post("/payments", json=_payload()).status_code == 200
+    canonical = db.stored_correlation_id()
+
+    monkeypatch.setattr(payments.httpx, "post",
+                        lambda url, json=None, **k: _Ok())
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        assert client.post("/payments", json=_payload()).status_code == 200
+
+    logged = chr(10).join(r.getMessage() for r in caplog.records)
+    seen = set(_re.findall(r"pay_[0-9a-f]{32}", logged))
+    assert seen <= {canonical}, (
+        "the retry logged correlation id(s) that belong to no payment row: %r "
+        "(canonical is %r)" % (sorted(seen - {canonical}), canonical)
+    )
+    assert canonical in logged, "the retry logged no canonical id at all"
+
+
+def test_the_duplicate_path_lines_can_be_found_by_the_trace(db, monkeypatch, caplog):
+    """The lines an operator reads during an incident must carry the id.
+
+    A retry writes its own explanatory lines -- 'still pending authorization',
+    'not yet applied, retrying apply'. Those are precisely what someone follows
+    when a payment is stuck, and a line without the id cannot be reached from
+    the trace at all.
+    """
+    import logging
+
+    def _boom(*a, **k):
+        raise RuntimeError("servicing is unreachable")
+
+    monkeypatch.setattr(payments.httpx, "post", _boom)
+    client.post("/payments", json=_payload())
+    canonical = db.stored_correlation_id()
+
+    monkeypatch.setattr(payments.httpx, "post", lambda url, json=None, **k: _Ok())
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        client.post("/payments", json=_payload())
+
+    retry_lines = [r.getMessage() for r in caplog.records
+                   if "duplicate POST /payments" in r.getMessage()]
+    assert retry_lines, "the retry logged no duplicate-path line"
+    for line in retry_lines:
+        assert canonical in line, (
+            "a duplicate-path line cannot be found by the trace: %r" % line
+        )
