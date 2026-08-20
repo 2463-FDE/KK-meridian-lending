@@ -84,13 +84,15 @@ def _rows(conn, sql, params=()):
 
 
 def _payment(conn, *, loan_id=1, amount="100.00", auth_status="captured",
-             applied=False, attempts=0, next_attempt="NULL"):
+             applied=False, attempts=0, next_attempt="NULL",
+             correlation_id="pay_seededfortherow"):
     row = _rows(
         conn,
         "INSERT INTO payments (loan_id, amount, auth_status, applied_at, apply_attempts, "
-        f"apply_next_attempt_at) VALUES (%s, %s, %s, %s, %s, {next_attempt}) RETURNING id",
+        f"apply_next_attempt_at, correlation_id) VALUES (%s, %s, %s, %s, %s, {next_attempt}, %s) "
+        "RETURNING id",
         (loan_id, amount, auth_status,
-         "2026-01-01T00:00:00+00:00" if applied else None, attempts),
+         "2026-01-01T00:00:00+00:00" if applied else None, attempts, correlation_id),
     )
     return row[0]["id"]
 
@@ -102,12 +104,18 @@ class _Servicing:
     def __init__(self, up=True):
         self.up = up
         self.calls = []
+        self.correlation_ids = []
 
     def install(self, monkeypatch, conn):
         from app import payments as payments_mod
 
-        def fake_apply(loan_id, amount, payment_id):
+        def fake_apply(loan_id, amount, payment_id, correlation_id=None):
+            # The drain passes the row's own correlation id (db/migrations/0043).
+            # Recorded rather than ignored: these cases are the only ones that
+            # exercise the drain against a real table, so they are also the only
+            # place a dropped id would show up in a real query plan.
             self.calls.append(payment_id)
+            self.correlation_ids.append(correlation_id)
             if not self.up:
                 _rows(conn, "UPDATE payments SET apply_last_error = %s WHERE id = %s",
                       ("HTTPStatusError", payment_id))
@@ -149,6 +157,15 @@ def test_captured_payment_with_servicing_down_reconciles_without_a_user_retry(pg
     row = _rows(pg, "SELECT * FROM payments WHERE id = %s", (payment_id,))[0]
     assert row["applied_at"] is not None, "the balance was never credited"
     assert servicing.calls == [payment_id, payment_id]
+
+    # The trace survives the drain, against a real table and a real claim query
+    # (db/migrations/0043). This is the path most likely to lose it: it runs long
+    # after the capture, nobody is watching, and a dropped id here would split
+    # one payment's evidence in two while every log line still looked correct.
+    assert servicing.correlation_ids == ["pay_seededfortherow"] * 2, (
+        "the drain did not carry the row's own correlation id: %r"
+        % (servicing.correlation_ids,)
+    )
 
 
 def test_backoff_grows_and_is_capped(pg, monkeypatch):
