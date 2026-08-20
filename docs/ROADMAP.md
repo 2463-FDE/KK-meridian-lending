@@ -38,8 +38,9 @@ below explain how it was derived.
   payment path is idempotent and servicing's processorless duplicate has been
   retired, so payment creation has exactly one path again; Week 6 has the token
   boundary, the gateway role rule, the ledger, a gateway-signed human principal
-  and maker-checker enforcement; Week 7 has
-  reconciliation but not a cross-service trace ID; Weeks 8–10 retain the scoped
+  and maker-checker enforcement; Week 7 has both
+  its deliverables — the scoped reconciliation control and the cross-service
+  trace ID (`db/migrations/0043`, PR #56); Weeks 8–10 retain the scoped
   gaps in the table below.
 
 *This block is the summary of the matrix below and it drifted from it.* It led
