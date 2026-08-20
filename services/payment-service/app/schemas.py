@@ -35,6 +35,16 @@ class PaymentIn(BaseModel):
     # PR; this is the same bound on the service that actually takes the charge.
     # Reviewed on PR #16.
     loan_id: int = Field(gt=0, le=2_147_483_647)
+    # The one free-form string on this model, and it was the one hole left.
+    # Length was the only constraint, so `processor_token="4111111111111111"`
+    # was accepted at the boundary; it is never persisted (ADR 0008) and it is
+    # redacted in the log, but `processor.authorize_charge` posts it verbatim to
+    # the processor once `PROCESSOR_API_KEY` is set -- a card number in an
+    # outbound request body. Reviewed on PR #51 (PAY-FLOW-001).
+    #
+    # Refused here as well as in `processor.py` on purpose: this boundary
+    # rejects before a `payments` row is written at all, so a card-shaped token
+    # produces a 422 rather than a failed payment row someone has to explain.
     processor_token: str = Field(min_length=1, max_length=255)
     last4: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
     # Shape-constrained like `last4` above, and for the same reason: the field
@@ -64,6 +74,24 @@ class PaymentIn(BaseModel):
     # constraint -- a PAN or an SSN cannot be spelled with it, because neither
     # survives without its digits being contiguous.
     idempotency_key: str = Field(min_length=1, max_length=255)
+
+    @field_validator("processor_token")
+    @classmethod
+    def _token_is_not_sensitive_content(cls, value: str) -> str:
+        """Reject a token carrying the card/SSN shapes the redactor knows.
+
+        Same rule and the same shared definition as `idempotency_key` below, for
+        a different reason: that field is refused because it is STORED, this one
+        because it is TRANSMITTED. Both are caller-controlled free text, and a
+        constraint on only the stored one leaves the outbound body open.
+        """
+        if redactor.looks_sensitive(value):
+            raise ValueError(
+                "processor_token must be an opaque token issued by the "
+                "processor's own tokenization step, not card or personal data -- "
+                "it is sent to the processor in a request body"
+            )
+        return value
 
     @field_validator("idempotency_key")
     @classmethod

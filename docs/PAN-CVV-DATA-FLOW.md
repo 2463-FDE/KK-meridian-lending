@@ -19,15 +19,26 @@ test card, not a card belonging to anyone.
 
 ## 1. The short answer
 
-| Value | Does the Meridian payment path hold it? | Where it dies |
+| Value | Does a Meridian **backend** service hold it? | Where it dies |
 |---|---|---|
-| PAN (full card number) | **No, not even transiently** — no Meridian process ever receives it | In the browser, inside `frontend/lib/tokenize.ts`; the last four digits leave it, nothing else |
+| PAN (full card number) | **No, not even transiently** — no backend service receives it | In the browser, inside `frontend/lib/tokenize.ts`; the last four digits leave it, nothing else |
 | CVV (security code) | **No** — it is a parameter of one browser-side function that reads and discards it | Same place, and it is not even returned from that function |
 
 The reason this is a stronger statement than "we do not store it" is the
 tokenization boundary: the values are reduced *before* the first Meridian
-backend is called, so there is no process, no request body, no log line and no
-cache downstream of that point that could hold them.
+backend is called, so there is no backend process, no request body, no log line
+and no cache downstream of that point that could hold them.
+
+**Read the scope of that claim exactly.** It is about backend services. **Meridian
+frontend code in this repository does receive both values** — `tokenizeCard(pan,
+cvv)` is our code, running in the borrower's browser, and it takes the card
+number and the security code as arguments. An earlier draft of this document
+said "no Meridian process ever receives it", which was wrong on its own next
+page, and was corrected in review (PR #51, DOC-FRONTEND-001). A claim that no
+Meridian code of any kind handles PAN or CVV requires a real processor's hosted
+field, where the input element itself belongs to the processor's origin and the
+values never enter a script we wrote. That is boundary B1 below, and it is not
+built.
 
 ## 2. The flow, step by step
 
@@ -72,10 +83,28 @@ field is otherwise a channel for the same data:
 | `loan_id` | `int`, ≤ 2147483647 | An unbounded int accepts a PAN-shaped number |
 | `idempotency_key` | rejected if `redactor.looks_sensitive` | Persisted on the row; redaction covers logs, not storage |
 
-`processor_token` is the one free-form string, and it is *not* a hole: a value
-that is not a recognised token is declined by
-`services/payment-service/app/processor.py` before anything is written, and it
-is redacted by key in every log line.
+`processor_token` is the one free-form string, and closing it took two changes
+rather than the one this document originally claimed:
+
+* `PaymentIn` now refuses a token carrying the card or SSN shapes the redactor
+  knows — the same rule as `idempotency_key`, for a different reason. That field
+  is constrained because it is **stored**; this one because it is
+  **transmitted**.
+* `processor.authorize_charge` refuses the same shapes before the stub/real
+  split, so the guard covers both paths.
+
+The second one is the point. The original version of this document said the
+field was "not a hole" because an unrecognised token is declined by the stub
+processor — but that check only runs when no processor is configured. With
+`PROCESSOR_API_KEY` set, the value was posted verbatim as `json={"token": ...}`,
+which put a card number in an outbound request body. Found in review (PR #51,
+PAY-FLOW-001), and the test that had "proved" the field safe could never have
+reached the code that sends it.
+
+**Cost of the check, stated:** a real processor whose token format contains a
+Luhn-valid or nine-digit run would be refused. A token is an opaque correlator
+by definition; if a live format collides, the fix is the format or an explicit
+allowance, not deleting the guard.
 
 ### Step 4 — what payment-service writes
 
@@ -133,7 +162,7 @@ boundary, not a claim: see §5, B4.
 |---|---|---|---|
 | T1 | Browser → processor | PAN, CVV | The processor's SDK. Outside Meridian code. Mocked here |
 | T2 | Browser → payment-service | token, last4, brand, amount, loan_id, key | `PaymentIn`, `extra="forbid"` |
-| T3 | payment-service → processor | token, amount, idempotency key | `processor.authorize_charge` |
+| T3 | payment-service → processor | token, amount, idempotency key | `PaymentIn`'s token validator, then `processor.authorize_charge`'s own refusal before either path builds a request |
 | T4 | payment-service → servicing | amount, payment_id | `_apply_via_servicing` |
 | T5 | payment-service → its log file | redacted dict | `redactor.redact_dict` |
 | T6 | payments table → reconciliation | loan_id, processor_ref, amount | The SELECT list in `reconciliation.py` |
@@ -142,7 +171,10 @@ boundary, not a claim: see §5, B4.
 
 | Claim | Test |
 |---|---|
-| A synthetic PAN and CVV pushed through **every** caller-controlled field reach no SQL parameter and no log record | `services/payment-service/tests/test_pan_cvv_never_enter_the_payment_path.py` |
+| A synthetic PAN pushed through **every** allowed field reaches no SQL parameter and no log record | `services/payment-service/tests/test_pan_cvv_never_enter_the_payment_path.py` |
+| A synthetic CVV, in four phrasings, pushed through **every** allowed field, likewise | same file — widened after review found the evidence table claiming more than the sweep covered (TEST-CLAIM-001) |
+| A card-shaped `processor_token` is refused at the API boundary, before any row is written | same file |
+| With a real processor configured, a card-shaped token never reaches `httpx.post` — asserted at the transport, not on the exception | same file; mutation-checked by disabling the guard, which fails that case |
 | The named fields `pan`/`cvv`/`ssn` are refused with 422 and nothing is written | `services/payment-service/tests/test_charge_flow.py` |
 | `processor_token` is never persisted and is redacted in the log | `services/payment-service/tests/test_charge_flow.py` |
 | The redactor masks PAN (Luhn), CVV and SSN shapes, by key and by pattern | `services/payment-service/tests/test_redactor.py` |
@@ -156,10 +188,20 @@ boundary, not a claim: see §5, B4.
 Named as unproven rather than left to be assumed. Each is a real gap, not a
 formality.
 
-**B1 — there is no real processor.** `frontend/lib/tokenize.ts` is a mock. It
-demonstrates the boundary; it is not a PCI-attested tokenizer, and no
-statement here transfers to whichever SDK replaces it. Substituting a real
-processor is a change to T1 and needs its own evidence.
+**B1 — there is no real processor, and our own frontend handles the card.**
+`frontend/lib/tokenize.ts` is a mock. It demonstrates the boundary; it is not a
+PCI-attested tokenizer, and no statement here transfers to whichever SDK
+replaces it. Two consequences, both open:
+
+* the PAN and the CVV are arguments to **Meridian code** — a function in this
+  repository, running in the borrower's browser. A real hosted field would put
+  the input element itself on the processor's origin, so the values would never
+  enter a script we wrote. Until that swap, "no Meridian code handles them" is
+  false and this document does not claim it;
+* substituting a real processor is a change to T1 and to T3, and needs its own
+  evidence. The T3 guard added in PR #51 keeps card-shaped data out of the
+  outbound body regardless of which processor is behind it, but it constrains
+  what we send, not what the SDK does.
 
 **B2 — logs outside the application.** Everything above is about
 application-level logging call sites. Reverse-proxy access logs, container

@@ -44,6 +44,7 @@ from typing import NamedTuple
 
 import httpx
 
+from . import redactor
 from .config import ALLOW_PAYMENT_STUB, ENVIRONMENT, PROCESSOR_API_KEY, PROCESSOR_BASE_URL
 from .logging_config import get_logger
 
@@ -276,6 +277,45 @@ def authorize_charge(processor_token: str, amount: float,
     # and Decimal('0.02') != 0.02 under naive comparison broke the stub's own
     # test-decline check. Normalize to float once, up front.
     amount = float(amount)
+
+    # A token that carries card or personal data never leaves this process.
+    #
+    # Review finding PAY-FLOW-001 on PR #51. The stub path declines an
+    # unrecognised token before authorizing, so `processor_token` looked closed.
+    # The REAL path did not check it at all: with `PROCESSOR_API_KEY` set, the
+    # value is posted verbatim as `json={"token": ...}`, so a caller sending a
+    # PAN in the one free-form string field put a card number in an outbound
+    # request body -- a card number leaving the process, which is precisely the
+    # question the data-flow statement exists to answer. The check sat in a
+    # branch that only runs when no processor is configured.
+    #
+    # Placed BEFORE the stub/real split so both paths are covered by one guard,
+    # and duplicated at the API boundary (`schemas.PaymentIn`) rather than only
+    # here: the boundary refuses before a `payments` row is written at all, and
+    # this one covers any caller that is not an HTTP request.
+    #
+    # `ChargeDeclinedError` rather than a new exception type, because the
+    # caller's correct behaviour is identical to a decline -- no money moved, the
+    # row is marked failed, nothing captured -- and `_stub_authorize` already
+    # declines an unrecognised token with the same class.
+    #
+    # **Cost, stated rather than hidden:** a real processor whose token format
+    # contains a Luhn-valid digit run, or a nine-digit run, would be refused
+    # here. That direction is deliberate. A token is an opaque correlator by
+    # definition, and if a live format ever collides with the shapes this
+    # rejects, the fix is the token format or an explicit allowance for it --
+    # not deleting the check that keeps card data out of an outbound body.
+    if redactor.looks_sensitive(processor_token or ""):
+        log.error(
+            "refusing to authorize: the processor_token carries card or personal "
+            "data shapes, and sending it would put that data in an outbound "
+            "request body"
+        )
+        raise ChargeDeclinedError(
+            "processor declined: the token carries card or personal data and was "
+            "not transmitted"
+        )
+
     if not PROCESSOR_API_KEY:
         if not ALLOW_PAYMENT_STUB:
             raise ProcessorUnavailableError(

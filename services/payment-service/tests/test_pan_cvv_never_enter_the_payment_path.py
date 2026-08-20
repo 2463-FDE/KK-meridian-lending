@@ -318,44 +318,112 @@ def test_a_pan_shaped_loan_id_is_refused_by_the_boundary(recording_db):
     assert recording_db.calls == [], "a refused request must write nothing"
 
 
-def test_a_pan_in_the_processor_token_never_becomes_a_captured_row(recording_db):
-    """The one free-form string field, followed all the way to what it writes.
+def test_a_pan_in_the_processor_token_is_refused_at_the_boundary(recording_db):
+    """The one free-form string field, refused before a row exists.
 
-    `processor._stub_authorize` builds `authorization_id` from the token's last
-    twelve characters, and that id IS persisted -- so a token that reached
-    authorization would put twelve digits of a card number on the payments row.
-    It does not, because a token that is not a recognised token is declined
-    before anything is captured. Asserted on the outcome rather than on the
-    regex, because the regex is what would change.
+    Reviewed finding PAY-FLOW-001. Length was this field's only constraint, so
+    the request was accepted and the value only stopped later, by the stub
+    processor's token-shape check -- a check that does not run once a real
+    processor is configured. `PaymentIn` now refuses it outright, which also
+    means no `payments` row is written for someone to explain afterwards.
     """
     resp = client.post("/payments", json=_payload(processor_token=SYNTHETIC_PAN))
 
-    assert resp.status_code in (200, 422)
-    if resp.status_code == 200:
-        assert resp.json()["status"] == "failed", (
-            "an arbitrary token was treated as an authorization")
-    written = recording_db.written()
-    assert "auth_status = 'captured'" not in written
-    _assert_no_card_data(written, "a statement, via the processor token")
+    assert resp.status_code == 422, resp.text
+    assert recording_db.calls == [], "a refused request must write nothing"
 
 
+def test_the_real_processor_path_never_transmits_a_card_shaped_token(monkeypatch):
+    """The gap the boundary check alone would not have closed.
+
+    With `PROCESSOR_API_KEY` set, `authorize_charge` posts the token verbatim as
+    `json={"token": ...}`. The previous version of this file swept the database
+    and the log and called `processor_token` closed -- but an outbound request
+    body is a third surface, and it was the one the stub path could never
+    exercise, because `_MOCK_TOKEN_RE` declines first when no processor is
+    configured. So the test that "proved" the field safe was structurally
+    incapable of reaching the code that sends it.
+
+    Asserted at the transport: `httpx.post` is captured and must never be
+    called. Checking the exception alone would pass on an implementation that
+    raised AFTER the request went out.
+    """
+    sent = []
+    monkeypatch.setattr(processor, "PROCESSOR_API_KEY", "test-processor-key")
+    monkeypatch.setattr(processor.httpx, "post",
+                        lambda *a, **k: sent.append((a, k)) or _FakeServicingResponse())
+
+    with pytest.raises(processor.ChargeDeclinedError):
+        processor.authorize_charge(SYNTHETIC_PAN, 250.0, "idem-real-processor")
+
+    assert sent == [], (
+        "a card number was put in an outbound processor request body")
+    _assert_no_card_data(repr(sent), "an outbound request")
+
+
+def test_the_real_processor_path_still_sends_a_legitimate_token(monkeypatch):
+    """Guard the guard, and the cost of the check above.
+
+    A guard that refused every token would satisfy the test above and break
+    every payment. The mock token shape -- which is what the tokenizer actually
+    issues -- must still reach the processor.
+    """
+    sent = []
+
+    class _Approved:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"approved": True, "authorization_id": "auth_live_1",
+                    "processor_ref": "PR-100231"}
+
+    monkeypatch.setattr(processor, "PROCESSOR_API_KEY", "test-processor-key")
+    monkeypatch.setattr(processor.httpx, "post",
+                        lambda *a, **k: sent.append((a, k)) or _Approved())
+
+    auth = processor.authorize_charge(VALID_MOCK_TOKEN, 250.0, "idem-real-ok")
+
+    assert auth.authorization_id == "auth_live_1"
+    assert len(sent) == 1
+    assert sent[0][1]["json"]["token"] == VALID_MOCK_TOKEN
+
+
+def test_the_stub_path_refuses_a_card_shaped_token_too(recording_db):
+    """One guard, both paths.
+
+    The check sits before the stub/real split. If it were inside the real
+    branch, a dev or test stack -- the configuration this repository actually
+    runs in -- would be the one place it did not apply.
+    """
+    with pytest.raises(processor.ChargeDeclinedError):
+        processor.authorize_charge(SYNTHETIC_PAN, 250.0, "idem-stub-pan")
+
+
+@pytest.mark.parametrize("field", ["processor_token", "brand", "method", "name",
+                                   "idempotency_key", "last4"])
 @pytest.mark.parametrize("phrasing", [
     "cvv {cvv}", "cvc: {cvv}", "security code {cvv}", "card verification value {cvv}",
 ])
-def test_a_security_code_pushed_through_a_free_text_field_reaches_neither_surface(
-        recording_db, logged, phrasing):
-    """The CVV, in the shapes a caller would actually spell it.
+def test_a_security_code_pushed_through_any_allowed_field_reaches_neither_surface(
+        recording_db, logged, field, phrasing):
+    """The CVV, in the shapes a caller would spell it, through every field.
 
-    `idempotency_key` is the free-text field that gets persisted, so it is the
-    one that matters; the boundary validator rejects a key carrying any shape the
-    redactor knows, which is why this is a 422 rather than a masked write.
+    Reviewed finding TEST-CLAIM-001: the first version of this file pushed the
+    PAN through every allowed field but the CVV through `idempotency_key` alone,
+    while the data-flow statement's evidence table claimed both. A claim wider
+    than its test is the defect this whole document set exists to avoid, so the
+    test was widened rather than the sentence narrowed.
+
+    Same two acceptable outcomes as the PAN sweep: refused at the boundary, or
+    accepted and reaching neither surface.
     """
     value = phrasing.format(cvv=SYNTHETIC_CVV)
-    resp = client.post("/payments", json=_payload(idempotency_key=value))
+    resp = client.post("/payments", json=_payload(**{field: value}))
 
     assert resp.status_code in (200, 422), resp.text
-    _assert_no_card_data(recording_db.written(), "a statement, via idempotency_key")
-    _assert_no_card_data(_logged_text(logged), "a log record, via idempotency_key")
+    _assert_no_card_data(recording_db.written(), f"a statement, via {field}")
+    _assert_no_card_data(_logged_text(logged), f"a log record, via {field}")
 
 
 # --------------------------------------------------------------------------
