@@ -336,7 +336,7 @@ def test_apply_payment_is_untouched_by_the_cutover(keys, monkeypatch):
     quietly took the payment path down with it would be its own defect."""
     applied = []
     monkeypatch.setattr(main.balance, "apply_payment_once",
-                        lambda p, l, a: (applied.append(p), (0.0, True))[1])
+                        lambda p, l, a, **kw: (applied.append(p), (0.0, True))[1])
     response = _client().post("/accounts/1/apply-payment",
                               json={"amount": 1.0, "payment_id": 5},
                               headers={"X-Internal-Token": TOKEN})

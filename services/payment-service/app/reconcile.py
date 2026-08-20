@@ -57,7 +57,7 @@ UPDATE payments
       LIMIT %s
       FOR UPDATE SKIP LOCKED
  )
-RETURNING id, loan_id, amount, apply_attempts
+RETURNING id, loan_id, amount, apply_attempts, correlation_id
 """
 
 
@@ -75,11 +75,18 @@ def reconcile_once(limit: int = 20) -> dict:
     claimed = claim_due(limit)
     applied = 0
     for row in claimed:
-        if _apply_via_servicing(row["loan_id"], row["amount"], row["id"]):
+        # The row's OWN correlation id, carried forward. This drain runs long
+        # after the capture, so it is the likeliest place for a trace to be
+        # dropped or a fresh id invented -- and either would split one payment's
+        # evidence in two while every individual log line still looked correct.
+        if _apply_via_servicing(row["loan_id"], row["amount"], row["id"],
+                                row.get("correlation_id")):
             applied += 1
             log.info(
-                "reconciled captured payment payment_id=%s loan_id=%s attempt=%s",
-                row["id"], row["loan_id"], row["apply_attempts"],
+                "reconciled captured payment correlation_id=%s payment_id=%s "
+                "loan_id=%s attempt=%s",
+                row.get("correlation_id"), row["id"], row["loan_id"],
+                row["apply_attempts"],
             )
         elif row["apply_attempts"] >= RECONCILE_MAX_ATTEMPTS:
             # Out of automatic retries. Left in place and still reported by

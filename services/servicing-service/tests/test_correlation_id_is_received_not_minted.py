@@ -1,21 +1,22 @@
-"""Tests for balance.apply_payment_once (db/migrations/0013).
+"""Servicing stamps the id it was GIVEN. It never invents one.
 
-Review finding: apply-payment applied the balance unconditionally on every
-call, with no idempotency of its own -- it trusted payment-service to never
-call it twice for the same payment. Once payment-service started retrying a
-pending apply on a same-key retry, a duplicate call here (the retry itself,
-or two requests racing) had to be guaranteed not to double-apply the same
-payment_id. These tests exercise apply_payment_once() directly.
+The half of the cross-service trace that lives here. payment-service mints one
+identifier and sends it with the apply; this service writes it onto every ledger
+entry the payment produces, so "show me this charge" returns the whole
+allocation -- fees, interest and principal -- rather than one row of it.
 
-Review finding (follow-up): the marker INSERT and the balance UPDATE used to
-each auto-commit on their own -- a balance-update failure after the marker
-had already landed left a permanent marker with no balance ever applied,
-silently skipping every future retry forever. test_apply_payment_once_rolls_
-back_marker_and_retries_after_a_failed_balance_update covers the fix:
-db.transaction() rolling both statements back together.
+The defect worth guarding is not a missing id. It is a SECOND one. If servicing
+generated its own when none arrived, or replaced what it was sent, both sides
+would hold a perfectly good identifier and neither could find the other's rows.
+Every log line would look right. That is the failure this file exists for, so
+the assertions compare against the value that was sent rather than checking that
+something id-shaped got stored.
+
+`correlation_id` is inert here by design: nothing keys, joins, dedupes or
+reconciles on it. `test_the_apply_still_works_without_one` is the proof -- a
+rolling deploy where payment-service is older must still credit the borrower.
 """
 from contextlib import contextmanager
-
 from decimal import Decimal
 
 import pytest
@@ -59,6 +60,8 @@ class _FakeDb:
         self.past_due = past_due
         self.applications = {}
         self.ledger = set()
+        self.ledger_params = []
+        self.ledger_sql = []
         self.payment_statuses = {}
 
     def _run(self, sql, params=None):
@@ -97,6 +100,8 @@ class _FakeDb:
             # precisely so a payment can be split.
             # correlation_id joined the ledger INSERT with db/migrations/0043.
             loan_id, component, amount, payment_id, correlation_id = params
+            self.ledger_params.append(params)
+            self.ledger_sql.append(" ".join(sql.split()))
             if (payment_id, component) in self.ledger:
                 raise RuntimeError("duplicate ledger payment component")
             self.ledger.add((payment_id, component))
@@ -129,93 +134,105 @@ class _FakeDb:
             raise
 
 
+
+
 @pytest.fixture
-def fake_db(monkeypatch):
-    db = _FakeDb(balance=100.0)
-    monkeypatch.setattr(balance, "db", db)
-    return db
+def db(monkeypatch):
+    """The same fake `test_apply_payment_idempotency.py` uses, so this file and
+    that one cannot disagree about what the apply path does -- with the ledger
+    parameters recorded, which is what these assertions read."""
+    fake = _FakeDb(balance=100.0)
+    monkeypatch.setattr(balance, "db", fake)
+    return fake
 
 
-def test_apply_payment_once_applies_on_first_call(fake_db):
-    new_balance, applied = balance.apply_payment_once(payment_id=1, loan_id=5, amount=30.0)
-
-    assert applied is True
-    assert new_balance == 70.0
-    assert fake_db.balance == 70.0
+def _apply(db, correlation_id):
+    return balance.apply_payment_once(7, 1, 10.0, correlation_id=correlation_id)
 
 
-def test_apply_payment_once_is_a_noop_on_duplicate_payment_id(fake_db):
-    """The exact scenario the review flagged: apply-payment called twice for
-    the same payment_id (a payment-service retry, or a race) must move the
-    balance once, not twice."""
-    first_balance, first_applied = balance.apply_payment_once(payment_id=7, loan_id=5, amount=30.0)
-    second_balance, second_applied = balance.apply_payment_once(payment_id=7, loan_id=5, amount=30.0)
-
-    assert first_applied is True
-    assert second_applied is False
-    assert first_balance == second_balance == 70.0
-    assert fake_db.balance == 70.0  # not 40.0 -- the second call never re-applied
+def _ledger_params(db):
+    assert db.ledger_params, "the apply wrote no ledger entry"
+    return db.ledger_params
 
 
-@pytest.mark.parametrize("replay_loan,replay_amount", [(6, 30.0), (5, 31.0), (6, 31.0)])
-def test_apply_payment_once_rejects_mismatched_replay(fake_db, replay_loan, replay_amount):
-    balance.apply_payment_once(payment_id=7, loan_id=5, amount=30.0)
+def test_the_ledger_entry_carries_the_id_it_was_sent(db):
+    _apply(db, "pay_fromtheotherservice")
 
-    with pytest.raises(balance.PaymentReplayConflict, match="does not match"):
-        balance.apply_payment_once(
-            payment_id=7, loan_id=replay_loan, amount=replay_amount
+    for params in _ledger_params(db):
+        assert params[-1] == "pay_fromtheotherservice", (
+            "servicing stored %r instead of the id payment-service sent" % (params[-1],)
         )
 
-    assert fake_db.applications[7] == (5, 30.0)
-    assert fake_db.balance == 70.0
+
+def test_every_component_of_one_payment_shares_the_id(db):
+    """One payment can write three entries. All three must carry the same id, or
+    "show me this charge" returns part of the allocation and the operator draws
+    the wrong conclusion from a complete-looking answer."""
+    _apply(db, "pay_onetrace")
+
+    ids = {params[-1] for params in _ledger_params(db)}
+    assert ids == {"pay_onetrace"}, ids
 
 
-def test_apply_payment_once_applies_separately_for_different_payment_ids(fake_db):
-    balance.apply_payment_once(payment_id=1, loan_id=5, amount=30.0)
-    _, applied = balance.apply_payment_once(payment_id=2, loan_id=5, amount=20.0)
+def test_the_insert_names_the_column_rather_than_relying_on_position(db):
+    """A positional guard: if the column list and the parameter tuple ever drift,
+    the id silently lands in another column."""
+    _apply(db, "pay_positional")
+    sql = db.ledger_sql[0]
+    params = _ledger_params(db)[0]
+
+    columns = sql.split("(", 1)[1].split(")", 1)[0]
+    names = [c.strip() for c in columns.split(",")]
+    assert names[-1] == "correlation_id", names
+
+    # Placeholders, not column count: `entry_type` is written as a literal
+    # 'payment' in the VALUES list, so the two differ by one BY DESIGN. Counting
+    # columns here would have made this test fail on correct code, which is how a
+    # guard gets weakened or deleted.
+    placeholders = sql.split("VALUES", 1)[1].count("%s")
+    assert placeholders == len(params), (sql, params)
+
+
+def test_the_apply_still_works_without_one(db):
+    """Inert by design.
+
+    A rolling deploy can put an older payment-service in front of this one, and
+    a captured charge must still reach the borrower's balance. NULL means "no
+    trace", which is true, rather than an error or an invented id.
+    """
+    new_balance, applied = _apply(db, None)
 
     assert applied is True
-    assert fake_db.balance == 50.0
+    assert new_balance is not None
+    for params in _ledger_params(db):
+        assert params[-1] is None
 
 
-def test_apply_payment_once_rolls_back_marker_and_retries_after_a_failed_balance_update(fake_db):
-    """The exact review scenario: the balance UPDATE fails AFTER the marker
-    INSERT would otherwise have landed. The marker must roll back with it --
-    otherwise a retry for this payment_id hits the ON CONFLICT path forever
-    and the balance never moves, even though the marker claims it's applied."""
-    real_run = fake_db._run
+def test_servicing_mints_nothing_of_its_own(db):
+    """The adversarial case, stated directly.
 
-    def _fail_the_balance_update(sql, params=None):
-        if "INSERT INTO ledger_entries" in sql.strip():
-            raise RuntimeError("simulated balance update failure")
-        return real_run(sql, params)
+    If this service ever generated an id when none arrived, both sides would
+    hold a good-looking identifier and neither could find the other's rows.
+    """
+    _apply(db, None)
 
-    fake_db._run = _fail_the_balance_update
-
-    with pytest.raises(RuntimeError):
-        balance.apply_payment_once(payment_id=9, loan_id=5, amount=30.0)
-
-    # Rolled back: no marker, balance untouched.
-    assert 9 not in fake_db.applications
-    assert fake_db.balance == 100.0
-
-    # A retry with no failure this time must actually apply -- not silently
-    # skip because a stale marker survived the failed attempt.
-    fake_db._run = real_run
-    new_balance, applied = balance.apply_payment_once(payment_id=9, loan_id=5, amount=30.0)
-
-    assert applied is True
-    assert new_balance == 70.0
-    assert fake_db.balance == 70.0
+    stored = {params[-1] for params in _ledger_params(db)}
+    assert stored == {None}, (
+        "servicing invented a correlation id (%r) instead of recording that "
+        "there was none" % (stored,)
+    )
 
 
-@pytest.mark.parametrize("status", ["failed", "pending"])
-def test_apply_payment_once_rejects_uncaptured_payment_before_marker(fake_db, status):
-    fake_db.payment_statuses[21] = status
+def test_the_guard_would_notice_a_replaced_id(db):
+    """Guard the guard.
 
-    with pytest.raises(ValueError, match="not captured"):
-        balance.apply_payment_once(payment_id=21, loan_id=5, amount=30.0)
+    Every assertion above compares against a value chosen by the test. If the
+    parameter were read from the wrong position, or the column dropped, these
+    comparisons must fail rather than pass on a coincidence -- so this asserts
+    the negative directly.
+    """
+    _apply(db, "pay_expected")
 
-    assert 21 not in fake_db.applications
-    assert 21 not in fake_db.ledger
-    assert fake_db.balance == 100.0
+    stored = {params[-1] for params in _ledger_params(db)}
+    assert "pay_somethingelse" not in stored
+    assert stored == {"pay_expected"}

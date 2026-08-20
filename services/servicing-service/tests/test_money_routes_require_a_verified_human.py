@@ -431,7 +431,7 @@ def test_the_machine_apply_path_still_needs_no_human(keys, monkeypatch):
     """
     applied = []
     monkeypatch.setattr(main.balance, "apply_payment_once",
-                        lambda payment_id, loan_id, amount: (applied.append(payment_id), (0.0, True))[1])
+                        lambda payment_id, loan_id, amount, **kw: (applied.append(payment_id), (0.0, True))[1])
     response = _post("/accounts/1/apply-payment", {"amount": 1.0, "payment_id": 5},
                      _headers())
     assert response.status_code == 200, response.text

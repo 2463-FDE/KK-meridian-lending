@@ -251,7 +251,8 @@ def get_authorization_captured_at(idempotency_key: str) -> str | None:
 
 
 def authorize_charge(processor_token: str, amount: float,
-                     idempotency_key: str = None) -> Authorization:
+                     idempotency_key: str = None,
+                     correlation_id: str = None) -> Authorization:
     """Confirm a real authorization for exactly `amount` before any payment
     is marked captured or any balance is touched.
 
@@ -322,7 +323,8 @@ def authorize_charge(processor_token: str, amount: float,
                 f"PROCESSOR_API_KEY is not set (ENVIRONMENT={ENVIRONMENT!r}) -- refusing "
                 "to authorize a charge against a fake processor outside development/test."
             )
-        log.warning("PROCESSOR_API_KEY not set -- using deterministic dev/test stub authorization")
+        log.warning("PROCESSOR_API_KEY not set -- using deterministic dev/test stub "
+                    "authorization correlation_id=%s", correlation_id)
         return _stub_authorize(processor_token, amount, idempotency_key)
 
     try:
@@ -332,6 +334,13 @@ def authorize_charge(processor_token: str, amount: float,
             headers={
                 "Authorization": f"Bearer {PROCESSOR_API_KEY}",
                 **({"Idempotency-Key": idempotency_key} if idempotency_key else {}),
+                # The trace leg no other identifier can cover: this call happens
+                # before the payments row has an id, so anything keyed on
+                # `payment_id` starts one hop too late. A header rather than a
+                # body field -- it is metadata about the request, not part of
+                # the charge, and a processor that ignores it must still charge
+                # correctly.
+                **({"X-Correlation-Id": correlation_id} if correlation_id else {}),
             },
             timeout=15.0,
         )

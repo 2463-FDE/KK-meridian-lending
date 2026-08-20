@@ -409,6 +409,12 @@ CREATE TABLE IF NOT EXISTS payments (
     apply_attempts INTEGER NOT NULL DEFAULT 0,
     apply_next_attempt_at TIMESTAMPTZ,
     apply_last_error TEXT,
+
+    -- One identifier following this payment across services (db/migrations/0043).
+    -- NOT the idempotency key: that one is caller-supplied and decides dedupe,
+    -- this one is server-minted and inert -- nothing behaves differently because
+    -- of it. NULL means the row predates the trace; no reader may require it.
+    correlation_id TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_key
@@ -495,6 +501,13 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     -- corrected by an update. It would sit on the wrong balance permanently.
     payment_id   INTEGER,
 
+    -- The correlation id of the payment that produced this entry, as RECEIVED
+    -- from payment-service (db/migrations/0043). Never minted here: a second
+    -- generator would leave each side holding an id the other has never seen,
+    -- which is the failure this column exists to prevent. NULL for entries with
+    -- no payment behind them -- a fee assessment, an approved adjustment.
+    correlation_id TEXT,
+
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -544,6 +557,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_payment_component
     ON ledger_entries (payment_id, component) WHERE payment_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
+
+-- Searchable by the id an operator reads off a log line (db/migrations/0043).
+-- Partial: NULL for every pre-trace row and every entry with no payment behind
+-- it, and indexing those buys nothing.
+CREATE INDEX IF NOT EXISTS idx_ledger_entries_correlation_id
+    ON ledger_entries (correlation_id) WHERE correlation_id IS NOT NULL;
 
 -- Invariant 7, the half the unique index cannot express: a payment entry must
 -- HAVE a payment, and nothing else may have one.
@@ -839,6 +858,10 @@ CREATE INDEX IF NOT EXISTS idx_payments_captured_at
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_processor_ref
     ON payments (processor_ref)
  WHERE processor_ref IS NOT NULL;
+
+-- The payment side of the cross-service trace (db/migrations/0043).
+CREATE INDEX IF NOT EXISTS idx_payments_correlation_id
+    ON payments (correlation_id) WHERE correlation_id IS NOT NULL;
 
 -- D7: one row per reconciliation run (db/migrations/0034). Counts and totals
 -- only -- no card data, no applicant identifiers, no processor references. A

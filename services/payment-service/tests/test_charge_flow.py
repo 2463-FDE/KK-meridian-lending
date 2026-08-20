@@ -77,7 +77,11 @@ class _FakeDb:
         self.calls.append((sql, params))
         stmt = sql.strip()
         if stmt.startswith("INSERT"):
-            loan_id, last4, brand, amount, method, idempotency_key = params
+            # `correlation_id` joined the INSERT with db/migrations/0043.
+            # Unpacked strictly rather than with a slice: a column silently
+            # dropped from the statement should fail here, not store a NULL.
+            (loan_id, last4, brand, amount, method, idempotency_key,
+             correlation_id) = params
             if idempotency_key is not None and idempotency_key in self._by_key:
                 return []  # ON CONFLICT DO NOTHING -- a row already exists for this key
             # Real Postgres hands a NUMERIC column back as Decimal regardless
@@ -87,6 +91,7 @@ class _FakeDb:
             row = {
                 "id": self._next_id, "loan_id": loan_id, "amount": Decimal(str(amount)),
                 "last4": last4, "brand": brand, "applied_at": None,
+                "correlation_id": correlation_id,
                 "auth_status": "pending", "authorization_id": None,
             }
             self._next_id += 1
@@ -567,7 +572,7 @@ def test_retry_after_crash_before_auth_status_persists_reuses_existing_authoriza
         processor_ref="PR-100231",
     )
 
-    def _fake_authorize(token, amount, idempotency_key=None):
+    def _fake_authorize(token, amount, idempotency_key=None, correlation_id=None):
         authorize_calls.append((token, amount, idempotency_key))
         return APPROVED
 
@@ -962,7 +967,8 @@ def test_a_pending_retry_is_also_guarded(monkeypatch):
                 return []                       # ON CONFLICT DO NOTHING -> duplicate
             if "SELECT" in sql.upper():
                 return [{"id": 7, "loan_id": 42, "amount": 10.0,
-                         "auth_status": "pending", "applied_at": None}]
+                         "auth_status": "pending", "applied_at": None,
+                         "correlation_id": "pay_fixture"}]
             return []
 
     monkeypatch.setattr(payments_mod, "db", _Db())
