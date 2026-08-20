@@ -1,7 +1,14 @@
 # Meridian Lending — Four Statuses, Said Separately
 
-Three slides, regenerated from the repository at `92908ce`. Bullets are what goes
-on screen. Notes are what I say.
+Three slides, regenerated from the repository. Bullets are what goes on screen.
+Notes are what I say.
+
+**Provenance.** The claims below rest on `92908ce` (the card-path proof),
+`81c16bb74` (the cross-service identifier) and `ee8f733c4` (the allocation
+read). Naming the evidence commits rather than a single head, because a head sha
+in a header goes stale on the next commit and then points a reader at a tree
+that does not support what they are reading — which is the failure this deck
+teaches people to check for.
 
 **Opening statement**
 

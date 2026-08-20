@@ -874,10 +874,11 @@ behavior landed, and the cross-service trace ID has since landed too (PR #56,
 2026-08-20). Verify current state from code and tests rather than treating the
 historical markers as live status.*
 
-**This week's real deliverable, stated honestly:** **one** instrumented path
-(a shared trace/correlation ID connecting `payment-service`'s `charge()` to
-`servicing-service`'s `apply_payment` — today the two hops share nothing that
-would let anyone connect them in logs) and **one** control (a reconciliation
+**Week 7's deliverable as scoped on 2026-08-05, stated honestly:** **one**
+instrumented path (a shared trace/correlation ID connecting `payment-service`'s
+`charge()` to `servicing-service`'s `apply_payment` — at the time the two hops
+shared nothing that would let anyone connect them in logs; that ID landed on
+2026-08-20, PR #56) and **one** control (a reconciliation
 job correctly scoped to `settlement.csv`'s actual date range and loan set,
 producing a break-report, plus one alert on a reconciliation break). Run
 against a sampled month (matching the settlement file), not full history —
