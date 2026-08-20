@@ -1,6 +1,8 @@
-# Evidence manifest — `2026-08-12-three-slides.md`
+# Evidence manifest — every deck in this folder
 
-Every `PR #NN` the deck cites, resolved according to whether it has landed.
+Every `PR #NN` any deck in `docs/presentations/` cites, resolved according to
+whether it has landed. One manifest rather than one per deck: two decks citing
+the same PR must not be able to disagree about what it is.
 
 A pull request is not durable evidence. It can be renumbered, reopened, closed
 without merging, or belong to a fork; a reader offline cannot check any of it;
@@ -28,6 +30,10 @@ labelled open on the slide, and that no other status is accepted.
 | #23 | merged | `db/tests/test_readme_schema_claims.py` | `e25bdfa94` |
 | #24 | merged | `services/disclosure-service/tests/test_redisplay_is_exact.py` | `2c65c9863` |
 | #28 | open | — (nothing has landed; the deck labels this claim open) | — |
+| #50 | merged | `scripts/check_self_approval.sh` | `13eb622d9` |
+| #51 | merged | `services/payment-service/tests/test_pan_cvv_never_enter_the_payment_path.py` | `92908ce0b` |
+| #52 | merged | `services/servicing-service/tests/test_double_capture_is_not_detected_yet.py` | `1ecb74e8e` |
+| #53 | merged | `db/tests/test_maker_checker_limits_have_one_source.py` | `48b5283bc` |
 
 ## How each column is checked
 
