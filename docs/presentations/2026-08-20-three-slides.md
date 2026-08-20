@@ -167,13 +167,19 @@ publishes the order and the code bills from the borrower's own signed schedule. 
 payment larger than everything owed is refused rather than absorbed, because what
 happens to the excess is a policy question no document here answers.
 
-What the borrower can see is the honest half of this slide. The allocation exists
-in the ledger, one row per component, keyed to the payment. No endpoint exposes
-it. The payment history shows date, method, card and amount, and the schedule
-table above it shows the *contract's* plan — which a borrower carrying a late fee
-will read as an answer and be wrong. I did not build the fix, because whether you
-want an itemised breakdown at payment time or only in history changes its shape.
-That is question two for you.
+What the borrower can see is the honest half of this slide, and it moved this
+week. The allocation exists in the ledger, one row per component, keyed to the
+payment, and the API now returns it — read from those rows, never recomputed,
+because re-running the waterfall at read time would give a second opinion about
+a movement that already happened and the two would disagree the moment a fee was
+waived.
+
+What has not moved is the screen. The payment history still shows date, method,
+card and amount, and the schedule table above it shows the *contract's* plan —
+which a borrower carrying a late fee will read as an answer and be wrong. I did
+not build that half, because whether you want an itemised breakdown at payment
+time or only in history changes its shape. That is question two for you, and the
+data is ready either way.
 
 On duplicate capture: reconciliation has four break kinds and none of them fires
 when two captures for one loan both settle. Each carries its own settlement
