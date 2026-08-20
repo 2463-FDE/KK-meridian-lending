@@ -1,12 +1,21 @@
-"""The maker-checker limits are written down in four places. They must agree.
+"""The maker-checker limits are written down in five places. They must agree.
 
 The 2026-08-19 demo feedback asked for one thing here: that the configuration
-note point at ONE source. Today the approved figures appear in four files --
+note point at ONE source. The approved figures appear in five files --
 `adr/0011-maker-checker-for-servicing-adjustments.md`,
-`specs/0002-maker-checker-self-approval.md`, `.env.example` and
-`scripts/bootstrap_env.py` -- and nothing checks that they still say the same
-number. Four copies of a money limit is three chances to drift, and the drift is
-invisible: every one of them looks authoritative on its own page.
+`specs/0002-maker-checker-self-approval.md`, `.env.example`,
+`scripts/bootstrap_env.py` and `.github/workflows/ci.yml` -- and nothing checked
+that they still say the same number. Five copies of a money limit is four
+chances to drift, and the drift is invisible: every one of them looks
+authoritative on its own page.
+
+`ci.yml` was missed in the first version of this file, and review (PR #53,
+MC-LIMIT-CI-COPIES) was right that leaving it out was the worst possible
+omission. It sets the three limits in three separate jobs, and it is the copy
+that decides whether a change ships: with it uncovered, an ADR figure could move
+and this guard would pass green while every backend, docker-build and e2e suite
+ran against the stale limit. A single-source test that exempts the environment
+the tests actually run in is a green light for the drift it exists to catch.
 
 ADR 0011 is the source. It is where the approval is recorded -- who approved the
 values, on what date, and the standing caveat that they are cohort/demo
@@ -36,6 +45,12 @@ ENV_EXAMPLE = REPO / ".env.example"
 BOOTSTRAP = REPO / "scripts" / "bootstrap_env.py"
 COMPOSE = REPO / "docker-compose.yml"
 CONFIG = REPO / "services" / "servicing-service" / "app" / "config.py"
+CI = REPO / ".github" / "workflows" / "ci.yml"
+
+#: How many jobs in `ci.yml` set the limits today. Asserted rather than merely
+#: iterated: a job added with its own hardcoded figures is a new copy, and the
+#: point of this file is that a new copy cannot appear unnoticed.
+CI_JOBS_SETTING_LIMITS = 3
 
 MONEY_LIMITS = ("MAKER_CHECKER_ADMIN_THRESHOLD", "MAKER_CHECKER_MAX_DELTA")
 
@@ -163,6 +178,51 @@ def test_the_bootstrap_script_matches_the_adr():
             f"{approved}")
     match = re.search(r'"MAKER_CHECKER_PERMITTED_LOAN_STATUSES",\s*"([^"]+)"', text)
     assert match and match.group(1) == _approved_statuses()
+
+
+def test_every_ci_job_uses_the_approved_limits():
+    """The copy that decides whether a change ships.
+
+    Every occurrence in the workflow, not the first one: three jobs set these
+    independently, and a fourth added later with a stale figure is exactly the
+    drift this file exists to catch. Scanning all of them means a new job cannot
+    introduce an unapproved limit without failing here.
+    """
+    text = _text(CI)
+    limits = _approved_money_limits()
+
+    for name, approved in limits.items():
+        values = re.findall(rf"^\s*{name}:\s*\"?([\d.]+)\"?\s*$", text, re.MULTILINE)
+        assert values, f"{CI.name} no longer sets {name}"
+        assert len(values) == CI_JOBS_SETTING_LIMITS, (
+            f"{CI.name} sets {name} in {len(values)} jobs, expected "
+            f"{CI_JOBS_SETTING_LIMITS}. If a job was added or removed, update "
+            f"CI_JOBS_SETTING_LIMITS -- the count is asserted so a new hardcoded "
+            f"copy cannot appear unnoticed"
+        )
+        for value in values:
+            assert value == approved, (
+                f"{CI.name} runs the suites with {name}={value}; ADR 0011 "
+                f"approved {approved}. Every test in that job proved something "
+                f"about a limit nobody approved"
+            )
+
+    statuses = re.findall(
+        r"^\s*MAKER_CHECKER_PERMITTED_LOAN_STATUSES:\s*\"?([A-Za-z,]+)\"?\s*$",
+        text, re.MULTILINE)
+    assert len(statuses) == CI_JOBS_SETTING_LIMITS
+    for value in statuses:
+        assert value == _approved_statuses()
+
+
+def test_the_ci_workflow_points_at_the_source():
+    """Same rule as `.env.example`: a copy must name where it came from."""
+    text = _text(CI)
+    block = text[:text.index("MAKER_CHECKER_ADMIN_THRESHOLD")]
+
+    assert "adr/0011" in block.lower(), (
+        "ci.yml's maker-checker block does not cite ADR 0011, so a reader "
+        "editing the figure that gates every merge cannot tell it is a copy")
 
 
 def test_the_spec_matches_the_adr():

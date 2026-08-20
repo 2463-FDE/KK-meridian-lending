@@ -53,6 +53,14 @@ jobs:
       # Approved cohort/demo values, injected explicitly. There are no defaults
       # to fall back on -- servicing refuses to boot without them, which is the
       # behaviour these suites rely on.
+      #
+      # SOURCE: adr/0011-maker-checker-for-servicing-adjustments.md, "Configured
+      # limits". These are a COPY of that table, as are .env.example's,
+      # scripts/bootstrap_env.py's and spec 0002's. This copy is the one that
+      # decides whether a change ships, so a drift here runs every suite against
+      # a limit nobody approved while the guard stays green;
+      # db/tests/test_maker_checker_limits_have_one_source.py compares every
+      # occurrence in this file against the ADR.
       MAKER_CHECKER_ADMIN_THRESHOLD: "500.00"
       MAKER_CHECKER_MAX_DELTA: "5000.00"
       MAKER_CHECKER_PERMITTED_LOAN_STATUSES: current

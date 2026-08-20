@@ -210,10 +210,13 @@ def validate_principal_verify_key(environment: str | None = None,
 # Operations policy. The approval itself -- which values, approved by whom, on
 # what date -- lives in ONE place: adr/0011-maker-checker-for-servicing-
 # adjustments.md, "Configured limits". Every other appearance of these figures
-# (spec 0002, .env.example, scripts/bootstrap_env.py) is a copy of that table,
-# and db/tests/test_maker_checker_limits_have_one_source.py fails if one drifts. Read from the environment with no default, and validated at
-# boot, for the same reason INTERNAL_SERVICE_TOKEN has no fallback: a limit this
-# repository chooses for itself is a limit nobody approved.
+# (spec 0002, .env.example, scripts/bootstrap_env.py, .github/workflows/ci.yml)
+# is a copy of that table, and
+# db/tests/test_maker_checker_limits_have_one_source.py fails if one drifts.
+#
+# Read from the environment with no default, and validated at boot, for the same
+# reason INTERNAL_SERVICE_TOKEN has no fallback: a limit this repository chooses
+# for itself is a limit nobody approved.
 #
 # spec 0002 REQ-CFG-1..4 is explicit that an unset value must NOT be treated as
 # "no threshold". An unset admin threshold would silently let an underwriter
