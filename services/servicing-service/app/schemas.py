@@ -90,6 +90,22 @@ class PaymentItem(BaseModel):
     masked_pan: Optional[str] = None
     created_at: Optional[str] = None
 
+    # Where this payment actually went, read from the ledger entries it wrote
+    # (`db/migrations/0035`, one row per component keyed on
+    # `(payment_id, component)`). NOT recomputed: re-running the waterfall at
+    # read time would produce a second opinion about a movement that already
+    # happened, and the two could disagree after a waiver, an adjustment or a
+    # schedule correction. The ledger is what moved the balance, so the ledger
+    # is what this reports.
+    #
+    # `None` -- not 0.00 -- when the payment has no ledger entries at all. A
+    # zero would assert "nothing went to interest"; the truth for a legacy row
+    # applied before the ledger existed is "unknown", and those are different
+    # answers to give a borrower.
+    applied_to_fees: Optional[float] = None
+    applied_to_interest: Optional[float] = None
+    applied_to_principal: Optional[float] = None
+
 
 class PaymentsOut(BaseModel):
     loan_id: int
