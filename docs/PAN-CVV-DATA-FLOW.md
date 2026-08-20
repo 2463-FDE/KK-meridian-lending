@@ -61,10 +61,12 @@ and returns exactly three values:
 
 The `cvv` parameter is named `_cvv`: read, never returned, never logged, never
 sent. The PAN is reduced to its last four digits and a brand prefix test. This
-is the boundary the whole design rests on — **in a real deployment the PAN and
-CVV go from the browser to the processor's own servers and never touch Meridian
-code at all**, and the mock reproduces that shape rather than pretending to be
-a PCI-attested tokenizer (see §5, boundary B1).
+is the boundary the whole design rests on — **with a real processor's hosted
+field, the PAN and CVV would go from the browser to the processor's own servers
+and never touch Meridian code at all.** That sentence is about the deployment
+this repository does not have. Here the mock reproduces the *shape* of that
+boundary while still being our code, taking both values as arguments; it is not
+a PCI-attested tokenizer and the difference is boundary B1, not a detail.
 
 ### Step 3 — the API boundary refuses the fields outright
 
