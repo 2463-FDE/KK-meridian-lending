@@ -154,12 +154,23 @@ def _cited_prs():
     return sorted(numbers)
 
 
-def _pr_context(pr):
-    """Lines mentioning this PR, from whichever decks cite it."""
-    lines = []
+def _deck_prs():
+    """(deck, pr) for every PR cited by each deck, kept PER DECK.
+
+    Reviewed on PR #55 (PR-GUARD-001). Widening the module to many decks turned
+    this into a set of numbers and joined every deck's lines together as the
+    context, so the open-PR label check leaked across files: a new deck could
+    cite an open PR with no open marker and pass, because an OLDER deck supplied
+    the marker. The label is a property of the slide a reader is looking at, so
+    it has to be asserted against that slide's own text -- the same
+    (deck, path) shape the path guard already uses.
+    """
+    pairs = []
     for deck in DECKS:
-        lines += _line_context(deck, f"PR #{pr}")
-    return " ".join(lines)
+        text = deck.read_text(encoding="utf-8")
+        for pr in sorted(set(int(n) for n in re.findall(r"PR #(\d+)", text))):
+            pairs.append((deck, pr))
+    return pairs
 
 
 def test_the_manifest_exists():
@@ -198,19 +209,25 @@ def test_a_merged_pr_names_an_artifact_that_exists(pr):
     )
 
 
-@pytest.mark.parametrize("pr", _cited_prs())
-def test_an_open_pr_is_labelled_open_in_the_deck(pr):
-    """An open PR has no landed artifact, so the deck must say so."""
+@pytest.mark.parametrize("deck,pr", _deck_prs(),
+                         ids=lambda v: v.name if hasattr(v, "name") else v)
+def test_an_open_pr_is_labelled_open_in_the_deck(deck, pr):
+    """An open PR has no landed artifact, so the deck citing it must say so.
+
+    Per deck, not per PR number: a marker in one deck says nothing about what a
+    reader of another deck can see.
+    """
     row = _manifest_rows().get(pr) or {}
     assert row.get("status") in MANIFEST_STATUSES, (
         f"PR #{pr} has an unrecognised status {row.get('status')!r}"
     )
     if row["status"] != "open":
         return
-    context = _pr_context(pr)
+    context = " ".join(_line_context(deck, f"PR #{pr}"))
     assert any(m in context for m in OPEN_MARKERS), (
-        f"PR #{pr} has not landed, but the deck presents its claim without an "
-        f"open marker. That is the overclaim this test exists to catch."
+        f"{deck.name} cites PR #{pr}, which has not landed, without an open "
+        f"marker on the line. That is the overclaim this test exists to catch, "
+        f"and another deck labelling it correctly does not help this reader."
     )
 
 
@@ -400,10 +417,32 @@ def test_the_manifest_prose_does_not_overclaim_either():
 # only -- speaker notes are meant to be prose and are left alone.
 
 #: A projected bullet a presenter can deliver without the room reading ahead.
-#: Chosen from the deck that got the note: its longest on-screen bullet was 96
-#: characters and its shortest were half that, so the bound sits just above what
-#: already reads well rather than at a number invented here.
-MAX_ON_SCREEN_BULLET = 100
+#:
+#: WORDS, not characters, and the unit changed for a reason worth recording.
+#: The first version counted characters. Once the measurement was fixed to join
+#: wrapped lines (PR #55, BULLET-GUARD-001) it failed five bullets in the
+#: 2026-08-12 deck -- but three of those were long only because they cite a file
+#: path. A path inside a code span is read as one chunk, not word by word, so a
+#: character rule punished exactly the citations these decks exist to carry,
+#: while passing a sixteen-word sentence that had no path in it. The client's
+#: own phrase was "fewer words".
+#:
+#: The bound comes from the decks rather than from taste: the 2026-08-20 deck's
+#: longest on-screen bullet is 13 words, and the only bullet in either deck above
+#: 14 was the one genuinely too long to hear in a single pass.
+MAX_ON_SCREEN_WORDS = 14
+
+
+def _bullet_words(bullet: str) -> int:
+    """Words as a listener hears them: a backticked span counts as one.
+
+    `db/tests/test_no_card_data_on_either_schema_path.py` is a single spoken
+    token -- "the card-path test" -- not nine words, and emphasis markers are
+    formatting rather than speech.
+    """
+    spoken = re.sub(r"`[^`]+`", "CODE", bullet)
+    spoken = re.sub(r"[*_]", "", spoken)
+    return len([w for w in spoken.split() if w.strip("—–-")])
 
 
 def _on_screen_bullets(deck):
@@ -418,10 +457,28 @@ def _on_screen_bullets(deck):
     bullets = []
     for block in text.split("### On screen")[1:]:
         section = block.split("###", 1)[0]
-        for line in section.splitlines():
-            line = line.strip()
+        current = None
+        for raw in section.splitlines():
+            line = raw.strip()
             if line.startswith("- "):
-                bullets.append(line[2:].strip())
+                if current is not None:
+                    bullets.append(current)
+                current = line[2:].strip()
+            elif current is not None and line and raw[:1] in " 	":
+                # An indented continuation of the bullet above. Markdown wraps a
+                # long bullet across source lines and renders it as ONE line on
+                # the slide, so measuring source lines measured the author's text
+                # editor rather than the projector. Reviewed on PR #55
+                # (BULLET-GUARD-001): the 2026-08-12 deck -- the deck this rule
+                # was written for -- carried a 107- and a 121-character bullet
+                # that passed, because each was wrapped.
+                current = f"{current} {line}"
+            elif not line:
+                if current is not None:
+                    bullets.append(current)
+                    current = None
+        if current is not None:
+            bullets.append(current)
     return bullets
 
 
@@ -437,13 +494,32 @@ def test_the_deck_has_on_screen_bullets_to_measure(deck):
 @pytest.mark.parametrize("deck", DECKS, ids=lambda d: d.name)
 def test_on_screen_bullets_stay_readable_at_a_glance(deck):
     """'Bigger type, fewer words', as an assertion rather than an intention."""
-    too_long = [b for b in _on_screen_bullets(deck) if len(b) > MAX_ON_SCREEN_BULLET]
+    too_long = [(b, _bullet_words(b)) for b in _on_screen_bullets(deck)
+                if _bullet_words(b) > MAX_ON_SCREEN_WORDS]
     assert not too_long, (
         f"{deck.name} has {len(too_long)} on-screen bullet(s) over "
-        f"{MAX_ON_SCREEN_BULLET} characters. The client asked for bigger type "
-        f"and fewer words; a bullet this long is read silently by the room "
-        f"instead of heard. Move the detail into the notes:\n  "
-        + "\n  ".join(f"({len(b)}) {b}" for b in too_long)
+        f"{MAX_ON_SCREEN_WORDS} words. The client asked for bigger type and "
+        f"fewer words; a bullet this long is read silently by the room instead "
+        f"of heard. Move the detail into the notes:\n  "
+        + "\n  ".join(f"({n}w) {b}" for b, n in too_long)
+    )
+
+
+@pytest.mark.parametrize("deck", DECKS, ids=lambda d: d.name)
+def test_a_wrapped_bullet_is_measured_as_one_bullet(deck):
+    """Guard the guard, and the regression proof for BULLET-GUARD-001.
+
+    Markdown wraps a long bullet across source lines and renders it as one line
+    on the slide, so measuring source lines measured the author's text editor
+    rather than the projector -- and the rule passed the two longest bullets in
+    the very deck it was written for. Every deck here wraps at least one bullet;
+    if none did, the joining logic would be untested and the defect could return
+    unnoticed.
+    """
+    wrapped = [b for b in _on_screen_bullets(deck) if len(b) > 78]
+    assert wrapped, (
+        f"{deck.name} has no on-screen bullet longer than one wrapped source "
+        f"line, so the continuation-joining logic is not exercised here"
     )
 
 
