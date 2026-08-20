@@ -21,7 +21,7 @@ import secrets
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
 from . import (balance, config, db, delinquency, maker_checker, principal,
@@ -280,6 +280,14 @@ def internal_auth_check(
 class ApplyPaymentIn(BaseModel):
     amount: float
     payment_id: int
+    # The trace identifier payment-service already minted, stored and logged.
+    # Optional so a caller running an older image still applies payments rather
+    # than 422-ing on a field it does not know about -- a rolling deploy must not
+    # strand a captured charge. Absent means "no trace", which is honest; it is
+    # never replaced with one minted here, because two generators produce two
+    # ids and neither side can find the other's.
+    correlation_id: Optional[str] = Field(default=None, max_length=64,
+                                          pattern=r"^[A-Za-z0-9_-]+$")
 
 
 @app.post("/accounts/{loan_id}/apply-payment")
@@ -302,7 +310,9 @@ def apply_payment(loan_id: int, body: ApplyPaymentIn,
     # payment-service retries this call on a same-key retry if a prior attempt
     # never confirmed, so a duplicate call here must not double-apply.
     try:
-        new_balance, applied = balance.apply_payment_once(body.payment_id, loan_id, body.amount)
+        new_balance, applied = balance.apply_payment_once(
+            body.payment_id, loan_id, body.amount,
+            correlation_id=body.correlation_id)
     except balance.PaymentReplayConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except waterfall.PaymentExceedsAmountOwed as exc:

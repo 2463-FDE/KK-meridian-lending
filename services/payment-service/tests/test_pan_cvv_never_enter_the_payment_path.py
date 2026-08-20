@@ -82,13 +82,18 @@ class _RecordingDb:
         self.calls.append((sql, params))
         stmt = sql.strip()
         if stmt.startswith("INSERT"):
-            loan_id, last4, brand, amount, method, idempotency_key = params
+            # `correlation_id` joined the INSERT with db/migrations/0043.
+            # Unpacked strictly rather than with a slice: a column silently
+            # dropped from the statement should fail here, not store a NULL.
+            (loan_id, last4, brand, amount, method, idempotency_key,
+             correlation_id) = params
             if idempotency_key is not None and idempotency_key in self._by_key:
                 return []
             row = {
                 "id": self._next_id, "loan_id": loan_id,
                 "amount": Decimal(str(amount)), "last4": last4, "brand": brand,
                 "applied_at": None, "auth_status": "pending",
+                "correlation_id": correlation_id,
                 "authorization_id": None,
             }
             self._next_id += 1
@@ -267,6 +272,11 @@ def test_the_insert_names_only_non_card_columns(recording_db):
     assert set(c.strip() for c in columns.split(",")) == {
         "loan_id", "last4", "brand", "amount", "method", "idempotency_key",
         "auth_status",
+        # Server-minted trace id (db/migrations/0043). Listed here deliberately:
+        # this assertion is an allowlist, so a new column has to be looked at and
+        # named rather than slipping in because it happened to hold no card data
+        # on the day it was added.
+        "correlation_id",
     }
 
 

@@ -45,9 +45,12 @@ class _FakeDb:
     def query(self, sql, params=None):
         stmt = " ".join(sql.split())
         if stmt.startswith("INSERT INTO payments"):
-            loan_id, last4, brand, amount, method, key = params
+            # 0043 added correlation_id to the INSERT; unpacked strictly so a
+            # dropped column fails here rather than storing a NULL.
+            loan_id, last4, brand, amount, method, key, correlation_id = params
             row = {"id": 501, "loan_id": loan_id, "amount": amount,
-                   "auth_status": "pending", "applied_at": None}
+                   "auth_status": "pending", "applied_at": None,
+                   "correlation_id": correlation_id}
             self.rows[501] = row
             return [row]
         if "auth_status = 'captured'" in stmt:

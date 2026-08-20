@@ -84,6 +84,8 @@ on, so a capture that does not set it is silently outside the comparison -- and
 `payments` has a second writer that legitimately is (servicing's legacy route),
 which is why the column exists and why the default is not 'processor'.
 """
+import uuid
+
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -115,6 +117,29 @@ class IdempotencyKeyConflict(Exception):
 def _to_cents(amount) -> float:
     d = amount if isinstance(amount, Decimal) else Decimal(str(amount))
     return float(d.quantize(_CENTS, rounding=ROUND_HALF_UP))
+
+
+def new_correlation_id() -> str:
+    """A fresh identifier for one payment's journey across services.
+
+    Server-minted, never caller-supplied. `PaymentIn` forbids unknown fields, so
+    a client cannot set this -- deliberately. A correlator decides how our own
+    evidence is indexed, and letting a caller choose it would let them collide
+    two unrelated payments into one trace, or push content of their choosing
+    into a column we later read back into log lines.
+
+    Distinct from `idempotency_key`, and the distinction is the point:
+
+      * `idempotency_key` is caller-supplied and DECIDES SOMETHING -- whether
+        two requests are the same payment. It is an input to a money decision.
+      * `correlation_id` is server-minted and decides NOTHING. Nothing keys,
+        joins, dedupes or reconciles on it. If every value were replaced with a
+        different one tomorrow, no balance would move.
+
+    Prefixed so a value found in a log line announces what it is, and opaque
+    beyond that: a UUID carries no loan, no amount and no card data.
+    """
+    return f"pay_{uuid.uuid4().hex}"
 
 
 class ServicingAuthUnavailable(Exception):
@@ -224,6 +249,13 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
     # raw value would otherwise be formatted. Reviewed on PR #16.
     safe_key = redact_str(idempotency_key)
 
+    # Minted at entry, before anything is logged or written, because the
+    # authorization leg needs it too: `payment_id` is only assigned by the INSERT
+    # below, so anything keyed on it starts one hop too late and the processor
+    # call -- the leg where money actually leaves -- would have no trace key at
+    # all. A retry replaces this with the original payment's id (see below).
+    correlation_id = new_correlation_id()
+
     # Review fix: the log line used to write full PAN/CVV/SSN at INFO with zero
     # redaction (D5). There's no raw PAN/CVV/SSN to log anymore (ADR 0008) --
     # redact_dict still guards processor_token, since a vaulted token is
@@ -240,6 +272,12 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         "amount": amount, "loan_id": loan_id,
         "idempotency_key": idempotency_key,
     })
+    # Deliberately WITHOUT the correlation id. At this point the request has not
+    # been resolved to a row, so on a retry the id minted above is about to be
+    # discarded in favour of the stored one -- and a log line carrying a
+    # discarded id is worse than one carrying none. It looks like evidence and
+    # returns nothing when an operator greps it. Reviewed on PR #56
+    # (CORR-LOG-001). The canonical line is emitted below, once the row is known.
     log.info("POST /payments charge req=%s -> ok", safe_req)
 
     # Review fix: atomic check-and-write, same ON CONFLICT DO NOTHING + read-
@@ -248,25 +286,32 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
     # original request. auth_status starts 'pending' -- authorization is NOT
     # yet confirmed at this point, on purpose (see below).
     inserted = db.query(
-        "INSERT INTO payments (loan_id, last4, brand, amount, method, idempotency_key, auth_status) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 'pending') "
+        "INSERT INTO payments (loan_id, last4, brand, amount, method, idempotency_key, "
+        "auth_status, correlation_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s) "
         "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
-        "RETURNING id, loan_id, amount",
-        (loan_id, last4, brand, amount, method, idempotency_key),
+        "RETURNING id, loan_id, amount, correlation_id",
+        (loan_id, last4, brand, amount, method, idempotency_key, correlation_id),
     )
     if inserted:
         row = inserted[0]
         payment_id = row["id"]
+        # The line an operator greps. Emitted after the row exists, so the id in
+        # it always matches a payments row.
+        log.info("payment accepted correlation_id=%s payment_id=%s loan_id=%s",
+                 correlation_id, payment_id, row["loan_id"])
         # Review fix: this is the actual authorization call -- a made-up
         # processor_token is declined here, not silently trusted. Only a
         # confirmed approval reaches _apply_via_servicing; a decline never
         # touches the loan balance at all.
         _require_servicing_auth(row["loan_id"])
         try:
-            auth = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
+            auth = processor.authorize_charge(processor_token, row["amount"], idempotency_key,
+                                              correlation_id=correlation_id)
         except ChargeDeclinedError as exc:
             db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
-            log.warning("charge declined payment_id=%s: %s", payment_id, exc)
+            log.warning("charge declined payment_id=%s correlation_id=%s: %s",
+                        payment_id, correlation_id, exc)
             return {
                 "payment_id": payment_id, "loan_id": row["loan_id"],
                 "status": "failed", "applied_amount": float(row["amount"]),
@@ -316,12 +361,35 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 "capture_source = 'processor' WHERE id = %s",
             (auth.authorization_id, auth.captured_at, auth.processor_ref, payment_id),
         )
-        applied = _apply_via_servicing(loan_id, row["amount"], payment_id)
+        applied = _apply_via_servicing(loan_id, row["amount"], payment_id, correlation_id)
     else:
         row = db.query(
-            "SELECT id, loan_id, amount, applied_at, auth_status FROM payments WHERE idempotency_key = %s",
+            "SELECT id, loan_id, amount, applied_at, auth_status, correlation_id "
+            "FROM payments WHERE idempotency_key = %s",
             (idempotency_key,),
         )[0]
+        # The retry adopts the ORIGINAL payment's correlation id and discards the
+        # one minted above. A retry is the same payment, so it belongs to the
+        # same trace; minting a second here would split one payment's evidence
+        # across two ids and quietly defeat the whole column -- and the retry
+        # path is the one an incident actually exercises.
+        #
+        # NULL stays NULL, with no fallback to the fresh mint. A row captured
+        # before this column existed HAS no trace, and nothing on this path
+        # persists a new id -- so falling back would log, send and stamp an
+        # identifier the `payments` row does not carry, unfindable by the very id
+        # it advertises. That is the round-1 dead-id defect arriving through the
+        # history the column deliberately preserves. Reviewed on PR #56
+        # (CORR-NULL-001).
+        #
+        # Back-filling the row instead was considered and rejected: the capture
+        # and its authorization already happened without an id, so the trace
+        # would cover only the tail of the payment while looking complete. An
+        # absent trace is a true statement; a partial one presented as whole is
+        # the same failure in a subtler form.
+        correlation_id = row.get("correlation_id")
+        log.info("payment recognised as a repeat correlation_id=%s payment_id=%s "
+                 "loan_id=%s", correlation_id, row["id"], row["loan_id"])
         payment_id = row["id"]
         # Review fix: row["amount"] comes back from Postgres as a Decimal
         # (psycopg2 NUMERIC mapping) while `amount` here is a plain float --
@@ -354,8 +422,9 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             # the "processor approved, then we crashed" case.
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
-                "still pending authorization, checking processor before retrying",
-                safe_key, payment_id,
+                "correlation_id=%s still pending authorization, checking processor "
+                "before retrying",
+                safe_key, payment_id, correlation_id,
             )
             # ONE lookup for all three facts this branch needs -- that the
             # processor holds the charge, when it took the money, and which
@@ -367,8 +436,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             if existing:
                 log.info(
                     "processor already has an authorization on record for "
-                    "idempotency_key=%s -> payment_id=%s, reusing it instead of "
-                    "re-charging", safe_key, payment_id,
+                    "idempotency_key=%s -> payment_id=%s correlation_id=%s, reusing "
+                    "it instead of re-charging", safe_key, payment_id, correlation_id,
                 )
                 auth_id = existing.authorization_id
                 # The PROCESSOR's capture time, not ours.
@@ -399,10 +468,12 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # again once the token skew is fixed, and no card was charged.
                 _require_servicing_auth(row["loan_id"])
                 try:
-                    auth = processor.authorize_charge(processor_token, row["amount"], idempotency_key)
+                    auth = processor.authorize_charge(processor_token, row["amount"], idempotency_key,
+                                              correlation_id=correlation_id)
                 except ChargeDeclinedError as exc:
                     db.query("UPDATE payments SET auth_status = 'failed' WHERE id = %s", (payment_id,))
-                    log.warning("charge declined on retry payment_id=%s: %s", payment_id, exc)
+                    log.warning("charge declined on retry payment_id=%s correlation_id=%s: %s",
+                                payment_id, correlation_id, exc)
                     return {
                         "payment_id": payment_id, "loan_id": row["loan_id"],
                         "status": "failed", "applied_amount": float(row["amount"]),
@@ -437,20 +508,21 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             # apply-payment is idempotent by payment_id (db/migrations/0013).
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> payment_id=%s "
-                "not yet applied, retrying apply",
-                safe_key, payment_id,
+                "correlation_id=%s not yet applied, retrying apply",
+                safe_key, payment_id, correlation_id,
             )
             # Review fix: reconcile against the ORIGINALLY stored loan_id, not
             # the retry request's own loan_id parameter -- a retry that (by
             # bug or bad-faith) sends a different loan_id with the same
             # idempotency_key must never misapply the payment to that loan.
-            applied = _apply_via_servicing(row["loan_id"], row["amount"], payment_id)
+            applied = _apply_via_servicing(row["loan_id"], row["amount"], payment_id,
+                                           correlation_id)
         else:
             applied = True
             log.info(
                 "duplicate POST /payments for idempotency_key=%s -> returning original "
-                "payment_id=%s (already applied)",
-                safe_key, payment_id,
+                "payment_id=%s correlation_id=%s (already applied)",
+                safe_key, payment_id, correlation_id,
             )
 
     return {
@@ -467,7 +539,8 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
     }
 
 
-def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
+def _apply_via_servicing(loan_id: int, amount: float, payment_id: int,
+                         correlation_id: str | None = None) -> bool:
     """Tell servicing-service to apply this payment to the loan balance.
 
     Returns whether the apply was confirmed. Review fix: this used to swallow
@@ -488,7 +561,13 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
-            url, json={"amount": float(amount), "payment_id": payment_id}, timeout=5.0,
+            # The correlation id crosses with the apply, so servicing can stamp
+            # the ledger rows it writes with the id this service already logged
+            # and stored. Sent rather than derived: servicing minting its own
+            # would leave each side holding an identifier the other has never
+            # seen, which looks like a trace and is not one.
+            url, json={"amount": float(amount), "payment_id": payment_id,
+                       "correlation_id": correlation_id}, timeout=5.0,
             # servicing-service now requires this on every money-moving route.
             # This call is the LSS half of the split payment flow and is the one
             # legitimate caller of apply-payment that is not the gateway, so it
@@ -520,8 +599,9 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
         resp.raise_for_status()
         db.query("UPDATE payments SET applied_at = now() WHERE id = %s", (payment_id,))
         log.info(
-            "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
-            loan_id, payment_id, amount,
+            "applied payment via servicing correlation_id=%s loan_id=%s "
+            "payment_id=%s amount=%s -> ok",
+            correlation_id, loan_id, payment_id, amount,
         )
         return True
     except Exception as exc:
@@ -542,7 +622,8 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
             (type(exc).__name__, payment_id),
         )
         log.error(
-            "apply-payment call to servicing failed loan_id=%s payment_id=%s error_type=%s",
-            loan_id, payment_id, type(exc).__name__,
+            "apply-payment call to servicing failed correlation_id=%s loan_id=%s "
+            "payment_id=%s error_type=%s",
+            correlation_id, loan_id, payment_id, type(exc).__name__,
         )
         return False

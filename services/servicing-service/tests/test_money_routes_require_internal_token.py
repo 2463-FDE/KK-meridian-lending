@@ -122,7 +122,7 @@ def test_the_token_still_admits_the_machine_caller(monkeypatch):
     Only the authorization boundary is exercised; the money layer is stubbed, so
     this asserts "the request was allowed through", not any balance arithmetic.
     """
-    monkeypatch.setattr(main.balance, "apply_payment_once", lambda p, l, a: (99.0, True))
+    monkeypatch.setattr(main.balance, "apply_payment_once", lambda p, l, a, **kw: (99.0, True))
 
     auth = {"X-Internal-Token": TOKEN}
     assert client.post("/accounts/1/apply-payment",
@@ -167,7 +167,7 @@ def test_the_token_alone_no_longer_admits_the_staff_money_routes(monkeypatch):
 
 
 def test_mismatched_payment_replay_returns_conflict(monkeypatch):
-    def conflict(*_args):
+    def conflict(*_args, **kw):
         raise main.balance.PaymentReplayConflict("payment replay does not match")
 
     monkeypatch.setattr(main.balance, "apply_payment_once", conflict)

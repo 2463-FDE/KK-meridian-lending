@@ -234,6 +234,10 @@ def pg():
                 amount NUMERIC(14,2) NOT NULL,
                 entry_type TEXT NOT NULL,
                 payment_id INTEGER,
+                -- db/migrations/0043. apply_payment_once names this column in
+                -- its INSERT, so a fixture without it fails on SQL rather than
+                -- on the lost-update behaviour these cases exist to prove.
+                correlation_id TEXT,
                 UNIQUE (payment_id, component),
                 FOREIGN KEY (payment_id, loan_id) REFERENCES payments(id, loan_id)
             );

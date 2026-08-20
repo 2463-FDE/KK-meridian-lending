@@ -52,3 +52,14 @@ services/*/logs/
 frontend/playwright-report/
 frontend/test-results/
 frontend/blob-report/
+
+# Developer-local editor/agent wiring. `.mcp.json` points at a loopback port on
+# whoever's machine wrote it (127.0.0.1:64342 for a JetBrains IDE), so it is
+# meaningless to anyone else and actively misleading in a clone -- a teammate
+# would get a config referring to a server that is not running. Ignored rather
+# than committed with a "change this" comment, because the value is per-machine
+# and there is nothing to standardise.
+#
+# Both were swept into a commit by `git add -A` and caught in review of PR #56.
+.mcp.json
+.ai/

@@ -102,7 +102,8 @@ def apply_payment(loan_id: int, amount: float) -> float:
     return new_balance
 
 
-def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[float, bool]:
+def apply_payment_once(payment_id: int, loan_id: int, amount: float,
+                       correlation_id: str | None = None) -> tuple[float, bool]:
     """Review fix: apply_payment() above has no idempotency of its own -- it
     trusted payment-service to never call apply-payment twice for the same
     payment. payment-service now retries a pending apply on a same-key retry
@@ -220,10 +221,15 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
         # happen.
         for component, part in allocation.components():
             cur.execute(
+                # `correlation_id` is stamped from the value RECEIVED with the
+                # apply, never minted here (db/migrations/0043). One payment can
+                # write three entries -- fees, interest, principal -- and all
+                # three carry the same id, so "show me this charge" returns the
+                # whole allocation rather than one row of it.
                 "INSERT INTO ledger_entries "
-                "(loan_id, component, amount, entry_type, payment_id) "
-                "VALUES (%s, %s, %s, 'payment', %s)",
-                (loan_id, component, -part, payment_id),
+                "(loan_id, component, amount, entry_type, payment_id, correlation_id) "
+                "VALUES (%s, %s, %s, 'payment', %s, %s)",
+                (loan_id, component, -part, payment_id, correlation_id),
             )
 
         cur.execute("SELECT balance FROM balances WHERE loan_id = %s", (loan_id,))
@@ -232,10 +238,10 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float) -> tuple[fl
             raise LookupError(f"no balances row for loan_id={loan_id}")
         new_balance = rows[0]["balance"]
         log.info(
-            "applied payment loan_id=%s fees=%s interest=%s principal=%s "
-            "new_balance=%s",
-            loan_id, allocation.fees, allocation.interest, allocation.principal,
-            new_balance,
+            "applied payment correlation_id=%s loan_id=%s fees=%s interest=%s "
+            "principal=%s new_balance=%s",
+            correlation_id, loan_id, allocation.fees, allocation.interest,
+            allocation.principal, new_balance,
         )
     return new_balance, True
 
