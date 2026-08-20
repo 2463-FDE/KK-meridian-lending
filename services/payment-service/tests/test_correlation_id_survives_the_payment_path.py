@@ -379,3 +379,56 @@ def test_the_duplicate_path_lines_can_be_found_by_the_trace(db, monkeypatch, cap
         assert canonical in line, (
             "a duplicate-path line cannot be found by the trace: %r" % line
         )
+
+
+def test_a_retry_on_a_pre_trace_row_propagates_no_id_at_all(db, monkeypatch, caplog):
+    """Reviewed finding CORR-NULL-001: the dead id returning through history.
+
+    A payment captured before this column existed has `correlation_id` NULL, and
+    the migration is explicit that NULL means "written before the trace existed"
+    -- a true statement rather than a gap. The duplicate path used to fall back
+    to the fresh pre-insert mint for such a row, and nothing ever persists that
+    value, so a retry would log an id, send it to the processor and stamp new
+    ledger entries with it while the `payments` row stayed NULL. Unfindable by
+    the very id it was advertising.
+
+    NULL stays NULL. The alternative -- back-filling the row on retry -- was
+    rejected deliberately: the capture and its authorization already happened
+    without an id, so the resulting trace would cover the tail of the payment
+    while looking complete, which is the same "looks like evidence, returns
+    nothing" failure in a subtler form.
+    """
+    import logging
+    import re as _re
+
+    def _boom(*a, **k):
+        raise RuntimeError("servicing is unreachable")
+
+    monkeypatch.setattr(payments.httpx, "post", _boom)
+    assert client.post("/payments", json=_payload()).status_code == 200
+
+    # The row as a pre-0043 capture looks: applied_at NULL, no trace.
+    db._by_key["idem-corr-1"]["correlation_id"] = None
+
+    sent = []
+    monkeypatch.setattr(payments.httpx, "post",
+                        lambda url, json=None, **k: sent.append(json) or _Ok())
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        assert client.post("/payments", json=_payload()).status_code == 200
+
+    assert sent, "the retry did not re-attempt the apply"
+    assert sent[0]["correlation_id"] is None, (
+        "the retry sent servicing %r for a payment whose row has no id"
+        % (sent[0]["correlation_id"],)
+    )
+
+    logged = chr(10).join(r.getMessage() for r in caplog.records)
+    assert not _re.findall(r"pay_[0-9a-f]{32}", logged), (
+        "the retry logged an id that is not on the payments row: %r"
+        % _re.findall(r"pay_[0-9a-f]{32}", logged)
+    )
+    assert db.stored_correlation_id() is None, (
+        "the retry back-filled the row instead of leaving the pre-trace payment "
+        "without a trace"
+    )

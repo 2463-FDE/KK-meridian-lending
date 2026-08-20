@@ -372,9 +372,22 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # one minted above. A retry is the same payment, so it belongs to the
         # same trace; minting a second here would split one payment's evidence
         # across two ids and quietly defeat the whole column -- and the retry
-        # path is the one an incident actually exercises. Falls back to the fresh
-        # value only for a row written before this column existed.
-        correlation_id = row.get("correlation_id") or correlation_id
+        # path is the one an incident actually exercises.
+        #
+        # NULL stays NULL, with no fallback to the fresh mint. A row captured
+        # before this column existed HAS no trace, and nothing on this path
+        # persists a new id -- so falling back would log, send and stamp an
+        # identifier the `payments` row does not carry, unfindable by the very id
+        # it advertises. That is the round-1 dead-id defect arriving through the
+        # history the column deliberately preserves. Reviewed on PR #56
+        # (CORR-NULL-001).
+        #
+        # Back-filling the row instead was considered and rejected: the capture
+        # and its authorization already happened without an id, so the trace
+        # would cover only the tail of the payment while looking complete. An
+        # absent trace is a true statement; a partial one presented as whole is
+        # the same failure in a subtler form.
+        correlation_id = row.get("correlation_id")
         log.info("payment recognised as a repeat correlation_id=%s payment_id=%s "
                  "loan_id=%s", correlation_id, row["id"], row["loan_id"])
         payment_id = row["id"]
