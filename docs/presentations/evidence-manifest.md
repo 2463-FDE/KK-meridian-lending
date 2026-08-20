@@ -34,6 +34,8 @@ labelled open on the slide, and that no other status is accepted.
 | #51 | merged | `services/payment-service/tests/test_pan_cvv_never_enter_the_payment_path.py` | `92908ce0b` |
 | #52 | merged | `services/servicing-service/tests/test_double_capture_is_not_detected_yet.py` | `1ecb74e8e` |
 | #53 | merged | `db/tests/test_maker_checker_limits_have_one_source.py` | `48b5283bc` |
+| #56 | merged | `services/payment-service/tests/test_correlation_id_survives_the_payment_path.py` | `81c16bb74` |
+| #58 | merged | `services/servicing-service/tests/test_payment_allocation_is_read_from_the_ledger.py` | `ee8f733c4` |
 
 ## How each column is checked
 
