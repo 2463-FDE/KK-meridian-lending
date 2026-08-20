@@ -105,6 +105,12 @@ def main() -> int:
     # defaulted in code: compose requires them, the service refuses to boot
     # without them, and a developer should see the figures their stack is
     # enforcing rather than inherit them invisibly.
+    #
+    # These are a COPY. The source is adr/0011-maker-checker-for-servicing-
+    # adjustments.md, "Configured limits" -- the table that records who approved
+    # them and when. This copy is the executed one, so a drift here reaches a
+    # running stack without anyone reading the number;
+    # db/tests/test_maker_checker_limits_have_one_source.py compares the two.
     for key, value in (("MAKER_CHECKER_ADMIN_THRESHOLD", "500.00"),
                        ("MAKER_CHECKER_MAX_DELTA", "5000.00"),
                        ("MAKER_CHECKER_PERMITTED_LOAN_STATUSES", "current")):

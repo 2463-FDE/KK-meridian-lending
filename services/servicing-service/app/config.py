@@ -207,7 +207,11 @@ def validate_principal_verify_key(environment: str | None = None,
 # --- maker-checker limits (spec 0002 section 3, ADR 0011) ----------------------
 #
 # Human-approved configuration for this cohort/demo environment, NOT Lending
-# Operations policy. Read from the environment with no default, and validated at
+# Operations policy. The approval itself -- which values, approved by whom, on
+# what date -- lives in ONE place: adr/0011-maker-checker-for-servicing-
+# adjustments.md, "Configured limits". Every other appearance of these figures
+# (spec 0002, .env.example, scripts/bootstrap_env.py) is a copy of that table,
+# and db/tests/test_maker_checker_limits_have_one_source.py fails if one drifts. Read from the environment with no default, and validated at
 # boot, for the same reason INTERNAL_SERVICE_TOKEN has no fallback: a limit this
 # repository chooses for itself is a limit nobody approved.
 #
