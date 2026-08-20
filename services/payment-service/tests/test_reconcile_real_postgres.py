@@ -50,6 +50,10 @@ def _schema_sql():
             apply_attempts INTEGER NOT NULL DEFAULT 0,
             apply_next_attempt_at TIMESTAMPTZ,
             apply_last_error TEXT,
+            -- db/migrations/0043. The drain RETURNS this column, so a fixture
+            -- without it fails the claim query rather than the assertion, and
+            -- the failure names SQL instead of behaviour.
+            correlation_id TEXT,
             created_at TIMESTAMPTZ DEFAULT now()
         );
         CREATE INDEX idx_payments_unapplied ON payments (apply_next_attempt_at)
