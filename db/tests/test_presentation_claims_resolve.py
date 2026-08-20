@@ -445,6 +445,49 @@ def _bullet_words(bullet: str) -> int:
     return len([w for w in spoken.split() if w.strip("—–-")])
 
 
+def _bullets_from_text(text):
+    """Parse `### On screen` bullets out of deck markdown. Pure, so it is testable.
+
+    Returns `(bullet, wrapped)` pairs, where `wrapped` says whether the bullet
+    absorbed at least one indented continuation line. The flag exists so the
+    joining behaviour can be proved on synthetic input rather than by demanding
+    that a real deck carry a long bullet -- see the parser tests below.
+
+    Markdown renders a bullet wrapped across source lines as ONE line on the
+    slide, so counting source lines counted the author's text editor rather than
+    the projector, and the brevity rule passed the two longest bullets in the
+    deck it was written for. Reviewed on PR #55 (BULLET-GUARD-001).
+
+    A non-indented, non-bullet line ENDS the bullet rather than continuing it:
+    these decks separate on-screen groups with bold labels like `**Action**`, and
+    absorbing one into the bullet above would measure text no slide shows.
+    """
+    results = []
+    for block in text.split("### On screen")[1:]:
+        section = block.split("###", 1)[0]
+        state = {"current": None, "wrapped": False}
+
+        def flush():
+            if state["current"] is not None:
+                results.append((state["current"], state["wrapped"]))
+            state["current"], state["wrapped"] = None, False
+
+        for raw in section.splitlines():
+            line = raw.strip()
+            if line.startswith("- "):
+                flush()
+                state["current"] = line[2:].strip()
+            elif state["current"] is None:
+                continue
+            elif line and raw[:1] in (" ", "	"):
+                state["current"] = f"{state['current']} {line}"
+                state["wrapped"] = True
+            else:
+                flush()
+        flush()
+    return results
+
+
 def _on_screen_bullets(deck):
     """Bullets under an `### On screen` heading, up to the next `###`.
 
@@ -453,33 +496,7 @@ def _on_screen_bullets(deck):
     the explanation off the page entirely -- which is the opposite of what the
     feedback asked for.
     """
-    text = deck.read_text(encoding="utf-8")
-    bullets = []
-    for block in text.split("### On screen")[1:]:
-        section = block.split("###", 1)[0]
-        current = None
-        for raw in section.splitlines():
-            line = raw.strip()
-            if line.startswith("- "):
-                if current is not None:
-                    bullets.append(current)
-                current = line[2:].strip()
-            elif current is not None and line and raw[:1] in " 	":
-                # An indented continuation of the bullet above. Markdown wraps a
-                # long bullet across source lines and renders it as ONE line on
-                # the slide, so measuring source lines measured the author's text
-                # editor rather than the projector. Reviewed on PR #55
-                # (BULLET-GUARD-001): the 2026-08-12 deck -- the deck this rule
-                # was written for -- carried a 107- and a 121-character bullet
-                # that passed, because each was wrapped.
-                current = f"{current} {line}"
-            elif not line:
-                if current is not None:
-                    bullets.append(current)
-                    current = None
-        if current is not None:
-            bullets.append(current)
-    return bullets
+    return [b for b, _wrapped in _bullets_from_text(deck.read_text(encoding="utf-8"))]
 
 
 @pytest.mark.parametrize("deck", DECKS, ids=lambda d: d.name)
@@ -505,22 +522,88 @@ def test_on_screen_bullets_stay_readable_at_a_glance(deck):
     )
 
 
-@pytest.mark.parametrize("deck", DECKS, ids=lambda d: d.name)
-def test_a_wrapped_bullet_is_measured_as_one_bullet(deck):
-    """Guard the guard, and the regression proof for BULLET-GUARD-001.
+# --- the parser, proved on synthetic markdown --------------------------------
+#
+# The first attempt at guarding the joining logic asserted that every real deck
+# contained a bullet over 78 characters. Review (PR #55, WRAP-GUARD-001) was
+# right that it proved the wrong thing in both directions: a long UNWRAPPED line
+# satisfies it without joining anything, and a genuinely concise future deck --
+# exactly what the brevity rule asks for -- would fail it. The guard and the rule
+# it guards pulled in opposite directions, which is a worse defect than the one
+# being guarded.
+#
+# The behaviour belongs to the parser, so it is tested on input written for the
+# purpose. No real deck has to carry an artificially long bullet to keep this
+# honest.
 
-    Markdown wraps a long bullet across source lines and renders it as one line
-    on the slide, so measuring source lines measured the author's text editor
-    rather than the projector -- and the rule passed the two longest bullets in
-    the very deck it was written for. Every deck here wraps at least one bullet;
-    if none did, the joining logic would be untested and the defect could return
-    unnoticed.
-    """
-    wrapped = [b for b in _on_screen_bullets(deck) if len(b) > 78]
-    assert wrapped, (
-        f"{deck.name} has no on-screen bullet longer than one wrapped source "
-        f"line, so the continuation-joining logic is not exercised here"
+WRAPPED_FIXTURE = """## Slide 1
+
+### On screen
+
+- A short one
+- A bullet that runs past the margin and therefore continues
+  onto a second source line
+- Another short one
+
+### Notes
+
+- This bullet is under Notes and must not be measured
+"""
+
+
+def test_the_parser_joins_a_wrapped_bullet():
+    """The regression proof for BULLET-GUARD-001, on input that isolates it."""
+    parsed = _bullets_from_text(WRAPPED_FIXTURE)
+    bullets = [b for b, _ in parsed]
+
+    assert len(bullets) == 3, f"wrapping split one bullet into several: {bullets}"
+    assert bullets[1] == (
+        "A bullet that runs past the margin and therefore continues "
+        "onto a second source line"
     )
+
+
+def test_the_parser_reports_which_bullets_wrapped():
+    """The flag has to distinguish, or the test above could pass on a parser
+    that joined nothing and simply had three short lines."""
+    parsed = _bullets_from_text(WRAPPED_FIXTURE)
+
+    assert [w for _, w in parsed] == [False, True, False]
+
+
+def test_the_parser_ignores_bullets_outside_the_on_screen_section():
+    """Notes are read, not projected. Measuring them would push the explanation
+    off the page, which is the opposite of what the feedback asked for."""
+    bullets = [b for b, _ in _bullets_from_text(WRAPPED_FIXTURE)]
+
+    assert not any("under Notes" in b for b in bullets)
+
+
+def test_a_bold_label_ends_the_bullet_rather_than_joining_it():
+    """These decks group on-screen bullets under bold labels.
+
+    A label is not a continuation, and absorbing one would measure text that
+    appears on no slide -- inflating a bullet the presenter never reads as one.
+    """
+    parsed = _bullets_from_text(
+        "### On screen\n\n- First bullet\n**Action**\n- Second bullet\n"
+    )
+
+    assert [b for b, _ in parsed] == ["First bullet", "Second bullet"]
+    assert not any(w for _, w in parsed)
+
+
+def test_a_concise_deck_would_pass_every_rule_here():
+    """The contradiction WRAP-GUARD-001 named, pinned so it cannot come back.
+
+    A deck whose bullets are all short must satisfy the brevity rule AND every
+    guard around it. The previous version failed exactly this deck.
+    """
+    concise = "### On screen\n\n- Balance unchanged\n- Approval refused\n"
+    bullets = [b for b, _ in _bullets_from_text(concise)]
+
+    assert bullets == ["Balance unchanged", "Approval refused"]
+    assert all(_bullet_words(b) <= MAX_ON_SCREEN_WORDS for b in bullets)
 
 
 @pytest.mark.parametrize("deck", DECKS, ids=lambda d: d.name)
