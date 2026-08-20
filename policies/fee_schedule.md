@@ -13,6 +13,14 @@
 | Returned payment (NSF) | $25 |
 | Payoff statement | $0 |
 
+> **Open question, recorded rather than answered (`docs/DEBT.md` D23).** A posted
+> late fee raises the past-due amount, so a second assessment prices five per
+> cent off a base that already contains the first fee — repeated assessment
+> compounds. This page does not say whether that is intended, and the code does
+> not guess: it implements the comparison above exactly as published. Lending
+> Operations owns the answer. Until there is one the behaviour stays as it is,
+> recorded in D23 rather than changed.
+
 ## APR / finance charge
 
 - APR is the annualized cost of credit including the finance charge per Reg Z.
