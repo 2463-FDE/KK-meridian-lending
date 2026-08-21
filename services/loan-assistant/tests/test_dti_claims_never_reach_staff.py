@@ -126,8 +126,10 @@ def test_the_guard_runs_in_summarize_application(monkeypatch):
         "flags": ["Debt-to-income near the policy limit", "Debt consolidation request"],
     }
 
-    monkeypatch.setattr(llm_client, "make_client", lambda: object())
-    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt: json.dumps(payload))
+    # The agent runtime is exercised by test_agent_*.py; these cases are
+    # about what happens to the text afterwards.
+    monkeypatch.setattr(llm_client, "_summary_text_via_agent",
+                        lambda prompt: json.dumps(payload))
     monkeypatch.setattr(llm_client, "_fetch_signal", lambda *a, **k: None, raising=False)
 
     result = llm_client.summarize_application({
@@ -204,8 +206,10 @@ def test_a_lone_repayment_capacity_sentence_does_not_fail_the_request(monkeypatc
         "flags": [],
     }
 
-    monkeypatch.setattr(llm_client, "make_client", lambda: object())
-    monkeypatch.setattr(llm_client, "call_api", lambda client, prompt: json.dumps(payload))
+    # The agent runtime is exercised by test_agent_*.py; these cases are
+    # about what happens to the text afterwards.
+    monkeypatch.setattr(llm_client, "_summary_text_via_agent",
+                        lambda prompt: json.dumps(payload))
     monkeypatch.setattr(llm_client, "_fetch_signal", lambda *a, **k: None, raising=False)
 
     result = llm_client.summarize_application({

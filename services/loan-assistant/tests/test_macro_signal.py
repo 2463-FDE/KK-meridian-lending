@@ -221,8 +221,8 @@ def _signal():
 def _summarize_with(monkeypatch, summary: str, flags="[]"):
     signal = _signal()
     monkeypatch.setattr(macro, "current_signal", lambda: signal)
-    monkeypatch.setattr(llm_client, "make_client", lambda: object())
-    monkeypatch.setattr(llm_client, "call_api", lambda c, p: (
+    # Agent runtime covered by test_agent_*.py; this is about the text.
+    monkeypatch.setattr(llm_client, "_summary_text_via_agent", lambda p: (
         '{"loan_amount": 18000, "term_months": 48, "purpose": "debt consolidation",'
         f' "risk_tier": "medium", "summary": "{summary}",'
         f' "flags": {flags}}}'
@@ -322,8 +322,8 @@ def test_a_summary_that_is_nothing_but_a_false_claim_fails_closed(monkeypatch):
 
 def test_no_signal_means_no_citation_rather_than_a_placeholder(monkeypatch):
     monkeypatch.setattr(macro, "current_signal", lambda: None)
-    monkeypatch.setattr(llm_client, "make_client", lambda: object())
-    monkeypatch.setattr(llm_client, "call_api", lambda c, p: (
+    # Agent runtime covered by test_agent_*.py; this is about the text.
+    monkeypatch.setattr(llm_client, "_summary_text_via_agent", lambda p: (
         '{"loan_amount": 18000, "term_months": 48, "purpose": "debt consolidation",'
         ' "risk_tier": "medium", "summary": "ok", "flags": []}'
     ))
@@ -527,17 +527,16 @@ def test_the_signal_is_dropped_rather_than_failing_an_otherwise_valid_prompt(mon
     """
     signal = _signal()
     monkeypatch.setattr(macro, "current_signal", lambda: signal)
-    monkeypatch.setattr(llm_client, "make_client", lambda: object())
     seen = {}
 
-    def _capture(client, prompt):
+    def _capture(prompt):
         seen["prompt"] = prompt
         return (
             '{"loan_amount": 18000, "term_months": 48, "purpose": "debt consolidation",'
             ' "risk_tier": "medium", "summary": "Adequate income.", "flags": []}'
         )
 
-    monkeypatch.setattr(llm_client, "call_api", _capture)
+    monkeypatch.setattr(llm_client, "_summary_text_via_agent", _capture)
 
     app = dict(_APP, applicant={"name": "Robin Fictional"})
     base_tokens = llm_client._estimate_tokens(

@@ -40,6 +40,7 @@ from tenacity import (
 )
 
 from . import config, macro
+from . import agent, policy_tool
 from .redactor import redact_dict, redact_str
 from .schemas import ExternalSignal, LoanSummary
 
@@ -774,6 +775,67 @@ def _strip_dti_claims(summary: str, flags: list):
     return cleaned, kept_flags, dropped
 
 
+def _parse_summary_text(raw: str) -> "_LLMOutput":
+    """Deterministic validation of the model's text: JSON, then the schema.
+
+    Extracted so the parse boundary is one named stage rather than an inline
+    try/except -- it is the "deterministic validation" step the trace records
+    (PR B), and it is where the content-bearing failure log used to live.
+    """
+    try:
+        data = json.loads(strip_markdown_fences(raw))
+        return _LLMOutput(**data)
+    except Exception as exc:
+        # Categorical only. This used to log `redact_str(raw)` -- the model's
+        # response with PII patterns masked -- and redaction is not the standard
+        # here: the requirement is that model responses are not RETAINED at all.
+        # A redacted response is still the response. What a debugger needs is
+        # which stage failed and how, and both survive.
+        log.error("llm_client parse error stage=summary_parse provider=%s error=%s",
+                  config.LLM_PROVIDER, type(exc).__name__)
+        raise LLMResponseError(
+            f"Could not parse LLM response: {type(exc).__name__}") from exc
+
+
+def _summary_text_via_agent(prompt: str) -> str:
+    """Run the agent and return its final text, or refuse.
+
+    The whole agentic contract lives here, in one function, so there is exactly
+    one place to read it and one seam for tests that care about what happens to
+    the text AFTERWARDS rather than how it was produced.
+
+    Two refusals, both deliberate and neither recoverable in place:
+
+      * the agent is disabled -- the summary fails rather than falling back to a
+        direct model call. A silent fallback is the preloaded prompt-to-text
+        architecture the client rejected, and nothing downstream would show it
+        had happened;
+      * the required policy tool was never executed -- the summary is refused.
+        Read from the runtime's own execution state, so application code cannot
+        satisfy it by calling the tool itself.
+    """
+    if not config.AGENT_ENABLED:
+        raise LLMResponseError(
+            "AGENT_ENABLED is off -- the underwriting summary runs through the "
+            "agent runtime and will not fall back to a direct model call."
+        )
+
+    raw, state = agent.run_underwriting_agent(prompt)
+
+    if not agent.required_tool_was_called(state):
+        # Categorical: which tool was required, never the query or the answer.
+        log.error("llm_client summary refused stage=tool_gate required_tool=%s",
+                  policy_tool.TOOL_NAME)
+        raise agent.RequiredToolNotCalled(
+            f"the agent produced a summary without calling "
+            f"{policy_tool.TOOL_NAME}; refusing it"
+        )
+
+    log.info("llm_client agent accepted stage=tool_gate tool_calls=%d",
+             len(agent.tool_messages(state)))
+    return raw
+
+
 def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     """
     Summarize a loan application for a loan officer.
@@ -852,10 +914,8 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         signal_tokens,
     )
 
-    client = make_client()
-
     t0 = time.monotonic()
-    raw = call_api(client, prompt)
+    raw = _summary_text_via_agent(prompt)
     elapsed = time.monotonic() - t0
 
     log.info(
@@ -864,13 +924,7 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
         int(elapsed * 1000),
     )
 
-    try:
-        data = json.loads(strip_markdown_fences(raw))
-        llm_output = _LLMOutput(**data)
-    except Exception as exc:
-        safe_raw = redact_str(raw)
-        log.error("llm_client parse error response=%s", safe_raw)
-        raise LLMResponseError(f"Could not parse LLM response: {exc}") from exc
+    llm_output = _parse_summary_text(raw)
 
     # The citation is built from what the provider returned, not from anything
     # the model produced -- the same rule _applicant_name follows. If the model

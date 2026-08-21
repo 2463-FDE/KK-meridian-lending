@@ -10,10 +10,13 @@ re-embeds the same chunk twice (Week 2 quota constraint: never re-embed per run)
 """
 import hashlib
 import json
+import logging
 import math
 import os
 import re
 from collections import Counter
+
+log = logging.getLogger("loan-assistant.embeddings")
 
 _DEFAULT_CACHE_PATH = os.path.join(
     os.path.dirname(__file__), "..", ".embedding_cache.json"
@@ -58,10 +61,37 @@ class LocalTfidfEmbedder:
         self._cache = self._load_cache()
 
     def _load_cache(self) -> dict:
-        if os.path.exists(self.cache_path):
+        """Load the cache, treating an unreadable one as empty.
+
+        It is a CACHE: every value in it is recomputable from the text by
+        `embed()`, so the correct response to a corrupt file is to rebuild, not
+        to fail. Before this, a truncated or double-written file made the
+        embedder permanently unconstructible -- and it surfaced as
+        `JSONDecodeError: Extra data` from deep inside a caller that had nothing
+        to do with caching. Found when the policy tool built an embedder in a
+        fresh process and hit a cache file two concurrent test runs had written
+        over each other (`_save_cache` is not atomic).
+
+        Not silent: the corruption is logged, because a cache that keeps
+        corrupting is a bug worth noticing rather than absorbing forever.
+        """
+        if not os.path.exists(self.cache_path):
+            return {}
+        try:
             with open(self.cache_path, encoding="utf-8") as f:
-                return json.load(f)
-        return {}
+                loaded = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            log.warning(
+                "embedding cache at %s is unreadable (%s) -- rebuilding from "
+                "scratch; every entry is recomputable",
+                self.cache_path, type(exc).__name__,
+            )
+            return {}
+        if not isinstance(loaded, dict):
+            log.warning("embedding cache at %s is not an object -- rebuilding",
+                        self.cache_path)
+            return {}
+        return loaded
 
     def _save_cache(self) -> None:
         with open(self.cache_path, "w", encoding="utf-8") as f:

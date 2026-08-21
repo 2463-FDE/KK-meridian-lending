@@ -138,9 +138,11 @@ def answer_policy_question(question: str) -> PolicyAnswer:
         raw_data = json.loads(llm_client.strip_markdown_fences(raw))
         parsed = _ModelJsonResponse(**raw_data)
     except (json.JSONDecodeError, ValidationError, TypeError) as exc:
-        safe_raw = redact_str(raw)
-        log.error("policy_chat parse error response=%s", safe_raw)
-        raise PolicyChatResponseError(f"Could not parse policy-chat response: {exc}") from exc
+        # Same rule as llm_client's summary parse: a redacted model response is
+        # still a retained model response. Stage and error class only.
+        log.error("policy_chat parse error stage=answer_parse error=%s", type(exc).__name__)
+        raise PolicyChatResponseError(
+            f"Could not parse policy-chat response: {type(exc).__name__}") from exc
 
     is_answerable = parsed.answerable
     return PolicyAnswer(

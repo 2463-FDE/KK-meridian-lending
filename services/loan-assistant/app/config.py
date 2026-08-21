@@ -26,6 +26,28 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
 # to, so there is no safe default to fall back to here.
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "")
 
+# The region the Bedrock client uses. Read here rather than left to the SDK's
+# own inference: `anthropic` 1.x and `boto3` disagree about what happens when no
+# region can be found, and an unset region surfaced as a CI failure on an
+# unrelated PR (see services/loan-assistant/requirements.txt). Empty means "let
+# the SDK infer", which is the previous behaviour, but it is now a stated choice
+# rather than an accident.
+AWS_REGION = os.getenv("AWS_REGION", "")
+
+# --- agentic underwriting summary --------------------------------------------
+#
+# The summary path runs as a LangChain v1 agent with ONE bounded policy tool
+# (app/agent.py, app/policy_tool.py). The flag exists so the agent path can be
+# turned off in an environment that has no Bedrock access at all, NOT so it can
+# silently degrade: with it off the summary route refuses rather than falling
+# back to a direct prompt-to-text call, because a silent fallback is exactly the
+# architecture the client rejected and nothing downstream would reveal it.
+AGENT_ENABLED = os.getenv("AGENT_ENABLED", "true").lower() not in ("0", "false", "no")
+
+#: Ceiling on the agent's own output. Separate from MAX_INPUT_TOKENS, which
+#: guards what we send.
+AGENT_MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_OUTPUT_TOKENS", "1024"))
+
 # --- one grounded external signal for the officer summary (app/macro.py) -----
 # Week 1-4 review: the summary drew everything from inside the application.
 # MACRO_ENABLED=0 turns the outbound call off entirely -- what the test suite

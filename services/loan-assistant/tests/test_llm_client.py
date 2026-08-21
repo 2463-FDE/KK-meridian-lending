@@ -111,7 +111,8 @@ def test_summarize_application_fills_applicant_name_from_trusted_data(monkeypatc
             "flags": [],
         }
     )
-    monkeypatch.setattr("app.llm_client.call_api", lambda client, prompt: llm_json)
+    monkeypatch.setattr("app.llm_client._summary_text_via_agent",
+                        lambda prompt: llm_json)
 
     result = summarize_application(APP_DATA)
 
@@ -139,7 +140,8 @@ def test_summarize_application_ignores_any_name_the_model_tries_to_return(monkey
             "flags": [],
         }
     )
-    monkeypatch.setattr("app.llm_client.call_api", lambda client, prompt: llm_json)
+    monkeypatch.setattr("app.llm_client._summary_text_via_agent",
+                        lambda prompt: llm_json)
 
     result = summarize_application(APP_DATA)
 
@@ -260,7 +262,8 @@ def test_summarize_application_strips_markdown_json_fence(monkeypatch):
         )
         + "\n```"
     )
-    monkeypatch.setattr("app.llm_client.call_api", lambda client, prompt: fenced)
+    monkeypatch.setattr("app.llm_client._summary_text_via_agent",
+                        lambda prompt: fenced)
 
     result = summarize_application(APP_DATA)
 
