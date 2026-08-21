@@ -11,9 +11,16 @@ the moment the agent shipped, because a model turn can emit several tool calls
 at once and LangGraph runs them in parallel threads, each building an embedder
 over the same file.
 
-Three tests, deliberately of different kinds. The concurrency one reproduces the
-failure; a race test alone can pass on a broken build, so the other two assert
-the properties that make the race impossible, deterministically.
+There turned out to be TWO races here, not one. The truncated file above, and a
+second that CI found and this machine never did: `policy_tool` memoises one
+embedder per process, so parallel tool calls share its dictionary, and a thread
+inserting into it while another iterates it inside `json.dump` raises
+"dictionary changed size during iteration".
+
+So the tests are of two kinds on purpose. Two reproductions, which are honest
+about being timing-dependent, and a set of deterministic assertions pinning the
+properties that make both races impossible -- because a race test alone can pass
+on a broken build, which is exactly how the second one reached CI.
 """
 import concurrent.futures
 import json
@@ -98,6 +105,48 @@ def test_an_unwritable_cache_directory_does_not_fail_the_caller(tmp_path):
     vector = LocalTfidfEmbedder(cache_path=str(unwritable)).embed("late payment fee")
 
     assert vector
+
+
+def test_the_live_cache_is_never_the_object_that_gets_serialised(cache_path, monkeypatch):
+    """The second race, pinned by identity rather than by timing.
+
+    `policy_tool` memoises one embedder per process, so parallel tool calls
+    share this instance and this dictionary. A thread inserting in `embed()`
+    while another iterates it inside `json.dump` raises "dictionary changed size
+    during iteration". CI hit that; this machine never has.
+
+    Two attempts to provoke it deterministically failed, and both failures are
+    worth recording because they look like passing tests. Mutating the cache
+    before calling the real `json.dump` is too early -- iteration has not
+    started. Mutating from inside the file object's `write` is too late: the C
+    encoder walks the whole mapping and emits it as a single chunk, so the first
+    write happens after iteration has finished. Both left the "serialise the
+    live dict" mutant alive.
+
+    So this asserts the property directly instead of trying to win a race. If
+    the object handed to the encoder is never the live dictionary, no concurrent
+    insertion can be observed by it, whatever the timing. White-box on purpose;
+    the alternative was a test that could not fail.
+    """
+    import app.embeddings as embeddings
+
+    embedder = LocalTfidfEmbedder(cache_path=cache_path)
+    embedder._cache.update({f"seed-{i}": {"t": 1} for i in range(10)})
+
+    seen = {}
+    real_dump = embeddings.json.dump
+
+    def _spy(obj, fp, *args, **kwargs):
+        seen["obj"] = obj
+        return real_dump(obj, fp, *args, **kwargs)
+
+    monkeypatch.setattr(embeddings.json, "dump", _spy)
+    embedder._save_cache()
+
+    assert seen["obj"] is not embedder._cache, (
+        "the live cache was handed to the encoder; a concurrent embed() can "
+        "then change its size mid-iteration")
+    assert seen["obj"] == embedder._cache, "the snapshot lost or altered entries"
 
 
 # --------------------------------------------------------------------------

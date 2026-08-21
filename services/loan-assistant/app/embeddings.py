@@ -99,14 +99,24 @@ class LocalTfidfEmbedder:
         overwrite entries the other added. That is a lost cache entry, not a
         lost result: the next `embed()` recomputes it. Locking to prevent it
         would add contention to fix nothing a user could observe.
+
+        **A snapshot is serialised, not the live dict.** `policy_tool` memoises
+        one embedder per process, so parallel tool calls share this instance and
+        this dictionary -- one thread inserting in `embed()` while another
+        iterates it inside `json.dump` raises "dictionary changed size during
+        iteration". That is a second, separate race from the truncated file
+        above, and it was caught by CI rather than locally: the timing window is
+        narrow enough that this machine never hit it. `dict(...)` copies under
+        the GIL without releasing it, so the copy itself cannot tear.
         """
         directory = os.path.dirname(os.path.abspath(self.cache_path)) or "."
+        snapshot = dict(self._cache)
         try:
             fd, tmp = tempfile.mkstemp(dir=directory, prefix=".embedding_cache-",
                                        suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(self._cache, f)
+                    json.dump(snapshot, f)
                 os.replace(tmp, self.cache_path)
             except BaseException:
                 # Never leave the temp file behind on a failed write.
