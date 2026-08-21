@@ -33,7 +33,7 @@ import logging
 import os
 from typing import Any
 
-from . import config
+from . import config, trace
 from .policy_tool import TOOL_NAME, search_underwriting_policy
 
 log = logging.getLogger("loan-assistant.agent")
@@ -510,11 +510,40 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
         if type(exc).__name__ == "GraphRecursionError":
             log.error("agent exceeded its step budget stage=agent_loop max_steps=%d",
                       config.AGENT_MAX_STEPS)
+            trace.record("agent_run", status="refused",
+                         refusal_class="AgentStepBudgetExceeded",
+                         step_budget=config.AGENT_MAX_STEPS)
+            trace.record("model", provider=config.LLM_PROVIDER, status="refused",
+                         refusal_class="AgentStepBudgetExceeded",
+                         step_budget=config.AGENT_MAX_STEPS)
             raise AgentStepBudgetExceeded(
                 f"the agent exceeded {config.AGENT_MAX_STEPS} steps without "
                 f"producing an answer; refusing rather than continuing"
             ) from exc
         raise _as_agent_error(exc) from exc
+
+    messages = state["messages"] if isinstance(state, dict) else getattr(state, "messages", [])
+    # The runtime as a whole. Declared in `trace.STAGES` from the start and
+    # never emitted -- caught in review, and the stage test did not require it,
+    # so a declared stage that produced nothing looked exactly like one that
+    # worked.
+    trace.record(
+        "agent_run",
+        status="ok",
+        tool_calls=len(tool_messages(state)),
+        model_turns=sum(1 for m in (messages or []) if getattr(m, "type", "") == "ai"),
+        step_budget=config.AGENT_MAX_STEPS,
+        provider_attempt_limit=AGENT_TOTAL_PROVIDER_ATTEMPTS,
+    )
+    trace.record(
+        "model",
+        provider=config.LLM_PROVIDER,
+        model_family="claude" if "claude" in (config.BEDROCK_MODEL_ID or "") else "unknown",
+        region=config.AWS_REGION,
+        model_turns=sum(1 for m in (messages or []) if getattr(m, "type", "") == "ai"),
+        step_budget=config.AGENT_MAX_STEPS,
+        provider_attempt_limit=AGENT_TOTAL_PROVIDER_ATTEMPTS,
+    )
 
     calls = [getattr(m, "name", "?") for m in tool_messages(state)]
     # Categorical only: which tools ran and how many times. Never the tool's

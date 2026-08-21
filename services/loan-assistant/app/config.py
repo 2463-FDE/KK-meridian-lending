@@ -44,6 +44,12 @@ BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "")
 # rather than an accident.
 AWS_REGION = os.getenv("AWS_REGION", "")
 
+#: Read so the trace emitter can tell "tracing on but unconfigured" from
+#: "tracing on and shipping". The VALUE is never logged, traced or returned --
+#: credentials are on the client's prohibited-retention list, and only its
+#: presence is ever consulted.
+LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY", "")
+
 # --- agentic underwriting summary --------------------------------------------
 #
 # The summary path runs as a LangChain v1 agent with ONE bounded policy tool
