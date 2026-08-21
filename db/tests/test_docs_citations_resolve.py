@@ -41,6 +41,12 @@ DOCS = [
     REPO / "docs" / "runbook.md",
     REPO / "docs" / "RUNBOOK-pan-cvv-contract.md",
     REPO / "docs" / "RUNBOOK-loans-apr-contract.md",
+    # The model card is a governance artefact: it names the model, the files
+    # that implement the controls it describes, and a route it advertises to a
+    # reader. It was the only document of that weight outside this list, so a
+    # path in it could rot unnoticed -- in the one document a regulator reads
+    # first.
+    REPO / "docs" / "model_card.md",
     # A data-flow statement is mostly citations -- it answers "where does this
     # value go" by naming files. A path that does not resolve there is not a
     # cosmetic defect: it is the evidence for a PCI claim failing to open.
