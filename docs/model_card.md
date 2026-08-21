@@ -62,7 +62,15 @@ origination — see above):
 - `reason_codes` — for a real vendor response, these come **from the vendor
   itself**, never re-derived locally (a locally-guessed reason could name a
   driver — e.g. bureau vs. income — that isn't actually what the licensed
-  model weighed, since it also sees `requested_amount`/`term_months`)
+  model weighed, since it also sees `requested_amount`/`term_months`).
+  Retained here **verbatim, as model evidence**, and that is now a different
+  artefact from what a declined applicant is told: the consumer-facing
+  adverse-action reason comes from an approved mapping
+  (`decision.py::APPROVED_CONSUMER_REASONS`, spec 0003 §1.6), and a code with
+  no approved wording **refuses the decision** rather than being repeated to a
+  person. Before that mapping existed, `reason_codes[0]` was published straight
+  into `adverse_action_reason`; the deterministic stub concealed it because its
+  codes are full sentences
 - `top_features` — **only populated for the dev/test stub**, whose score
   formula is known and reproducible. For a real vendor response this is
   recorded as `null`: `_ScorerResponse` doesn't include feature attribution,
@@ -110,10 +118,17 @@ origination — see above):
   only ever run against seeded fictional applicants.
 - `decision_events` itself is the long-term audit record — append-only,
   DB-trigger-enforced, queryable for any past decision.
-- **Not yet built:** aggregate monitoring of the model's own behavior over
-  time (approval-rate drift, score distribution shift, reason-code
-  frequency). Today this data can be queried per-decision but isn't
-  dashboarded anywhere.
+- **Reason-code frequency is now measurable**, per model version and over a
+  stated window: `GET /applications/fair-lending/reason-distribution`
+  (`origination-service/app/reason_distribution.py`, spec 0003 §1.3). It
+  reports the count of distinct adverse-action reasons, the frequency of each,
+  and the count of denials carrying no reason. Staff-only, aggregate,
+  on-demand. It sets **no threshold and reaches no verdict** — what counts as
+  too few distinct reasons is a compliance judgement, and this repository has
+  no authority to set one.
+- **Still not built:** approval-rate drift and score-distribution shift over
+  time. Both are queryable per-decision from `decision_events`; neither is
+  reported or dashboarded anywhere, and neither is scheduled or alerted.
 
 ## Owner
 
