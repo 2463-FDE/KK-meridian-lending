@@ -39,7 +39,24 @@ from .policy_tool import TOOL_NAME, search_underwriting_policy
 log = logging.getLogger("loan-assistant.agent")
 
 
-class AgentUnavailable(RuntimeError):
+class AgentError(RuntimeError):
+    """Base for every way the agent path can refuse.
+
+    Exists so the summary route can have a controlled fallback for an agent
+    failure nobody has enumerated yet. Reviewed on PR #63: the first four
+    subclasses below all reached the API as a generic 500 `{"detail": "internal
+    error"}`, because the route enumerated the `LLM*Error` classes and these are
+    not among them. A designed refusal that presents as an internal server error
+    is not a refusal contract -- it is the absence of one, and it hides exactly
+    the failures this PR added on purpose.
+
+    `test_agent_failures_reach_the_route.py` asserts that every exception this
+    module defines inherits from here, so adding a fifth cannot silently
+    reintroduce the 500.
+    """
+
+
+class AgentUnavailable(AgentError):
     """The agent runtime could not be constructed.
 
     Raised rather than falling back to a direct model call. A silent fallback
@@ -48,7 +65,7 @@ class AgentUnavailable(RuntimeError):
     """
 
 
-class AgentStepBudgetExceeded(RuntimeError):
+class AgentStepBudgetExceeded(AgentError):
     """The agent looped past its step budget.
 
     Refused rather than retried or allowed to continue: an autonomous loop with
@@ -57,7 +74,7 @@ class AgentStepBudgetExceeded(RuntimeError):
     """
 
 
-class PolicyEvidenceMissing(RuntimeError):
+class PolicyEvidenceMissing(AgentError):
     """The tool ran and found nothing, and the summary was refused for it.
 
     Distinct from RequiredToolNotCalled on purpose: "never asked" and "asked and
@@ -66,7 +83,7 @@ class PolicyEvidenceMissing(RuntimeError):
     """
 
 
-class UnsafeTracingConfiguration(RuntimeError):
+class UnsafeTracingConfiguration(AgentError):
     """Tracing was requested but cannot be proven safe, so the run is refused.
 
     Only reachable if the suppression below cannot be installed. Refusing beats
@@ -75,7 +92,29 @@ class UnsafeTracingConfiguration(RuntimeError):
     """
 
 
-class RequiredToolNotCalled(RuntimeError):
+class AgentTimeout(AgentError):
+    """The provider did not answer inside the request timeout.
+
+    Restores a contract this PR had silently dropped. `call_api` set
+    `timeout=TIMEOUT_SECONDS` and mapped `APITimeoutError` to `LLMTimeoutError`,
+    which the route renders as **504**. The agent path does not go through
+    `call_api`, so that number stopped applying to the summary and the 504
+    became unreachable: a hung Bedrock call fell back to botocore's own 60s
+    read timeout, multiplied by its retries and again by the number of model
+    turns in a run. Reviewed on PR #63.
+    """
+
+
+class AgentProviderError(AgentError):
+    """The provider rejected the call or failed in a way we do not retry.
+
+    Carries the exception CLASS and nothing else. Provider error bodies are on
+    the client's prohibited-retention list and can quote the request, so the raw
+    text is never put in the message, the log or the HTTP response.
+    """
+
+
+class RequiredToolNotCalled(AgentError):
     """The agent produced an answer without consulting policy.
 
     Not a warning and not a retry-in-place: the summary is refused. An
@@ -200,11 +239,28 @@ def build_agent(tools: list | None = None):
             "BEDROCK_MODEL_ID is not set -- refusing to guess a model id."
         )
 
+    # An explicit request timeout and retry policy, because the agent path does
+    # not go through `call_api` and therefore inherited neither of the ones that
+    # function carried. Left implicit, botocore's own defaults applied: 60s
+    # connect, 60s read, and its legacy retry mode -- per model turn, of which a
+    # real run made two. A summary the officer was told would fail in 20 seconds
+    # could occupy a worker for minutes. Reviewed on PR #63.
+    #
+    # `standard` mode is named rather than left to default so the attempt count
+    # is a decision: transient throttling is worth three tries, and anything
+    # beyond that is better refused than queued behind a stuck request.
+    from botocore.config import Config as BotocoreConfig
+
     model = ChatBedrockConverse(
         model=config.BEDROCK_MODEL_ID,
         region_name=config.AWS_REGION or None,
         temperature=0,
         max_tokens=config.AGENT_MAX_OUTPUT_TOKENS,
+        config=BotocoreConfig(
+            connect_timeout=config.AGENT_REQUEST_TIMEOUT_SECONDS,
+            read_timeout=config.AGENT_REQUEST_TIMEOUT_SECONDS,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
     )
     # Wrapped HERE rather than decorated at the definition site, so
     # `policy_tool` stays framework-free: its bounds and its allowlist are
@@ -317,6 +373,50 @@ def final_text(state: Any) -> str:
     return "".join(parts)
 
 
+#: botocore's timeout classes, matched by NAME rather than imported.
+#:
+#: Importing them would drag botocore into every import of this module, which
+#: the lazy-import design exists to avoid -- the FastAPI app and most of the
+#: test suite import `agent` without the AWS stack installed. Names are stable
+#: public API; the alternative is a module-level import that breaks the very
+#: property `test_importing_agent_needs_no_framework` asserts.
+_TIMEOUT_EXCEPTIONS = frozenset({
+    "ReadTimeoutError", "ConnectTimeoutError", "ConnectionError",
+    "EndpointConnectionError", "ReadTimeout", "ConnectTimeout",
+})
+
+
+def _as_agent_error(exc: BaseException) -> AgentError:
+    """Turn a provider-layer failure into a refusal the route can render.
+
+    Anything not recognised becomes `AgentProviderError` rather than escaping,
+    so a provider exception nobody anticipated is still a controlled 502 and not
+    a generic 500 with the raw error in the log.
+
+    **The message is built from the exception's class name only.** Provider
+    error bodies can quote the request that caused them -- which on this path is
+    the application prompt -- and raw provider errors are on the client's
+    prohibited-retention list. `str(exc)` therefore never appears in the
+    message, the log line or the HTTP response.
+    """
+    if isinstance(exc, AgentError):
+        return exc
+
+    name = type(exc).__name__
+    if name in _TIMEOUT_EXCEPTIONS:
+        log.error("agent provider timeout stage=agent_invoke error_class=%s "
+                  "timeout_s=%s", name, config.AGENT_REQUEST_TIMEOUT_SECONDS)
+        return AgentTimeout(
+            f"the model did not answer within "
+            f"{config.AGENT_REQUEST_TIMEOUT_SECONDS}s"
+        )
+
+    log.error("agent provider error stage=agent_invoke error_class=%s", name)
+    return AgentProviderError(
+        f"the model provider failed ({name}); the summary was not produced"
+    )
+
+
 def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
     """Run the agent and return (final text, execution state).
 
@@ -354,7 +454,7 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
                 f"the agent exceeded {config.AGENT_MAX_STEPS} steps without "
                 f"producing an answer; refusing rather than continuing"
             ) from exc
-        raise
+        raise _as_agent_error(exc) from exc
 
     calls = [getattr(m, "name", "?") for m in tool_messages(state)]
     # Categorical only: which tools ran and how many times. Never the tool's

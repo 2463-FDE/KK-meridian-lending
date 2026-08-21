@@ -241,14 +241,32 @@ def test_a_looping_agent_is_refused_rather_than_left_running(monkeypatch):
 
 
 def test_an_unrelated_runtime_error_is_not_swallowed_as_a_budget_breach():
-    """Mapping every exception to the budget error would hide real failures."""
+    """Mapping every exception to the budget error would hide real failures.
+
+    Rewritten in review. It used to assert the `ValueError` escaped untouched,
+    which was the behaviour that returned `500 {"detail": "internal error"}` at
+    the route and put the raw provider text in the log -- so the old assertion
+    was pinning the defect in place. The invariant it was actually written to
+    protect is intact and asserted below: an unrelated failure is NOT reported
+    as a budget breach.
+    """
 
     class _Runtime:
         def invoke(self, payload, config=None):
             raise ValueError("something else went wrong")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(agent.AgentProviderError) as exc:
         agent.run_underwriting_agent("prompt", _Runtime())
+
+    assert not isinstance(exc.value, agent.AgentStepBudgetExceeded), (
+        "an unrelated error was reported as a step-budget breach"
+    )
+    assert isinstance(exc.value.__cause__, ValueError), (
+        "the original exception must stay chained, or debugging loses it"
+    )
+    assert "something else went wrong" not in str(exc.value), (
+        "the raw error text must not be quoted in the refusal"
+    )
 
 
 # --------------------------------------------------------------------------

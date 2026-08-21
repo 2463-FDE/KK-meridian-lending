@@ -58,6 +58,16 @@ AGENT_ENABLED = os.getenv("AGENT_ENABLED", "true").lower() not in ("0", "false",
 #: guards what we send.
 AGENT_MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_OUTPUT_TOKENS", "1024"))
 
+#: Per-request timeout on the Bedrock call, in seconds.
+#:
+#: 20.0 is not a new number -- it is `llm_client.TIMEOUT_SECONDS`, the value the
+#: summary path has always advertised, restated here because the agent path does
+#: not go through `call_api` and stopped inheriting it. Left unset, botocore
+#: applied its own 60s connect/60s read per model turn instead, so the 504 the
+#: route documents had become unreachable. Reviewed on PR #63.
+AGENT_REQUEST_TIMEOUT_SECONDS = float(
+    os.getenv("AGENT_REQUEST_TIMEOUT_SECONDS", "20.0"))
+
 #: Hard ceiling on agent loop steps per summary (LangGraph `recursion_limit`).
 #: Three steps is the minimum useful path -- decide, call the tool, answer. The
 #: observed real run used seven. Twelve leaves room for a couple of extra

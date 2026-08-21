@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
+from . import agent
 from .config import INTERNAL_SERVICE_TOKEN, ORIGINATION_URL
 from .llm_client import (
     LLMCostGuardError,
@@ -113,6 +114,33 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     except LLMTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except LLMResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # The agent's refusals are designed behaviour and must render as the
+    # contract, not as an internal error. Before this block every one of them
+    # fell through to the catch-all above and came back as 500 {"detail":
+    # "internal error"} -- so a skipped tool call, a retrieval miss, a missing
+    # Bedrock configuration and a loop-budget breach were indistinguishable from
+    # a crash, both to the officer and to whoever was on call. Found in review
+    # on PR #63.
+    #
+    # Ordered specific-first. `AgentError` last is the point of the base class:
+    # a refusal added later still gets a controlled status instead of silently
+    # regressing to 500.
+    except agent.AgentTimeout as exc:
+        # 504 is the status `call_api` used to produce for a slow model. Keeping
+        # it means the timeout contract survived the move to the agent.
+        log.warning("summary timed out app_id=%s", app_id)
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (agent.AgentUnavailable, agent.UnsafeTracingConfiguration) as exc:
+        # Configuration, not a bad answer: the service cannot run the summary at
+        # all in its current setup, which is 503 rather than 502.
+        log.error("summary unavailable app_id=%s reason=%s", app_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except agent.AgentError as exc:
+        # RequiredToolNotCalled, PolicyEvidenceMissing, AgentStepBudgetExceeded,
+        # AgentProviderError -- all "the upstream model did not give us
+        # something we can publish", which is the same 502 LLMResponseError uses.
+        log.error("summary refused app_id=%s reason=%s", app_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return summary.model_dump()
