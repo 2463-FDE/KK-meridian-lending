@@ -246,6 +246,25 @@ def test_loan_history_staff_role_without_internal_token_is_forbidden():
     assert resp.status_code == 403
 
 
+def test_reason_distribution_staff_role_without_internal_token_is_forbidden():
+    """Spec 0003 §1.3's report. Aggregate, but underwriting-sensitive: a reason
+    distribution says how the model declines people, which is the same bar as
+    the ZIP screen beside it."""
+    resp = client.get("/applications/fair-lending/reason-distribution",
+                      headers={"X-User-Role": "admin"})
+
+    assert resp.status_code == 403
+
+
+def test_reason_distribution_is_not_parsed_as_an_app_id():
+    """Registered above /{app_id}. If it were below, "fair-lending" would be
+    parsed as an int and 422 before the route was ever reached -- so a 403 here
+    also proves the ordering."""
+    resp = client.get("/applications/fair-lending/reason-distribution")
+
+    assert resp.status_code != 422
+
+
 def test_zip_analysis_staff_role_without_internal_token_is_forbidden():
     resp = client.get("/applications/fair-lending/zip-analysis", headers={"X-User-Role": "admin"})
 

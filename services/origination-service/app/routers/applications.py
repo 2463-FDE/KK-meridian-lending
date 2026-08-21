@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, config, db, decision_state, disclosure_graph, fair_lending, intake, kg, models
+from .. import clients, config, db, decision_state, disclosure_graph, fair_lending, intake, kg, models, reason_distribution
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -671,6 +671,28 @@ def get_zip_disparate_impact_report(
     """
     _require_staff(x_user_role, x_internal_token)
     return fair_lending.zip_disparate_impact_report()
+
+
+@router.get("/fair-lending/reason-distribution")
+def get_adverse_reason_distribution(
+    since: str | None = None,
+    until: str | None = None,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    """Spec 0003 §1.3 -- how many distinct adverse-action reasons the model
+    actually emitted, per model version, over a stated window.
+
+    Registered above /{app_id} for the same reason as the ZIP screen: a literal
+    segment has to be matched before the catch-all path parameter, or
+    "fair-lending" is parsed as an app_id and 422s on the int conversion.
+
+    Staff only, same bar as the ZIP screen. Aggregate counts only -- no
+    applicant identifiers are selected, so there is nothing here to tie back to
+    a person.
+    """
+    _require_staff(x_user_role, x_internal_token)
+    return reason_distribution.adverse_reason_distribution(since=since, until=until)
 
 
 @router.get("/{app_id}", response_model=ApplicationDetail)
