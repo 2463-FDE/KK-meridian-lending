@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
-from . import agent
+from . import agent, trace
 from .config import INTERNAL_SERVICE_TOKEN, ORIGINATION_URL
 from .llm_client import (
     LLMCostGuardError,
@@ -67,6 +67,15 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     # /financials call just below) -- this call used to send neither header
     # at all, only /financials did. Send both here too, or every summary
     # request now 403s.
+    # One trace per request, opened at the authenticated boundary so the entry
+    # stage is genuinely the entry and not the first LLM call. Carries the
+    # caller's ROLE, never their identity -- role is what explains an
+    # authorisation outcome; who they are is on the prohibited list.
+    with trace.summary_trace(role=x_user_role):
+        return _summarize(app_id, x_user_role)
+
+
+def _summarize(app_id: int, x_user_role: str | None):
     main_headers = {"X-Internal-Token": INTERNAL_SERVICE_TOKEN}
     if x_user_role:
         main_headers["X-User-Role"] = x_user_role
@@ -104,16 +113,24 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     try:
         summary = summarize_application(app_data)
     except LLMInsufficientDataError as exc:
+        trace.record("outcome", outcome="refused", status="refused",
+                     http_status=422, refusal_class="LLMInsufficientDataError")
         # The reader gets `exc.detail`; the log keeps the field names and the
         # app_id. A 422 body rendered straight into the UI is read by a loan
         # officer, not by whoever wrote the guard.
         log.info("summary refused: %s", exc)
         raise HTTPException(status_code=422, detail=exc.detail) from exc
     except LLMCostGuardError as exc:
+        trace.record("outcome", outcome="refused", status="refused",
+                     http_status=400, refusal_class="LLMCostGuardError")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LLMTimeoutError as exc:
+        trace.record("outcome", outcome="refused", status="refused",
+                     http_status=504, refusal_class="LLMTimeoutError")
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except LLMResponseError as exc:
+        trace.record("outcome", outcome="refused", status="refused",
+                     http_status=502, refusal_class="LLMResponseError")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     # The agent's refusals are designed behaviour and must render as the
     # contract, not as an internal error. Before this block every one of them
@@ -127,22 +144,30 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     # a refusal added later still gets a controlled status instead of silently
     # regressing to 500.
     except agent.AgentTimeout as exc:
+        trace.record("outcome", outcome="refused", status="refused",
+                     http_status=504, refusal_class=type(exc).__name__)
         # 504 is the status `call_api` used to produce for a slow model. Keeping
         # it means the timeout contract survived the move to the agent.
         log.warning("summary timed out app_id=%s", app_id)
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except (agent.AgentUnavailable, agent.UnsafeTracingConfiguration) as exc:
+        trace.record("outcome", outcome="refused", status="refused",
+                     http_status=503, refusal_class=type(exc).__name__)
         # Configuration, not a bad answer: the service cannot run the summary at
         # all in its current setup, which is 503 rather than 502.
         log.error("summary unavailable app_id=%s reason=%s", app_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except agent.AgentError as exc:
+        trace.record("outcome", outcome="refused", status="refused",
+                     http_status=502, refusal_class=type(exc).__name__)
         # RequiredToolNotCalled, PolicyEvidenceMissing, AgentStepBudgetExceeded,
         # AgentProviderError -- all "the upstream model did not give us
         # something we can publish", which is the same 502 LLMResponseError uses.
         log.error("summary refused app_id=%s reason=%s", app_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    trace.record("outcome", outcome="summary_returned", status="ok",
+                 http_status=200, refusal_class="none")
     return summary.model_dump()
 
 
