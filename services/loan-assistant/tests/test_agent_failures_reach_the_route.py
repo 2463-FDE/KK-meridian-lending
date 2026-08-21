@@ -20,13 +20,15 @@ response.
 
 No paid calls: `run_underwriting_agent` is replaced by something that raises.
 """
+import json
 import logging
+import sys
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import agent, config, llm_client, main
+from app import agent, config, llm_client, main, policy_tool
 
 APP_DATA = {
     "id": 90001, "applicant_name": "Test Applicant 90001", "amount": 18000,
@@ -256,3 +258,172 @@ def test_the_timeout_reaches_the_bedrock_client():
     assert botocore_config.read_timeout == config.AGENT_REQUEST_TIMEOUT_SECONDS
     assert botocore_config.connect_timeout == config.AGENT_REQUEST_TIMEOUT_SECONDS
     assert botocore_config.retries["max_attempts"] == 3
+
+# --------------------------------------------------------------------------
+# A1 re-proved through the REAL code paths.
+#
+# The cases above inject the exception, which proves the route's mapping. These
+# five provoke each refusal the way production would -- a runtime that returns a
+# state with no tool message, a retrieval that misses, a graph that recurses, a
+# model id that is unset, a suppressor that cannot be imported -- so the
+# assertion covers the whole chain from the FastAPI route down, not just the
+# except clause. Requested in review; the earlier version could have passed
+# while the code that RAISES had drifted.
+#
+# Sentinels stand in for content that must never reach the officer's screen or
+# the log: the applicant's own data, the model's text, the tool's output.
+# --------------------------------------------------------------------------
+
+PROMPT_SENTINEL = "72000"                      # applicant income, from APP_DATA
+MODEL_SENTINEL = "MODEL-TEXT-SENTINEL-4401"    # what the model wrote
+TOOL_SENTINEL = "TOOL-OUTPUT-SENTINEL-4402"    # what retrieval returned
+
+_MISS_PAYLOAD = json.dumps({"status": "miss", "hit_count": 0, "excerpts": [],
+                            "note": TOOL_SENTINEL})
+_HIT_PAYLOAD = json.dumps({
+    "status": "hit", "hit_count": 1,
+    "excerpts": [{"document": "fee_schedule.md", "version": "sha256:abc",
+                  "chunk_id": "fee_schedule.md#1.0", "excerpt": TOOL_SENTINEL,
+                  "citation": "c"}]})
+
+
+class _ToolMsg:
+    type = "tool"
+
+    def __init__(self, content, name=None):
+        self.name = name or policy_tool.TOOL_NAME
+        self.content = content
+
+
+class _AIMsg:
+    type = "ai"
+
+    def __init__(self, content):
+        self.content = content
+
+
+class _Runtime:
+    """A fake LangChain runtime: returns a state, or raises like one would."""
+
+    def __init__(self, state=None, raises=None):
+        self._state = state
+        self._raises = raises
+
+    def invoke(self, payload, config=None):
+        if self._raises is not None:
+            raise self._raises
+        return self._state
+
+
+class _GraphRecursionError(Exception):
+    """`run_underwriting_agent` matches this by class name, as LangGraph's is
+    not importable without the framework."""
+
+
+_GraphRecursionError.__name__ = "GraphRecursionError"
+
+
+def _real_path(monkeypatch, runtime):
+    """Wire the route to a real agent run over a fake runtime.
+
+    `build_agent` is the only thing replaced, so `run_underwriting_agent`, the
+    tool gate, the evidence gate and the error classification all execute.
+    """
+    monkeypatch.setattr(agent, "build_agent", lambda *a, **k: runtime)
+
+
+A1_CASES = {
+    "1. required policy tool skipped": (
+        502, "RequiredToolNotCalled",
+        lambda mp: _real_path(mp, _Runtime(state={"messages": [_AIMsg(MODEL_SENTINEL)]}))),
+
+    "2. tool ran but retrieval missed": (
+        502, "PolicyEvidenceMissing",
+        lambda mp: _real_path(mp, _Runtime(state={"messages": [
+            _ToolMsg(_MISS_PAYLOAD), _AIMsg(MODEL_SENTINEL)]}))),
+
+    "3. step budget exceeded": (
+        502, "AgentStepBudgetExceeded",
+        lambda mp: _real_path(mp, _Runtime(raises=_GraphRecursionError("recursion limit")))),
+
+    "4. agent unavailable (no Bedrock model id)": (
+        503, "AgentUnavailable",
+        lambda mp: (mp.setattr(config, "LLM_PROVIDER", "bedrock"),
+                    mp.setattr(config, "BEDROCK_MODEL_ID", ""))),
+
+    "5. tracing cannot be safely suppressed": (
+        503, "UnsafeTracingConfiguration",
+        lambda mp: (mp.setenv("LANGSMITH_TRACING", "true"),
+                    # Blocks `from langsmith.run_helpers import tracing_context`
+                    # with an ImportError, which is the only way the suppressor
+                    # can be unavailable.
+                    mp.setitem(sys.modules, "langsmith.run_helpers", None),
+                    _real_path(mp, _Runtime(state={"messages": [
+                        _ToolMsg(_HIT_PAYLOAD), _AIMsg(MODEL_SENTINEL)]})))),
+}
+
+
+@pytest.mark.parametrize("label", list(A1_CASES))
+def test_a1_each_refusal_reproduced_through_the_route(client, monkeypatch, caplog, label):
+    expected_status, expected_class, arrange = A1_CASES[label]
+    arrange(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        resp = _summary(client)
+
+    body = resp.text
+    detail = resp.json().get("detail", "")
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+
+    # 1. not a generic internal error
+    assert resp.status_code != 500, f"{label}: generic 500 -- {body}"
+    assert detail != "internal error", f"{label}: reached the catch-all"
+
+    # 2. maps into the controlled contract
+    assert resp.status_code == expected_status, (
+        f"{label}: expected {expected_status}, got {resp.status_code}: {body}")
+
+    # 3. the detail says something a reader can act on
+    assert isinstance(detail, str) and len(detail) > 20, (
+        f"{label}: detail is not useful: {detail!r}")
+
+    # 4. no prompt, model or tool content anywhere in the response
+    for name, sentinel in (("applicant data", PROMPT_SENTINEL),
+                           ("model text", MODEL_SENTINEL),
+                           ("tool output", TOOL_SENTINEL)):
+        assert sentinel not in body, f"{label}: {name} leaked into the response"
+
+    # 5. logs carry the category, not the content
+    for name, sentinel in (("model text", MODEL_SENTINEL),
+                           ("tool output", TOOL_SENTINEL)):
+        assert sentinel not in logged, f"{label}: {name} was logged"
+    # 6. the log names WHICH refusal -- strict, because an `or` fallback here
+    #    would let a case pass on the wrong refusal and prove nothing about the
+    #    path it claims to exercise.
+    assert expected_class in logged, (
+        f"{label}: expected the log to name {expected_class}; got: {logged[-300:]!r}")
+
+
+def test_a1_the_five_refusals_stay_distinguishable_internally(monkeypatch):
+    """The HTTP layer collapses these onto three statuses. The domain must not.
+
+    PR B records which refusal happened as trace metadata, so flattening them
+    into one exception to make the route simpler would destroy the categories
+    that work depends on. Two share a status and are still different classes.
+    """
+    classes = {
+        agent.RequiredToolNotCalled, agent.PolicyEvidenceMissing,
+        agent.AgentStepBudgetExceeded, agent.AgentUnavailable,
+        agent.UnsafeTracingConfiguration,
+    }
+
+    assert len(classes) == 5, "refusal classes were merged"
+    for exc_class in classes:
+        assert issubclass(exc_class, agent.AgentError)
+        others = classes - {exc_class}
+        assert not any(issubclass(exc_class, other) for other in others), (
+            f"{exc_class.__name__} is a subclass of another refusal, so the two "
+            f"cannot be told apart by except-clause or by isinstance")
+
+    # 502 is shared by three of them; the status is not the category.
+    assert agent.RequiredToolNotCalled is not agent.PolicyEvidenceMissing
