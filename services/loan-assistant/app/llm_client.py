@@ -40,7 +40,7 @@ from tenacity import (
 )
 
 from . import config, macro
-from . import agent, policy_tool
+from . import agent, policy_tool, trace
 from .redactor import redact_dict, redact_str
 from .schemas import ExternalSignal, LoanSummary
 
@@ -797,6 +797,36 @@ def _parse_summary_text(raw: str) -> "_LLMOutput":
             f"Could not parse LLM response: {type(exc).__name__}") from exc
 
 
+def _policy_provenance(state) -> tuple[list, list, list]:
+    """Document names, versions and citations from the tool messages.
+
+    Reads the SAME payload the model saw, but takes only the three identifier
+    fields and never `excerpt`. Returning the excerpt here would put retrieved
+    policy text into the trace, which is the single most likely way this
+    feature reintroduces the leak it exists to prevent.
+    """
+    documents, versions, citations = set(), set(), set()
+    for message in agent.tool_messages(state):
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for excerpt in payload.get("excerpts") or []:
+            if not isinstance(excerpt, dict):
+                continue
+            documents.add(excerpt.get("document"))
+            versions.add(excerpt.get("version"))
+            citations.add(excerpt.get("citation"))
+    return (sorted(d for d in documents if isinstance(d, str)),
+            sorted(v for v in versions if isinstance(v, str)),
+            sorted(c for c in citations if isinstance(c, str)))
+
+
 def _summary_text_via_agent(prompt: str) -> str:
     """Run the agent and return its final text, or refuse.
 
@@ -830,6 +860,9 @@ def _summary_text_via_agent(prompt: str) -> str:
         # Categorical: which tool was required, never the query or the answer.
         log.error("llm_client summary refused stage=tool_gate required_tool=%s",
                   policy_tool.TOOL_NAME)
+        trace.record("policy_retrieval", tool_name=policy_tool.TOOL_NAME,
+                     tool_calls=0, evidence_status="absent", status="refused",
+                     refusal_class="RequiredToolNotCalled")
         raise agent.RequiredToolNotCalled(
             f"the agent produced a summary without calling "
             f"{policy_tool.TOOL_NAME}; refusing it"
@@ -845,6 +878,10 @@ def _summary_text_via_agent(prompt: str) -> str:
     if evidence != "hit":
         log.error("llm_client summary refused stage=policy_evidence status=%s "
                   "required_tool=%s", evidence, policy_tool.TOOL_NAME)
+        trace.record("policy_retrieval", tool_name=policy_tool.TOOL_NAME,
+                     tool_calls=len(agent.tool_messages(state)),
+                     evidence_status=evidence, status="refused",
+                     refusal_class="PolicyEvidenceMissing")
         raise agent.PolicyEvidenceMissing(
             f"the agent called {policy_tool.TOOL_NAME} but retrieval returned "
             f"{evidence!r}; refusing a summary with no policy behind it"
@@ -852,6 +889,15 @@ def _summary_text_via_agent(prompt: str) -> str:
 
     log.info("llm_client agent accepted stage=tool_gate tool_calls=%d "
              "policy_evidence=%s", len(agent.tool_messages(state)), evidence)
+    # Provenance, not content: which allowlisted documents answered, at which
+    # content hash, and the citation identifiers. `trace._safe` re-checks the
+    # shape of every one of these, so a retrieved excerpt cannot ride in here.
+    documents, versions, citations = _policy_provenance(state)
+    trace.record("policy_retrieval", tool_name=policy_tool.TOOL_NAME,
+                 tool_calls=len(agent.tool_messages(state)),
+                 evidence_status=evidence, status="ok",
+                 documents=documents, document_versions=versions,
+                 citations=citations)
     return raw
 
 
@@ -963,25 +1009,41 @@ def summarize_application(app_data: dict[str, Any]) -> LoanSummary:
     # asks the model not to repeat the number at all; this is the half that
     # holds when it does anyway and gets it wrong.
     fields = llm_output.model_dump()
-    fields["summary"], fields["flags"], _ = _strip_contradicting_macro_claims(
+    # Each validator already reported whether it changed anything; that third
+    # value was being discarded. The trace records WHICH validators fired --
+    # a categorical fact about the guardrails, carrying none of the text they
+    # removed, and the only way an operator can see a guardrail working.
+    _triggered_validators = []
+    fields["summary"], fields["flags"], _macro_hit = _strip_contradicting_macro_claims(
         fields["summary"], fields.get("flags") or [], signal,
     )
+    if _macro_hit:
+        _triggered_validators.append("macro_contradiction")
 
     # The prose half of the no-risk-label invariant. Removing `risk_tier` from
     # the contract closed the chip; a model can still write "High-risk borrower"
     # into `summary` or "High risk" into `flags`, and staff read that the same
     # way. Runs after the macro scrub so both operate on sentences.
-    fields["summary"], fields["flags"], _ = _strip_risk_classifications(
+    fields["summary"], fields["flags"], _risk_hit = _strip_risk_classifications(
         fields["summary"], fields["flags"],
     )
+    if _risk_hit:
+        _triggered_validators.append("risk_classification")
 
     # The debt-to-income half. G-DTI removed the published cutoff and the prompt
     # instruction; this is what holds when the model writes one anyway. Nothing
     # in this system carries the applicant's debt obligations, so a DTI claim in
     # the summary is invented, and staff read it during manual review.
-    fields["summary"], fields["flags"], _ = _strip_dti_claims(
+    fields["summary"], fields["flags"], _dti_hit = _strip_dti_claims(
         fields["summary"], fields["flags"],
     )
+    if _dti_hit:
+        _triggered_validators.append("dti_claim")
+
+    trace.record("validation", status="ok",
+                 validators_run=["macro_contradiction", "risk_classification",
+                                 "dti_claim"],
+                 validators_triggered=_triggered_validators)
 
     return LoanSummary(
         applicant_name=_applicant_name(app_data),
