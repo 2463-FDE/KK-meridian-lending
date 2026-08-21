@@ -1,13 +1,20 @@
 # Meridian Lending — Four Statuses, Said Separately
 
-Three slides, regenerated from the repository at `92908ce`. Bullets are what goes
-on screen. Notes are what I say.
+Three slides, regenerated from the repository. Bullets are what goes on screen.
+Notes are what I say.
+
+**Provenance.** The claims below rest on `92908ce` (the card-path proof),
+`81c16bb74` (the cross-service identifier) and `ee8f733c4` (the allocation
+read). Naming the evidence commits rather than a single head, because a head sha
+in a header goes stale on the next commit and then points a reader at a tree
+that does not support what they are reading — which is the failure this deck
+teaches people to check for.
 
 **Opening statement**
 
 > Four things. Separation of duties: done. Auditable traces: done. Cross-service
-> traceability: open. Duplicate-capture detection: open. I will demonstrate the
-> two that are done and show you exactly where the two that are open stop.
+> traceability: done this week, and I will show you the identifier. Duplicate-capture
+> detection: still open, and it is waiting on a decision from you.
 
 Last demo the feedback was that the visuals improved and the reading did not. So
 every on-screen line here is short enough to read at a glance, and a claim that
@@ -128,25 +135,28 @@ changes it.
 
 ### On screen
 
-**Fees → interest → principal is enforced. What the borrower sees is not.**
+**Fees → interest → principal is enforced. The API now returns it. The screen does not.**
 
 **Show**
 
 - Apply a synthetic payment
-- The split is enforced in code and written to the ledger per component
-- On the borrower's screen: date, method, amount — **not the split**
+- The split is written to the ledger, one entry per component
+- The API returns what that payment paid, **read from the ledger**
+- On the borrower's screen: date, method, amount — **not yet the split**
 
 **Where it stops — said separately**
 
 - Separation of duties — **done**
 - Auditable traces — **done**
-- Cross-service traceability — **open.** No shared id links charge to application
+- Cross-service traceability — **done.** One id, charge to ledger
+- Pre-trace payments keep no id. We do not back-fill one
 - Duplicate-capture detection — **open.** Deferred, pending your decision
 
 **Evidence**
 
 - `services/servicing-service/app/waterfall.py` — the order, from the published schedule
 - `services/servicing-service/tests/test_payment_waterfall.py` — 25 cases
+- `services/servicing-service/tests/test_payment_allocation_is_read_from_the_ledger.py` — the read
 - `services/servicing-service/tests/test_double_capture_is_not_detected_yet.py` — the gap, pinned
 - `docs/DEBT.md` D22 — the deferral, with the decision it needs
 
@@ -157,13 +167,19 @@ publishes the order and the code bills from the borrower's own signed schedule. 
 payment larger than everything owed is refused rather than absorbed, because what
 happens to the excess is a policy question no document here answers.
 
-What the borrower can see is the honest half of this slide. The allocation exists
-in the ledger, one row per component, keyed to the payment. No endpoint exposes
-it. The payment history shows date, method, card and amount, and the schedule
-table above it shows the *contract's* plan — which a borrower carrying a late fee
-will read as an answer and be wrong. I did not build the fix, because whether you
-want an itemised breakdown at payment time or only in history changes its shape.
-That is question two for you.
+What the borrower can see is the honest half of this slide, and it moved this
+week. The allocation exists in the ledger, one row per component, keyed to the
+payment, and the API now returns it — read from those rows, never recomputed,
+because re-running the waterfall at read time would give a second opinion about
+a movement that already happened and the two would disagree the moment a fee was
+waived.
+
+What has not moved is the screen. The payment history still shows date, method,
+card and amount, and the schedule table above it shows the *contract's* plan —
+which a borrower carrying a late fee will read as an answer and be wrong. I did
+not build that half, because whether you want an itemised breakdown at payment
+time or only in history changes its shape. That is question two for you, and the
+data is ready either way.
 
 On duplicate capture: reconciliation has four break kinds and none of them fires
 when two captures for one loan both settle. Each carries its own settlement
@@ -174,11 +190,26 @@ false-positive appetite are yours to set. What I did instead is write the
 deferral down with the owner and the follow-up, and pin the gap with a test that
 fails the day someone builds detection without settling the question.
 
-Cross-service traceability is the fourth status and it is open. Auditable is not
-traceable: what happened is recorded, and one payment still cannot be followed
-from the processor charge to the servicing application, because there is no
-shared correlation id. I am saying that separately from the auditable-traces
-claim on purpose — last week the two were easy to hear as one.
+Cross-service traceability is the fourth status, and it closed this week. I am
+still saying it separately from auditable traces on purpose, because last week
+the two were easy to hear as one and they are different claims: auditable means
+every change is recorded immutably with who and when, traceable means one
+payment can be followed across process boundaries from a single identifier.
+
+The identifier is minted before the payments row exists — deliberately, because
+the processor call is the hop that most needs it and the row id does not exist
+yet. It goes to the processor as a header, to servicing with the apply, and onto
+every ledger entry the payment writes, so one charge returns its whole
+allocation rather than one row of it. A retry adopts the original payment's id
+rather than minting a second, which is the case an incident actually exercises.
+
+Two bounds, on the slide rather than here. A payment captured before this
+existed has no id and keeps none — we do not back-fill one, because the capture
+and its authorization already happened without it and a trace covering only the
+tail of a payment would look complete while being partial. And this makes a
+payment followable in our own logs and tables; it is not a log aggregator, and
+the processor is still a mock, so nothing echoes the id back from a real
+processor's systems.
 
 ---
 
@@ -224,10 +255,11 @@ reader offline cannot check it. The manifest names what landed instead.
 |---|---|---|
 | Fees → interest → principal, from the published schedule | `services/servicing-service/app/waterfall.py` | **verified** |
 | The split, per component, on the ledger | `services/servicing-service/tests/test_payment_waterfall.py` | **verified** |
-| The borrower can see what a payment paid | — | **open** — not built, question 2 |
+| The API returns what a payment paid, read from the ledger | `services/servicing-service/tests/test_payment_allocation_is_read_from_the_ledger.py` | **verified** — PR #58 |
+| The borrower's SCREEN shows it | — | **open** — waiting on question 2 |
 | Double-fund raises no break today | `services/servicing-service/tests/test_double_capture_is_not_detected_yet.py` | **deferred** — PR #52 |
 | The decision, its owner and the follow-up | `docs/DEBT.md` D22 | **deferred** |
-| One payment traced across services | — | **open** — no shared correlation id |
+| One payment traced across services | `db/migrations/0043_correlation_id.sql` | **verified** — PR #56 |
 
 ## Three questions for you
 

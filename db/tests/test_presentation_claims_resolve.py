@@ -618,3 +618,55 @@ def test_no_deck_claims_every_pr_resolves_to_a_file(deck):
         f"{deck.name} claims every cited PR resolves to an existing file, which "
         f"is false for any open row"
     )
+
+
+# --- commits a deck cites in its own prose ------------------------------------
+#
+# The manifest's merge commits were checked; a commit written into a deck's
+# header or body was not. Review of PR #59 (B2) found the deck claiming it was
+# "regenerated from the repository at 92908ce" while its load-bearing claims
+# came from two later commits -- so a reader checking provenance landed on a
+# tree that did not support what they were reading. The deck failed the exact
+# check it teaches people to run.
+
+_DECK_COMMIT = re.compile(r"`([0-9a-f]{7,40})`")
+
+
+def _deck_commits():
+    """(deck, sha) for every commit-shaped citation in a deck's prose."""
+    found = []
+    for deck in DECKS:
+        for raw in _DECK_COMMIT.findall(deck.read_text(encoding="utf-8")):
+            # A short sha and a lowercase hex word are the same shape. Require a
+            # digit so prose like `deadbeef` or `accede` is not treated as one.
+            if any(c.isdigit() for c in raw):
+                found.append((deck, raw))
+    return found
+
+
+@pytest.mark.parametrize("deck,sha", _deck_commits(),
+                         ids=lambda v: v.name if hasattr(v, "name") else v)
+def test_every_commit_a_deck_cites_exists(deck, sha):
+    """A provenance line pointing at nothing is worse than none at all.
+
+    Skipped on a shallow clone rather than passed silently -- CI checks out with
+    limited history, and a skip that reads like a pass is the failure this whole
+    module is about.
+    """
+    if subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                      cwd=REPO, capture_output=True, text=True).stdout.strip() == "true":
+        pytest.skip("shallow clone -- cited commits are not in this checkout")
+
+    found = subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+                           cwd=REPO, capture_output=True)
+    assert found.returncode == 0, (
+        f"{deck.name} cites commit {sha}, which is not in this repository"
+    )
+
+
+def test_the_commit_scan_finds_something():
+    """Vacuity guard: a regex matching nothing would make the check decorative."""
+    assert _deck_commits(), (
+        "no deck cites a commit -- either the provenance lines went away or the "
+        "pattern stopped matching them"
+    )

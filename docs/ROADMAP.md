@@ -38,8 +38,9 @@ below explain how it was derived.
   payment path is idempotent and servicing's processorless duplicate has been
   retired, so payment creation has exactly one path again; Week 6 has the token
   boundary, the gateway role rule, the ledger, a gateway-signed human principal
-  and maker-checker enforcement; Week 7 has
-  reconciliation but not a cross-service trace ID; Weeks 8–10 retain the scoped
+  and maker-checker enforcement; Week 7 has both
+  its deliverables — the scoped reconciliation control and the cross-service
+  trace ID (`db/migrations/0043`, PR #56); Weeks 8–10 retain the scoped
   gaps in the table below.
 
 *This block is the summary of the matrix below and it drifted from it.* It led
@@ -80,7 +81,7 @@ during Week 4); those are marked where they occur.
 | 4 | Auto-disclosure on approval + KG traversal | ✅ Landed |
 | 5 | Card tokenization + payment reconciliation | ✅ Landed |
 | 6 | Servicing RBAC / ledger / maker-checker | ✅ Landed — RBAC, append-only ledger, and maker-checker enforced by `no_self_approval` plus `resolve_pending_movement` (migrations 0036/0037) |
-| 7 | Trace ID + scoped reconciliation control | 🟡 Scheduled transaction-level reconciliation landed; cross-service trace ID remains open |
+| 7 | Trace ID + scoped reconciliation control | ✅ Landed — scheduled transaction-level reconciliation, and a shared `correlation_id` minted by `payment-service`, sent to the processor and to servicing, and stamped on every ledger entry a payment writes (`db/migrations/0043`, PR #56) |
 | 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
 | 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
@@ -870,18 +871,27 @@ noisy, we just adjust to the bank number."
 *The four rows above are dated discovery evidence, not current guarantees.
 Since that measurement, transaction-level scheduled reconciliation,
 `processor_ref`, capture timestamps/source, run evidence, and fail-closed
-behavior landed. The cross-service trace-ID gap remains; verify current state
-from code and tests rather than treating the historical markers as live status.*
+behavior landed, and the cross-service trace ID has since landed too (PR #56,
+2026-08-20). Verify current state from code and tests rather than treating the
+historical markers as live status.*
 
-**This week's real deliverable, stated honestly:** **one** instrumented path
-(a shared trace/correlation ID connecting `payment-service`'s `charge()` to
-`servicing-service`'s `apply_payment` — today the two hops share nothing that
-would let anyone connect them in logs) and **one** control (a reconciliation
+**Week 7's deliverable as scoped on 2026-08-05, stated honestly:** **one**
+instrumented path (a shared trace/correlation ID connecting `payment-service`'s
+`charge()` to `servicing-service`'s `apply_payment` — at the time the two hops
+shared nothing that would let anyone connect them in logs; that ID landed on
+2026-08-20, PR #56) and **one** control (a reconciliation
 job correctly scoped to `settlement.csv`'s actual date range and loan set,
 producing a break-report, plus one alert on a reconciliation break). Run
 against a sampled month (matching the settlement file), not full history —
 per the brief's own quota note. **One path, one control — not full
 observability.**
+
+> **Superseded 2026-08-20.** Both of Week 7's own deliverables have since
+> landed: the scoped reconciliation control (transaction-level, scheduled, with
+> run evidence) and the cross-service trace ID (`db/migrations/0043`, PR #56).
+> The status paragraph below is kept as written because it is dated evidence of
+> what was true on 2026-08-05, and rewriting it would erase the gap rather than
+> close it — but it is no longer live status.
 
 **Status (2026-08-05): 🟡 Partial — and the partial piece is not the piece this
 week scoped.** A Prometheus + Grafana stack landed early (`monitoring/`,
@@ -999,8 +1009,10 @@ built" is **not fully accurate**, checked today:
   landed. ADR 0011 and spec 0002 defined maker-checker and its
   non-forgeable-principal boundary first; migrations 0036/0037 then enforced it,
   and money now moves only on a second person's approval.
-- **Week 7** — Prometheus/Grafana and the scoped, scheduled reconciliation
-  control have landed. The cross-service trace ID remains open.
+- **Week 7** — Prometheus/Grafana, the scoped scheduled reconciliation control,
+  and the cross-service trace ID have all landed. `correlation_id` is minted at
+  charge entry, sent to the processor as a header and to servicing with the
+  apply, and stamped on every ledger entry the payment writes (PR #56).
 - **Week 4** — merged to `main` (PR #6, 2026-08-05), including the
   auto-disclosure chain this capstone depends on.
 - **Week 5** — built, CI-green and **merged** (PR #8, 2026-08-05). A showcase must not
