@@ -291,6 +291,35 @@ def test_the_outcome_screen_is_not_presented_as_model_validation():
 # Guard 4 -- the artefact has an owner, and the commitment lives THERE.
 # --------------------------------------------------------------------------
 
+def test_the_cards_monitoring_claim_matches_what_exists():
+    """The card now says reason-code frequency is measurable. If that surface
+    is ever removed, the claim becomes a false statement in a governance
+    artefact -- which is the failure this file exists to prevent, just pointed
+    at a different sentence.
+
+    Deliberately two-way. It also fails if the card still calls reason-code
+    frequency unbuilt while the surface exists, so the claim cannot lag the
+    code in either direction.
+    """
+    card = CARD.read_text(encoding="utf-8")
+    module = REPO / "services" / "origination-service" / "app" / "reason_distribution.py"
+    router = (REPO / "services" / "origination-service" / "app" / "routers"
+              / "applications.py").read_text(encoding="utf-8")
+
+    claims_measurable = "Reason-code frequency is now measurable" in card
+
+    if claims_measurable:
+        assert module.is_file(), (
+            "the card claims reason-code frequency is measurable, but "
+            f"{module.name} does not exist")
+        assert "fair-lending/reason-distribution" in router, (
+            "the card claims a route that is not registered")
+    else:
+        assert not module.is_file(), (
+            "reason_distribution.py exists but the card still does not mention "
+            "it -- the card is behind the code")
+
+
 def test_the_card_names_an_owner_and_an_update_trigger():
     """Scoped to the ownership section, with no whole-document fallback.
 
