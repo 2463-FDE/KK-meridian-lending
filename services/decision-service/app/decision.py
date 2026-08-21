@@ -49,11 +49,39 @@ log = get_logger("decision")
 # Specific, per-applicant adverse-action reasons — see _reason_codes() for which
 # input drives which reason. Replaces the old single hardcoded "purchasing history"
 # string that never reflected what the model actually weighed.
+#: Approved consumer-facing wording, keyed by the reason code the model
+#: reported. Spec 0003 §1.6.
+#:
+#: A reason code is authoritative about **the model**. It is not automatically
+#: authoritative **wording**, and the two are different artefacts: the code is
+#: audit evidence and is retained verbatim in `decision_events`; this table
+#: produces what a declined applicant is actually told.
+#:
+#: The deterministic stub's two codes ARE approved sentences, so they map to
+#: themselves. That is not a placeholder -- their meaning is owned by
+#: `_reason_codes` in this repository rather than by a third party, which is
+#: exactly what makes them safe to show. Two entries is not a defect where two
+#: drivers is what the stub genuinely has.
+#:
+#: **Real vendor codes are deliberately absent.** No vendor taxonomy or approved
+#: wording is committed anywhere in this repository, so any entry added here for
+#: a real code would be invented semantics. `high_debt_to_income` appears in
+#: this repo only as a test author's placeholder and MUST NOT be added.
+#: VENDOR-BLOCKED (spec 0003, *Blocked*).
+APPROVED_CONSUMER_REASONS: dict[str, str] = {}
+
+
 REASON_LOW_BUREAU_SCORE = "Low credit bureau score relative to lending criteria"
 REASON_INSUFFICIENT_INCOME = "Insufficient income relative to lending criteria"
 
 # Baseline "healthy applicant" values used only to compare which input is further
 # below a reasonable bar — not approval thresholds themselves. See _reason_codes().
+APPROVED_CONSUMER_REASONS.update({
+    REASON_LOW_BUREAU_SCORE: REASON_LOW_BUREAU_SCORE,
+    REASON_INSUFFICIENT_INCOME: REASON_INSUFFICIENT_INCOME,
+})
+
+
 _HEALTHY_BUREAU_SCORE = 720
 _HEALTHY_INCOME = 50_000
 
@@ -64,6 +92,31 @@ class CreditBureauUnavailableError(RuntimeError):
 
 class ModelUnavailableError(RuntimeError):
     """Licensed AI scorer not configured/reachable and stubbing isn't allowed here."""
+
+
+
+class UnmappedAdverseActionReason(ModelUnavailableError):
+    """The model reported a reason with no approved consumer wording.
+
+    Fails closed, and subclasses ModelUnavailableError so it inherits the
+    existing refusal handling rather than inventing a second one -- while
+    staying a distinct class, because "the scorer is unreachable" and "the
+    scorer answered with something we may not repeat to an applicant" are
+    different incidents and a log that conflated them would mislead whoever
+    reads it.
+
+    Refusing the whole decision is deliberate and is the strict reading of
+    12 CFR 1002.9: a denial has to carry a statement of specific reasons, so a
+    denial we cannot lawfully explain is not a decision worth committing. The
+    alternatives were all worse -- a nearest match invents a reason the model
+    did not give, a generic fallback is the `GENERIC_REASONS` defect this
+    repository already removed once, and passing the raw code through puts a
+    machine token in front of a person.
+
+    Operationally severe with a real vendor and an empty mapping table: every
+    denial refuses until approved wording exists. That is the honest posture,
+    and spec 0003 records it rather than softening it.
+    """
 
 
 class _ScorerResponse(BaseModel):
@@ -210,6 +263,40 @@ async def _call_ai_scorer(bureau_score: int, application: dict) -> dict:
             "model_version": f"{AI_MODEL_VERSION}-stub",
             "reason_codes": _reason_codes(bureau_score, income),
         }
+
+
+def consumer_adverse_action_reason(reason_codes, decision: str):
+    """The approved sentence a declined applicant is told, or refuse.
+
+    Spec 0003 §1.1/§1.4/§1.6. Returns None for any outcome that is not a
+    denial -- an approval has no adverse action to explain.
+
+    This is the seam that stops `reason_codes[0]` becoming consumer text by
+    default, which is what `graph.py::_node_finalize` used to do.
+    """
+    if decision != "deny":
+        return None
+
+    codes = [c for c in (reason_codes or []) if isinstance(c, str) and c.strip()]
+    if not codes:
+        raise UnmappedAdverseActionReason(
+            "the model reported no usable reason code for a denial; refusing "
+            "rather than issuing an unexplained adverse action"
+        )
+
+    code = codes[0]
+    try:
+        return APPROVED_CONSUMER_REASONS[code]
+    except KeyError:
+        # The code itself is NOT interpolated into the message: it is model
+        # output, it reaches logs through this exception, and the whole point
+        # of this function is that it is not fit to be repeated onward. The
+        # count tells an operator how much is unmapped without quoting any of
+        # it.
+        raise UnmappedAdverseActionReason(
+            f"the model reported {len(codes)} reason code(s), none of which "
+            f"has approved consumer wording; refusing the denial"
+        ) from None
 
 
 def _reason_codes(bureau_score: int, income: float) -> list[str]:

@@ -42,14 +42,22 @@ Two questions have no answer today, and they are different questions.
    is answerable only by reading source.
 2. **Is the model fair?** The ZIP3 screen measures **outcomes**, not the model.
    It cannot support a statement about the model, and no data exists that could.
-3. **Does a machine token reach the consumer?** Yes, today it would.
-   `origination-service/app/decision_state.py::get_deny_reason` returns
-   `reason_codes[0]` unchanged into `adverse_action_reason`, and no mapping
-   layer exists anywhere between the scorer and the notice. The deterministic
-   stub hides this because it emits full sentences; a real vendor returning
-   `high_debt_to_income` would put that token in front of a consumer. A raw
+3. **Does a machine token reach the consumer?** Yes, by **two** paths, and the
+   first version of this spec named only the second and less important one.
+
+   - **`services/decision-service/app/graph.py::_node_finalize`** set
+     `adverse_action_reason` to `reason_codes[0]` unchanged. That field travels
+     to origination and is rendered to the applicant by
+     `frontend/app/apply/page.tsx`. This is the applicant-facing path.
+   - **`services/origination-service/app/decision_state.py::get_deny_reason`**
+     returned `reason_codes[0]` unchanged into the 422 details on the boarding
+     and offer-creation routes. Operational rather than applicant-facing, but
+     still the model's own code repeated onward.
+
+   The deterministic stub hides both, because its codes are full sentences; a
+   real vendor returning `high_debt_to_income` would surface that token. A raw
    snake_case machine code is not a *specific reason* in the sense 12 CFR
-   1002.9 requires.
+   1002.9 requires. **Both paths are closed by the mapping seam (§1.6).**
 
 ## Decision — the monitoring contract
 
