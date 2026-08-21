@@ -238,6 +238,82 @@ service and evaluated every 30s; the rules are visible at
   reports `ok` -- and reintroducing it silently, on a file already known to be
   malformed, is the worst moment to do it.
 
+## Following one payment across services
+
+A borrower says they were charged and their balance did not move. Before
+`db/migrations/0043` the only way to answer that was to join by eye --
+`loan_id` plus amount plus a nearby timestamp -- across two services' logs and
+two tables. That is what "payments feel flaky" looked like from the inside.
+
+Every payment now carries a `correlation_id`, minted by payment-service at the
+moment the charge is accepted and carried unchanged to the processor, to
+servicing, and onto every ledger entry the payment writes.
+
+**It correlates and nothing else.** No balance, no dedupe and no reconciliation
+decision depends on it, so it is safe to quote in a ticket, and changing one
+would move no money. It is NOT the idempotency key: that value is
+caller-supplied and decides whether two requests are the same payment.
+
+### Start from whatever the ticket gives you
+
+```bash
+# From a log line -- the id is on every payment-specific line in both services.
+docker compose logs payment-service | grep pay_2f6c1e...
+docker compose logs servicing-service | grep pay_2f6c1e...
+
+# From a loan and an amount, when nobody has an id yet.
+psql "$DATABASE_URL" -c "
+  SELECT id, correlation_id, amount, auth_status, captured_at, applied_at
+    FROM payments
+   WHERE loan_id = 4471 AND amount = 250.00
+   ORDER BY created_at DESC;"
+```
+
+### Then pull everything that belongs to it
+
+```bash
+psql "$DATABASE_URL" -c "
+  SELECT id, loan_id, amount, auth_status, captured_at, applied_at, processor_ref
+    FROM payments
+   WHERE correlation_id = 'pay_2f6c1e...';"
+
+# One row per component the payment moved: fees, interest, principal.
+psql "$DATABASE_URL" -c "
+  SELECT component, amount, entry_type, occurred_at
+    FROM ledger_entries
+   WHERE correlation_id = 'pay_2f6c1e...'
+   ORDER BY occurred_at;"
+```
+
+Both columns are indexed (partial, on non-NULL), so neither query scans the
+table.
+
+### Reading the answer
+
+| What you see | What happened |
+|---|---|
+| A `payments` row, no `ledger_entries` rows | Captured, never applied. The drain retries it -- check `apply_attempts` and `apply_last_error` |
+| `payments` row and ledger rows | Applied. The ledger rows are where the money went, in the order fees -> interest -> principal |
+| Two `payments` rows, one id | Impossible by construction: the id is per payment. Two ids for one complaint means two payments -- which may be the double-fund case (`docs/DEBT.md` D22) |
+| No rows at all | The charge never reached us. Look at the gateway, not here |
+
+### The two cases with no id, and they are not faults
+
+- **A payment captured before 0043** has `correlation_id` NULL and is not
+  back-filled on retry. Its capture and authorization happened without an id, so
+  a trace covering only the tail would look complete while being partial. Fall
+  back to the `loan_id` + amount + timestamp join for those.
+- **A ledger entry with no payment behind it** -- a late fee, an approved
+  adjustment, a waiver -- carries NULL too. Those are found by `loan_id` and
+  `entry_type`, and they are movements nobody paid for.
+
+### What this is not
+
+It follows a payment through **our** logs and tables. It is not a log
+aggregator, and the processor is a mock in this repository -- a real processor
+would have to be asked to echo `X-Correlation-Id` back on its own records
+before the trace covered their side too.
+
 ## Verifying maker-checker on a running system
 
 `scripts/check_self_approval.sh` answers a question CI cannot: is the
@@ -313,8 +389,20 @@ against someone holding the schema-owning database credentials -- see ADR 0011,
   synchronous HTTP with no timeout or retry. If `decision-service`'s credit pull hangs, the
   applicant-facing origination request hangs with it. Watch `decision-service` latency when
   intake requests pile up. (No circuit breaker / fallback.)
-- **Month-end close.** `reconciliation.peek` totals do not tie out and nothing runs on a
-  schedule. Finance reconciles by hand in a spreadsheet.
+- **Month-end close — FIXED, with one part still open.** This bullet used to say
+  `reconciliation.peek` totals do not tie out and nothing runs on a schedule.
+  Both halves stopped being true: a `reconciliation` service runs the job on a
+  schedule in the default compose services (not behind a profile), and the
+  comparison is transaction-level, keyed on the processor's own settlement
+  reference, so a break names the capture responsible instead of a net figure
+  per loan. `peek` still exists and still reports two totals that need not tie
+  out -- it is a read, not the control; the control is `app.reconcile_job` and
+  its exit code. **What remains open is routing:** the alert rules in
+  `monitoring/alerts.yml` reach `firing` in Prometheus and there is no
+  Alertmanager in this compose file, so nothing pages anyone. Watch
+  `docker compose logs -f reconciliation`, or the rules at
+  `http://localhost:9090/alerts`, until somewhere to send a page has been
+  decided (`docs/DEBT.md` D7).
 - **No log line writes a card-number-shaped value — and that is narrower than "no SSN".**
   This entry previously said `payment-service` logs full PAN/CVV/SSN at INFO and that
   origination logs full PII at intake. Both are false against the current code and were
