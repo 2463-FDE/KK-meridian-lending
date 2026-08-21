@@ -27,6 +27,7 @@ authenticated server-side). They stay where they are.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -45,6 +46,24 @@ class AgentUnavailable(RuntimeError):
     """
 
 
+class AgentStepBudgetExceeded(RuntimeError):
+    """The agent looped past its step budget.
+
+    Refused rather than retried or allowed to continue: an autonomous loop with
+    no ceiling is an open line to a paid API, and the client named usage limits
+    explicitly.
+    """
+
+
+class PolicyEvidenceMissing(RuntimeError):
+    """The tool ran and found nothing, and the summary was refused for it.
+
+    Distinct from RequiredToolNotCalled on purpose: "never asked" and "asked and
+    got nothing" are different failures, and a trace that conflated them could
+    not tell an operator which one happened.
+    """
+
+
 class RequiredToolNotCalled(RuntimeError):
     """The agent produced an answer without consulting policy.
 
@@ -54,20 +73,33 @@ class RequiredToolNotCalled(RuntimeError):
     """
 
 
-#: What the agent is told. Deliberately short: instructions are not a security
-#: control -- the tool's own bounds are (see policy_tool). This says what the
-#: job is and that policy must be consulted, and nothing about how to behave if
-#: someone tries to talk it out of that, because the enforcement is downstream.
-SYSTEM_PROMPT = (
-    "You summarise a consumer loan application for an underwriter.\n"
-    "\n"
-    f"Before answering you MUST call the {TOOL_NAME} tool to find the "
-    "underwriting policy that applies to this application, and your summary "
-    "must be consistent with what it returns.\n"
-    "\n"
-    "Return only the requested JSON object. Do not include applicant names, "
-    "card numbers, or social security numbers in any field."
-)
+#: The agent's contract = the EXISTING summary safety contract, plus the tool
+#: requirement. Composed rather than rewritten, and that is the point.
+#:
+#: The first version of this file wrote a short prompt of its own and silently
+#: dropped rules `_SYSTEM` had carried for months -- "use only the data
+#: provided, do not invent", no risk tier, no DTI reasoning, no invented numeric
+#: threshold. Three of those have deterministic post-validators
+#: (`_strip_risk_classifications`, `_strip_dti_claims`,
+#: `_strip_contradicting_macro_claims`) so the guarantee survived; "do not
+#: invent" has NO deterministic replacement, and dropping it weakened a live
+#: safety boundary while adding a feature. Reviewed on PR #63.
+#:
+#: Composing means the two cannot drift again: editing the summary rules edits
+#: what the agent is told, in one place.
+def system_prompt() -> str:
+    """The summary safety contract plus the policy-tool requirement."""
+    from .llm_client import _SYSTEM
+
+    blank = "\n\n"
+    return (
+        _SYSTEM + blank
+        + f"Before answering you MUST call the {TOOL_NAME} tool to find the "
+        "underwriting policy that applies to this application, and your summary "
+        "must be consistent with what it returns. Do not claim to have consulted "
+        "policy without calling the tool." + blank
+        + "Return only the requested JSON object."
+    )
 
 
 def build_agent(tools: list | None = None):
@@ -119,7 +151,7 @@ def build_agent(tools: list | None = None):
             ),
         )]
 
-    return create_agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)
+    return create_agent(model=model, tools=tools, system_prompt=system_prompt())
 
 
 def tool_messages(state: Any) -> list:
@@ -150,15 +182,50 @@ def tool_messages(state: Any) -> list:
 def required_tool_was_called(state: Any, tool_name: str = TOOL_NAME) -> bool:
     """Did the RUNTIME execute the required tool?
 
-    The whole invariant in one function. A ToolMessage naming the tool exists
-    only because the model emitted a tool call and the runtime ran it -- it
-    cannot be produced by application code calling the tool itself, which is
+    A ToolMessage naming the tool exists only because the model emitted a tool
+    call and the runtime ran it -- it cannot be produced by application code
+    calling the tool itself, nor by the model *saying* it used a tool, which is
     what makes this evidence rather than bookkeeping.
+
+    Says nothing about whether the retrieval found anything. That is
+    `policy_evidence_status`, and the two questions are separate on purpose.
     """
     for message in tool_messages(state):
         if getattr(message, "name", None) == tool_name:
             return True
     return False
+
+
+def policy_evidence_status(state: Any, tool_name: str = TOOL_NAME) -> str:
+    """What the policy retrieval actually produced: "hit", "miss" or "absent".
+
+    Reviewed on PR #63 (finding 3). The gate above answers "did a tool run",
+    and a tool CAN run and return nothing -- an empty or irrelevant query yields
+    `status=miss, hit_count=0`. Treating that as consultation would let an
+    ungrounded summary be indistinguishable from a grounded one, which is
+    exactly the claim the PR title makes and must therefore hold.
+
+    Returns the strongest status across all calls: a model that misses once and
+    then retrieves successfully HAS consulted policy. Categorical by design --
+    this is the value the trace records (PR B).
+    """
+    best = "absent"
+    for message in tool_messages(state):
+        if getattr(message, "name", None) != tool_name:
+            continue
+        best = "miss" if best == "absent" else best
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            # Unparseable tool output is not evidence of a hit. Fail closed.
+            continue
+        if isinstance(payload, dict) and payload.get("status") == "hit" \
+                and payload.get("hit_count", 0) > 0:
+            return "hit"
+    return best
 
 
 def final_text(state: Any) -> str:
@@ -187,7 +254,32 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
     than being summarised into a boolean here.
     """
     runtime = agent if agent is not None else build_agent()
-    state = runtime.invoke({"messages": [{"role": "user", "content": prompt}]})
+
+    # An explicit, finite budget. LangGraph enforces `recursion_limit` and
+    # raises GraphRecursionError, but its default (25) is the framework's
+    # choice, not ours, and 25 steps is roughly a dozen model calls for a
+    # one-paragraph summary. Reviewed on PR #63 (finding 4).
+    #
+    # The number is derived, not picked: one model turn to decide, one tool
+    # execution, one model turn to answer is 3 steps. The real Bedrock run made
+    # three tool calls before answering (7 steps), so the demo genuinely needs
+    # more than the minimum. `AGENT_MAX_STEPS` defaults to 12 -- comfortably
+    # above observed behaviour, far below anything that could run up a bill --
+    # and a loop that exceeds it is refused rather than retried.
+    try:
+        state = runtime.invoke(
+            {"messages": [{"role": "user", "content": prompt}]},
+            config={"recursion_limit": config.AGENT_MAX_STEPS},
+        )
+    except Exception as exc:
+        if type(exc).__name__ == "GraphRecursionError":
+            log.error("agent exceeded its step budget stage=agent_loop max_steps=%d",
+                      config.AGENT_MAX_STEPS)
+            raise AgentStepBudgetExceeded(
+                f"the agent exceeded {config.AGENT_MAX_STEPS} steps without "
+                f"producing an answer; refusing rather than continuing"
+            ) from exc
+        raise
 
     calls = [getattr(m, "name", "?") for m in tool_messages(state)]
     # Categorical only: which tools ran and how many times. Never the tool's

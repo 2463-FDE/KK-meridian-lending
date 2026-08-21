@@ -27,7 +27,8 @@ class _FakeToolMessage:
 
     type = "tool"
 
-    def __init__(self, name, content=""):
+    def __init__(self, name, content=None):
+        content = HIT_PAYLOAD if content is None else content
         self.name = name
         self.content = content
 
@@ -38,6 +39,8 @@ class _FakeAIMessage:
     def __init__(self, content):
         self.content = content
 
+
+HIT_PAYLOAD = '{"status": "hit", "hit_count": 1, "excerpts": [{"document": "fee_schedule.md", "version": "sha256:abc", "chunk_id": "fee_schedule.md#1.0", "excerpt": "x", "citation": "c"}]}'
 
 SUMMARY_JSON = json.dumps({
     "loan_amount": 18000, "term_months": 48, "purpose": "debt consolidation",
@@ -54,7 +57,7 @@ def _state(messages):
 # --------------------------------------------------------------------------
 
 def test_a_runtime_tool_message_is_recognised():
-    state = _state([_FakeToolMessage(policy_tool.TOOL_NAME, "{}"),
+    state = _state([_FakeToolMessage(policy_tool.TOOL_NAME),
                     _FakeAIMessage(SUMMARY_JSON)])
 
     assert agent.required_tool_was_called(state) is True

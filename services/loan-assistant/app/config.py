@@ -19,7 +19,17 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # see llm_client.py::make_client(). Config-driven so one vendor is never
 # hardcoded, same principle as the CreditBureauClient abstraction planned for
 # decision-service (RF-21).
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
+# Default: bedrock. Changed from "anthropic" when the summary became an agent.
+#
+# The agent runtime refuses any provider but Bedrock, so leaving the default on
+# direct Anthropic meant the DOCUMENTED configuration produced: agent enabled ->
+# provider anthropic -> agent refuses -> no summary. A developer following the
+# supported setup would have selected the architecture the client rejected and
+# then found the feature broken, which is the worst of both. Reviewed on PR #63.
+#
+# policy_chat still runs on whichever provider is configured; it is not the
+# agent path and is unaffected by this default beyond which vendor it calls.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "bedrock")
 
 # Required when LLM_PROVIDER=bedrock -- Bedrock model ids differ from direct-API
 # model ids and depend on what your AWS account/region has been granted access
@@ -47,6 +57,19 @@ AGENT_ENABLED = os.getenv("AGENT_ENABLED", "true").lower() not in ("0", "false",
 #: Ceiling on the agent's own output. Separate from MAX_INPUT_TOKENS, which
 #: guards what we send.
 AGENT_MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_OUTPUT_TOKENS", "1024"))
+
+#: Hard ceiling on agent loop steps per summary (LangGraph `recursion_limit`).
+#: Three steps is the minimum useful path -- decide, call the tool, answer. The
+#: observed real run used seven. Twelve leaves room for a couple of extra
+#: retrieval attempts and stops well short of anything that could run up a bill.
+AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
+
+#: Whether a policy retrieval that found nothing may still yield a summary.
+#: Default false: an ungrounded summary must not be indistinguishable from a
+#: grounded one (PR #63, finding 3). Configurable so the demo can show the
+#: classified-fallback behaviour without a code change.
+AGENT_REQUIRE_POLICY_HIT = os.getenv(
+    "AGENT_REQUIRE_POLICY_HIT", "true").lower() not in ("0", "false", "no")
 
 # --- one grounded external signal for the officer summary (app/macro.py) -----
 # Week 1-4 review: the summary drew everything from inside the application.

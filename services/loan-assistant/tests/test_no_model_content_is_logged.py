@@ -43,7 +43,7 @@ def test_a_summary_parse_failure_logs_no_model_text(monkeypatch, caplog):
     class _Tool:
         type = "tool"
         name = policy_tool.TOOL_NAME
-        content = "{}"
+        content = '{"status": "hit", "hit_count": 1, "excerpts": [{"document": "fee_schedule.md", "version": "sha256:abc", "chunk_id": "fee_schedule.md#1.0", "excerpt": "x", "citation": "c"}]}'
 
     monkeypatch.setattr(
         agent, "run_underwriting_agent",
@@ -90,7 +90,7 @@ def test_a_successful_summary_logs_no_prompt_or_response(monkeypatch, caplog):
     class _Tool:
         type = "tool"
         name = policy_tool.TOOL_NAME
-        content = "{}"
+        content = '{"status": "hit", "hit_count": 1, "excerpts": [{"document": "fee_schedule.md", "version": "sha256:abc", "chunk_id": "fee_schedule.md#1.0", "excerpt": "x", "citation": "c"}]}'
 
     payload = json.dumps({
         "loan_amount": 1000, "term_months": 12, "purpose": "debt consolidation",

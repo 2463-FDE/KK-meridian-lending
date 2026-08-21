@@ -831,8 +831,21 @@ def _summary_text_via_agent(prompt: str) -> str:
             f"{policy_tool.TOOL_NAME}; refusing it"
         )
 
-    log.info("llm_client agent accepted stage=tool_gate tool_calls=%d",
-             len(agent.tool_messages(state)))
+    # A tool that RAN is not the same as policy that was FOUND. An empty or
+    # irrelevant query returns status=miss with no excerpts, and accepting that
+    # would make an ungrounded summary indistinguishable from a grounded one --
+    # which is precisely the claim this path makes. Reviewed on PR #63.
+    evidence = agent.policy_evidence_status(state)
+    if evidence != "hit" and config.AGENT_REQUIRE_POLICY_HIT:
+        log.error("llm_client summary refused stage=policy_evidence status=%s "
+                  "required_tool=%s", evidence, policy_tool.TOOL_NAME)
+        raise agent.PolicyEvidenceMissing(
+            f"the agent called {policy_tool.TOOL_NAME} but retrieval returned "
+            f"{evidence!r}; refusing a summary with no policy behind it"
+        )
+
+    log.info("llm_client agent accepted stage=tool_gate tool_calls=%d "
+             "policy_evidence=%s", len(agent.tool_messages(state)), evidence)
     return raw
 
 

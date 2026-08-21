@@ -35,3 +35,21 @@ langchain==1.3.16
 langchain-aws==1.7.3
 langchain-core==1.6.0
 langgraph==1.2.11
+
+# WHAT THIS DOES AND DOES NOT LOCK, stated because the PR claimed more than it
+# enforced (reviewed on PR #63, finding 6).
+#
+# Locked: the four direct agent dependencies above, exactly.
+#
+# NOT locked: their transitive closure. A clean checkout today resolves
+# langgraph-checkpoint 4.2.0, langgraph-prebuilt 1.1.0, langgraph-sdk 0.4.3,
+# langchain-protocol 0.0.18, boto3/botocore 1.43.77 and numpy 2.5.2 -- a future
+# install may resolve different versions of any of them within the ranges the
+# pinned packages allow.
+#
+# Not pinned here on purpose: this repository's convention across all eight
+# services is exact pins on DIRECT dependencies only, with no constraints file
+# anywhere, and pinning a transitive graph by hand is how a service acquires a
+# combination its own maintainers never tested. If the demo needs a fully
+# reproducible closure, the right tool is a lock/constraints file adopted
+# repo-wide, not a partial list bolted onto one service.
