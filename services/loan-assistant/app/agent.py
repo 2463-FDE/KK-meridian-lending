@@ -93,15 +93,20 @@ class UnsafeTracingConfiguration(AgentError):
 
 
 class AgentTimeout(AgentError):
-    """The provider did not answer inside the request timeout.
+    """A provider request exceeded the per-attempt transport timeout.
 
-    Restores a contract this PR had silently dropped. `call_api` set
+    Restores a boundary this PR had dropped. `call_api` set
     `timeout=TIMEOUT_SECONDS` and mapped `APITimeoutError` to `LLMTimeoutError`,
     which the route renders as **504**. The agent path does not go through
-    `call_api`, so that number stopped applying to the summary and the 504
-    became unreachable: a hung Bedrock call fell back to botocore's own 60s
-    read timeout, multiplied by its retries and again by the number of model
-    turns in a run. Reviewed on PR #63.
+    `call_api`, so nothing bounded a Bedrock call and the 504 became
+    unreachable; botocore's own 60s default applied instead.
+
+    **Deliberately not called a deadline.** What the 20 seconds bounds is one
+    connect and one read on one HTTP attempt -- not an attempt sequence, not a
+    model invocation, not the run. `call_api`'s own "20s" was never a wall
+    either: its `@retry(stop_after_attempt(3))` decorator meant three such calls
+    plus backoff. Reviewed on PR #63; the wording here says what the code does
+    rather than repeating the inherited claim.
     """
 
 
@@ -159,6 +164,13 @@ def system_prompt() -> str:
 _TRACING_ENV = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING")
 
 _TRUTHY = ("1", "true", "yes", "on")
+
+#: Total provider attempts per model invocation, INCLUDING the first.
+#:
+#: Passed as botocore's `total_max_attempts`, which is the key that means what
+#: this name says. `max_attempts` means retries-after-the-first, so the same
+#: number there would be four. Verified against botocore 1.43.77, not assumed.
+AGENT_TOTAL_PROVIDER_ATTEMPTS = 3
 
 
 def tracing_is_requested() -> bool:
@@ -239,16 +251,34 @@ def build_agent(tools: list | None = None):
             "BEDROCK_MODEL_ID is not set -- refusing to guess a model id."
         )
 
-    # An explicit request timeout and retry policy, because the agent path does
-    # not go through `call_api` and therefore inherited neither of the ones that
+    # An explicit transport timeout and attempt limit, because the agent path
+    # does not go through `call_api` and inherited neither of the ones that
     # function carried. Left implicit, botocore's own defaults applied: 60s
-    # connect, 60s read, and its legacy retry mode -- per model turn, of which a
-    # real run made two. A summary the officer was told would fail in 20 seconds
-    # could occupy a worker for minutes. Reviewed on PR #63.
+    # connect, 60s read, and its default attempt count -- per model invocation.
+    # Reviewed on PR #63.
     #
-    # `standard` mode is named rather than left to default so the attempt count
-    # is a decision: transient throttling is worth three tries, and anything
-    # beyond that is better refused than queued behind a stuck request.
+    # **These are PER-ATTEMPT transport timeouts, not a deadline for the run.**
+    # Measured on botocore 1.43.77: there is no total-deadline knob on Config at
+    # all. What 20 seconds bounds is one connect and one read on one HTTP
+    # attempt. It does not bound an attempt sequence, a model invocation, or the
+    # agent run -- and the first version of this comment claimed it did, having
+    # copied the framing from `call_api`, where it was not true either: that
+    # function wrapped its 20-second call in
+    # `@retry(stop_after_attempt(3), wait_exponential(...))`, so its worst case
+    # was three 20-second calls plus backoff, never a 20-second wall.
+    #
+    # The honest worst case here, stated rather than left to be discovered:
+    # AGENT_MAX_STEPS=12 permits 6 model invocations (measured, not derived),
+    # each up to 3 attempts, each attempt up to 20s of read -- so roughly six
+    # minutes of wall clock before the step budget refuses. No global deadline
+    # is invented to make that number smaller; if one is ever required it has to
+    # be a real deadline with a test, not a transport timeout relabelled.
+    #
+    # `total_max_attempts`, NOT `max_attempts`. Verified against the installed
+    # botocore rather than assumed: `retries={"max_attempts": 3}` resolves to
+    # `{'total_max_attempts': 4}` -- three retries AFTER the initial request.
+    # The intent is three attempts in total, so the key that says so is the one
+    # used. That difference is 24 provider attempts per summary versus 18.
     from botocore.config import Config as BotocoreConfig
 
     model = ChatBedrockConverse(
@@ -259,7 +289,8 @@ def build_agent(tools: list | None = None):
         config=BotocoreConfig(
             connect_timeout=config.AGENT_REQUEST_TIMEOUT_SECONDS,
             read_timeout=config.AGENT_REQUEST_TIMEOUT_SECONDS,
-            retries={"max_attempts": 3, "mode": "standard"},
+            retries={"total_max_attempts": AGENT_TOTAL_PROVIDER_ATTEMPTS,
+                     "mode": "standard"},
         ),
     )
     # Wrapped HERE rather than decorated at the definition site, so
@@ -386,12 +417,19 @@ _TIMEOUT_EXCEPTIONS = frozenset({
 })
 
 
-def _as_agent_error(exc: BaseException) -> AgentError:
+def _as_agent_error(exc: BaseException, stage: str = "invoke") -> AgentError:
     """Turn a provider-layer failure into a refusal the route can render.
 
-    Anything not recognised becomes `AgentProviderError` rather than escaping,
-    so a provider exception nobody anticipated is still a controlled 502 and not
+    Anything not recognised becomes a controlled refusal rather than escaping,
+    so a provider exception nobody anticipated is still a mapped status and not
     a generic 500 with the raw error in the log.
+
+    `stage` keeps the two origins distinguishable rather than flattening them.
+    A failure while CONSTRUCTING the runtime means the agent could not be made
+    ready in this environment, which is what `AgentUnavailable` already means
+    and what the route already renders as 503. A failure while INVOKING it is
+    the provider refusing a request we managed to send, which is 502. Both keep
+    their identifiable timeout category; neither invents one.
 
     **The message is built from the exception's class name only.** Provider
     error bodies can quote the request that caused them -- which on this path is
@@ -404,11 +442,21 @@ def _as_agent_error(exc: BaseException) -> AgentError:
 
     name = type(exc).__name__
     if name in _TIMEOUT_EXCEPTIONS:
-        log.error("agent provider timeout stage=agent_invoke error_class=%s "
-                  "timeout_s=%s", name, config.AGENT_REQUEST_TIMEOUT_SECONDS)
+        log.error("agent provider timeout stage=agent_%s error_class=%s "
+                  "timeout_s=%s", stage, name,
+                  config.AGENT_REQUEST_TIMEOUT_SECONDS)
         return AgentTimeout(
-            f"the model did not answer within "
-            f"{config.AGENT_REQUEST_TIMEOUT_SECONDS}s"
+            f"provider I/O timed out against a "
+            f"{config.AGENT_REQUEST_TIMEOUT_SECONDS}s per-attempt transport "
+            f"timeout; the summary was not produced"
+        )
+
+    if stage == "construct":
+        log.error("agent construction failed stage=agent_construct "
+                  "error_class=%s", name)
+        return AgentUnavailable(
+            f"the underwriting agent could not be constructed ({name}); "
+            f"no summary was produced"
         )
 
     log.error("agent provider error stage=agent_invoke error_class=%s", name)
@@ -424,7 +472,19 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
     the caller from the state, so the state has to travel with the answer rather
     than being summarised into a boolean here.
     """
-    runtime = agent if agent is not None else build_agent()
+    # Construction is inside the boundary, not before it. A configuration
+    # refusal already raises AgentUnavailable and passes through untouched, but
+    # an UNEXPECTED failure from the provider SDK's constructor did not: it
+    # escaped to the FastAPI catch-all as a generic 500, and that handler logs
+    # the raw exception -- so a constructor error quoting the config was
+    # retained verbatim. Reviewed on PR #63 (finding F10).
+    if agent is not None:
+        runtime = agent
+    else:
+        try:
+            runtime = build_agent()
+        except Exception as exc:
+            raise _as_agent_error(exc, stage="construct") from exc
 
     # An explicit, finite budget. LangGraph enforces `recursion_limit` and
     # raises GraphRecursionError, but its default (25) is the framework's

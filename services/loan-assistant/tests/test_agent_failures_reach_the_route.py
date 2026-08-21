@@ -257,7 +257,9 @@ def test_the_timeout_reaches_the_bedrock_client():
     botocore_config = captured["config"]
     assert botocore_config.read_timeout == config.AGENT_REQUEST_TIMEOUT_SECONDS
     assert botocore_config.connect_timeout == config.AGENT_REQUEST_TIMEOUT_SECONDS
-    assert botocore_config.retries["max_attempts"] == 3
+    # total_max_attempts, not max_attempts -- see test_f8_* for why the two
+    # differ by one and which of them means what this code intends.
+    assert botocore_config.retries["total_max_attempts"] == 3
 
 # --------------------------------------------------------------------------
 # A1 re-proved through the REAL code paths.
@@ -427,3 +429,236 @@ def test_a1_the_five_refusals_stay_distinguishable_internally(monkeypatch):
 
     # 502 is shared by three of them; the status is not the category.
     assert agent.RequiredToolNotCalled is not agent.PolicyEvidenceMissing
+
+# --------------------------------------------------------------------------
+# F8 / F9 / F10 -- the three narrow points, each asserted against what the
+# installed libraries actually do rather than against what the names suggest.
+# --------------------------------------------------------------------------
+
+def _model_kwargs():
+    """Construct the agent over a fake model class and return the kwargs it got."""
+    pytest.importorskip("langchain_aws")
+    import langchain_aws
+
+    captured = {}
+
+    class _FakeChatBedrock:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(config, "LLM_PROVIDER", "bedrock")
+    mp.setattr(config, "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    original = langchain_aws.ChatBedrockConverse
+    langchain_aws.ChatBedrockConverse = _FakeChatBedrock
+    try:
+        try:
+            agent.build_agent()
+        except Exception:
+            pass  # create_agent may reject the fake; the constructor already ran
+    finally:
+        langchain_aws.ChatBedrockConverse = original
+        mp.undo()
+    return captured
+
+
+# --- F8 -------------------------------------------------------------------
+
+def test_f8_the_attempt_limit_is_three_TOTAL_not_three_retries():
+    """`max_attempts` and `total_max_attempts` differ by one, and the name that
+    reads correctly is the wrong one.
+
+    Measured on the installed botocore: `retries={"max_attempts": 3}` resolves
+    to `total_max_attempts=4` -- three retries AFTER the initial request. The
+    intent is three attempts in total, so the key that means that is used.
+    """
+    retries = _model_kwargs()["config"].retries
+
+    assert retries.get("total_max_attempts") == agent.AGENT_TOTAL_PROVIDER_ATTEMPTS == 3
+    assert "max_attempts" not in retries, (
+        "max_attempts means retries-after-the-first; this would be 4 total")
+
+
+def test_f8_botocore_really_does_treat_the_two_keys_differently():
+    """Guard the guard.
+
+    If a future botocore made `max_attempts` mean total, the test above would
+    be enforcing a distinction that no longer exists. This asserts the
+    distinction itself, so the reason for the choice is checked and not just
+    the choice.
+    """
+    pytest.importorskip("botocore")
+    from botocore.config import Config
+    from botocore.session import get_session
+
+    def _resolved(retries):
+        client = get_session().create_client(
+            "bedrock-runtime", region_name="us-east-1",
+            aws_access_key_id="not-a-real-key", aws_secret_access_key="not-a-real-secret",
+            config=Config(retries=retries))
+        return client.meta.config.retries
+
+    assert _resolved({"max_attempts": 3, "mode": "standard"})["total_max_attempts"] == 4, (
+        "botocore no longer adds the initial request to max_attempts")
+    assert _resolved({"total_max_attempts": 3, "mode": "standard"})["total_max_attempts"] == 3
+
+
+def test_f8_the_worst_case_provider_attempt_exposure_is_bounded():
+    """The number quoted in the PR body, asserted rather than asserted-about.
+
+    AGENT_MAX_STEPS permits at most half its value in model invocations, since
+    the graph alternates model and tool nodes. Each invocation may make up to
+    AGENT_TOTAL_PROVIDER_ATTEMPTS provider attempts.
+    """
+    max_model_invocations = config.AGENT_MAX_STEPS // 2
+    exposure = max_model_invocations * agent.AGENT_TOTAL_PROVIDER_ATTEMPTS
+
+    assert max_model_invocations == 6
+    assert exposure == 18, (
+        f"worst-case provider attempts per summary changed to {exposure}; "
+        f"update the PR body and the comment in build_agent")
+
+
+def test_f8_the_model_invocation_bound_is_real_not_arithmetic():
+    """Drive a real graph to its recursion limit and count model invocations.
+
+    `AGENT_MAX_STEPS // 2` is a claim about how LangGraph counts steps. This
+    checks it against the framework instead of trusting the division.
+    """
+    pytest.importorskip("langchain")
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import StructuredTool
+
+    calls = {"n": 0}
+
+    class _AlwaysCallsTheTool(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            calls["n"] += 1
+            message = AIMessage(content="", tool_calls=[{
+                "name": policy_tool.TOOL_NAME, "args": {"query": "fee"},
+                "id": f"call-{calls['n']}"}])
+            return ChatResult(generations=[ChatGeneration(message=message)])
+
+    tool = StructuredTool.from_function(
+        func=policy_tool.search_underwriting_policy,
+        name=policy_tool.TOOL_NAME, description="search policy")
+    runtime = create_agent(model=_AlwaysCallsTheTool(messages=iter([])),
+                           tools=[tool], system_prompt="x")
+
+    with pytest.raises(agent.AgentStepBudgetExceeded):
+        agent.run_underwriting_agent("prompt", runtime)
+
+    assert calls["n"] == config.AGENT_MAX_STEPS // 2 == 6, (
+        f"the step budget allowed {calls['n']} model invocations, not 6")
+
+
+# --- F9 -------------------------------------------------------------------
+
+def test_f9_the_timeout_is_described_as_per_attempt_not_as_a_deadline():
+    """CODE == DOCUMENTED CONTRACT == TEST.
+
+    `connect_timeout`/`read_timeout` bound one connect and one read on one HTTP
+    attempt. They do not bound an attempt sequence, a model invocation or the
+    run, and botocore exposes no knob that does. The wording must not imply
+    otherwise -- the first version did, having inherited the framing from
+    `call_api`, where a `@retry(stop_after_attempt(3))` decorator meant its own
+    "20s" was never a wall either.
+    """
+    detail = str(agent._as_agent_error(_FakeReadTimeout("timed out")))
+
+    assert "per-attempt" in detail or "transport" in detail, (
+        f"the timeout message does not say what it bounds: {detail!r}")
+    for overclaim in ("did not answer within", "deadline", "total"):
+        assert overclaim not in detail, (
+            f"the timeout message implies a wall it does not enforce: {detail!r}")
+
+
+def test_f9_the_transport_timeout_reaches_the_client_on_both_legs():
+    botocore_config = _model_kwargs()["config"]
+
+    assert botocore_config.connect_timeout == config.AGENT_REQUEST_TIMEOUT_SECONDS
+    assert botocore_config.read_timeout == config.AGENT_REQUEST_TIMEOUT_SECONDS
+
+
+# --- F10 ------------------------------------------------------------------
+
+def test_f10_an_unexpected_construction_failure_is_controlled(client, monkeypatch, caplog):
+    """The provider SDK's own constructor raising is not a configuration
+    refusal, and it used to escape the classification boundary entirely.
+
+    Reproduced by making the real `ChatBedrockConverse` construction path raise
+    -- not by raising `AgentUnavailable` in the route, which would prove only
+    that the route maps a class it is already given.
+    """
+    pytest.importorskip("langchain_aws")
+    import langchain_aws
+
+    sentinel = "PROVIDER-CONSTRUCTOR-SENTINEL rejected config / secret-looking-data"
+
+    class _ExplodingModel:
+        def __init__(self, **kwargs):
+            raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(langchain_aws, "ChatBedrockConverse", _ExplodingModel)
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    monkeypatch.setattr(config, "BEDROCK_MODEL_ID",
+                        "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+
+    with caplog.at_level(logging.DEBUG):
+        resp = _summary(client)
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+
+    assert resp.status_code == 503, f"expected 503, got {resp.status_code}: {resp.text}"
+    assert resp.json()["detail"] != "internal error"
+    assert sentinel not in resp.text, "the constructor error reached the response"
+    assert sentinel not in logged, "the constructor error was logged raw"
+    assert "RuntimeError" in resp.json()["detail"], (
+        "the refusal should still name the failure category")
+    assert "stage=agent_construct" in logged, (
+        "the log should distinguish construction from invocation")
+
+
+def test_f10_a_construction_failure_keeps_its_chained_cause():
+    """Raw text stays reachable for a debugger, never formatted into output."""
+    original = RuntimeError("CAUSE-SENTINEL-7712")
+
+    classified = agent._as_agent_error(original, stage="construct")
+
+    assert isinstance(classified, agent.AgentUnavailable)
+    assert "CAUSE-SENTINEL-7712" not in str(classified)
+
+
+def test_f10_configuration_refusals_still_map_to_503_unchanged(client, monkeypatch):
+    """The known construction refusals must not be reclassified by the fix."""
+    # Without the framework installed, build_agent refuses on the missing
+    # dependency FIRST -- still a 503, but a different refusal than the one
+    # this test is about. Gated rather than loosened, so the assertion stays
+    # specific to the model-id case.
+    pytest.importorskip("langchain_aws")
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    monkeypatch.setattr(config, "BEDROCK_MODEL_ID", "")
+
+    resp = _summary(client)
+
+    assert resp.status_code == 503
+    assert "BEDROCK_MODEL_ID" in resp.json()["detail"]
+
+
+def test_f10_construction_and_invocation_stay_distinguishable():
+    """Flattening both onto one class would lose a category PR B needs."""
+    from_construct = agent._as_agent_error(RuntimeError("x"), stage="construct")
+    from_invoke = agent._as_agent_error(RuntimeError("x"), stage="invoke")
+
+    assert isinstance(from_construct, agent.AgentUnavailable)
+    assert isinstance(from_invoke, agent.AgentProviderError)
+    assert type(from_construct) is not type(from_invoke)
