@@ -199,6 +199,9 @@ def test_the_spec_requires_an_unmapped_vendor_code_to_fail_closed(spec):
 
 
 def test_the_spec_forbids_a_raw_machine_token_reaching_the_consumer(spec):
+    assert "_node_finalize" in spec, (
+        "the spec does not name the applicant-facing path that published the "
+        "raw code; naming only the operational one understates it")
     assert "get_deny_reason" in spec, (
         "the spec does not name the function that currently passes the raw "
         "code through, so a reader cannot verify the problem exists")

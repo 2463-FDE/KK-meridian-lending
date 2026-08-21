@@ -93,7 +93,13 @@ def _node_finalize(state: DecisionState) -> dict:
             "score": result["score"],
             "decision": result["decision"],
             "reason_codes": result["reason_codes"],
-            "adverse_action_reason": result["reason_codes"][0] if result["reason_codes"] else None,
+            # NOT reason_codes[0]. That put the model's own code straight in
+            # front of a declined applicant -- harmless while the deterministic
+            # stub emits full sentences, and a raw machine token the moment a
+            # real vendor answers. Spec 0003 §1.6; refuses if unmapped, before
+            # origination writes either `decisions` or `decision_events`.
+            "adverse_action_reason": decision.consumer_adverse_action_reason(
+                result["reason_codes"], result["decision"]),
             "bureau_score": bureau_score,
             "bureau_reference_id": state.get("bureau_reference_id"),
             "model_version": result["model_version"],

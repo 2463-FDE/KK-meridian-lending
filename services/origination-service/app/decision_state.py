@@ -544,12 +544,47 @@ def get_manual_review(app_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+#: Approved consumer-facing wording, keyed by the reason code the model
+#: reported. Spec 0003 §1.6.
+#:
+#: Duplicated from `decision-service/app/decision.py::APPROVED_CONSUMER_REASONS`
+#: rather than imported, because this repository has no shared library and the
+#: two services do not import one another -- the same reason the
+#: internal-token validator is duplicated. `db/tests/` asserts the two tables
+#: agree, so the duplication cannot drift silently.
+#:
+#: Real vendor codes are deliberately absent: no taxonomy or approved wording is
+#: committed anywhere, so an entry here would be invented semantics.
+APPROVED_CONSUMER_REASONS: dict[str, str] = {
+    "Low credit bureau score relative to lending criteria":
+        "Low credit bureau score relative to lending criteria",
+    "Insufficient income relative to lending criteria":
+        "Insufficient income relative to lending criteria",
+}
+
+
 def get_deny_reason(app_id: int) -> str | None:
-    """Best-effort human-readable reason for a 'deny' outcome -- staff's own
-    reason if this was manually decided, else the automated model's stored
-    reason (decision_events.reason_codes, Week 3's audit trail). Returns
-    None if neither has a reason on record (should not normally happen for
-    a real deny, but never fabricate one if it does)."""
+    """Human-readable reason for a 'deny' outcome, or None.
+
+    Staff's own reason if this was manually decided -- a person wrote that
+    sentence and owns it. Otherwise the model's stored reason code, **mapped
+    through the approved wording table**.
+
+    It used to return `reason_codes[0]` unchanged, which put the model's own
+    code into the messages this function feeds (the 422 details on the boarding
+    and offer routes). Harmless while the deterministic stub emits full
+    sentences; a raw machine token the moment a real vendor answers. Spec 0003
+    §1.1 -- a reason code is authoritative about the model, not automatically
+    authoritative wording.
+
+    An unmapped code returns None, so the caller renders its existing "not on
+    record" wording. That is deliberately NOT a generic substitute reason: the
+    callers are operational messages, and declining to state a reason is
+    honest, whereas inventing one is the defect this repository already removed
+    once. The consumer-facing adverse-action notice does not come from here --
+    it is refused outright upstream, in
+    `decision-service/app/decision.py::consumer_adverse_action_reason`.
+    """
     manual = get_manual_review(app_id)
     if manual and manual["outcome"] == "deny":
         return manual["reason"]
@@ -559,5 +594,6 @@ def get_deny_reason(app_id: int) -> str | None:
         (app_id,),
     )
     if events and events[0]["reason_codes"]:
-        return events[0]["reason_codes"][0]
+        code = events[0]["reason_codes"][0]
+        return APPROVED_CONSUMER_REASONS.get(code)
     return None
