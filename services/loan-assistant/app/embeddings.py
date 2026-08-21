@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import tempfile
 from collections import Counter
 
 _DEFAULT_CACHE_PATH = os.path.join(
@@ -58,14 +59,65 @@ class LocalTfidfEmbedder:
         self._cache = self._load_cache()
 
     def _load_cache(self) -> dict:
-        if os.path.exists(self.cache_path):
+        """Read the cache, treating an unreadable one as absent.
+
+        Every value here is a term-frequency vector recomputable from the text
+        that produced it, so a cache that cannot be read costs time and nothing
+        else. Failing the caller instead would turn a disposable optimisation
+        into an outage -- which is exactly what happened before the write below
+        was made atomic.
+        """
+        if not os.path.exists(self.cache_path):
+            return {}
+        try:
             with open(self.cache_path, encoding="utf-8") as f:
                 return json.load(f)
-        return {}
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return {}
 
     def _save_cache(self) -> None:
-        with open(self.cache_path, "w", encoding="utf-8") as f:
-            json.dump(self._cache, f)
+        """Write the cache atomically.
+
+        The previous version opened the real path with "w", which truncates
+        immediately and serialises afterwards. Any reader arriving inside that
+        window got an empty or half-written file and raised JSONDecodeError.
+
+        That was latent until the underwriting agent shipped: retrieval used to
+        run once, server-side, in sequence. The agent's model turn emits several
+        tool calls at once and LangGraph runs them in parallel threads, each
+        constructing an embedder that loads and rewrites this same file. Proven
+        rather than theorised -- eight concurrent embedders reproduce it, and it
+        took down the containerised summary end to end, surfacing as
+        `AgentProviderError (JSONDecodeError)` after two successful tool calls.
+
+        `os.replace` is atomic on POSIX and on Windows, so a reader sees either
+        the old file or the new one and never a partial write. The temporary
+        file is created in the same directory because a cross-filesystem replace
+        is not atomic.
+
+        Two writers can still each persist their own full dict, so one may
+        overwrite entries the other added. That is a lost cache entry, not a
+        lost result: the next `embed()` recomputes it. Locking to prevent it
+        would add contention to fix nothing a user could observe.
+        """
+        directory = os.path.dirname(os.path.abspath(self.cache_path)) or "."
+        try:
+            fd, tmp = tempfile.mkstemp(dir=directory, prefix=".embedding_cache-",
+                                       suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self._cache, f)
+                os.replace(tmp, self.cache_path)
+            except BaseException:
+                # Never leave the temp file behind on a failed write.
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            # An unwritable cache directory is not a reason to fail a summary.
+            return
 
     def embed(self, text: str) -> dict:
         """Return a term-frequency vector, cached by content hash."""
