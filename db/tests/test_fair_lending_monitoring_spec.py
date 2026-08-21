@@ -156,6 +156,96 @@ def test_the_spec_cites_the_regulation_not_the_withdrawn_circulars(spec):
 
 
 # --------------------------------------------------------------------------
+# Vendor reason code is not consumer wording.
+#
+# This is the correction that arrived after the first draft. The spec had said
+# vendor reason codes are "used verbatim" and had permitted, as one option for
+# an unknown code, surfacing the vendor string unchanged. Traced through the
+# code, that is not a hypothetical: `get_deny_reason` returns `reason_codes[0]`
+# straight into `adverse_action_reason` with no mapping anywhere, so a vendor
+# token like `high_debt_to_income` would reach a declined applicant. Permitting
+# it in the spec would have promoted the defect to governed behaviour.
+# --------------------------------------------------------------------------
+
+def test_the_spec_separates_model_evidence_from_consumer_wording(spec):
+    lowered = spec.lower()
+
+    assert "model reason evidence" in lowered, (
+        "the spec does not name the model-evidence artefact")
+    assert "consumer adverse-action reason" in lowered, (
+        "the spec does not name the consumer-facing artefact")
+    assert re.search(r"not\W{1,4}automatically\W{1,4}authoritative", lowered), (
+        "the spec does not say a vendor code is not automatically consumer "
+        "wording, which is the whole distinction")
+
+
+def test_the_spec_requires_an_unmapped_vendor_code_to_fail_closed(spec):
+    assert re.search(r"unmapped vendor reasons? fail closed", spec, re.I), (
+        "the fail-closed rule for unmapped codes is missing")
+
+    # The specific escape hatch that was removed. If it comes back in any
+    # permissive form, this fails.
+    permissive = re.compile(
+        r"(permitted|allowed|acceptable|may)[^.]{0,120}"
+        r"surface[^.]{0,60}(vendor|raw)[^.]{0,60}unchanged", re.I)
+    for match in permissive.finditer(spec):
+        sentence_start = max(spec.rfind('.', 0, match.start()),
+                             spec.rfind(chr(10) * 2, 0, match.start())) + 1
+        end = spec.find('.', match.end())
+        sentence = spec[sentence_start:(len(spec) if end == -1 else end + 1)]
+        assert re.search(r'\b(not|never|wrong|must not|earlier draft)\b',
+                         sentence, re.I), (
+            f'spec 0003 permits raw vendor pass-through: {sentence.strip()!r}')
+
+
+def test_the_spec_forbids_a_raw_machine_token_reaching_the_consumer(spec):
+    assert "get_deny_reason" in spec, (
+        "the spec does not name the function that currently passes the raw "
+        "code through, so a reader cannot verify the problem exists")
+    assert re.search(r"snake_case|machine (code|token)", spec, re.I)
+
+
+def test_the_spec_does_not_promote_the_placeholder_into_an_approved_mapping(spec):
+    """`high_debt_to_income` appears in this repo twice, both times as a test
+    author's placeholder. Promoting it would invent a vendor taxonomy entry.
+
+    Scoped to the containing PARAGRAPH. A wider window let a planted mapping
+    entry pass by borrowing a warning from the paragraph above it -- the same
+    masking mistake the fairness guard made, found the same way.
+    """
+    assert "high_debt_to_income" in spec, (
+        "the placeholder is not named, so nothing warns against promoting it")
+
+    warning = re.compile(r"placeholder|must not|not evidence|would put|never reach|specific reason", re.I)
+    for match in re.finditer("high_debt_to_income", spec):
+        blank = chr(10) * 2
+        para_start = spec.rfind(blank, 0, match.start()) + 2
+        para_end = spec.find(blank, match.end())
+        paragraph = spec[para_start:(len(spec) if para_end == -1 else para_end)]
+        assert warning.search(paragraph), (
+            "high_debt_to_income appears in a paragraph that does not warn it "
+            f"is not a real taxonomy entry: {paragraph.strip()[:160]!r}")
+
+
+def test_the_spec_separates_blocked_mapping_content_from_buildable_mechanism(spec):
+    """Both can be true at once, and saying so is what makes the follow-up
+    actionable rather than parked behind the vendor."""
+    assert re.search(r"CONTENT, not its MECHANISM|content.{0,40}mechanism",
+                     spec, re.I), (
+        "the spec does not separate the blocked mapping content from the "
+        "buildable mapping mechanism")
+
+
+def test_the_spec_requires_atomic_failure_and_preserved_provenance(spec):
+    lowered = spec.lower()
+
+    assert "partial committed state" in lowered or "partial" in lowered, (
+        "nothing requires the fail-closed path to be atomic")
+    assert re.search(r"provenance", lowered), (
+        "nothing requires the raw code to survive as audit evidence")
+
+
+# --------------------------------------------------------------------------
 # It must not contradict the other governance artefact.
 # --------------------------------------------------------------------------
 

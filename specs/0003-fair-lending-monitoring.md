@@ -25,7 +25,7 @@ description of it.
 
 | Concern | Where it lives | State |
 |---|---|---|
-| Reason from the real vendor | `services/decision-service/app/decision.py` | vendor's `reason_codes` used **verbatim**; missing, empty, or non-list fails closed |
+| Reason from the real vendor | `services/decision-service/app/decision.py` | vendor's `reason_codes` retained **verbatim as model evidence**; missing, empty, or non-list fails closed. **No mapping layer stands between them and the consumer notice** — see Problem 3 |
 | Reason from the deterministic stub | `decision.py::_reason_codes` | derives from the larger of two shortfalls (bureau vs income); dev/test only, gated by `ALLOW_MODEL_STUB`, `model_version` suffixed `-stub` |
 | Per-decision audit record | `decision_events` (`db/init/004_decision_events.sql`) | append-only by DB trigger; carries `model_version`, `model_score`, `top_features`, the inputs, `decision`, `reason_codes`, `occurred_at` |
 | Outcome disparity | `services/origination-service/app/fair_lending.py` | ZIP3 approval rate, four-fifths screen against the highest rate, groups under `min_group_size=5` excluded from flagging; staff-only `GET /applications/fair-lending/zip-analysis` |
@@ -42,6 +42,14 @@ Two questions have no answer today, and they are different questions.
    is answerable only by reading source.
 2. **Is the model fair?** The ZIP3 screen measures **outcomes**, not the model.
    It cannot support a statement about the model, and no data exists that could.
+3. **Does a machine token reach the consumer?** Yes, today it would.
+   `origination-service/app/decision_state.py::get_deny_reason` returns
+   `reason_codes[0]` unchanged into `adverse_action_reason`, and no mapping
+   layer exists anywhere between the scorer and the notice. The deterministic
+   stub hides this because it emits full sentences; a real vendor returning
+   `high_debt_to_income` would put that token in front of a consumer. A raw
+   snake_case machine code is not a *specific reason* in the sense 12 CFR
+   1002.9 requires.
 
 ## Decision — the monitoring contract
 
@@ -51,16 +59,28 @@ and none are specified here.
 
 ### 1. Denial-reason accuracy
 
-**1.1 Authoritative source, in order.** The reason attached to a decision is,
-in precedence order:
+**1.1 Two different artefacts, and conflating them is the defect.**
 
-1. the licensed vendor's `reason_codes`, used verbatim; else
-2. the deterministic stub's `_reason_codes`, permitted **only** where
-   `ALLOW_MODEL_STUB` is set (dev/test), and always recorded against a
-   `-stub`-suffixed `model_version`.
+| | what it is | where it may appear |
+|---|---|---|
+| **Model reason evidence** | what the scorer reported — the vendor's `reason_codes` verbatim, or the deterministic stub's `_reason_codes` | `decision_events`, audit and governance surfaces |
+| **Consumer adverse-action reason** | the specific reason a declined applicant is told | `adverse_action_reason`, notices, anything applicant-facing |
 
-No third source is permitted. In particular, this service must never author a
-consumer explanation of its own for a decision the model drove.
+The first is authoritative about **the model**. It is *not* automatically
+authoritative **wording**, and a vendor code becomes consumer text only by
+passing through an approved mapping (1.6).
+
+Model reason evidence comes from exactly two sources, in precedence order: the
+licensed vendor's `reason_codes`; else the deterministic stub's
+`_reason_codes`, permitted **only** where `ALLOW_MODEL_STUB` is set (dev/test)
+and always recorded against a `-stub`-suffixed `model_version`. No third source
+is permitted, and this service must never author a reason of its own for a
+decision the model drove.
+
+Provenance is preserved: mapping to consumer wording MUST NOT overwrite or
+discard the raw code in `decision_events`. The audit record answers "what did
+the model say"; the notice answers "what is the applicant told". Both are
+needed and they are not the same field.
 
 **1.2 Fail-closed behaviour, already implemented and hereby fixed as contract.**
 
@@ -69,7 +89,7 @@ consumer explanation of its own for a decision the model drove.
 | no `reason_codes` key | refuse the decision |
 | `reason_codes: []` | refuse the decision |
 | `reason_codes` not a list of strings | refuse the decision |
-| an unrecognised reason string | see 1.4 |
+| a code with no approved consumer mapping | see 1.4 — **fail closed** |
 
 A denial persisted without a reason, or with a reason the model did not
 produce, is the Reg B defect this spec exists to prevent. Refusing is correct
@@ -87,12 +107,41 @@ Grouping by `model_version` is required, not optional: a reason distribution
 that silently mixes two model versions describes neither. `decision_events`
 already carries every field this needs; no schema change is required.
 
-**1.4 Unknown reasons.** A vendor reason string that this repository has no
-approved consumer wording for MUST NOT be paraphrased, guessed at, or mapped to
-the nearest known reason. Until an authoritative mapping exists (see
-*Blocked*), the permitted behaviours are: refuse the decision, or surface the
-vendor string unchanged and record it as unmapped. Choosing between those two is
-part of the follow-up work, not of this spec.
+**1.4 Unmapped vendor reasons fail closed.** A vendor reason code with no
+approved consumer wording MUST NOT be paraphrased, guessed at, mapped to the
+nearest known reason, replaced by a generic fallback, or **surfaced to the
+consumer unchanged**. All five are ways of putting an unapproved statement in
+front of a declined applicant, and the last is the one that looks harmless.
+
+The required behaviour is a single one: **the decision fails closed before any
+consumer-facing reason is produced.**
+
+An earlier draft of this spec permitted "surface the vendor string unchanged
+and record it as unmapped" as an alternative. That was wrong and is recorded
+rather than silently deleted: it would have made the defect in Problem 3 the
+*governed* behaviour, which is worse than the defect being an oversight.
+
+Failing closed MUST be atomic with respect to the audit trail. An unmapped code
+must not leave a committed `decisions` row carrying a machine token, nor a
+`decision_events` row whose decision never completed. Whichever write happens
+first, neither half may survive alone.
+
+**1.6 The approved mapping.** Consumer wording is produced by an explicit,
+deterministic mapping from model reason code to approved consumer sentence. Two
+properties matter more than its shape:
+
+- **the mechanism may be built now** — a mapping seam with a fail-closed
+  default requires no vendor knowledge at all;
+- **its real-vendor entries may not be invented.** The taxonomy is
+  VENDOR-BLOCKED (see *Blocked*), and `high_debt_to_income` — which appears in
+  this repository exactly twice, both times as a test author's placeholder —
+  is **not** evidence of a vendor taxonomy entry and MUST NOT be promoted into
+  the mapping.
+
+The deterministic stub's two reasons are already approved consumer sentences,
+because their meaning is owned by the stub logic in this repository rather than
+by a third party. **Two reasons is not a defect** where two drivers is what the
+stub genuinely has.
 
 **1.5 Fixtures only.** Acceptance MUST NOT require a live model call. The brief's
 quota note is explicit, and reason-mapping logic is deterministic and testable
@@ -162,18 +211,30 @@ none.
 
 1. A reporting surface answers 1.3 over a stated window, grouped by
    `model_version`, from `decision_events` alone.
-2. Reason-mapping behaviour in 1.1–1.4 is covered by fixture tests, with no live
+2. Reason-mapping behaviour in 1.1–1.6 is covered by fixture tests, with no live
    model call.
-3. The ZIP3 screen's documentation states 2.2–2.4 wherever its output is
+3. A fixture proves that an **unmapped vendor reason code cannot reach
+   `adverse_action_reason`** or any consumer-facing output — asserted on the
+   output, not on the mapping table, because a table can be correct while a
+   caller bypasses it.
+4. A fixture proves the fail-closed path leaves **no partial committed state**:
+   no `decisions` row carrying a raw machine token, and no orphaned
+   `decision_events` row for a decision that never completed.
+5. A fixture proves the raw vendor code is still **retained as model evidence**
+   for decisions that do complete — the mapping must not destroy provenance.
+6. The ZIP3 screen's documentation states 2.2–2.4 wherever its output is
    presented.
-4. `docs/model_card.md` and this spec do not contradict one another on what
+7. `docs/model_card.md` and this spec do not contradict one another on what
    fairness evidence exists.
-5. No document in this repository asserts that the model is fair.
+8. No document in this repository asserts that the model is fair.
 
 ## Failure behaviour
 
 - Missing/empty/malformed vendor reason → the decision is refused, not
   defaulted.
+- Vendor reason code with no approved consumer mapping → the decision is
+  refused. Never the raw token, never a nearest match, never a generic string.
+- A refusal on either of the two rows above → no partial committed state.
 - Reason reporting over a window containing more than one `model_version` →
   reported per version, never merged.
 - ZIP3 groups below `min_group_size` → reported, not flagged.
@@ -217,9 +278,16 @@ none.
 
 - **Vendor reason taxonomy — VENDOR-BLOCKED.** The set of reason codes the
   licensed scorer can emit is not documented anywhere in this repository, and no
-  vendor contract or sample response is committed. A consumer-facing mapping
-  cannot be written without it, and inventing categories (`HIGH_DTI`,
-  `DEROGATORY_HISTORY`) would fabricate semantics the model may not have.
+  vendor contract or sample response is committed. Inventing categories
+  (`HIGH_DTI`, `DEROGATORY_HISTORY`) would fabricate semantics the model may not
+  have.
+
+  **This blocks the mapping's CONTENT, not its MECHANISM.** The two are
+  separable and the distinction is the practical output of this spec: a mapping
+  seam whose default is to fail closed can be built and tested today with an
+  empty real-vendor table, and it removes the Problem 3 defect immediately.
+  Entries get added when the client supplies the taxonomy and approved wording,
+  and not before.
 - **Protected-class data — CLIENT-BLOCKED.** Whether Meridian collects it,
   may collect it, or has an approved proxy is a compliance decision.
 - **Disparity thresholds beyond four-fifths — CLIENT-BLOCKED.**
@@ -246,7 +314,12 @@ no DTI and therefore cannot offer it as a reason).
 - The honest answer to the board is available and unflattering: the model emits
   two distinct reasons today, and its fairness cannot be assessed at all. Both
   are now written down where a regulator's question would find them.
-- Two follow-ups are unblocked by this spec and one is not. The
+- Three follow-ups are unblocked by this spec and one is half-blocked. The
   distinct-reason/frequency measurement (1.3) can be built now against
   `decision_events`. The ZIP3 documentation (2.2–2.4) can be corrected now. The
-  consumer-facing reason mapping cannot, until the vendor taxonomy exists.
+  mapping **mechanism** (1.6) can be built now, with a fail-closed default and
+  no real-vendor entries — which is what actually closes Problem 3. Only the
+  mapping's real-vendor **entries** wait on the taxonomy.
+- Until that mechanism lands, a real vendor deployment would put machine tokens
+  in front of declined applicants. The deterministic stub conceals it, so this
+  is written down where the next person will find it.
