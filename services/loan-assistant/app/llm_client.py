@@ -804,7 +804,7 @@ def _summary_text_via_agent(prompt: str) -> str:
     one place to read it and one seam for tests that care about what happens to
     the text AFTERWARDS rather than how it was produced.
 
-    Two refusals, both deliberate and neither recoverable in place:
+    Three refusals, all deliberate and none recoverable in place:
 
       * the agent is disabled -- the summary fails rather than falling back to a
         direct model call. A silent fallback is the preloaded prompt-to-text
@@ -812,7 +812,11 @@ def _summary_text_via_agent(prompt: str) -> str:
         had happened;
       * the required policy tool was never executed -- the summary is refused.
         Read from the runtime's own execution state, so application code cannot
-        satisfy it by calling the tool itself.
+        satisfy it by calling the tool itself;
+      * the tool ran but retrieval found nothing. Refused unconditionally, with
+        no environment variable that relaxes it: an ungrounded summary is not
+        currently distinguishable from a grounded one anywhere in the response,
+        so accepting one would quietly void the guarantee above.
     """
     if not config.AGENT_ENABLED:
         raise LLMResponseError(
@@ -836,7 +840,9 @@ def _summary_text_via_agent(prompt: str) -> str:
     # would make an ungrounded summary indistinguishable from a grounded one --
     # which is precisely the claim this path makes. Reviewed on PR #63.
     evidence = agent.policy_evidence_status(state)
-    if evidence != "hit" and config.AGENT_REQUIRE_POLICY_HIT:
+    # Unconditional, and there is no environment variable that relaxes it --
+    # see the note in config.py where the toggle used to be.
+    if evidence != "hit":
         log.error("llm_client summary refused stage=policy_evidence status=%s "
                   "required_tool=%s", evidence, policy_tool.TOOL_NAME)
         raise agent.PolicyEvidenceMissing(

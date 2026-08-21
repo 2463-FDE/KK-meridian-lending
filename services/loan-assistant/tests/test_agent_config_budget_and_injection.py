@@ -65,23 +65,18 @@ def test_the_default_provider_is_the_one_the_agent_requires():
     refuses anything but Bedrock, so a developer following the documented setup
     got a summary route that never answered.
     """
-    assert config.LLM_PROVIDER == "bedrock" or config.LLM_PROVIDER == "anthropic"
-    import os
-    assert os.getenv("LLM_PROVIDER") or True  # env may override; the default is what matters
+    # The DECLARED default is what a developer with a silent environment gets,
+    # so that is what is read -- `config.LLM_PROVIDER` here would just reflect
+    # whatever this shell happens to export.
+    import pathlib
+    import re
 
-    import importlib
-    fresh = importlib.reload(config)
-    try:
-        # Read the default the module declares when the environment is silent.
-        import re, pathlib
-        source = pathlib.Path(fresh.__file__).read_text(encoding="utf-8")
-        default = re.search(r'LLM_PROVIDER = os\.getenv\("LLM_PROVIDER", "([^"]+)"\)', source)
-        assert default, "could not read the declared default"
-        assert default.group(1) == "bedrock", (
-            f"the tracked default is {default.group(1)!r}, which the agent refuses"
-        )
-    finally:
-        importlib.reload(config)
+    source = pathlib.Path(config.__file__).read_text(encoding="utf-8")
+    default = re.search(r'LLM_PROVIDER = os\.getenv\("LLM_PROVIDER", "([^"]+)"\)', source)
+    assert default, "could not read the declared default"
+    assert default.group(1) == "bedrock", (
+        f"the tracked default is {default.group(1)!r}, which the agent refuses"
+    )
 
 
 def test_the_env_example_matches_what_the_agent_requires():
@@ -168,6 +163,29 @@ def test_the_two_failures_are_distinguishable(monkeypatch):
                         lambda prompt: (SUMMARY_JSON, _state(_Tool(MISS), _AI(SUMMARY_JSON))))
     with pytest.raises(agent.PolicyEvidenceMissing):
         llm_client._summary_text_via_agent("prompt")
+
+
+def test_no_environment_variable_can_switch_the_refusal_off(monkeypatch):
+    """The toggle that used to exist is gone, and this is what keeps it gone.
+
+    `AGENT_REQUIRE_POLICY_HIT` (default on) was removed on review: its only
+    reachable effect was a summary built on a retrieval miss that looked
+    identical to a grounded one, because nothing in the output classifies REAL
+    vs FALLBACK. Re-adding a relaxation without also shipping that
+    classification fails here.
+    """
+    for name in ("AGENT_REQUIRE_POLICY_HIT", "AGENT_ALLOW_POLICY_MISS",
+                 "AGENT_REQUIRE_POLICY_EVIDENCE"):
+        monkeypatch.setenv(name, "false")
+    monkeypatch.setattr(agent, "run_underwriting_agent",
+                        lambda prompt: (SUMMARY_JSON, _state(_Tool(MISS), _AI(SUMMARY_JSON))))
+
+    with pytest.raises(agent.PolicyEvidenceMissing):
+        llm_client._summary_text_via_agent("prompt")
+
+    assert not [n for n in dir(llm_client.config) if "POLICY_HIT" in n or "POLICY_MISS" in n], (
+        "a policy-evidence relaxation switch is back in config"
+    )
 
 
 def test_saying_the_tool_was_used_does_not_satisfy_either_check():

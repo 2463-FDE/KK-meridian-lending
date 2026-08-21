@@ -13,8 +13,8 @@ INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# Which backend calls Claude. "anthropic" (default) = direct Anthropic API,
-# reads ANTHROPIC_API_KEY. "bedrock" = AWS Bedrock, reads standard AWS env vars
+# Which backend calls Claude. "bedrock" (default) = AWS Bedrock, "anthropic" =
+# direct Anthropic API reading ANTHROPIC_API_KEY. Bedrock reads standard AWS env vars
 # (AWS_BEARER_TOKEN_BEDROCK or the normal AWS credential chain, AWS_REGION) --
 # see llm_client.py::make_client(). Config-driven so one vendor is never
 # hardcoded, same principle as the CreditBureauClient abstraction planned for
@@ -64,12 +64,21 @@ AGENT_MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_OUTPUT_TOKENS", "1024"))
 #: retrieval attempts and stops well short of anything that could run up a bill.
 AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
 
-#: Whether a policy retrieval that found nothing may still yield a summary.
-#: Default false: an ungrounded summary must not be indistinguishable from a
-#: grounded one (PR #63, finding 3). Configurable so the demo can show the
-#: classified-fallback behaviour without a code change.
-AGENT_REQUIRE_POLICY_HIT = os.getenv(
-    "AGENT_REQUIRE_POLICY_HIT", "true").lower() not in ("0", "false", "no")
+#: There is deliberately NO switch here for "accept a summary when policy
+#: retrieval found nothing".
+#:
+#: An earlier revision of this PR had one (`AGENT_REQUIRE_POLICY_HIT`, default
+#: on). Reviewed and removed, because the only thing it could do was produce an
+#: ungrounded summary that looked exactly like a grounded one: nothing in the
+#: LoanSummary, the API response or the UI distinguishes REAL from FALLBACK
+#: today, so a demo run with retrieval missing would have been unreadable as
+#: such by the person watching it. A toggle whose off-state cannot be seen in
+#: the output is not a demo affordance, it is a silent downgrade of the exact
+#: guarantee this PR exists to make.
+#:
+#: So the refusal is unconditional (`llm_client._summary_text_via_agent`). If a
+#: classified fallback is genuinely wanted later, the classification has to ship
+#: WITH it -- visible in the response and asserted in a test -- not before it.
 
 # --- one grounded external signal for the officer summary (app/macro.py) -----
 # Week 1-4 review: the summary drew everything from inside the application.

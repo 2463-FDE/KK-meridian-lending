@@ -27,8 +27,10 @@ authenticated server-side). They stay where they are.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 from typing import Any
 
 from . import config
@@ -61,6 +63,15 @@ class PolicyEvidenceMissing(RuntimeError):
     Distinct from RequiredToolNotCalled on purpose: "never asked" and "asked and
     got nothing" are different failures, and a trace that conflated them could
     not tell an operator which one happened.
+    """
+
+
+class UnsafeTracingConfiguration(RuntimeError):
+    """Tracing was requested but cannot be proven safe, so the run is refused.
+
+    Only reachable if the suppression below cannot be installed. Refusing beats
+    running untraced-but-unproven, because the whole point of the guard is that
+    nobody has to trust a configuration note.
     """
 
 
@@ -100,6 +111,66 @@ def system_prompt() -> str:
         "policy without calling the tool." + blank
         + "Return only the requested JSON object."
     )
+
+
+#: Every environment variable that turns LangChain/LangSmith tracing on.
+#: Both spellings are live: `langsmith` reads LANGSMITH_TRACING, and the
+#: LANGCHAIN_* names are still honoured for backwards compatibility, so
+#: checking one of them would leave the other as an open door.
+_TRACING_ENV = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING")
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def tracing_is_requested() -> bool:
+    """Is LangSmith tracing switched on in this environment?"""
+    return any(os.getenv(name, "").strip().lower() in _TRUTHY for name in _TRACING_ENV)
+
+
+@contextlib.contextmanager
+def suppressed_tracing():
+    """Run the agent with LangSmith tracing off, whatever the environment says.
+
+    **Interim measure, and deliberately blunt.** Measured on this branch: with
+    `LANGSMITH_TRACING=true` and nothing else changed, one agent run posts ~31KB
+    to the LangSmith endpoint containing the user prompt, the system prompt, the
+    tool query and the retrieved policy text -- four of the categories the client
+    put on the prohibited-retention list. That is the default behaviour of the
+    framework, not a bug in this code, and no amount of documentation prevents
+    someone from setting the variable.
+
+    `LANGSMITH_HIDE_INPUTS`/`HIDE_OUTPUTS` were measured too and do suppress
+    those four, leaving ~17KB of structural metadata. They are NOT used here,
+    because "the remaining 17KB is safe" is a claim about payloads this branch
+    has not enumerated -- provider error bodies in particular are on the
+    prohibited list and do not appear on a happy path. Designing and proving a
+    redacting emitter is PR B's entire job.
+
+    So the interim guarantee is the one that needs no such claim: the agent path
+    transmits nothing. Measured at 0 bytes. PR B replaces this with the
+    privacy-safe trace rather than loosening it.
+    """
+    try:
+        from langsmith.run_helpers import tracing_context
+    except ImportError as exc:  # pragma: no cover - langsmith is a hard dep
+        # No suppressor available. If tracing is off this is harmless; if it is
+        # on, we cannot prove anything, so we refuse instead of hoping.
+        if tracing_is_requested():
+            raise UnsafeTracingConfiguration(
+                "LangSmith tracing is enabled but tracing suppression is "
+                "unavailable, so the underwriting agent cannot be run safely. "
+                "Unset LANGSMITH_TRACING/LANGCHAIN_TRACING_V2."
+            ) from exc
+        yield
+        return
+
+    if tracing_is_requested():
+        # Categorical only, and worth saying out loud: someone enabled tracing
+        # and is about to see no traces for this path.
+        log.warning("agent tracing suppressed stage=privacy_interim reason="
+                    "no_privacy_safe_emitter_yet")
+    with tracing_context(enabled=False):
+        yield
 
 
 def build_agent(tools: list | None = None):
@@ -267,10 +338,14 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
     # above observed behaviour, far below anything that could run up a bill --
     # and a loop that exceeds it is refused rather than retried.
     try:
-        state = runtime.invoke(
-            {"messages": [{"role": "user", "content": prompt}]},
-            config={"recursion_limit": config.AGENT_MAX_STEPS},
-        )
+        # Suppression wraps the invoke, not build_agent: tracing attaches per
+        # run from the ambient environment, so a guard at construction time
+        # would be read once and then be wrong for every later call.
+        with suppressed_tracing():
+            state = runtime.invoke(
+                {"messages": [{"role": "user", "content": prompt}]},
+                config={"recursion_limit": config.AGENT_MAX_STEPS},
+            )
     except Exception as exc:
         if type(exc).__name__ == "GraphRecursionError":
             log.error("agent exceeded its step budget stage=agent_loop max_steps=%d",
