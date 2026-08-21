@@ -11,17 +11,22 @@ DEBT, both runbooks, both decks. This one was not, which is the same defect as a
 policy publishing a rule no code applies: a claim with no mechanism behind it.
 
 **What these tests pin, and what they deliberately do not.** They pin FACTS the
-card asserts about this repository -- a version string, a route, the existence of
-a governance surface, the owner's update trigger. They do not pin prose. A test
-that froze wording would fail on every honest edit and be deleted within a month,
-taking the guard with it.
+card asserts about this repository -- a version string, the existence of a
+governance surface, the owner's update trigger. They do not pin prose. A test
+that froze wording would fail on every honest edit and be deleted within a
+month, taking the guard with it.
 
-The fairness check needs its own care, and it is written to expire correctly
-rather than to freeze today's gap. The card currently records that no model-level
-fairness validation has been performed (W8-5). That is true today. If it is ever
-done, the right outcome is that the card and its evidence move together -- so the
-test asks the repository whether such evidence exists and holds the card to
-whichever answer is current. It never demands that the limitation stay open.
+The route the card advertises is proved elsewhere, deliberately:
+`origination-service/tests/test_model_card_route_is_registered.py` asks the
+running FastAPI app whether the route exists. That test lives with the service
+because that is where the app can be imported, and because grepping source for
+a decorator proves text, not a served route (PR #62, MC-004).
+
+The fairness check is written to expire correctly rather than to freeze today's
+gap. The card records that no model-level fairness validation has been performed
+(W8-5). If that changes, the card and its evidence must move together -- so the
+test asks the repository which state is current and holds the card to it, in
+both directions.
 """
 import pathlib
 import re
@@ -31,12 +36,41 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[2]
 CARD = REPO / "docs" / "model_card.md"
 DECISION_CONFIG = REPO / "services" / "decision-service" / "app" / "config.py"
-APPLICATIONS = REPO / "services" / "origination-service" / "app" / "routers" / "applications.py"
 
-#: The outcome screen is NOT model validation, and the card says so itself. Any
-#: search for model-fairness evidence has to exclude it, or the ZIP screen would
-#: be read as closing a gap it explicitly does not close.
-_OUTCOME_SCREEN = ("fair_lending", "zip-analysis", "zip_disparate_impact")
+#: The ZIP outcome screen is NOT model validation -- the card says so itself --
+#: so it must never be discovered as evidence that W8-5 closed.
+#:
+#: Excluded by EXACT REPOSITORY PATH, not by filename substring. Reviewed on
+#: PR #62 (MC-002): a substring rule on "fair_lending" would also suppress a
+#: legitimate future artefact such as `tests/test_fair_lending_model_scores.py`,
+#: which is real model-level work wearing a name containing the excluded word.
+#: Suppressing real evidence is the worse error, because it keeps the card's
+#: "no validation" claim alive after the validation exists.
+_OUTCOME_MONITOR_PATHS = frozenset({
+    "services/origination-service/app/fair_lending.py",
+    "services/origination-service/tests/test_fair_lending.py",
+})
+
+#: The vocabulary this repository actually uses for fairness work, rather than
+#: one filename spelling. All of these appear in the card, the code or the brief.
+_FAIRNESS_TERMS = ("fairness", "fair_lending", "fair-lending",
+                   "disparate_impact", "disparate-impact",
+                   "model_fairness", "model_score")
+
+#: A card asserting the validation has NEVER happened. Matched as a CLAIM rather
+#: than as one sentence -- the assertion is what matters, however it is phrased.
+_ABSENCE_CLAIM = re.compile(
+    r"no\s+(?:model[- ]level\s+)?(?:fairness|disparate[- ]impact)[^.]{0,80}?"
+    r"(?:testing|validation|evaluation|analysis)[^.]{0,60}?"
+    r"(?:has|have)\s+(?:ever\s+)?(?:been\s+)?(?:run|performed|done|carried out)",
+    re.I | re.S)
+
+#: A card asserting the validation HAS happened.
+_PRESENCE_CLAIM = re.compile(
+    r"(?<!no )(?:fairness|disparate[- ]impact)[^.]{0,60}?"
+    r"(?:testing|validation|evaluation)[^.]{0,40}?"
+    r"(?:has|have|was|were)\s+(?:been\s+)?(?:run|performed|completed|validated)",
+    re.I | re.S)
 
 
 def _card() -> str:
@@ -52,8 +86,9 @@ def _configured_model_version() -> str:
     quietly agree with itself while both real sources drifted.
     """
     source = DECISION_CONFIG.read_text(encoding="utf-8")
-    match = re.search(r'AI_MODEL_VERSION\s*=\s*os\.getenv\(\s*"AI_MODEL_VERSION"\s*,\s*"([^"]+)"\s*\)',
-                      source)
+    match = re.search(
+        r'AI_MODEL_VERSION\s*=\s*os\.getenv\(\s*"AI_MODEL_VERSION"\s*,\s*"([^"]+)"\s*\)',
+        source)
     assert match, (
         "could not read the default AI_MODEL_VERSION out of "
         f"{DECISION_CONFIG.name} -- the extraction broke, and every version "
@@ -63,24 +98,46 @@ def _configured_model_version() -> str:
 
 
 def _model_fairness_evidence():
-    """Repository evidence that model-LEVEL fairness validation exists.
+    """Repository artefacts that look like model-LEVEL fairness evidence.
 
-    Deliberately a search for artefacts rather than a hardcoded "no". W8-5 is
-    open today; when it closes, this returns something and the fairness test
-    below flips from "you may not claim it" to "then cite it". The card and its
-    evidence move together, which is the point -- the guard must not become a
-    reason to leave the gap open.
+    Deliberately a search rather than a hardcoded "no". W8-5 is open today; when
+    it closes this returns something and the fairness test flips from "you may
+    not claim it" to "then cite it, and drop the denial". The card and its
+    evidence move together, which is the point.
 
-    The ZIP outcome screen is excluded on the card's own authority: it monitors
-    recorded approvals, not the model's scores.
+    Matched on the repository's own fairness vocabulary across app modules and
+    tests, then the known ZIP outcome-monitor files are removed BY EXACT PATH.
+    Reviewed on PR #62 (MC-002): the first version matched only `*fairness*` in
+    test filenames, so `test_model_disparate_impact.py` was invisible and the
+    stale claim would have survived real work landing.
     """
-    found = []
-    for path in REPO.glob("services/*/tests/test_*fairness*.py"):
-        if not any(marker in path.name for marker in _OUTCOME_SCREEN):
-            found.append(path)
-    for path in REPO.glob("services/*/app/*model_fairness*.py"):
-        found.append(path)
-    return sorted(found)
+    found = set()
+    for pattern in ("services/*/app/*.py", "services/*/tests/*.py"):
+        for path in REPO.glob(pattern):
+            name = path.name.lower()
+            if any(term in name for term in _FAIRNESS_TERMS):
+                found.add(path)
+    return sorted(p for p in found
+                  if p.relative_to(REPO).as_posix() not in _OUTCOME_MONITOR_PATHS)
+
+
+def _section(body: str, heading_pattern: str):
+    """The body of the first heading matching `heading_pattern`, or None.
+
+    Sliced to the next heading of the SAME OR HIGHER level, so a subsection
+    cannot leak the parent's content and the parent cannot swallow the rest of
+    the document. Returning None rather than the whole card is the fix for
+    PR #62 MC-003: the old fallback let a mention anywhere in the file satisfy a
+    check that was supposed to be about one section.
+    """
+    for match in re.finditer(r"^(#{2,6})\s+(.+)$", body, re.MULTILINE):
+        level, title = len(match.group(1)), match.group(2)
+        if not re.search(heading_pattern, title, re.I):
+            continue
+        rest = body[match.end():]
+        nxt = re.search(r"^#{1,%d}\s+" % level, rest, re.MULTILINE)
+        return rest[:nxt.start()] if nxt else rest
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -101,6 +158,18 @@ def test_the_version_extraction_works():
 
     assert version, "no default model version was extracted"
     assert re.match(r"^[a-z0-9][a-z0-9.\-]+$", version), version
+
+
+def test_the_section_slicer_stops_at_the_next_heading():
+    """`_section` is load-bearing for Guard 4, so it is tested directly rather
+    than only through the card it happens to parse today."""
+    doc = "# T\n\n## Owner\n\nalpha\n\n## Other\n\nbeta\n"
+
+    owner = _section(doc, r"owner")
+    assert owner is not None
+    assert "alpha" in owner
+    assert "beta" not in owner, "the slice ran past the next peer heading"
+    assert _section(doc, r"nothing-like-this") is None
 
 
 # --------------------------------------------------------------------------
@@ -137,35 +206,6 @@ def test_the_card_does_not_name_a_second_conflicting_version():
 
 
 # --------------------------------------------------------------------------
-# Guard 2 -- what the card advertises, the code still provides.
-# --------------------------------------------------------------------------
-
-def test_the_fair_lending_route_the_card_advertises_exists():
-    """The card sends a reader to a specific staff endpoint.
-
-    Backticked FILE paths in the card are covered by the shared citation guard
-    (`test_docs_citations_resolve.py`, which now includes this document). A
-    ROUTE is not a path on disk, so it needs this: the card is the only place
-    that advertises it, and a renamed route would leave the artefact directing
-    an auditor at a 404.
-    """
-    body = _card()
-    routes = re.findall(r"`GET (/[A-Za-z0-9/_{}-]+)`", body)
-    assert routes, "the card advertises no route -- check the pattern before trusting this"
-
-    source = APPLICATIONS.read_text(encoding="utf-8")
-    prefix = re.search(r'APIRouter\(prefix="([^"]+)"', source)
-    assert prefix, "could not read the router prefix"
-
-    for route in routes:
-        tail = route[len(prefix.group(1)):] if route.startswith(prefix.group(1)) else route
-        assert f'@router.get("{tail}")' in source, (
-            f"the card advertises {route}, which {APPLICATIONS.name} does not "
-            f"register (looked for @router.get(\"{tail}\"))"
-        )
-
-
-# --------------------------------------------------------------------------
 # Guard 3 -- honesty, written to expire rather than to freeze.
 # --------------------------------------------------------------------------
 
@@ -174,7 +214,7 @@ def test_the_card_keeps_a_governance_status_surface():
 
     Asserted structurally, not by wording: a card can be rewritten freely, but
     deleting the place where open gaps are disclosed turns the artefact into
-    marketing -- which is the exact failure the Week 8 brief was about.
+    marketing -- the exact failure the Week 8 brief was about.
     """
     headings = re.findall(r"^##+ (.+)$", _card(), re.MULTILINE)
 
@@ -184,43 +224,50 @@ def test_the_card_keeps_a_governance_status_surface():
 
 
 def test_the_card_claims_no_more_fairness_validation_than_exists():
-    """The durable contract, in both directions.
+    """The durable contract, in BOTH directions.
 
-    While no model-level fairness evidence exists in the repository, the card
-    may not assert that it does. If such evidence is added, the card must cite
-    it -- so closing W8-5 means updating the artefact, not fighting this test.
+    No evidence -> the card may not claim validation happened, and must still
+    disclose that it has not. Evidence -> the card must cite it AND must no
+    longer carry the denial.
 
-    Written this way on purpose: a test that permanently required the card to
-    say "no fairness testing has been run" would make the gap unclosable
-    without deleting the guard, and a guard that punishes progress gets deleted.
+    That second half is what review found missing (PR #62, MC-001): citing the
+    new test *inside* the old "has never been run" sentence satisfied a citation
+    check while leaving the card false. A reader takes the stale sentence as the
+    status, and an artefact asserting both says nothing.
+
+    It never demands the limitation stay open -- closing W8-5 means updating the
+    card, not deleting a guard.
     """
     body = _card()
     evidence = _model_fairness_evidence()
 
     if not evidence:
-        claimed = re.search(
-            r"(fairness|disparate[- ]impact)[^.\n]{0,60}"
-            r"(has been|have been|was|were)\s+(run|performed|completed|validated)",
-            body, re.I)
-        if claimed and not re.search(r"\bno\b[^.\n]{0,40}" + re.escape(claimed.group(0)[:20]),
-                                     body, re.I):
-            pytest.fail(
-                "the card claims fairness validation has been performed, and no "
-                f"model-level fairness evidence exists in the repository: "
-                f"{claimed.group(0)!r}"
-            )
+        claimed = _PRESENCE_CLAIM.search(body)
+        assert claimed is None, (
+            "the card claims fairness validation has been performed while no "
+            "model-level fairness evidence exists in the repository: "
+            f"{claimed.group(0)!r}" if claimed else ""
+        )
         assert re.search(r"fairness|disparate[- ]impact", body, re.I), (
             "the card no longer mentions fairness at all while model-level "
             "validation is still absent -- the gap stopped being disclosed "
             "rather than being closed"
         )
-    else:
-        cited = [p for p in evidence if p.name in body or p.stem in body]
-        assert cited, (
-            f"model-level fairness evidence now exists ({[p.name for p in evidence]}) "
-            f"and the card cites none of it. Update the card -- this test moves "
-            f"with the evidence, it does not hold the gap open."
-        )
+        return
+
+    cited = [p for p in evidence if p.name in body or p.stem in body]
+    assert cited, (
+        f"model-level fairness evidence now exists ({[p.name for p in evidence]}) "
+        f"and the card cites none of it. Update the card -- this test moves with "
+        f"the evidence, it does not hold the gap open."
+    )
+    stale = _ABSENCE_CLAIM.search(body)
+    assert stale is None, (
+        f"the card cites {[p.name for p in cited]} while still asserting that no "
+        f"such validation has ever been run: {stale.group(0)!r}. Citing the "
+        f"evidence and keeping the denial beside it is worse than either alone -- "
+        f"a reader cannot tell which is current." if stale else ""
+    )
 
 
 def test_the_outcome_screen_is_not_presented_as_model_validation():
@@ -241,25 +288,30 @@ def test_the_outcome_screen_is_not_presented_as_model_validation():
 
 
 # --------------------------------------------------------------------------
-# Guard 4 -- the artefact has an owner and a trigger to update it.
+# Guard 4 -- the artefact has an owner, and the commitment lives THERE.
 # --------------------------------------------------------------------------
 
 def test_the_card_names_an_owner_and_an_update_trigger():
-    """Semantic anchors, not the sentence.
+    """Scoped to the ownership section, with no whole-document fallback.
 
-    A governance artefact nobody owns is a file. What matters is that some
-    section identifies responsibility and names at least the model-version
-    change as the event that requires an update -- which is precisely the
-    trigger Guard 1 now enforces.
+    Reviewed on PR #62 (MC-003): the old version fell back to the entire card
+    when the heading was not matched exactly, so `AI_MODEL_VERSION` in the
+    Vendor/version section satisfied a test about the owner's commitment. The
+    commitment could disappear and the guard it underwrites would not notice.
+
+    Heading matching is deliberately permissive (Owner / Ownership / Maintainer
+    / Maintenance) so the card can be reorganised; the CONTENT requirement is
+    strict.
     """
     body = _card()
-    headings = re.findall(r"^##+ (.+)$", body, re.MULTILINE)
+    owner = _section(body, r"owner|ownership|maintain")
 
-    assert any(re.search(r"owner|ownership|maintain", h, re.I) for h in headings), (
-        f"the card names no owner: {headings}"
+    assert owner is not None, (
+        "the card has no ownership section. A governance artefact nobody owns "
+        "is a file, and the update trigger Guard 1 enforces has nowhere to live."
     )
-    owner = body.split("## Owner", 1)[-1] if "## Owner" in body else body
     assert "AI_MODEL_VERSION" in owner, (
-        "the owner section no longer names AI_MODEL_VERSION as an update "
-        "trigger, so the commitment Guard 1 enforces is no longer written down"
+        "the ownership section no longer names AI_MODEL_VERSION as an update "
+        "trigger. It may still appear elsewhere in the card, which is exactly "
+        "the false pass this scoping exists to prevent."
     )
