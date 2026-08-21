@@ -67,12 +67,39 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     # /financials call just below) -- this call used to send neither header
     # at all, only /financials did. Send both here too, or every summary
     # request now 403s.
-    # One trace per request, opened at the authenticated boundary so the entry
-    # stage is genuinely the entry and not the first LLM call. Carries the
-    # caller's ROLE, never their identity -- role is what explains an
-    # authorisation outcome; who they are is on the prohibited list.
+    # One trace per request, opened at THIS SERVICE's ingress -- which is one
+    # hop downstream of the gateway, where the session is actually resolved and
+    # the staff check happens. Deliberately not called gateway entry; see
+    # app/trace.py. Carries the caller's ROLE, never their identity: role is
+    # what explains an authorisation outcome, who they are is on the
+    # prohibited list.
     with trace.summary_trace(role=x_user_role):
-        return _summarize(app_id, x_user_role)
+        # Every exit records an outcome, including the ones that never reach
+        # the agent. Found in review: a 404, a 403 or an unreachable upstream
+        # emitted a trace containing only the `request` stage, which reads as a
+        # request that vanished rather than one that was answered -- the exact
+        # ambiguity a trace exists to remove.
+        try:
+            result = _summarize(app_id, x_user_role)
+        except HTTPException as exc:
+            trace.record("outcome", outcome="refused", status="refused",
+                         http_status=exc.status_code,
+                         refusal_class=_UPSTREAM_REFUSALS.get(exc.status_code, "none"))
+            raise
+        except Exception:
+            trace.record("outcome", outcome="error", status="error",
+                         http_status=500, refusal_class="none")
+            raise
+        return result
+
+
+#: Upstream failures reaching the route before the agent runs. Categorical, and
+#: mapped from the status rather than the detail string, which carries text.
+_UPSTREAM_REFUSALS = {
+    404: "application_not_found",
+    403: "forbidden",
+    502: "upstream_unavailable",
+}
 
 
 def _summarize(app_id: int, x_user_role: str | None):

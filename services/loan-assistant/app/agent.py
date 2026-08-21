@@ -510,6 +510,9 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
         if type(exc).__name__ == "GraphRecursionError":
             log.error("agent exceeded its step budget stage=agent_loop max_steps=%d",
                       config.AGENT_MAX_STEPS)
+            trace.record("agent_run", status="refused",
+                         refusal_class="AgentStepBudgetExceeded",
+                         step_budget=config.AGENT_MAX_STEPS)
             trace.record("model", provider=config.LLM_PROVIDER, status="refused",
                          refusal_class="AgentStepBudgetExceeded",
                          step_budget=config.AGENT_MAX_STEPS)
@@ -520,6 +523,18 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
         raise _as_agent_error(exc) from exc
 
     messages = state["messages"] if isinstance(state, dict) else getattr(state, "messages", [])
+    # The runtime as a whole. Declared in `trace.STAGES` from the start and
+    # never emitted -- caught in review, and the stage test did not require it,
+    # so a declared stage that produced nothing looked exactly like one that
+    # worked.
+    trace.record(
+        "agent_run",
+        status="ok",
+        tool_calls=len(tool_messages(state)),
+        model_turns=sum(1 for m in (messages or []) if getattr(m, "type", "") == "ai"),
+        step_budget=config.AGENT_MAX_STEPS,
+        provider_attempt_limit=AGENT_TOTAL_PROVIDER_ATTEMPTS,
+    )
     trace.record(
         "model",
         provider=config.LLM_PROVIDER,

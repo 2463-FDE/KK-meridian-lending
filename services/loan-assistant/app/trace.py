@@ -27,6 +27,26 @@ scrubber removes what it recognises; this admits only what it recognises, so a
 field added carelessly does not travel -- it raises in tests and is dropped in
 production.
 
+**Where the trace actually starts, stated precisely.** The client asked for
+"UI/gateway entry through ... final outcome". This trace opens in
+loan-assistant's summary route, which is one hop DOWNSTREAM of that: the gateway
+is where a session is resolved and where the staff check happens
+(`gateway/app/main.py::assistant`), and this service only ever sees an already
+forwarded `X-User-Role`. So the first span is the service's own ingress, not
+gateway entry, and it is named `request` rather than anything that would imply
+otherwise. Extending the trace across the gateway means instrumenting a second
+service and propagating a correlation id into this one -- a different concern
+than making this path safe, and named as a remaining gap rather than quietly
+claimed.
+
+**On identifiers.** The prohibited list includes identifiers, and every run here
+carries a `trace_id` and per-span UUIDs. Those are generated in this process for
+this request and refer to nothing outside it -- they are not the applicant, the
+application, the user or the session. What the list forbids is client and
+application identifiers, and none of those travel: the application id is not
+recorded anywhere, and the caller appears only as a role. A trace with no id is
+not a trace, so the distinction is drawn deliberately rather than by omission.
+
 **What this module deliberately does NOT do.** It does not touch the policy-chat
 path or decision-service, both of which still trace their content in full when
 `LANGSMITH_TRACING` is set. That is a real exposure, it is named in this PR's
@@ -87,7 +107,12 @@ VOCABULARIES = {
         "AgentStepBudgetExceeded", "UnsafeTracingConfiguration",
         "AgentTimeout", "AgentProviderError",
         "LLMInsufficientDataError", "LLMCostGuardError", "LLMTimeoutError",
-        "LLMResponseError", "none",
+        "LLMResponseError",
+        # Reached before the agent runs at all: the route could not assemble
+        # the application. Recorded so an early exit is a described outcome
+        # rather than a trace that simply stops.
+        "application_not_found", "forbidden", "upstream_unavailable",
+        "none",
     },
     "validators_run": {"macro_contradiction", "risk_classification", "dti_claim"},
     "validators_triggered": {"macro_contradiction", "risk_classification", "dti_claim"},

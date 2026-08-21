@@ -23,6 +23,7 @@ strips something. The failure paths matter most -- an error is where a payload
 usually escapes, and raw provider errors are themselves on the list.
 """
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,6 +33,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 pytest.importorskip("langsmith")
+# The instrumentation under test only runs when the real agent runs, and the
+# real agent needs the framework. Skipped rather than stubbed in the shared
+# environment: a stub here would be the very shortcut this file was corrected
+# for.
+pytest.importorskip("langchain")
 
 from app import agent, config, llm_client, main, policy_tool, trace  # noqa: E402
 
@@ -147,13 +153,78 @@ def client():
     return TestClient(main.app, raise_server_exceptions=False)
 
 
+def _real_agent_over_a_fake_model(monkeypatch, tool_payload=HIT, answer=SUMMARY_JSON):
+    """Fake ONLY the external model. Everything else is the real code.
+
+    Corrected in review, and the correction matters more than the code it
+    replaced. These tests used to monkeypatch `run_underwriting_agent` -- which
+    is the function that records the `model` and `agent_run` stages. Stubbing it
+    meant the instrumentation under test never executed, so the wire assertions
+    were made about a trace those stages had never contributed to, and the
+    stages could have been emitting anything at all.
+
+    Now the route runs `summarize_application`, the real
+    `run_underwriting_agent`, the real LangChain graph, the real tool node, the
+    real evidence gate, the real validators and the real emitter. Only the
+    Bedrock model is fake, because that is the one thing that would cost money
+    and the one thing whose output the test needs to control.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    turns = {"n": 0}
+
+    class _FakeModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            turns["n"] += 1
+            if turns["n"] == 1:
+                msg = AIMessage(content="", tool_calls=[{
+                    "name": policy_tool.TOOL_NAME,
+                    "args": {"query": S_QUERY}, "id": "call-1"}])
+            else:
+                msg = AIMessage(content=answer)
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    from langchain_core.tools import StructuredTool
+
+    def _search(query: str, top_k: int = 3) -> str:
+        return tool_payload
+
+    tool = StructuredTool.from_function(
+        func=_search, name=policy_tool.TOOL_NAME,
+        description="Search the client's underwriting policy documents.")
+
+    runtime = create_agent(model=_FakeModel(messages=iter([])), tools=[tool],
+                           system_prompt="system contract")
+    monkeypatch.setattr(agent, "build_agent", lambda *a, **k: runtime)
+    return runtime
+
+
 def _run(monkeypatch, runner):
+    """Legacy seam, kept only where the test is about the ROUTE's mapping of an
+    already-classified refusal rather than about instrumentation."""
     monkeypatch.setattr(llm_client.agent, "run_underwriting_agent", runner)
 
 
 def _post(client):
     return client.post(f"/applications/{S_APP_ID}/summary",
                        headers={"X-User-Role": "underwriter"})
+
+
+def _span_names(blob):
+    """Span names actually present on the wire.
+
+    Substring-matching the blob for a stage name is not enough and a mutation
+    proved it: deleting the `model` stage entirely left the test green, because
+    the word "model" also appears in `model_turns` and in the SDK's own
+    metadata. Names are matched as names.
+    """
+    return set(re.findall(r'"name"\s*:\s*"([a-z_]+)"', blob))
 
 
 def _leaks(blob):
@@ -165,8 +236,7 @@ def _leaks(blob):
 # --------------------------------------------------------------------------
 
 def test_a_successful_run_leaks_nothing(sink, client, monkeypatch):
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", HIT, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch)
 
     resp = _post(client)
     assert resp.status_code == 200, resp.text
@@ -177,8 +247,7 @@ def test_a_successful_run_leaks_nothing(sink, client, monkeypatch):
 
 
 def test_a_retrieval_miss_leaks_nothing(sink, client, monkeypatch):
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", MISS, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch, tool_payload=MISS)
 
     resp = _post(client)
     assert resp.status_code == 502
@@ -243,19 +312,56 @@ def test_a_validation_strip_is_recorded_without_the_text_it_removed(sink, client
     assert "debt-to-income ratio is 22" not in blob
 
 
+@pytest.mark.parametrize("upstream_status, expected_class", [
+    (404, "application_not_found"),
+    (403, "forbidden"),
+])
+def test_a_failure_before_the_agent_still_records_an_outcome(
+        sink, client, monkeypatch, upstream_status, expected_class):
+    """A request that never reaches the agent is still a request that was
+    answered.
+
+    Found in review. These exits raise `HTTPException` from inside the route
+    before the block that records the outcome, so the trace stopped after
+    `request` -- which reads as a request that vanished, the exact ambiguity a
+    trace exists to remove.
+    """
+    class _Upstream:
+        status_code = upstream_status
+        def json(self): return {}
+        def raise_for_status(self): pass
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Upstream())
+
+    resp = _post(client)
+    assert resp.status_code == upstream_status
+
+    blob = sink.text()
+    names = _span_names(blob)
+    assert "outcome" in names, (
+        f"a {upstream_status} emitted only {sorted(names)}")
+    assert expected_class in blob
+    assert not _leaks(blob), f"prohibited content on the wire: {_leaks(blob)}"
+
+
 # --------------------------------------------------------------------------
 # The categorical events the client asked to SEE.
 # --------------------------------------------------------------------------
 
 def test_every_required_stage_reaches_the_endpoint(sink, client, monkeypatch):
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", HIT, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch)
 
     _post(client)
     blob = sink.text()
 
-    for stage in ("request", "policy_retrieval", "validation", "outcome"):
-        assert stage in blob, f"stage {stage!r} never reached the endpoint"
+    # agent_run and model included deliberately: both were declared in
+    # trace.STAGES and neither was required here, so `agent_run` was emitting
+    # nothing at all and nobody noticed.
+    names = _span_names(blob)
+    for stage in ("request", "agent_run", "model", "policy_retrieval",
+                  "validation", "outcome"):
+        assert stage in names, (
+            f"stage {stage!r} never reached the endpoint; saw {sorted(names)}")
     for categorical in ("underwriting_summary", "privacy_safe_categorical",
                         "search_underwriting_policy", "hit",
                         "summary_returned", "underwriter"):
@@ -265,8 +371,7 @@ def test_every_required_stage_reaches_the_endpoint(sink, client, monkeypatch):
 def test_policy_provenance_travels_but_policy_text_does_not(sink, client, monkeypatch):
     """Document, version and citation identify the client's own published
     policy, not an applicant. The excerpt beside them does not travel."""
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", HIT, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch)
 
     _post(client)
     blob = sink.text()
@@ -289,8 +394,7 @@ def test_the_sink_would_see_a_sentinel_without_the_allow_list(sink, client, monk
     allow-list is the thing preventing it -- not some accident of the emitter.
     """
     monkeypatch.setattr(trace, "_safe", lambda fields: dict(fields or {}))
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", HIT, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch)
 
     # Feed a prohibited value through a stage the disabled filter will now pass.
     original = llm_client._policy_provenance
@@ -401,8 +505,7 @@ def test_the_excerpt_field_is_never_read_into_provenance():
 def test_the_credential_is_never_traced_even_though_the_emitter_holds_it(sink, client, monkeypatch):
     """The API key is on the prohibited list and is in this process's
     environment, so it is the easiest thing in the world to emit by accident."""
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", HIT, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch)
 
     _post(client)
 
@@ -423,8 +526,7 @@ def test_no_provider_credential_from_the_environment_reaches_the_wire(
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "AWSBEARER-SENTINEL-A8")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SENTINEL-A9")
     monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "INTERNALTOKEN-SENTINEL-A10")
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", HIT, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch)
 
     _post(client)
     blob = sink.text()
@@ -440,8 +542,7 @@ def test_nothing_is_emitted_when_tracing_is_off(sink, client, monkeypatch):
     monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
     monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
     monkeypatch.delenv("LANGCHAIN_TRACING", raising=False)
-    _run(monkeypatch, lambda prompt: (SUMMARY_JSON, _state(
-        _Msg("tool", HIT, policy_tool.TOOL_NAME), _Msg("ai", SUMMARY_JSON))))
+    _real_agent_over_a_fake_model(monkeypatch)
 
     assert _post(client).status_code == 200
     assert sink.text() == ""
