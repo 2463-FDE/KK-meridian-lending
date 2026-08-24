@@ -52,7 +52,9 @@ don't justify.
 **3. Every decision persists an append-only `decision_events` row** (new table,
 `db/init/004_decision_events.sql`): `app_id`, `occurred_at`, `requested_amount`,
 `term_months`, `annual_income`, `bureau_score`, `model_score`, `model_version`,
-`top_features` (the contribution breakdown), `decision`, `reason_codes`. This is the
+`top_features` (the contribution breakdown — populated only where the
+deterministic stub produced the score, `null` for a real vendor response, which
+reports no attribution), `decision`, `reason_codes`. This is the
 dispute-proof record the brief's own question exposed as missing. No raw SSN/PAN is
 stored — inputs are limited to the fields the scorecard/model actually consume.
 

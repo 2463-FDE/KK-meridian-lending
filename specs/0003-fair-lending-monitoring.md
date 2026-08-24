@@ -19,7 +19,9 @@
 The client's brief describes a system that no longer exists in three respects,
 and saying so is part of the spec rather than a footnote: `GENERIC_REASONS` was
 removed in Week 3, a model card exists, and `decision_events` already records
-the model version and features behind every decision. The attached decision logs
+the model version and score behind every decision — plus `top_features`, but
+**only** where the deterministic stub produced the score; a real vendor response
+carries no attribution and is recorded as `null` (§3). The attached decision logs
 are stale. What follows is measured against the code, not the brief's
 description of it.
 

@@ -303,3 +303,42 @@ def test_the_spec_and_the_card_agree_on_who_populates_top_features(spec):
         "spec 0003 no longer says top_features is stub-only")
     assert re.search(r"only populated for the dev/test stub", card, re.I), (
         "the model card no longer says top_features is stub-only")
+
+
+def test_no_governance_document_claims_attribution_for_every_decision(spec):
+    """"Records the features behind every decision" is the same error one
+    sentence up from where it is contradicted.
+
+    Spec 0003's context section said exactly that while its own §3 said
+    `top_features` is stub-only -- review of this PR caught it. The claim is
+    tempting because a *column* does exist on every row; what does not exist is
+    a value in it for a vendor decision. So a document may pair "every
+    decision" with feature attribution only if the same scope says which
+    decisions actually carry it.
+    """
+    documents = {
+        "spec 0003": spec,
+        "the model card": _read(MODEL_CARD),
+        "ADR 0006": _read(REPO / "adr" / "0006-adverse-action-reason-mapping.md"),
+    }
+    # Co-occurrence inside one scope, not proximity in characters. ADR 0006's
+    # sentence puts "every decision" at the head of a column list and
+    # `top_features` eleven columns later, which a distance-bounded pattern
+    # missed -- mutation testing caught that. A paragraph or a cell is already a
+    # tight enough scope to make co-occurrence meaningful.
+    # `top_features` and "feature attribution" by name, plus the exact phrasing
+    # review caught -- "records the model version and features behind every
+    # decision", which names neither. A bare `\bfeatures\b` was tried and is too
+    # broad at paragraph scope: it fires on an ADR bullet list where one bullet
+    # says "every decision" and another says "features", which is not a claim
+    # about attribution at all.
+    attribution = re.compile(
+        r"top_features|feature attribution|"
+        r"features? (?:behind|for|driving|of) every decision", re.I)
+
+    for label, text in documents.items():
+        for scope in (_flat(s) for s in _scopes(text)):
+            if attribution.search(scope) and re.search(r"every decision", scope, re.I):
+                assert re.search(r"stub|null", scope, re.I), (
+                    f"{label} pairs feature attribution with every decision and "
+                    f"does not say which decisions carry it:\n{scope.strip()[:300]}")
