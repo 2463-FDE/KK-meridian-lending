@@ -83,7 +83,7 @@ during Week 4); those are marked where they occur.
 | 6 | Servicing RBAC / ledger / maker-checker | ✅ Landed — RBAC, append-only ledger, and maker-checker enforced by `no_self_approval` plus `resolve_pending_movement` (migrations 0036/0037) |
 | 7 | Trace ID + scoped reconciliation control | ✅ Landed — scheduled transaction-level reconciliation, and a shared `correlation_id` minted by `payment-service`, sent to the processor and to servicing, and stamped on every ledger entry a payment writes (`db/migrations/0043`, PR #56) |
 | 8 | Model governance + fair-lending screen | ✅ Landed — approved consumer-reason mapping (fail-closed on an unmapped code), `docs/model_card.md`, spec 0003 Accepted, ZIP3 four-fifths screen, windowed reason distribution per `model_version`, prompt-injection guard. Vendor taxonomy content is VENDOR-BLOCKED and protected-class evidence CLIENT-BLOCKED, so no model-fairness claim is made |
-| 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
+| 9 | BSA/AML — UBO + sanctions screening | 🟡 Spec and ADR landed (`specs/0004-kyc-aml-ubo-and-sanctions-screening.md`, `adr/0012-sanctions-screening-integration.md`), nothing built — that is the week's whole deliverable. Screening is VENDOR-BLOCKED, four decisions are COMPLIANCE-BLOCKED, and `docs/DEBT.md` D11 stays open |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
 | — | **Not on any brief:** test + CI infrastructure, browser E2E, migration parity, the bureau/decision-attempt seams, this register | ✅ Landed |
 
@@ -1024,7 +1024,27 @@ same hardcoding mistake with a different vendor), ongoing-monitoring/SAR
 trigger points, a screening-integration ADR, and acceptance criteria (e.g. "no
 applicant reaches `cip_passed = true` without a completed sanctions screen
 returning clear"). **Spec + ADR only — screening-vendor integration scoped,
-not built. Not yet started — plan only, pending go-ahead to write it.**
+not built.**
+
+**Status (2026-08-24): the spec and the ADR are written; nothing is built, and
+that is the deliverable.** `specs/0004-kyc-aml-ubo-and-sanctions-screening.md`
+carries the `beneficial_owners` model (ownership percentage, control person,
+entity-to-owner chain), the sanctions-screening evidence design, the
+`SanctionsScreeningProvider` seam with its idempotency and fail-closed
+requirements, the ongoing-monitoring trigger points, the SAR boundary and ten
+acceptance criteria; `adr/0012-sanctions-screening-integration.md` records where
+the screen runs and what it blocks. *This paragraph read "Not yet started — plan
+only, pending go-ahead to write it" until 2026-08-24.*
+
+What is **not** decided is decided by nobody here, and each row says so: four
+COMPLIANCE-BLOCKED items (which BSA/AML obligations bind Meridian at all,
+sanctions-match disposition, SAR rules, false-negative appetite behind any match
+threshold), two VENDOR-BLOCKED (provider selection and list-currency contract,
+provider scoring semantics), three CLIENT-BLOCKED (owner SSN/ITIN collection,
+ownership-chain depth, re-screening cadence) and one OPS-BLOCKED (who runs the
+monitoring job and receives its findings — the same gap as D7). `docs/DEBT.md`
+**D11 stays open**: CIP-only onboarding is unchanged, `sanctions_screened` and
+`ubo_captured` are still hardcoded `False`, and no migration is written.
 
 ---
 
