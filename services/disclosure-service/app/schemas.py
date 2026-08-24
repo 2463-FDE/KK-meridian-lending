@@ -1,5 +1,9 @@
 """Pydantic request/response models for the disclosure API."""
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# The note rate this service prices at, read from the same environment
+# variable origination publishes -- see `config.DEMO_NOTE_RATE_PCT`.
+from . import config
 
 
 class OfferIn(BaseModel):
@@ -7,13 +11,42 @@ class OfferIn(BaseModel):
     decision_id: int | None = None  # W4: which decision this offer follows, if any
     principal: float = Field(gt=0, le=50000)
     term_months: int = Field(default=48, ge=12, le=60)
-    # **Required, with no default.** This service calculates a disclosure; it
-    # does not decide what a loan costs. A default here was a second copy of a
-    # contractual term -- origination owns the figure
-    # (`origination-service/app/config.py::DEMO_NOTE_RATE_PCT`) and every caller
-    # sends it, so the default only ever served a caller that forgot, which is
-    # exactly the caller who should be told rather than quietly priced.
-    annual_rate: float = Field(gt=0, le=35)
+    # **Optional, and never the number that gets used.** This service calculates
+    # a disclosure; it does not decide what a loan costs. The rate it prices and
+    # persists is `config.DEMO_NOTE_RATE_PCT`, the same variable origination
+    # publishes at `GET /los/pricing`.
+    #
+    # It carried `= 7.99` as a default, which was a second copy of a contractual
+    # term. Removing the copy is right; making the field *required* was not, and
+    # review of PR #80 caught what that cost: the handler ignores this value, so
+    # requiring it only rejected callers -- including the offer-repair tests,
+    # whose 27 requests began failing validation before they could reach the
+    # repair path they exist to prove. A required field the handler ignores
+    # validates nothing and refuses callers for nothing.
+    #
+    # So it is optional, and a value that DISAGREES with the server's rate is
+    # refused rather than ignored -- the same treatment
+    # `origination-service`'s `OfferIn.annual_rate_pct` gives it. Silently
+    # overriding it would leave the caller believing it had priced the loan
+    # while the disclosure said something else, which is the failure the whole
+    # single-source change is about.
+    annual_rate: float | None = Field(default=None, gt=0, le=35)
+
+    @field_validator("annual_rate")
+    @classmethod
+    def _rate_is_not_the_callers_to_choose(cls, value):
+        if value is None:
+            return value
+        # Basis points, not raw floats: 7.99 is not exactly representable, so an
+        # equality test would reject a caller sending the very rate the server
+        # holds after a JSON round trip.
+        if round(value * 100) != round(config.DEMO_NOTE_RATE_PCT * 100):
+            raise ValueError(
+                "annual_rate is set by the server, not by the caller -- omit it. "
+                "The note rate is the configured training default; no "
+                "per-applicant or risk-based pricing exists in this system"
+            )
+        return value
 
 
 class ScheduleRow(BaseModel):
