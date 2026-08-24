@@ -41,15 +41,27 @@ DEBT = REPO / "docs" / "DEBT.md"
 ARCHITECTURE = REPO / "ARCHITECTURE.md"
 
 #: Documents and source files that describe the servicing money path to a reader.
+#:
+#: Derived from one list rather than assembled per check, because review of PR #77
+#: found the two ways this set goes wrong. `principal.py` was referenced by the
+#: guard and left out of the scan -- and it is the module that *implements* the
+#: verified human, so a reader landing there took away the exact false conclusion
+#: the guard exists to prevent. `login/page.tsx` was corrected by the same PR and
+#: had no protection at all, so restoring its old wording would have passed
+#: clean. Anything corrected for D8 belongs here; if a file describes the money
+#: path and is missing, that is the defect.
 LIVE_SURFACES = [
     ARCHITECTURE,
     SERVICING_MAIN,
     BALANCE,
+    PRINCIPAL,
+    MAKER_CHECKER,
     REPO / "docs" / "ROADMAP.md",
     REPO / "specs" / "0002-maker-checker-self-approval.md",
     REPO / "frontend" / "lib" / "api.ts",
     REPO / "frontend" / "components" / "AppBar.tsx",
     REPO / "frontend" / "components" / "RequireRole.tsx",
+    REPO / "frontend" / "app" / "login" / "page.tsx",
 ]
 
 #: A scope that says out loud it is describing the past.
@@ -78,7 +90,12 @@ FALSE_CLAIMS = [
     (re.compile(r"validates no human principal|reads no principal|"
                 r"identif(?:ies|y) no human", re.I),
      "principal.require_staff_principal verifies a gateway-signed assertion"),
-    (re.compile(r"no maker.?checker", re.I),
+    # Both shapes: "no maker-checker", and "maker-checker ... is not
+    # implemented", which is how `principal.py` phrased it and which the first
+    # version of this list missed (found by mutation testing).
+    (re.compile(r"no maker.?checker|"
+                r"maker.?checker[^.]{0,60}\bnot implemented|"
+                r"\bnot implemented[^.]{0,60}maker.?checker", re.I),
      "maker_checker.propose/resolve is the live adjust-balance / waive-fee path"),
     # `D8 itself is still open` slipped past a pattern anchored on "D8 is",
     # found by mutation testing -- hence the small gap for an intervening word.
@@ -93,6 +110,15 @@ FALSE_CLAIMS = [
     (re.compile(r"server-side authz is intentionally absent", re.I),
      "gateway role rules, ownership checks and servicing's principal all exist"),
 ]
+
+
+#: One money route genuinely does act on a single principal: `late-fee`, which
+#: assesses a contractual fee rather than adjusting a balance or waiving one, and
+#: which D8 was never about (D8 is "fee waiver / balance adjust"). A sentence
+#: about that route may say a single person acts alone, because they do -- see
+#: `principal.py::require_money_mover` and spec 0002 §8. Recognised explicitly so
+#: the guard does not push an accurate docstring into a false one.
+_LATE_FEE = re.compile(r"late-fee|late fee", re.I)
 
 
 def _read(path: pathlib.Path) -> str:
@@ -267,7 +293,7 @@ def test_no_live_surface_says_the_d8_controls_are_missing(path):
             for sentence in _sentences(scope):
                 if not pattern.search(sentence):
                     continue
-                if _HISTORICAL.search(sentence):
+                if _HISTORICAL.search(sentence) or _LATE_FEE.search(sentence):
                     continue
                 pytest.fail(
                     f"{path.name} states {pattern.pattern!r} as current, with "
