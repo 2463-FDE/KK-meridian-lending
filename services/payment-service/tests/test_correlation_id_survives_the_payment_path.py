@@ -27,7 +27,9 @@ Synthetic data only.
 """
 import logging
 import re
+import uuid
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -148,15 +150,50 @@ def test_a_capture_mints_one_opaque_identifier(db, servicing):
     assert CORRELATION_RE.match(stored), stored
 
 
-def test_the_identifier_carries_no_business_or_card_data(db, servicing):
+def test_the_identifier_carries_no_business_or_card_data(db, servicing, monkeypatch):
     """A correlator embedding the loan or the amount would leak context into
     every log line quoting it, and would stop being opaque the moment a reader
-    learned the format."""
+    learned the format.
+
+    Asserted by pinning the only entropy the minter has and demanding the whole
+    identifier equal it. Two reasons, and the second is the interesting one:
+
+    * the previous version searched the stored id for "4471", "250", "1111" and
+      the token, and a random `uuid4().hex` contains "250" roughly once in 140
+      runs -- so it failed on CI about once in a hundred runs for a reason that
+      had nothing to do with a leak. A control that cries wolf is how people
+      learn to re-run the suite instead of reading it;
+    * substring absence is also weaker than it looks. It passes a minter that
+      hashes the loan id into the identifier, or reverses its digits, or encodes
+      it in hex -- all of which leak exactly what this test exists to prevent.
+      Equality against the pinned entropy fails for any input that reaches the
+      identifier by any route.
+
+    The patch is scoped to the `payments` module's own `uuid` name rather than
+    the global module, so nothing else in the request path is affected by it.
+    """
+    fixed = uuid.UUID("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(payments, "uuid", SimpleNamespace(uuid4=lambda: fixed))
+
     client.post("/payments", json=_payload(loan_id=4471, amount=250.0))
 
-    stored = db.stored_correlation_id()
-    for leak in ("4471", "250", "1111", VALID_MOCK_TOKEN, "idem-corr-1"):
-        assert leak not in stored, "the correlation id embeds " + leak
+    assert db.stored_correlation_id() == f"pay_{fixed.hex}", (
+        "the correlation id is not purely the entropy the minter was given, so "
+        "something from the request reached it")
+
+
+def test_two_captures_do_not_share_an_identifier(db, servicing):
+    """The complement to the test above, unpatched: pinning the entropy proves
+    nothing about uniqueness, and an id that is opaque but constant correlates
+    every payment with every other one."""
+    client.post("/payments", json=_payload(idempotency_key="idem-corr-uniq-1"))
+    first = db.stored_correlation_id()
+
+    client.post("/payments", json=_payload(idempotency_key="idem-corr-uniq-2"))
+    second = db.stored_correlation_id(payment_id=2)
+
+    assert CORRELATION_RE.match(first) and CORRELATION_RE.match(second)
+    assert first != second, "two captures share one correlation id"
 
 
 def test_it_is_not_the_idempotency_key(db, servicing):
