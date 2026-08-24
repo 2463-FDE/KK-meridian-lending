@@ -127,38 +127,70 @@ function ReconciliationQueue() {
   const [serverNote, setServerNote] = useState<string | null>(null);
   const [peek, setPeek] = useState<Peek | null>(null);
   const [showReviewed, setShowReviewed] = useState(false);
-  const [loading, setLoading] = useState(true);
+  // Two independent loads, and deliberately two of everything that describes
+  // them. Review of PR #81: both requests were awaited in one `Promise.all`
+  // under one `catch`, so a failure of `/peek` -- the break SUMMARY, which
+  // decides nothing about a flagged payment -- threw before `setItems` ran and
+  // left the candidate list empty. The one destination the client authorised for
+  // a flagged payment went blank because an unrelated request failed, and
+  // "nothing to review" and "the fetch broke" looked identical on screen.
+  //
+  // So the queue renders whenever ITS OWN call succeeded, and each section owns
+  // its loading and error state. The sections are two different findings (that
+  // is the whole layout); they are now two different failures too.
+  const [queueLoading, setQueueLoading] = useState(true);
+  const [queueError, setQueueError] = useState<string | null>(null);
+  const [peekLoading, setPeekLoading] = useState(true);
+  const [peekError, setPeekError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [notes, setNotes] = useState<Record<number, string>>({});
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const loadQueue = useCallback(async () => {
+    setQueueLoading(true);
+    setQueueError(null);
     try {
       const status = showReviewed ? "reviewed" : "open";
-      const [queue, breaks] = await Promise.all([
-        apiGet(`/lss/reconciliation/review-queue?status=${status}`) as Promise<QueueResponse>,
-        apiGet("/lss/reconciliation/peek") as Promise<Peek>,
-      ]);
+      const queue = (await apiGet(
+        `/lss/reconciliation/review-queue?status=${status}`,
+      )) as QueueResponse;
       setItems(queue.items ?? []);
       setCounts(queue.counts ?? null);
       // The server's sentence about what a flag is not, displayed rather than
       // rewritten here. A paraphrase in the browser is a second copy of a
       // client instruction, free to soften as the page is edited.
       setServerNote(queue.note ?? null);
-      setPeek(breaks);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "The reconciliation queue could not be loaded.");
+      setQueueError(
+        e instanceof Error ? e.message : "The review queue could not be loaded.",
+      );
     } finally {
-      setLoading(false);
+      setQueueLoading(false);
     }
   }, [showReviewed]);
 
+  const loadPeek = useCallback(async () => {
+    setPeekLoading(true);
+    setPeekError(null);
+    try {
+      setPeek((await apiGet("/lss/reconciliation/peek")) as Peek);
+    } catch (e) {
+      setPeekError(
+        e instanceof Error ? e.message : "The break comparison could not be read.",
+      );
+    } finally {
+      setPeekLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    load();
-  }, [load]);
+    loadQueue();
+  }, [loadQueue]);
+
+  useEffect(() => {
+    loadPeek();
+  }, [loadPeek]);
 
   async function disposition(itemId: number, choice: string) {
     setBusyId(itemId);
@@ -173,7 +205,10 @@ function ReconciliationQueue() {
         `Review item ${itemId} recorded as “${DISPOSITION_LABEL[choice] ?? choice}”. ` +
           `No money moved — a reversal goes through Approvals.`
       );
-      await load();
+      // Only the queue is reloaded: recording a disposition cannot change the
+      // ledger-versus-settlement comparison, so re-reading the break summary
+      // would be a request that can only fail.
+      await loadQueue();
     } catch (e) {
       // The server's own words. A 409 here means someone else answered first,
       // and that is worth reading exactly rather than as "something failed".
@@ -218,8 +253,18 @@ function ReconciliationQueue() {
           </button>
         </p>
 
-        {loading ? (
+        {/* The queue's OWN error, and it must not read as an empty queue.
+            "No payments are waiting for review" is a claim; a failed fetch
+            cannot support it. */}
+        {queueError ? <p className="alert alert-error">{queueError}</p> : null}
+
+        {queueLoading ? (
           <div className="card empty">Loading…</div>
+        ) : queueError ? (
+          <div className="card empty">
+            The review queue could not be read, so this list is not a statement
+            about whether anything is waiting.
+          </div>
         ) : items.length === 0 ? (
           <div className="card empty">
             {showReviewed
@@ -351,10 +396,17 @@ function ReconciliationQueue() {
           a different kind of work.
         </p>
 
-        {loading ? (
+        {/* Scoped to this section. A break summary that cannot be read says
+            nothing about the candidates above it, and used to blank them. */}
+        {peekError ? <p className="alert alert-error">{peekError}</p> : null}
+
+        {peekLoading ? (
           <div className="card empty">Loading…</div>
         ) : !peek ? (
-          <div className="card empty">The comparison could not be read.</div>
+          <div className="card empty">
+            The comparison could not be read. That is a gap in this panel, not a
+            statement that the books agree.
+          </div>
         ) : (
           <section className="card">
             <div className="spread">

@@ -336,6 +336,69 @@ test("an answered item offers no way to change the answer", async ({ page }) => 
   }
 });
 
+test("a broken break-summary does not blank the review queue", async ({ page }) => {
+  /**
+   * Review of PR #81 found this, and it is the failure that matters most on this
+   * page: both requests were awaited in one `Promise.all` under one `catch`, so
+   * a failure of `/peek` -- the ledger-versus-settlement SUMMARY, which decides
+   * nothing about any flagged payment -- threw before the candidates were set.
+   * The only destination the client authorised for a flagged payment rendered
+   * empty because an unrelated request failed, and "nothing to review" looked
+   * exactly like "the fetch broke".
+   *
+   * So only `/peek` is failed here. The queue must still render its item, and
+   * the break panel must say it could not be read rather than implying the books
+   * agree.
+   */
+  const seeded = await seedReviewItem("heuristic_30_minute_candidate");
+  try {
+    await signInAsStaff(page, "csr");
+
+    // Routed AFTER sign-in so the sign-in flow itself is untouched.
+    await page.route("**/lss/reconciliation/peek", (route) =>
+      route.fulfill({ status: 503, body: "peek is down" }),
+    );
+
+    await page.goto("/reconciliation");
+
+    const card = page
+      .locator(".card", { hasText: "Potential duplicate — review required" })
+      .filter({ hasText: `Flagged · ${seeded.paymentIds[1]}` })
+      .first();
+    await expect(card).toBeVisible({ timeout: 15_000 });
+
+    // The queue is not claiming to be empty.
+    await expect(page.getByText("No payments are waiting for review")).toHaveCount(0);
+
+    // And the break panel is honest about what it does not know.
+    await expect(
+      page.getByText(/not a statement that the books agree/i),
+    ).toBeVisible();
+  } finally {
+    await cleanUp(seeded);
+  }
+});
+
+test("a broken review queue does not read as an empty one", async ({ page }) => {
+  /** The other direction: the list must not assert "nothing is waiting" on the
+   * strength of a request that failed. A queue that says it is empty when it
+   * could not be read is worse than one that says nothing -- it is the same
+   * defect as two equal reconciliation totals with no run behind them. */
+  await signInAsStaff(page, "csr");
+  await page.route("**/lss/reconciliation/review-queue**", (route) =>
+    route.fulfill({ status: 503, body: "queue is down" }),
+  );
+
+  await page.goto("/reconciliation");
+
+  await expect(
+    page.getByText(/not a statement about whether anything is waiting/i),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("No payments are waiting for review")).toHaveCount(0);
+  // The break panel is unaffected: independent loads in both directions.
+  await expect(page.getByRole("heading", { name: "Reconciliation breaks" })).toBeVisible();
+});
+
 test("a borrower cannot reach the reconciliation queue at all", async ({ request }) => {
   /**
    * The gateway's refusal, not the page's. `RequireRole` decides what renders;
