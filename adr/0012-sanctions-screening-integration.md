@@ -1,10 +1,16 @@
 # ADR 0012: Sanctions screening behind a provider seam, blocking at the CIP gate
 
-- **Status:** Accepted as a **decision**, not as an implementation. Nothing here
-  is built. The Week 9 brief asks for a spec and an ADR; this records where the
+- **Status:** Accepted. **One part of it is built: the provider seam**
+  (`services/kyc-service/app/screening.py`) — the `Protocol`, the result type,
+  the stub, the HTTP shape, fail-closed behaviour and idempotent replay.
+  **Nothing else is built**, and the distinction is the point: no route calls
+  the seam, no evidence table exists, no migration is written, `cip_passed` is
+  unchanged, and `sanctions_screened`/`ubo_captured` are still hardcoded
+  `False`. The Week 9 brief asked for a spec and an ADR; this records where the
   screen runs, what it may block, and the shape a vendor integration must take,
   so that whoever wires up a provider is not also inventing the architecture at
-  the same time.
+  the same time. *This status read "Nothing here is built" until the seam
+  landed.*
 - **Date:** 2026-08-24
 - **Depends on:** [`specs/0004-kyc-aml-ubo-and-sanctions-screening.md`](../specs/0004-kyc-aml-ubo-and-sanctions-screening.md),
   which carries the data model, the acceptance criteria and the full
@@ -51,8 +57,8 @@ Three things make this a decision worth recording now, before any vendor exists:
 
 ### 1. The screen is a separate provider boundary inside `kyc-service`
 
-`services/kyc-service/app/screening.py` — which **does not exist on `main`** and
-arrives with the implementation, not with this ADR — holds
+`services/kyc-service/app/screening.py` — **landed after this ADR, as mechanism
+only; it is wired into no route** — holds
 `SanctionsScreeningProvider`, `ScreeningResult`, a deterministic
 `StubScreeningProvider` for dev and test, and an HTTP implementation that pins
 the requirements of a real integration without claiming to work. Exactly the
@@ -221,9 +227,14 @@ anywhere in this repository.**
 
 ## Limitations
 
-- Nothing here is implemented. There is no `screening.py`, no
-  `sanctions_screenings` table, no `beneficial_owners` table, and no migration:
-  the next free number at the time of writing is `0044`.
+- **What is implemented is the seam and nothing else.**
+  `services/kyc-service/app/screening.py` exists with its stub, its HTTP shape,
+  fail-closed behaviour and idempotent replay. There is still no
+  `sanctions_screenings` table, no `beneficial_owners` table, no migration (the
+  next free number at the time of writing is `0044`), no route that calls the
+  seam, and no change to `cip_passed`: `sanctions_screened` and `ubo_captured`
+  are still hardcoded `False`, and `docs/DEBT.md` D11 is still open. *This bullet
+  read "Nothing here is implemented" until the seam landed.*
 - The idempotency and list-version contracts are what this repository would
   **require** of a provider. As with `bureau.py`, they would be verified only
   against our own stub — real-provider behaviour is unverified and no production

@@ -59,6 +59,7 @@ Read from the code, not from the brief.
 | Persistence | `db/init/001_schema.sql`, `kyc_checks` | four factor booleans plus `cip_passed`. The schema comment says it out loud: *"no sanctions_screened, no ubo_identified, no ongoing_monitoring columns"* |
 | Entity applicants in the schema | `applicants` | `is_entity`, `ein`; no owner, no ownership percentage, no control person, and no table to put one in |
 | The worked example | `db/init/002_seed.sql` line 17 | `Northgate Holdings LLC`, EIN only, no SSN, no DOB — clears CIP on a company name and an address, with no natural person identified anywhere |
+| Provider seam | `services/kyc-service/app/screening.py` | **landed as mechanism only:** the `Protocol`, `ScreeningResult`, `StubScreeningProvider` and the HTTP shape, with fail-closed and idempotent-replay behaviour and 24 tests. No vendor, no route wiring, no enforcement, no evidence table — nothing calls it |
 | What consumes the verdict | `services/origination-service/app/routers/applications.py::_kyc_rows_for` | reads `cip_passed` from `kyc_checks`; a missing row blocks the decision, and `_attempt_kyc_recheck` runs CIP once for an application that has none |
 
 **So the honest statement of today's position:** identity verification is a
@@ -222,6 +223,12 @@ false-negative appetite is a compliance judgement).
 
 ## §4. `SanctionsScreeningProvider` — the abstraction
 
+**Status: the mechanism is built** (`services/kyc-service/app/screening.py`,
+`services/kyc-service/tests/test_screening_seam.py`), and everything it would
+feed is not: no `sanctions_screenings` table, no `kyc_checks` column, no route
+calls it, and `cip_passed` is unchanged. Vendor entries remain VENDOR-BLOCKED
+and enforcement remains COMPLIANCE-BLOCKED (§3.2, §7).
+
 Deliberately the same shape as `services/decision-service/app/bureau.py`, which
 already solved this problem once for the credit bureau: a `Protocol` naming the
 seam, a deterministic stub for dev and test, an HTTP implementation that pins
@@ -245,7 +252,7 @@ class SanctionsScreeningProvider(Protocol):
     returns the ORIGINAL screen rather than performing a new one.
     """
 
-    async def screen(
+    def screen(
         self,
         *,
         name: str,
@@ -255,6 +262,13 @@ class SanctionsScreeningProvider(Protocol):
     ) -> ScreeningResult:
         ...
 ```
+
+**Synchronous, unlike `bureau.py`.** This spec's first draft wrote `async def
+screen(...)`, copying the bureau seam. That was wrong for this service:
+`kyc-service`'s routes are `def`, and its database calls are blocking psycopg2.
+An async provider would force the route to `async def`, and every one of those
+blocking calls would then run on the event loop. The seam is synchronous, and the
+deviation is recorded rather than quietly corrected.
 
 Requirements on any implementation:
 

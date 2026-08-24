@@ -128,11 +128,24 @@ def test_neither_document_claims_the_screening_is_built(spec, adr):
     assert re.search(r"\bOpen\b", d11), (
         "DEBT D11 no longer reads as open while the spec says it is unbuilt")
 
+    # Each document must say, in its own words, what is NOT built. The phrasing
+    # is deliberately loose -- the seam has since landed as mechanism only, so
+    # "nothing is built" became untrue and had to be replaced by "nothing else
+    # is built"; a guard pinned to one sentence would have blocked that
+    # correction instead of checking the property.
     for label, text in (("spec 0004", spec), ("ADR 0012", adr)):
-        assert re.search(r"nothing (?:in it )?is built|not (?:an )?implement|"
+        assert re.search(r"nothing (?:in it |here |else )?is built|"
+                         r"not (?:as )?(?:an )?implement|"
                          r"does not exist on `main`|spec(?:ification)? only|"
+                         r"is not written|no migration is written|"
                          r"not written", text, re.I), (
-            f"{label} does not say anywhere that this is unbuilt")
+            f"{label} does not say anywhere what is still unbuilt")
+
+        # And the enforcement gap specifically, because that is the one a reader
+        # would otherwise assume the seam closed.
+        assert re.search(r"cip_passed`? is unchanged|no route (?:calls|wired)|"
+                         r"wired into no route|no enforcement", text, re.I), (
+            f"{label} does not say that nothing enforces a screen yet")
 
 
 def test_the_spec_says_cip_is_not_full_kyc_aml(spec):

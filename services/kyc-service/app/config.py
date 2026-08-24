@@ -32,6 +32,22 @@ INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "").lower()
 _DEV_ENVIRONMENTS = ("development", "dev", "test", "local")
 
+# --- sanctions screening (spec 0004 §4, ADR 0012) ---------------------------
+#
+# No provider is selected: SCREENING_BASE_URL is a placeholder host and nothing
+# in this repository calls a real screening vendor. These exist so the seam in
+# app/screening.py has a configured shape rather than a hardcoded one, and so a
+# future integration is a provider implementation instead of a redesign.
+SCREENING_BASE_URL = os.getenv("SCREENING_BASE_URL", "https://screening.invalid")
+SCREENING_KEY = os.getenv("SCREENING_KEY", "")
+
+# A stub outside a development environment is a configuration error, not a
+# fallback -- the same gate and the same reasoning as decision-service's
+# ALLOW_MODEL_STUB. An unset ENVIRONMENT counts as production: a container boots
+# without one, so a deploy that configured no provider must fail at the first
+# screen rather than quietly clear everybody.
+ALLOW_SCREENING_STUB = os.getenv("ENVIRONMENT", "").lower() in _DEV_ENVIRONMENTS
+
 #: Values that exist in this repository (compose defaults, test fixtures) and so
 #: must never authenticate anything outside a dev/test environment.
 KNOWN_DEV_TOKENS = frozenset({
