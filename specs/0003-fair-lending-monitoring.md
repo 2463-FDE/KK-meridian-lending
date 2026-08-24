@@ -1,6 +1,9 @@
 # Spec 0003 — Fair-lending monitoring: denial-reason accuracy and disparity
 
-- **Status:** Accepted
+- **Status:** Accepted, and **AMENDED BY CLIENT DECISION 2026-08-24** — see
+  *Superseding authority* below. §2's ZIP3 disparity screen is **SUPERSEDED —
+  NOT CURRENT POLICY** and its implementation is retired. The rest of the
+  document — §1's denial-reason contract, §4-§7 — stands unchanged.
 - **Domain:** Decisioning · Origination
 - **Authority for the requirement:** Week 8 client brief (Dana, VP Lending Ops)
   — *"a fair-lending monitoring spec (denial-reason accuracy + disparity
@@ -13,6 +16,46 @@
   2025-05-12**; they are named here only so nobody re-cites them. See
   [`adr/0006-adverse-action-reason-mapping.md`](../adr/0006-adverse-action-reason-mapping.md),
   *Addendum (2026-08-06)*, where exactly that mistake was already made once.
+
+## Superseding authority — Charles Jester (client), 2026-08-24
+
+Quoted, because the wording is the authority:
+
+> You do not have permission to collect real protected-class data for this
+> demonstration. There is NO approved proxy. Do not create one, including from
+> ZIP, ZIP3 or similar fields. Synthetic protected-class labels may be used ONLY
+> in the isolated OFFLINE evaluation fixture included in the attached training
+> package. They must NEVER enter model inputs, runtime application inputs,
+> application decisions, operational records, runtime database records, traces,
+> telemetry, or consumer output.
+
+**What that changes in this document.**
+
+| | Previous authority (Week 8 brief) | Current authority (2026-08-24) |
+|---|---|---|
+| Runtime fairness evaluation | a ZIP3 outcome screen was permitted and built | **NOT PERMITTED** with protected-class data or an inferred proxy — including ZIP and ZIP3 |
+| Offline evaluation | not contemplated | **PERMITTED**, against the single isolated synthetic fixture only |
+| Protected-class collection | absent, and named as the blocker | **PROHIBITED** for this demonstration |
+| Fairness claim | not supportable | **PROHIBITED**, and unchanged in substance |
+
+**What was retired to comply**, on the day the decision arrived:
+`services/origination-service/app/fair_lending.py` (deleted, not on `main`), its
+route `GET /applications/fair-lending/zip-analysis` (no longer registered), and
+`origination-service/tests/test_fair_lending.py` (deleted, not on `main`).
+`applicants.zip_code` stays as
+a postal-address component and is no longer fairness evidence.
+`db/tests/test_no_runtime_protected_class_proxy.py` fails if the module, the
+route, or a substitute proxy reappears — renaming ZIP3 would not make it
+permitted, so the guard checks the shape as well as the name.
+
+**Not affected:** §1's denial-reason-accuracy contract, the mapping seam, and the
+per-`model_version` reason distribution. None of them touches a protected class
+or a proxy; the reason distribution groups by model version.
+
+**The client's confirmation request, answered in the repository:** protected-class
+labels are confined to `fixtures/offline_fairness_training/` (not yet supplied —
+`docs/DEBT.md` **D24**), and real, currently approved vendor material must
+replace the synthetic package before any non-training use.
 
 ## Context — what exists on `main` today
 
@@ -30,7 +73,7 @@ description of it.
 | Reason from the real vendor | `services/decision-service/app/decision.py` | vendor's `reason_codes` retained **verbatim as model evidence**; missing, empty, or non-list fails closed. A vendor code becomes consumer wording only through the approved mapping in `decision.py::consumer_adverse_action_reason` (§1.6, PR #66), and an unmapped code refuses the denial. *Before #66 no mapping layer stood between them and the consumer notice — that defect is Problem 3, kept as the record of what was fixed.* |
 | Reason from the deterministic stub | `decision.py::_reason_codes` | derives from the larger of two shortfalls (bureau vs income); dev/test only, gated by `ALLOW_MODEL_STUB`, `model_version` suffixed `-stub` |
 | Per-decision audit record | `decision_events` (`db/init/004_decision_events.sql`) | append-only by DB trigger; carries `model_version`, `model_score`, `top_features`, the inputs, `decision`, `reason_codes`, `occurred_at` |
-| Outcome disparity | `services/origination-service/app/fair_lending.py` | ZIP3 approval rate, four-fifths screen against the highest rate, groups under `min_group_size=5` excluded from flagging; staff-only `GET /applications/fair-lending/zip-analysis` |
+| Outcome disparity | — | **Retired 2026-08-24 and does not exist on `main`.** Was a ZIP3 approval-rate four-fifths screen in `fair_lending.py` at `GET /applications/fair-lending/zip-analysis`; the client prohibited ZIP/ZIP3 as a protected-class proxy, so the module, the route and its tests are deleted. No runtime fairness evaluation replaces it |
 | Aggregate reason monitoring over a window | `services/origination-service/app/reason_distribution.py` | distinct adverse-action reasons, each reason's frequency, and the no-reason count, per `model_version` over a stated window; staff-only `GET /applications/fair-lending/reason-distribution` (§1.3, PR #67). On demand — not scheduled, no threshold, no verdict |
 | Approval-rate drift and score-distribution shift over time | — | not built; `docs/model_card.md` says so under *Monitoring*. Not asked for by the Week 8 brief — see *Non-goals* |
 
@@ -167,26 +210,50 @@ stub genuinely has.
 quota note is explicit, and reason-mapping logic is deterministic and testable
 against fixtures.
 
-### 2. Disparity check
+### 2. Disparity check — **SUPERSEDED — NOT CURRENT POLICY**
 
-**2.1 What the existing screen is.** Approval outcomes grouped by ZIP3;
-approval rate per group; the four-fifths rule applied against the highest
-group's rate; groups smaller than `min_group_size` (default 5) reported but not
-flagged, because a rate over three applications is noise.
+**Current contract, which replaces everything in this section:**
 
-**2.2 What a flag means.** *Investigate.* It is not a finding of
-discrimination, and it is not evidence about the model. ZIP3 is a geographic
-proxy standing in for nothing that has been validated as a protected-class
-proxy here.
+- **Runtime fairness evaluation: NOT PERMITTED.** Not with protected-class data,
+  which this demonstration may not collect, and not with an inferred proxy, which
+  it may not create — expressly including ZIP and ZIP3.
+- **Offline synthetic evaluation: PERMITTED**, and only against the single
+  isolated fixture at `fixtures/offline_fairness_training/`. Offline means a CLI
+  or test package: it reads that directory, never the runtime tables, writes no
+  label anywhere, calls no model, and emits aggregate output that says SYNTHETIC
+  / TRAINING ONLY on its face.
+- **No production fairness claim**, from either. Unchanged, and now doubly so.
 
-**2.3 What this screen cannot do.** It measures the **final outcome**, which is
-the product of the model, the policy thresholds, and every manual review in
-between. It cannot attribute a disparity to the model, and therefore cannot
-support or refute a claim about the model.
-
-**2.4 Evidence status.** Local/training-only, against seeded fictional
-applicants. No result from it may be presented as a production fair-lending
-assessment.
+> ### Superseded 2026-08-24 — the original §2, kept verbatim
+>
+> The four paragraphs below described a screen that was built, tested and
+> shipped. They are the record of a decision the client has since reversed, and
+> deleting them would hide that this repository once operated a geographic
+> proxy — which is exactly the thing a reader should be able to see was stopped.
+> Nothing below is current policy, and the code it describes no longer exists.
+>
+> **2.1 What the existing screen is.** Approval outcomes grouped by ZIP3;
+> approval rate per group; the four-fifths rule applied against the highest
+> group's rate; groups smaller than `min_group_size` (default 5) reported but not
+> flagged, because a rate over three applications is noise.
+>
+> **2.2 What a flag means.** *Investigate.* It is not a finding of
+> discrimination, and it is not evidence about the model. ZIP3 is a geographic
+> proxy standing in for nothing that has been validated as a protected-class
+> proxy here.
+>
+> **2.3 What this screen cannot do.** It measures the **final outcome**, which is
+> the product of the model, the policy thresholds, and every manual review in
+> between. It cannot attribute a disparity to the model, and therefore cannot
+> support or refute a claim about the model.
+>
+> **2.4 Evidence status.** Local/training-only, against seeded fictional
+> applicants. No result from it may be presented as a production fair-lending
+> assessment.
+>
+> *Read 2.2 alongside the 2026-08-24 decision: the spec already said ZIP3 stood
+> in for nothing validated. The client's answer to that was to prohibit the
+> substitution rather than to validate it.*
 
 ### 3. What is required before anyone claims *this model is fair*
 
@@ -195,7 +262,7 @@ current answer.
 
 | Required evidence | Available on `main`? |
 |---|---|
-| Protected-class data (or a legally appropriate, validated proxy) | **No.** Only `applicants.zip_code` (`db/migrations/0014`), which is a geographic field, not a validated proxy |
+| Protected-class data (or a legally appropriate, validated proxy) | **PROHIBITED**, which is a stronger statement than unavailable. Client decision 2026-08-24: no real collection for this demonstration, no approved proxy, and none may be created from ZIP, ZIP3 or similar. `applicants.zip_code` remains a postal-address component. *This cell read "**No.** Only `applicants.zip_code` … not a validated proxy" until that decision* |
 | Model scores per decision | Yes — `decision_events.model_score` |
 | Decisions/outcomes | Yes — `decision_events.decision` |
 | Reason codes | Yes — `decision_events.reason_codes` |
@@ -225,6 +292,13 @@ none.
   disparity ratio beyond the four-fifths screen already implemented, is a
   compliance judgement this repository has no authority to set.
 - Inventing vendor reason codes. See *Blocked*.
+- **Any runtime fairness evaluation**, and any proxy for a protected class —
+  geographic, surname-based, census-based, BISG or otherwise. Prohibited by the
+  client, not merely out of scope (2026-08-24).
+- **Treating the client's synthetic training package as vendor documentation.**
+  It is synthetic, training-only, and not vendor-issued. Real, currently approved
+  vendor material must replace it before any non-training use, and a real vendor
+  response on a non-training path still fails closed until then.
 - Widening the scorer to more products.
 
 ## Acceptance criteria

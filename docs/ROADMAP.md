@@ -82,7 +82,7 @@ during Week 4); those are marked where they occur.
 | 5 | Card tokenization + payment reconciliation | ✅ Landed |
 | 6 | Servicing RBAC / ledger / maker-checker | ✅ Landed — RBAC, append-only ledger, and maker-checker enforced by `no_self_approval` plus `resolve_pending_movement` (migrations 0036/0037) |
 | 7 | Trace ID + scoped reconciliation control | ✅ Landed — scheduled transaction-level reconciliation, and a shared `correlation_id` minted by `payment-service`, sent to the processor and to servicing, and stamped on every ledger entry a payment writes (`db/migrations/0043`, PR #56) |
-| 8 | Model governance + fair-lending screen | ✅ Landed — approved consumer-reason mapping (fail-closed on an unmapped code), `docs/model_card.md`, spec 0003 Accepted, ZIP3 four-fifths screen, windowed reason distribution per `model_version`, prompt-injection guard. Vendor taxonomy content is VENDOR-BLOCKED and protected-class evidence CLIENT-BLOCKED, so no model-fairness claim is made |
+| 8 | Model governance + fair-lending screen | ✅ Landed, **amended by client decision 2026-08-24** — approved consumer-reason mapping (fail-closed on an unmapped code), `docs/model_card.md`, spec 0003, windowed reason distribution per `model_version`, prompt-injection guard. **The ZIP3 four-fifths screen is retired**: no protected-class collection is permitted, there is no approved proxy, and ZIP/ZIP3 may not become one. Vendor taxonomy content is VENDOR-BLOCKED, and no model-fairness claim is made |
 | 9 | BSA/AML — UBO + sanctions screening | 🟡 Spec and ADR landed (`specs/0004-kyc-aml-ubo-and-sanctions-screening.md`, `adr/0012-sanctions-screening-integration.md`), nothing built — that is the week's whole deliverable. Screening is VENDOR-BLOCKED, four decisions are COMPLIANCE-BLOCKED, and `docs/DEBT.md` D11 stays open |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
 | — | **Not on any brief:** test + CI infrastructure, browser E2E, migration parity, the bureau/decision-attempt seams, this register | ✅ Landed |
@@ -721,7 +721,7 @@ schedule:** gateway rate limiting (Week 7), a model card, a ZIP-level
 fair-lending check, and a prompt-injection guard on policy-chat (all Week 8).
 Flagging this now so Weeks 7/8 don't get re-built from scratch when their
 turn comes — check `services/gateway/app/rate_limit.py`,
-`docs/model_card.md`, `services/origination-service/app/fair_lending.py`, and
+`docs/model_card.md`, `services/origination-service/app/fair_lending.py` (deleted, not on `main` — see the Week 8 status block) and
 `services/loan-assistant/app/prompt_injection.py` for what's already done
 before starting those weeks' own briefs.
 
@@ -964,8 +964,8 @@ approval-rate breakdown showing a pattern.
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
 | 1 | Decisioning | Client's claim: every denial gets one of two hardcoded strings regardless of the real driver | ✅ **Already fixed — checked directly against the current code, the client's own attached logs are stale.** `decision.py` no longer has `GENERIC_REASONS` anywhere; Week 3's real fix already replaced it with an input-driven mapping (bureau-score shortfall vs. income shortfall). The still-real gap when this row was written: the mapping only ever picks between **two** categories and was not fixture-tested. *Closed since:* `services/decision-service/tests/test_approved_consumer_reason.py` and `services/origination-service/tests/test_deny_reason_is_approved_wording.py` cover both stub drivers, the unmapped-code refusal, and the graph path that publishes the wording — no live model call (PR #66). Two categories is not a defect where two drivers is what the stub has (spec 0003 §1.6) | Citing a stale finding as current would be its own credibility problem — the fix already shipped, the remaining gap is narrower than the brief assumes |
-| 2 | Decisioning | Does the ZIP-level approval-rate pattern warrant a disparate-impact look? | ✅ **Now checkable — the blocker is gone.** When this row was written no ZIP field existed anywhere; `applicants.zip_code` was added (`db/migrations/0014`) and `fair_lending.py` computes a ZIP3-level four-fifths-rule screen over recorded approval outcomes, staff-only at `GET /applications/fair-lending/zip-analysis`. Local/training-only — never run against real applicants | "Can't check" was itself a reason to pause before "wider." That reason no longer holds, which means the screen's *output* now has to be looked at rather than the check being unavailable |
-| 3 | Decisioning | *As of 2026-08-05:* no model card, no record of which features/model version produced any given decision, no fairness testing ever performed | 🟡 **Two of three closed.** `docs/model_card.md` documents the model, its inputs, its bands and its limits; `decision_events` records the exact model version and score behind every decision (Week 3). **The third is not built, and is classified rather than left open: no fairness testing of the model itself** — CLIENT-BLOCKED on protected-class data or a validated proxy (none exists, and spec 0003 forbids synthesising one) and VENDOR-BLOCKED on vendor fairness documentation (none supplied with `creditai-2026.1`). The consequence is stated rather than deferred: Meridian cannot substantiate a model-fairness claim and must not make one. The ZIP screen in row 2 is an *outcome* monitor, not model validation, and the model card says so explicitly | Two thirds of the answer now exists. The remaining third is the one a regulator would actually press on, so it is called out rather than folded into a green tick |
+| 2 | Decisioning | Does the ZIP-level approval-rate pattern warrant a disparate-impact look? | ⛔ **Answered by the client, and the answer is no: SUPERSEDED 2026-08-24.** The screen was built — `applicants.zip_code` (`db/migrations/0014`) plus a ZIP3 four-fifths-rule screen over recorded approval outcomes — and is now **retired**, module, route and tests deleted, not on `main`. Charles Jester: no permission to collect real protected-class data, **no approved proxy**, and none may be created "including from ZIP, ZIP3 or similar fields". *This cell read "✅ Now checkable — the blocker is gone" until that decision.* | The question itself assumed a geographic field could stand in for a protected class. The client's answer is that it may not — which retires the screen rather than reading its output |
+| 3 | Decisioning | *As of 2026-08-05:* no model card, no record of which features/model version produced any given decision, no fairness testing ever performed | 🟡 **Two of three closed.** `docs/model_card.md` documents the model, its inputs, its bands and its limits; `decision_events` records the exact model version and score behind every decision (Week 3). **The third is not built, and is classified rather than left open: no fairness testing of the model itself** — CLIENT-BLOCKED on protected-class data or a validated proxy (none exists, and spec 0003 forbids synthesising one) and VENDOR-BLOCKED on vendor fairness documentation (none supplied with `creditai-2026.1`). The consequence is stated rather than deferred: Meridian cannot substantiate a model-fairness claim and must not make one. Row 2's ZIP screen is retired and is no longer part of the answer: as of 2026-08-24 **no runtime fairness evaluation is permitted at all**, and the only permitted evaluation is offline, against the client's isolated synthetic fixture (`docs/DEBT.md` **D24** — not yet supplied). *This clause read "The ZIP screen in row 2 is an *outcome* monitor, not model validation" while that screen existed.* | Two thirds of the answer now exists. The remaining third is the one a regulator would actually press on, so it is called out rather than folded into a green tick |
 | 4 | Decisioning | What "responsible AI" requires beyond a marketing page | ✅ Delivered as a governance package — `docs/model_card.md` (PR #62, corrected by #68), `specs/0003-fair-lending-monitoring.md` Accepted (PR #65), the approved consumer-reason mapping with fail-closed unmapped handling (PR #66), and windowed per-`model_version` reason reporting (PR #67). What is left is evidence Meridian does not hold, classified in #3 — not unbuilt code. *This row read "⬜ Open — ... a model card and a monitoring spec are not" until those landed* | A marketing claim of "advanced underwriting" with zero governance behind it is the same pattern as the README's earlier false PCI claim — a claim not backed by what the system can prove |
 
 **This week's real deliverable, stated honestly:** a reason-code →
@@ -992,6 +992,36 @@ the week started from.* Two limits remain and both are evidence limits rather
 than delivery gaps: vendor reason-taxonomy **content** is VENDOR-BLOCKED and
 protected-class evidence is CLIENT-BLOCKED, so no model-fairness claim may be
 made — spec 0003 §3.
+
+**Amendment (2026-08-24), which changes what this week delivered.** Charles
+Jester (client) answered the protected-class question, and the answer removed a
+control rather than unblocking one:
+
+> You do not have permission to collect real protected-class data for this
+> demonstration. There is NO approved proxy. Do not create one, including from
+> ZIP, ZIP3 or similar fields. Synthetic protected-class labels may be used ONLY
+> in the isolated OFFLINE evaluation fixture … They must NEVER enter model
+> inputs, runtime application inputs, application decisions, operational records,
+> runtime database records, traces, telemetry, or consumer output.
+
+| | Before | Now |
+|---|---|---|
+| Runtime ZIP3 four-fifths screen | built, staff-only, reported | **retired** — module, route and tests deleted, not on `main` |
+| Protected-class data | absent, named as the blocker | **prohibited** for this demonstration |
+| Approved proxy | none existed | **none may be created**, ZIP and ZIP3 named explicitly |
+| Fairness evaluation | outcome-level only, never model-level | **runtime: none permitted.** Offline only, against one isolated synthetic fixture |
+| Synthetic governance package | not contemplated | **training-only**, never vendor documentation; real approved vendor material must replace it before any non-training use |
+
+`applicants.zip_code` stays as a postal-address component and is no longer
+fairness evidence. `db/tests/test_no_runtime_protected_class_proxy.py` fails if
+the screen, the route, or a substitute proxy reappears — including a renamed one,
+because it checks the shape as well as the name. The client's synthetic package
+has not been supplied: `fixtures/offline_fairness_training/` holds the rules and
+the labels it must carry, and nothing else, tracked as `docs/DEBT.md` **D24**.
+
+What did **not** change: §1's denial-reason contract, the mapping seam, the
+fail-closed unmapped-code behaviour, and the per-`model_version` reason
+distribution. None of them touches a protected class or a proxy.
 
 ---
 

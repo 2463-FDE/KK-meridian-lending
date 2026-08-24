@@ -265,10 +265,24 @@ def test_reason_distribution_is_not_parsed_as_an_app_id():
     assert resp.status_code != 422
 
 
-def test_zip_analysis_staff_role_without_internal_token_is_forbidden():
-    resp = client.get("/applications/fair-lending/zip-analysis", headers={"X-User-Role": "admin"})
+def test_the_zip_analysis_route_is_gone_rather_than_gated():
+    """It used to be here, staff-gated, and being gated is no longer the point.
 
-    assert resp.status_code == 403
+    The client prohibited ZIP and ZIP3 as a protected-class proxy on 2026-08-24,
+    so the ZIP3 disparate-impact screen was retired rather than restricted: a
+    404 is the correct answer for every caller, staff included. The
+    reason-distribution route above is unaffected -- it groups by
+    `model_version`, not by anything about the applicant.
+    """
+    resp = client.get(
+        "/applications/fair-lending/zip-analysis",
+        headers={"X-User-Role": "admin",
+                 "X-Internal-Token": config.INTERNAL_SERVICE_TOKEN},
+    )
+
+    assert resp.status_code == 404, (
+        "the ZIP3 screen answers a fully authorised staff caller, so it is still "
+        "being served")
 
 
 def test_non_staff_role_is_forbidden_regardless_of_internal_token():

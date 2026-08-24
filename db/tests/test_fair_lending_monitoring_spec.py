@@ -283,13 +283,30 @@ def test_every_repository_path_the_spec_cites_resolves(spec):
 
     assert cited, "no citations found -- this test would pass vacuously"
 
+    # A path may be unresolved when the line saying so is on the same line --
+    # the same rule `test_docs_citations_resolve.py` uses. Spec 0003 now records
+    # the retirement of the ZIP3 screen (client decision 2026-08-24), and a
+    # document that may not name a deleted module cannot explain why it went.
+    absent_by_design = re.compile(
+        r"does not exist on `main`|deleted, not on `main`|deleted -- not on `main`"
+        r"|since deleted|arrives with")
+    lines_for = {}
+    for lineno, line in enumerate(spec.splitlines(), start=1):
+        for ref in re.findall(r"`([a-zA-Z0-9_./-]+\.(?:py|md|sql))`", line):
+            lines_for.setdefault(ref, []).append(line)
+
     missing = []
     for path in sorted(cited):
         resolved = (SPEC.parent / path) if path.startswith("../") else (REPO / path)
-        if not resolved.exists():
-            missing.append(path)
+        if resolved.exists():
+            continue
+        if all(absent_by_design.search(line) for line in lines_for.get(path, []))                 and lines_for.get(path):
+            continue
+        missing.append(path)
 
-    assert not missing, f"spec 0003 cites paths that do not resolve: {missing}"
+    assert not missing, (
+        f"spec 0003 cites paths that do not resolve and do not say so on the "
+        f"same line: {missing}")
 
 
 def test_the_spec_is_marked_accepted_and_scoped_as_a_non_goal_list(spec):
