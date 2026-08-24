@@ -350,16 +350,58 @@ def test_an_inbound_assertion_is_replaced_not_forwarded(staff_session):
 
 
 def test_a_read_route_carries_no_assertion(staff_session):
-    """Least privilege: only the hops that move money get one.
+    """Least privilege: a hop gets an assertion only if the far end asks who the
+    person is.
 
-    A read does not need a principal, and minting one anyway would put a valid
-    admin-capable credential on hops that have no use for it.
+    This used to say "only the hops that move money get one", which stopped being
+    true when the reconciliation review queue was added: it is a READ, and it
+    carries an assertion, because servicing refuses to hand out payment amounts
+    to a shared internal token with no human behind it
+    (`test_the_review_queue_hop_carries_an_assertion` below). The rule was never
+    really about money -- it is that minting a credential for a hop that has no
+    use for it puts a valid one somewhere it cannot be needed.
+
+    `GET /lss/loans/{id}` is such a hop: ownership is decided here, and servicing
+    asks nothing about the caller.
     """
     resp = _client().get("/lss/loans/1",
                          headers={"Authorization": "Bearer faketoken123"})
     assert resp.status_code == 200
     forwarded = {k.lower(): v for k, v in (_CapturingClient.last_headers or {}).items()}
     assert "x-principal-assertion" not in forwarded
+
+
+def test_the_review_queue_hop_carries_an_assertion(staff_session):
+    """The exception, and the reason for it.
+
+    The in-app reconciliation queue is the ONLY destination the client authorised
+    for a payment flagged for review, and it returns amounts and capture times
+    for real loans. Servicing verifies a signed principal before answering, so a
+    hop without one gets a 401 there and the queue would simply never load --
+    the failure would look like a broken page rather than a missing credential.
+    """
+    _, public_pem = staff_session
+    resp = _client().get("/lss/reconciliation/review-queue",
+                         headers={"Authorization": "Bearer faketoken123"})
+    assert resp.status_code == 200, resp.text
+
+    forwarded = {k.lower(): v for k, v in (_CapturingClient.last_headers or {}).items()}
+    assertion = forwarded.get("x-principal-assertion")
+    assert assertion, "the review-queue hop carried no principal assertion"
+    assert _decode(assertion, public_pem)["sub"] == "7"
+
+
+def test_the_disposition_hop_carries_an_assertion(staff_session):
+    """And the write, whose whole point is the name stored beside the answer."""
+    _, public_pem = staff_session
+    resp = _client().post("/lss/reconciliation/review-queue/1/disposition",
+                          json={"disposition": "confirmed_duplicate"},
+                          headers={"Authorization": "Bearer faketoken123"})
+    assert resp.status_code == 200, resp.text
+
+    forwarded = {k.lower(): v for k, v in (_CapturingClient.last_headers or {}).items()}
+    claims = _decode(forwarded.get("x-principal-assertion"), public_pem)
+    assert claims["sub"] == "7" and claims["role"] == "csr"
 
 
 # --- the shape a key arrives in ----------------------------------------------

@@ -52,6 +52,14 @@ MONEY_ROUTES = [
     # from the running app and failed until this was listed -- the hand-written
     # list going stale, caught by the check written for exactly that.
     ("/movements/7/resolve", {"resolution": "approved"}),
+    # The review-queue disposition. It moves no money -- that is the point of it
+    # -- but it is a mutating staff route and the internal token is what says the
+    # request came from inside the estate, so the same rule applies. Listed here
+    # because `test_every_money_route_is_guarded` derived it from the running app
+    # and failed until it was: the guard being present in the signature is not
+    # the same as the guard executing.
+    ("/reconciliation/review-queue/1/disposition",
+     {"disposition": "requires_further_review"}),
 ]
 # `/payments` was in this list until the processorless duplicate was retired
 # (docs/DEBT.md D2). It is not listed as an unguarded exception -- the route does
@@ -588,7 +596,7 @@ def test_the_preflight_cannot_collide_with_a_real_payment(monkeypatch):
 
 @pytest.mark.parametrize("broken", ["payments", "payment_applications", "ledger_entries", "balances"])
 def test_the_preflight_refuses_when_either_money_table_fails(monkeypatch, broken):
-    """Charles's case: the probe table is writable and a real one is not.
+    """The reviewer's case: the probe table is writable and a real one is not.
 
     Parametrised over both tables rather than written once, because the failure
     being guarded against is table-SPECIFIC -- that is the whole reason a

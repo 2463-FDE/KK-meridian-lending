@@ -53,12 +53,19 @@ export default function AppBar() {
           { href: "/apply", label: "Apply" },
           { href: "/my-loan", label: "My Loan" },
         ];
+      // "Reconciliation" is on all three staff roles because the in-app queue
+      // is the ONLY place a payment flagged for review is reported -- the client
+      // ruled out email, Slack, PagerDuty, webhooks and SMS before the freeze --
+      // and any staff principal may read it (visibility is not authority, the
+      // same rule the Approvals queue follows). A destination nobody can
+      // navigate to is not a destination.
       case "csr":
         return [
           { href: "/", label: "Home" },
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
           { href: "/approvals", label: "Approvals" },
+          { href: "/reconciliation", label: "Reconciliation" },
           { href: "/policy-chat", label: "Policy Chat" },
         ];
       case "underwriter":
@@ -67,6 +74,7 @@ export default function AppBar() {
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
           { href: "/approvals", label: "Approvals" },
+          { href: "/reconciliation", label: "Reconciliation" },
           { href: "/policy-chat", label: "Policy Chat" },
         ];
       case "admin":
@@ -76,6 +84,7 @@ export default function AppBar() {
           { href: "/underwriting", label: "Underwriting" },
           { href: "/servicing", label: "Servicing" },
           { href: "/approvals", label: "Approvals" },
+          { href: "/reconciliation", label: "Reconciliation" },
           { href: "/policy-chat", label: "Policy Chat" },
         ];
       default:

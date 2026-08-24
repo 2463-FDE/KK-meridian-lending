@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
 from . import (balance, config, db, delinquency, maker_checker, principal,
-               reconciliation, waterfall)
+               reconciliation, review_queue, waterfall)
 from .logging_config import get_logger
 from .routers import loans
 
@@ -555,3 +555,96 @@ def reconciliation_peek():
         ],
     }
 
+
+# --- the in-app reconciliation review queue (D22) -----------------------------
+#
+# The client's decision of 2026-08-24 authorised ONE destination for a payment
+# flagged for review -- Meridian's internal in-app reconciliation queue -- and
+# ruled out email, Slack, PagerDuty, webhooks and SMS before the freeze. These
+# two routes are that destination. They read and classify; they move no money,
+# and nothing downstream reads a disposition and acts on it.
+
+
+@app.get("/reconciliation/review-queue")
+def get_review_queue(status: Literal["open", "reviewed"] = "open",
+                 x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+                 x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+                 x_principal_assertion: Optional[str] = Header(
+                     None, alias="X-Principal-Assertion"),
+                 x_internal_token: Optional[str] = Header(
+                     None, alias="X-Internal-Token")):
+    """Payments flagged for human review.
+
+    Any verified staff principal may read it, on the same reasoning as
+    `GET /movements`: visibility is not authority, and reading it concludes
+    nothing. `require_staff_principal` rather than the internal token alone
+    because this returns payment amounts and times for real loans.
+
+    The response says what the rows are NOT, in the payload rather than only in
+    the UI: a client that renders this list under a heading of its own choosing
+    still carries the sentence that says these are candidates.
+    """
+    _require_internal(x_internal_token)
+    principal.require_staff_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    return {
+        "items": review_queue.queue(status=status),
+        "counts": review_queue.counts(),
+        "dispositions": list(review_queue.DISPOSITIONS),
+        "note": (
+            "Candidates for human reconciliation review. A flag is not a "
+            "duplicate finding, not a validity conclusion, and not permission "
+            "to move money."
+        ),
+    }
+
+
+class DispositionIn(BaseModel):
+    # `Literal` over the module's own tuple would be nice, but a Literal needs
+    # constants at class-creation time; these are spelled out and
+    # `test_review_queue.py` fails if the two lists ever differ.
+    disposition: Literal["confirmed_duplicate", "legitimate_distinct_payment",
+                         "requires_further_review"]
+    # Free text a reviewer writes. Length-capped because it is stored and
+    # redisplayed; no other validation, because constraining what a human may
+    # say about a payment would lose the part worth keeping.
+    note: Optional[str] = Field(default=None, max_length=2000)
+    model_config = {"extra": "forbid"}
+
+
+@app.post("/reconciliation/review-queue/{item_id}/disposition")
+def record_review_disposition(item_id: int, body: DispositionIn,
+                              x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+                              x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+                              x_principal_assertion: Optional[str] = Header(
+                                  None, alias="X-Principal-Assertion"),
+                              x_internal_token: Optional[str] = Header(
+                                  None, alias="X-Internal-Token")):
+    """Record a human's classification of one flagged payment.
+
+    **Staff, not money-authority.** A balance change needs two people, and the
+    maker-checker is what requires them; this route writes no balance and no
+    ledger entry, so the second person it would summon protects nothing here
+    while flagged payments went unreviewed. Wording chosen carefully: the
+    approver requirement is intact everywhere it applies, and
+    `db/tests/test_d8_is_closed_everywhere.py` refused an earlier draft of this
+    paragraph for reading like a claim that it is not.
+
+    What this route does require is that the name stored beside the answer is a
+    verified human -- which is why the signed assertion is checked here rather
+    than a claimed role header being trusted.
+
+    Write-once: a disposition already recorded is a 409, never an overwrite.
+    """
+    _require_internal(x_internal_token)
+    actor = principal.require_staff_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    try:
+        return review_queue.record_disposition(
+            item_id, disposition=body.disposition, note=body.note, actor=actor)
+    except review_queue.ReviewConflict as exc:
+        # 409, not 404 for the missing case and not 500 for the raced one: both
+        # mean "this item cannot take your answer", and the message says which.
+        raise HTTPException(status_code=409, detail=str(exc))
