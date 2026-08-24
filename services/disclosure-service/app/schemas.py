@@ -7,7 +7,13 @@ class OfferIn(BaseModel):
     decision_id: int | None = None  # W4: which decision this offer follows, if any
     principal: float = Field(gt=0, le=50000)
     term_months: int = Field(default=48, ge=12, le=60)
-    annual_rate: float = Field(default=7.99, gt=0, le=35)
+    # **Required, with no default.** This service calculates a disclosure; it
+    # does not decide what a loan costs. A default here was a second copy of a
+    # contractual term -- origination owns the figure
+    # (`origination-service/app/config.py::DEMO_NOTE_RATE_PCT`) and every caller
+    # sends it, so the default only ever served a caller that forgot, which is
+    # exactly the caller who should be told rather than quietly priced.
+    annual_rate: float = Field(gt=0, le=35)
 
 
 class ScheduleRow(BaseModel):

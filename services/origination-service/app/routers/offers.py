@@ -28,7 +28,9 @@ structured error -- see _conflict() below.
 """
 import httpx
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator
 
 from .. import clients, config, db, decision_state
 from ..logging_config import get_logger
@@ -42,8 +44,35 @@ router = APIRouter(tags=["offers"])
 class OfferIn(BaseModel):
     app_id: int
     principal: float = Field(gt=0, le=50000)
-    annual_rate_pct: float = Field(default=7.99, gt=0, le=35)
+    # **The server decides the note rate.** This field used to default to 7.99
+    # here and the browser used to send its own copy, which made the contractual
+    # rate on a real loan whatever the client posted. It is now optional, and the
+    # authority is `config.DEMO_NOTE_RATE_PCT`.
+    #
+    # Still accepted rather than removed, for two reasons: an existing caller
+    # that sends the current rate keeps working, and a caller that sends a
+    # DIFFERENT rate gets told plainly that pricing is not theirs to set (422)
+    # instead of silently having it ignored. Silently ignoring it would be worse
+    # than either -- the caller would believe it had priced the loan.
+    annual_rate_pct: Optional[float] = Field(default=None, gt=0, le=35)
     term_months: int = Field(default=48, ge=12, le=60)
+
+    @field_validator("annual_rate_pct")
+    @classmethod
+    def _rate_is_not_the_callers_to_choose(cls, value):
+        if value is None:
+            return value
+        # Compared in basis points: these arrive as JSON floats, and 7.99 is not
+        # exactly representable, so an equality test on the raw values would
+        # reject a caller sending the very rate the server holds.
+        if round(value * 100) != round(config.DEMO_NOTE_RATE_PCT * 100):
+            raise ValueError(
+                "annual_rate_pct is set by the server, not by the caller -- omit "
+                "it. The note rate for a new offer is the configured training "
+                "default; no per-applicant or risk-based pricing exists in this "
+                "system"
+            )
+        return value
 
 
 def _conflict(status_code: int, code: str, message: str) -> HTTPException:
@@ -90,6 +119,36 @@ def _to_offer_out(app_id: int, resp: dict, offer_ready: bool = False) -> OfferOu
         app_id=app_id, disclosure=disclosure, created=resp.get("created", True),
         offer_ready=offer_ready,
     )
+
+
+@router.get("/pricing")
+def pricing():
+    """The note rate a new offer will be priced at, and where that figure is from.
+
+    Exists so the browser can ASK instead of deciding. The apply flow shows an
+    estimated rate before an offer exists, and it used to show its own hardcoded
+    constant -- the same constant it then posted into offer creation. A screen
+    that displays a contractual term should read it from whoever owns it.
+
+    `source` and `is_production_pricing_policy` are part of the answer rather
+    than decoration: this is one configured training rate applied to every offer,
+    and nothing in this system underwrites a per-applicant rate. A caller that
+    renders this figure as "your rate" is reading it wrong, and the response says
+    so in its own fields.
+
+    Deliberately unauthenticated, like the apply flow it serves: the figure is
+    already displayed to anyone who opens the application form, and it is not
+    about a person.
+    """
+    return {
+        "note_rate_pct": config.DEMO_NOTE_RATE_PCT,
+        "source": config.NOTE_RATE_SOURCE,
+        "is_production_pricing_policy": False,
+        # Named so a reader of the JSON alone knows what it is not: the disclosed
+        # APR is computed per offer and is higher wherever a prepaid fee exists.
+        "note": "training default; the disclosed APR is calculated per offer and "
+                "is not this figure",
+    }
 
 
 @router.post("/offer", response_model=OfferOut)
@@ -166,7 +225,11 @@ def make_offer(
             "decision_id": body.app_id,  # decisions.app_id is that table's PK -- 1 decision per app
             "principal": body.principal,
             "term_months": body.term_months,
-            "annual_rate": body.annual_rate_pct,
+            # The server's figure, never the caller's. `annual_rate_pct` is
+            # validated to equal this when present (see OfferIn), so this is the
+            # same number either way -- written from config so there is one
+            # source of it rather than two that agree today.
+            "annual_rate": config.DEMO_NOTE_RATE_PCT,
         }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     except httpx.HTTPStatusError as exc:
         # disclosure-service rejected the request -- surface ITS OWN already

@@ -51,7 +51,12 @@ def _node_assemble_disclosure(state: DisclosureState) -> dict:
         "decision_id": inputs["app_id"],  # decisions.app_id is that table's PK
         "principal": float(inputs["amount"]),
         "term_months": inputs["term_months"],
-        "annual_rate": 7.99,  # no per-applicant rate exists elsewhere -- same default make_offer() uses
+        # The one configured training rate (`config.DEMO_NOTE_RATE_PCT`). This
+        # was a literal 7.99 -- the auto-offer path's own copy of a number that
+        # also lived in two frontends and two request schemas. No per-applicant
+        # rate exists anywhere in this system, by design and for want of any
+        # authority for one.
+        "annual_rate": config.DEMO_NOTE_RATE_PCT,
     }, headers={"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN})
     return {"offer": offer}
 

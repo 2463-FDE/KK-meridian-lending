@@ -13,6 +13,7 @@ import {
   intakeResumeToken,
 } from "../../lib/api";
 import { usd, pct, paymentPlanText } from "../../lib/format";
+import { Pricing, describePricing, fetchPricing } from "../../lib/pricing";
 
 const STEPS: Step[] = [
   { n: 1, label: "Personal" },
@@ -43,7 +44,6 @@ const US_STATES = [
   "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
 ];
 
-const OFFER_RATE_PCT = 7.99;
 const MIN_AGE_YEARS = 18; // lending policy floor -- see policy-chat's eligibility excerpt
 
 function isoDateYearsAgo(years: number): string {
@@ -202,6 +202,20 @@ export default function ApplyPage() {
   // defect as leaving it there on the way out.
   const [returnFocusStep, setReturnFocusStep] = useState<number | null>(null);
   const [editOriginStep, setEditOriginStep] = useState<number | null>(null);
+
+  // Read the configured note rate once. The estimate on step 3 used to render a
+  // constant this file owned; a screen showing a contractual term should read it
+  // from whoever owns it.
+  useEffect(() => {
+    let cancelled = false;
+    fetchPricing().then((p) => {
+      if (!cancelled) setPricing(p);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (focusStepHeading && stepHeadingRef.current) {
       stepHeadingRef.current.focus();
@@ -251,6 +265,11 @@ export default function ApplyPage() {
   const [app, setApp] = useState<AppResult | null>(null);
   const [decision, setDecision] = useState<DecisionResult | null>(null);
   const [disclosure, setDisclosure] = useState<Disclosure | null>(null);
+  // The note rate a new offer will be priced at, read from the server rather
+  // than held here. `null` means "not read yet, or unreadable", and
+  // `describePricing` renders that as a sentence instead of a number nobody
+  // confirmed.
+  const [pricing, setPricing] = useState<Pricing | null>(null);
   const [acceptedLoanId, setAcceptedLoanId] = useState<string | number | null>(
     null
   );
@@ -509,7 +528,10 @@ export default function ApplyPage() {
         {
           app_id: app.app_id,
           principal: form.amount,
-          annual_rate_pct: OFFER_RATE_PCT,
+          // No rate. The server prices the offer
+          // (origination's DEMO_NOTE_RATE_PCT); this browser used to send its
+          // own constant, which made a contractual term whatever the client
+          // posted.
           term_months: parseInt(form.term_months, 10),
         },
         { "X-Offer-Accept-Token": token },
@@ -575,7 +597,7 @@ export default function ApplyPage() {
           // edit was not what the backend had accepted -- so an offer could be
           // created on terms the application record never carried.
           principal: (submitted ?? form).amount,
-          annual_rate_pct: OFFER_RATE_PCT,
+          // No rate: the server prices the offer.
           term_months: parseInt((submitted ?? form).term_months, 10),
         },
         { "X-Offer-Accept-Token": token },
@@ -875,9 +897,11 @@ export default function ApplyPage() {
               </Field>
             </div>
             <p className="hint hint-strong" style={{ marginTop: 12 }}>
-              Estimated interest rate (note rate) {pct(OFFER_RATE_PCT)} —
-              illustrative; your final rate is set at offer. Your APR will be
-              higher, because it also includes the origination fee.
+              {pricing
+                ? `Estimated interest rate (note rate) ${describePricing(pricing)} — illustrative; your final rate is set at offer.`
+                : describePricing(pricing)}{" "}
+              Your APR will be higher, because it also includes the origination
+              fee.
             </p>
           </>
         )}

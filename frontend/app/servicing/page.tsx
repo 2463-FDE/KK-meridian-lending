@@ -179,7 +179,14 @@ function ServicingContent() {
               <th>Loan ID</th>
               <th>Borrower</th>
               <th className="num">Principal</th>
-              <th className="num">Rate</th>
+              {/* "Rate" was ambiguous in the one place it matters most: the
+                  column holds `note_rate_pct`, the CONTRACTUAL interest rate,
+                  and the disclosed federal APR is a different and usually higher
+                  number. A servicing screen that says only "Rate" invites a
+                  staff member to quote it as the APR. */}
+              <th className="num" title="Contractual interest rate; the federal APR is shown on the disclosure">
+                Note rate
+              </th>
               <th className="num">Term</th>
               <th>Status</th>
               <th className="num">Balance</th>

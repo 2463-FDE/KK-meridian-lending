@@ -8,6 +8,7 @@ import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate, paymentPlanText } from "../../../lib/format";
+import { Pricing, describePricing, fetchPricing } from "../../../lib/pricing";
 
 interface Kyc {
   name_verified?: boolean;
@@ -82,7 +83,6 @@ interface DecisionResult {
   adverse_action_reason?: string;
 }
 
-const OFFER_RATE_PCT = 7.99;
 
 function errMsg(err: unknown, fallback: string): string {
   if (err && typeof err === "object" && "detail" in err) {
@@ -117,6 +117,9 @@ function UnderwritingDetailContent() {
   // action state (mirrors the servicing detail action pattern)
   const [decision, setDecision] = useState<DecisionResult | null>(null);
   const [offer, setOffer] = useState<Offer | null>(null);
+  // The server's note rate, for the copy above the Generate control. `null`
+  // renders as a sentence rather than as a number nobody confirmed.
+  const [pricing, setPricing] = useState<Pricing | null>(null);
   const [offerReady, setOfferReady] = useState(false);
   const [boardedLoanId, setBoardedLoanId] = useState<string | number | null>(
     null
@@ -151,6 +154,18 @@ function UnderwritingDetailContent() {
       setLoading(false);
     }
   }, [appId]);
+
+  // The configured note rate, read once. This screen used to hold its own copy
+  // of it and post that into offer creation.
+  useEffect(() => {
+    let cancelled = false;
+    fetchPricing().then((p) => {
+      if (!cancelled) setPricing(p);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     load();
@@ -210,7 +225,7 @@ function UnderwritingDetailContent() {
       const res = (await apiPost("/los/offer", {
         app_id: appId,
         principal: app.amount,
-        annual_rate_pct: OFFER_RATE_PCT,
+        // The server prices it. This screen used to post its own constant.
         term_months: app.term_months,
       })) as { app_id: string | number; disclosure?: Offer; offer?: Offer };
       const disc = res.disclosure ?? res.offer ?? null;
@@ -518,8 +533,10 @@ function UnderwritingDetailContent() {
       <div className="card">
         <div className="spread" style={{ marginBottom: offer ? 16 : 0 }}>
           <p className="hint hint-strong" style={{ margin: 0 }}>
-            Generate a Truth-in-Lending offer using a {pct(OFFER_RATE_PCT)} note
-            rate for {usd(app?.amount)} over {app?.term_months} months.
+            Generate a Truth-in-Lending offer for {usd(app?.amount)} over{" "}
+            {app?.term_months} months
+            {pricing ? ` at a ${describePricing(pricing)} note rate` : ""}. The
+            note rate is set by the server, not by this screen.
           </p>
           {offer && offerReady ? (
             // Not a control. "Offer already created" describes state and can
