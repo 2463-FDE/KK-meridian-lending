@@ -942,12 +942,23 @@ that led to them rather than current status:
 | Prometheus metric + reconciliation alert | ✅ Closed | `servicing_reconciliation_last_run_ok` and `servicing_reconciliation_last_success_timestamp` exported by `services/servicing-service/app/reconciliation.py`; `ReconciliationBreach`, `ReconciliationStale` and `ReconciliationMetricMissing` in `monitoring/alerts.yml`, with `db/tests/test_alert_rules_watch_metrics_that_exist.py` proving each rule watches a metric something actually emits |
 | Operator traceability | ✅ Closed | `docs/runbook.md` follows one payment across services by `correlation_id`, including the pre-0043 rows it cannot cover |
 | Payment error-rate SLO | **OPTIONAL — not required.** The brief says break **or** error-rate SLO, and the break alert satisfies it | no authoritative error-rate objective exists in this repository, and inventing a threshold would repeat the maker-checker mistake (`docs/DEBT.md` D8) |
-| Fuzzy double-fund detection (same loan, same amount, two references, short window) | **CLIENT-DEFERRED** | `docs/DEBT.md` **D22** holds the deferral, the three decisions it needs (raise a break at all? what window? what false-positive appetite?) and the follow-up. Pinned by `services/servicing-service/tests/test_double_capture_is_not_detected_yet.py`, which fails the day detection lands. Note that an exact duplicate `processor_ref` is a *different* problem and is already prevented; D22 is only the fuzzy case |
-| Alert delivery to a human | **OPS-BLOCKED** | the rules evaluate and are visible at `/alerts`, and there is deliberately no Alertmanager: where pages go, who is on call and what the escalation path is are deployment decisions this repository cannot make. Stated in the header of `monitoring/alerts.yml` and in `docs/runbook.md`, in the same words |
+| Fuzzy double-fund detection (same loan, same amount, two references, short window) | ✅ **Closed 2026-08-24 as REVIEW-ONLY, on the client's decision** | The three questions D22 held were answered on 2026-08-24, and the answer was **not** the fifth break kind that entry proposed: flag the payment for human review, and never conclude it is a duplicate. Two signals (`services/payment-service/app/review_signals.py`) — exact provider reference or idempotency key regardless of elapsed time, and same loan + amount + payment source + channel inside a rolling 30 minutes. Routed to the in-app reconciliation queue only (`/reconciliation`, `services/servicing-service/app/review_queue.py`); a human records one of three dispositions and it is write-once. **Reconciliation still raises no break on this shape, and that is now correct rather than pending** — the client chose review over a break, which is why `test_double_capture_is_not_detected_yet.py` still passes. An exact duplicate `processor_ref` remains a different problem, prevented by a UNIQUE index since 0041 |
+| Alert delivery to a human — **reconciliation breaks** | **OPS-BLOCKED, and now also CLIENT-PROHIBITED before the freeze** | Two separate reasons, and both have to lift. The rules evaluate and are visible at `/alerts`, and there is deliberately no Alertmanager: where pages go, who is on call and what the escalation path is are deployment decisions this repository cannot make (stated in the header of `monitoring/alerts.yml` and in `docs/runbook.md`, in the same words). **On top of that**, the client's decision of 2026-08-24 prohibits email, Slack, PagerDuty, webhook and SMS delivery and authorises no new credentials or integrations before the freeze — so even with an on-call owner named, nothing may be wired now. Breaks ARE visible to a human in-app, on `/reconciliation`, beside the run that found them; what has no destination is a *firing alert* |
+| Alert delivery to a human — **payment review candidates** | ✅ Closed 2026-08-24 | A different question from the row above, and it has an answer: the client named the in-app reconciliation queue as the authorised destination and ruled out every external channel. That destination exists and is reachable (`/reconciliation`, staff-only, behind a signed principal). Telemetry carries only that an item exists, its queue, signal category, status and a non-identifying correlation value — no customer details, instrument data or payment content |
 
-**Week 7's required delivery is closed.** The three rows that are not ✅ are a
-client decision, an operations decision, and an item the brief made optional —
-none of them is unbuilt code waiting on this repository.
+**Week 7's required delivery is closed.** Two rows are not ✅: the payment
+error-rate SLO, which the brief made optional, and alert delivery for
+reconciliation breaks, which is blocked twice over — by an operations decision
+this repository cannot make, and by the client's own prohibition on external
+channels before the freeze. Neither is unbuilt code waiting on this repository.
+
+The fuzzy double-fund row **was** the third, and it closed on 2026-08-24 when
+the client answered it. Worth stating plainly because the answer changed the
+shape of the work rather than unblocking the version D22 proposed: a review
+signal put to a human, not a fifth break kind. A deferral resolved differently
+from how it was scoped is still resolved, and carrying it as "deferred" a month
+later would be the stale-status defect this section has already had to correct
+once.
 
 ---
 

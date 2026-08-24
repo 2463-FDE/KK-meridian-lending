@@ -152,19 +152,104 @@ def test_the_week7_section_states_a_dated_closed_status(week7):
 # What is not built is classified, and by whom.
 # --------------------------------------------------------------------------
 
-def test_the_double_fund_gap_is_client_deferred_and_points_at_its_decision(week7):
-    assert "CLIENT-DEFERRED" in week7, (
-        "the fuzzy double-fund gap is not classified; 'open' would read as "
-        "missing code rather than a missing client decision")
-    assert "D22" in week7, (
-        "the section does not cite the register entry holding the deferral and "
-        "the three questions it needs answered")
+def _d22() -> str:
+    """The D22 row of the register, on its own.
 
-    debt = _read(REPO / "docs" / "DEBT.md")
-    d22 = debt[debt.index("| **D22**"):]
-    d22 = d22[:d22.index("\n|")] if "\n|" in d22 else d22
-    assert re.search(r"deferred", d22, re.I), (
-        "DEBT.md D22 no longer records the deferral the roadmap points at")
+    One row per line in this table, so the entry is the line that starts
+    with its id. Split on a newline escape here once, and the escaping cost
+    more than reading the line did.
+    """
+    for line in _read(REPO / "docs" / "DEBT.md").splitlines():
+        if line.startswith("| **D22**"):
+            return line
+    raise AssertionError("docs/DEBT.md has no D22 row at all")
+
+
+def test_the_double_fund_gap_is_no_longer_recorded_as_deferred(week7):
+    """This test used to assert the opposite, and the inversion is the point.
+
+    It required `CLIENT-DEFERRED` in the Week 7 section and the word "deferred"
+    in D22, which was true and worth pinning while the decision was outstanding.
+    The client answered on 2026-08-24. A guard that still demanded the deferral
+    would be holding the documents at a status that stopped being true -- the
+    exact defect this file exists to catch, pointed the wrong way.
+    """
+    assert "CLIENT-DEFERRED" not in week7, (
+        "the Week 7 section still classifies something as CLIENT-DEFERRED. The "
+        "double-fund decision arrived on 2026-08-24; if a DIFFERENT item is now "
+        "deferred, this guard needs to name it rather than leaving the row to "
+        "read as the old one")
+
+    d22 = _d22()
+    assert not re.search(r"Deferred pending", d22, re.I), (
+        "DEBT.md D22 still opens as deferred pending a client decision. The "
+        "decision was received on 2026-08-24")
+    assert "2026-08-24" in d22, (
+        "D22 does not date the decision it now records, so a reader cannot tell "
+        "which instruction it is describing")
+
+
+def test_d22_says_the_answer_was_review_and_not_a_break(week7):
+    """The part most likely to be summarised into something false.
+
+    The client did not unblock the fifth break kind D22 proposed -- they replaced
+    it with a review signal put to a human. A document recording "detection
+    built" without that distinction leaves a reader expecting reconciliation to
+    raise a break, and finding a passing test that says it does not.
+    """
+    d22 = _d22()
+
+    assert re.search(r"review", d22, re.I), (
+        "D22 does not say the decision was to flag for human review")
+    assert re.search(r"(no break|raises no break|not.{0,40}break)", d22, re.I), (
+        "D22 does not say reconciliation still raises no break on this shape, "
+        "so the entry and `test_double_capture_is_not_detected_yet.py` read as "
+        "contradicting each other")
+
+    for disposition in ("confirmed_duplicate", "legitimate_distinct_payment",
+                        "requires_further_review"):
+        assert disposition in d22, (
+            "D22 does not name the authorised disposition %r; the three are the "
+            "whole of what a reviewer may record" % disposition)
+
+
+def test_the_pin_test_and_the_register_agree_that_no_break_is_intended(week7):
+    """The passing-tripwire problem.
+
+    `test_double_capture_is_not_detected_yet.py` still passes, and its assertions
+    are unchanged, because the decided behaviour IS no break. That is correct and
+    it is also a trap: a reader who finds a test called "not detected yet" that
+    passes concludes the gap is open. So the file has to say the decision was
+    made, in its own words, rather than relying on a register entry elsewhere.
+    """
+    pin = _read(REPO / "services" / "servicing-service" / "tests"
+                / "test_double_capture_is_not_detected_yet.py")
+
+    assert "2026-08-24" in pin, (
+        "the pin test does not mention the decision that settled what it pins")
+    assert not re.search(r"D22 records the question, the owner and", pin), (
+        "the pin test still describes D22 as holding an unanswered question")
+    assert re.search(r"(decided behaviour|by decision, not by omission)", pin, re.I), (
+        "the pin test does not say that raising no break is the decided "
+        "behaviour, so a passing tripwire still reads as an open gap")
+
+
+def test_the_review_queue_destination_is_recorded_as_delivered(week7):
+    """Alert delivery is two questions now, and only one of them is blocked.
+
+    The client authorised the in-app queue as the destination for a payment
+    review candidate and prohibited every external channel. So "nothing reaches
+    a person" is no longer true of review items, and a section that said it would
+    understate what exists while overstating what is blocked.
+    """
+    assert re.search(r"in-app|/reconciliation", week7, re.I), (
+        "the Week 7 section does not name the in-app queue as the authorised "
+        "destination, so review candidates read as having nowhere to go")
+    assert re.search(r"CLIENT-PROHIBITED|prohibit", week7, re.I), (
+        "the section does not record that external alert channels are "
+        "prohibited before the freeze -- without it the remaining block reads "
+        "as purely an operations decision a developer could resolve")
+
 
 
 def test_alert_delivery_is_ops_blocked_rather_than_claimed(week7):

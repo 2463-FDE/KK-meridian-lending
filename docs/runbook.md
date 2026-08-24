@@ -238,6 +238,48 @@ service and evaluated every 30s; the rules are visible at
   reports `ok` -- and reintroducing it silently, on a file already known to be
   malformed, is the worst moment to do it.
 
+## The payment review queue (D22)
+
+**A different thing from a reconciliation break, and the screen keeps them
+apart on purpose.** A break says the ledger and the settlement file disagree
+about money. A review candidate says one payment resembles another and a person
+should look. Reading a candidate as a break is the mistake this section exists
+to prevent.
+
+Open `/reconciliation` as csr, underwriter or admin. Two sections: **Payment
+review candidates** at the top, **Reconciliation breaks** below.
+
+**What puts an item there** (client decision, 2026-08-24 — this repository did
+not choose the thresholds):
+
+| Signal | What it means | Window |
+|---|---|---|
+| `exact_provider_transaction_id` | The processor returned a settlement reference another capture already holds | none — elapsed time is irrelevant |
+| `exact_idempotency_key` | The same idempotency key was presented again | none |
+| `heuristic_30_minute_candidate` | Same loan **and** amount **and** payment source **and** channel | rolling 30 minutes, inclusive |
+
+All four factors are required for the heuristic. Same loan and same amount alone
+raise nothing, because that is what a legitimate second installment looks like.
+
+**Answering one.** Three dispositions and no fourth: `confirmed_duplicate`,
+`legitimate_distinct_payment`, `requires_further_review`. Your name and role are
+recorded from the verified session, not from anything the browser sends, and the
+answer is **write-once** — there is no edit, and a second attempt returns 409.
+Write a note if what you found is not obvious from the two rows.
+
+**What answering does NOT do.** Nothing. No balance moves, no ledger entry is
+written, the payment is untouched, and no maker-checker proposal is raised —
+including for `confirmed_duplicate`. If money has to come back, that is a
+separate two-person decision: raise it in `/approvals` and have a different
+approver resolve it. A flag is not permission to move money, and the queue is
+built so it cannot become one.
+
+**If the queue is empty and you expected an item.** The signals are raised at
+capture time by payment-service and are deliberately unable to fail a payment —
+a review insert that errors is swallowed and logged rather than rolling back a
+capture. So check `docker compose logs payment-service` for a swallowed insert
+before concluding nothing matched.
+
 ## Following one payment across services
 
 A borrower says they were charged and their balance did not move. Before
@@ -294,7 +336,7 @@ table.
 |---|---|
 | A `payments` row, no `ledger_entries` rows | Captured, never applied. The drain retries it -- check `apply_attempts` and `apply_last_error` |
 | `payments` row and ledger rows | Applied. The ledger rows are where the money went, in the order fees -> interest -> principal |
-| Two `payments` rows, one id | Impossible by construction: the id is per payment. Two ids for one complaint means two payments -- which may be the double-fund case (`docs/DEBT.md` D22) |
+| Two `payments` rows, one id | Impossible by construction: the id is per payment. Two ids for one complaint means two payments. **Check `/reconciliation` before doing anything else** -- since the client's decision of 2026-08-24 a pair like this is flagged for review automatically when it matches on loan, amount, payment source and channel inside 30 minutes, or on a repeated provider reference or idempotency key at any interval, and the item may already be there with a disposition on it (`docs/DEBT.md` D22). A flag is not a finding: it says a human should look, and only a human's recorded disposition says what it was |
 | No rows at all | The charge never reached us. Look at the gateway, not here |
 
 ### The two cases with no id, and they are not faults
