@@ -194,6 +194,28 @@ def test_the_error_rate_slo_is_marked_optional_not_missing(week7):
         "acceptance item")
 
 
+def test_the_superseded_status_paragraph_keeps_its_fence(week7):
+    """Week 7 keeps its 2026-08-05 status paragraph verbatim -- "🟡 Partial",
+    "both deliverables are still ⬜ Open" -- because rewriting it would erase
+    the gap rather than close it. The whole thing rests on the blockquote above
+    it saying it is superseded. Delete that blockquote and the section reads as
+    a live claim that neither deliverable landed, which is the failure mode this
+    week's own history is about.
+    """
+    stale = re.search(r"deliverables are still \*\*⬜ Open\*\*", week7)
+    if stale is None:
+        pytest.skip("the 2026-08-05 status paragraph is no longer quoted here")
+
+    before = week7[:stale.start()]
+    fence = [line for line in before.splitlines() if line.startswith(">")]
+    assert fence, (
+        "the superseded 2026-08-05 status paragraph has no blockquote fence "
+        "above it, so its 'still Open' reads as current")
+    assert any(re.search(r"superseded", line, re.I) for line in fence[-8:]), (
+        "the blockquote above the 2026-08-05 status paragraph no longer says it "
+        "is superseded")
+
+
 def test_no_week7_item_is_left_bare_open(week7):
     """Every not-built row carries a classification. Bare "Open" is what this
     week's status looked like for two weeks after both deliverables landed."""
