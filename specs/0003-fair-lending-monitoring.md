@@ -17,7 +17,7 @@
   [`adr/0006-adverse-action-reason-mapping.md`](../adr/0006-adverse-action-reason-mapping.md),
   *Addendum (2026-08-06)*, where exactly that mistake was already made once.
 
-## Superseding authority — Charles Jester (client), 2026-08-24
+## Superseding authority — client decision, 2026-08-24
 
 Quoted, because the wording is the authority:
 

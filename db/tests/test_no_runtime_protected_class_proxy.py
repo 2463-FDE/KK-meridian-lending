@@ -1,6 +1,6 @@
 """No runtime path may infer, group by, or carry protected-class data.
 
-**Authority.** Charles Jester, client, 2026-08-24: there is no permission to
+**Authority.** Client decision, 2026-08-24: there is no permission to
 collect real protected-class data for this demonstration, there is **no approved
 proxy**, and one may not be created "including from ZIP, ZIP3 or similar fields".
 Synthetic protected-class labels are permitted **only** inside an isolated

@@ -13,7 +13,7 @@ already exactly one place it may live.
 
 ## Authority
 
-Charles Jester (client), **2026-08-24**:
+Client decision, **2026-08-24**:
 
 > You do not have permission to collect real protected-class data for this
 > demonstration. There is NO approved proxy. Do not create one, including from

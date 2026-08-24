@@ -274,7 +274,7 @@ def test_the_zip_screen_is_named_only_as_retired_and_prohibited():
     """The card used to have to say the ZIP screen was an outcome monitor and
     not model validation. The client removed the screen instead.
 
-    Charles Jester, 2026-08-24: no protected-class collection, no approved
+    Client decision, 2026-08-24: no protected-class collection, no approved
     proxy, and none may be created from ZIP or ZIP3. So the card may still name
     the screen -- the record of a reversal is worth keeping -- but only as
     something retired, never as a control that exists. A card that reintroduced
