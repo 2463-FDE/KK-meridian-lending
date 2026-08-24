@@ -23,8 +23,15 @@ What is genuinely still open here, so nothing below reads as finished:
     `policies/fee_schedule.md` publishes. `apply_payment` below does NOT --
     it is dead code, reached by no route, and converting it is part of ADR
     0010's writer retirement rather than this change.
-  * **No maker-checker (D8).** `adjust_balance` and `waive_fee` move money on
-    one person's say-so, and this module is given no principal to record.
+  * **Maker-checker is NOT in this module, and D8 is closed elsewhere.** The
+    live `adjust-balance` / `waive-fee` routes raise proposals through
+    `maker_checker.propose` and move nothing; a different verified principal
+    resolves them, and the approval writes its ledger entry inside
+    `resolve_pending_movement`. `adjust_balance` and `waive_fee` below are the
+    retired direct writers, reachable from no route (see `models.py`), and their
+    docstrings describe what they did rather than what happens today. *This
+    bullet read "No maker-checker (D8): they move money on one person's say-so"
+    until PRs #34/#35 landed.*
   * **Legacy writers are still direct.** `apply_payment`, `adjust_balance` and
     `waive_fee` write `balances` themselves rather than through the ledger.
     They are not invisible -- 0035's compatibility bridge mirrors each committed
@@ -247,7 +254,7 @@ def apply_payment_once(payment_id: int, loan_id: int, amount: float,
 
 
 def adjust_balance(loan_id: int, new_value: float) -> float:
-    """Set the balance directly, on one person's say-so.
+    """Set the balance directly. RETIRED: no route reaches this.
 
     This function writes no ledger entry of its own, and the comment here used to
     conclude "the prior value is gone forever". That stopped being true when
@@ -255,10 +262,15 @@ def adjust_balance(loan_id: int, new_value: float) -> float:
     trigger mirrors this UPDATE's committed delta into `ledger_entries` as a
     `legacy_direct_write`, so the movement is recoverable after the fact.
 
-    What the ledger cannot supply is who did it. The entry's `actor_id` is NULL
-    because this route is handed no human principal to record -- that half of D8
-    is untouched, along with the second approver that would make the movement
-    reviewable at all (`specs/0002-maker-checker-self-approval.md`).
+    What the ledger cannot supply is who did it: the entry's `actor_id` is NULL,
+    because this function is handed no human principal to record.
+
+    **Not the live path, and not D8's open half any more.** No route reaches this
+    function. `POST /accounts/{loan_id}/adjust-balance` raises a proposal
+    (`maker_checker.propose`) that moves nothing, and the approval writes its
+    entry inside `resolve_pending_movement` with the approver as `actor_id`
+    (spec 0002, ADR 0011, PRs #34/#35). *This paragraph said that half of D8 was
+    untouched, which stopped being true when the proposal path landed.*
     """
     new_balance = float(_to_decimal(new_value))
     with db.transaction() as cur:
@@ -276,15 +288,19 @@ def adjust_balance(loan_id: int, new_value: float) -> float:
 
 
 def waive_fee(loan_id: int, amount: float) -> float:
-    """Reduce past_due, on one person's say-so.
+    """Reduce past_due. RETIRED: no route reaches this.
 
     Same shape as `apply_payment`: the UPDATE is a relative delta, so the stored
     `past_due` composes correctly with a concurrent write, and only the returned
     figure can be stale. It used to be described as racing with `apply_payment`
     under D3; the two touch different columns and neither loses an update.
 
-    The open part is authorisation, not concurrency -- no role check here, no
-    approver, and the captured ledger entry names nobody (D8).
+    Authorisation is not this function's any more, and not open: no route
+    reaches it. `POST /accounts/{loan_id}/waive-fee` raises a proposal that moves
+    nothing, and a different verified principal's approval writes the entry
+    naming them (spec 0002, ADR 0011). *This paragraph read "no role check here,
+    no approver, and the captured ledger entry names nobody (D8)", which
+    described the live path until PRs #34/#35.*
     """
     rows = db.query("SELECT past_due FROM balances WHERE loan_id = %s", (loan_id,))
     past_due = rows[0]["past_due"] if rows else 0.0

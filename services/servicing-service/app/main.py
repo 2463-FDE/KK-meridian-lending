@@ -4,15 +4,32 @@ Read API (loan list / detail / schedule / payment history) uses SQLAlchemy. The
 money-moving endpoints (payments, balance adjust, fee waiver) keep their original
 raw implementation.
 
-Authorization, stated as it now stands: every money route requires
-`X-Internal-Token` and the service refuses to start without a usable one, and the
-gateway restricts adjust-balance / waive-fee / late-fee to csr/admin. What this
-service itself does not do is identify the human — it reads no principal, ignores
-the `x_user_role` header it accepts, and enforces no second approver (D8). This
-docstring used to describe the money endpoints as open to any authenticated
-caller with no check of any kind, which stopped being true once the token and the
-gateway rule landed, and was never the right description of who may authorise a
-movement.
+Authorization, stated as it now stands. Four layers, and this service owns
+three of them:
+
+  * **The boundary.** Every money route requires `X-Internal-Token`, and the
+    service refuses to start on a weak or unset one.
+  * **The human.** `principal.require_staff_principal` verifies a short-lived
+    Ed25519 assertion the gateway signed, against the public half — this service
+    cannot mint one. `X-User-Role`/`X-User-Id` are untrusted hints, and a
+    disagreement with the signature is refused.
+  * **The second person.** `adjust-balance` and `waive-fee` raise proposals and
+    move nothing (202); a *different* verified principal resolves them through
+    `resolve_pending_movement`, which refuses self-approval including admin.
+  * **The record.** An approval writes exactly one immutable ledger entry naming
+    the approver; a rejection writes none and is retained.
+
+`docs/DEBT.md` **D8 is closed** — see it for what that does and does not cover,
+and `adr/0011-maker-checker-for-servicing-adjustments.md` *Limitations* for the
+direct-`INSERT` boundary, which no application-layer control changes.
+
+*Historical, kept because the difference is the work.* Version one of this
+docstring described the money endpoints as open to any authenticated caller with
+no check of any kind. Version two, written after the token and the gateway rule
+landed, said this service "reads no principal ... and enforces no second approver
+(D8)" — historical wording that outlived its truth by the whole of PRs
+#33/#34/#35. That drift is what
+`db/tests/test_d8_is_closed_everywhere.py` now guards.
 """
 import logging
 import os
