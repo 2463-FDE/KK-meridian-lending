@@ -268,7 +268,7 @@ current answer.
 | Reason codes | Yes — `decision_events.reason_codes` |
 | Model version alongside each of the above | Yes — `decision_events.model_version` |
 | Feature attribution per decision | Partial, and in the opposite direction to what a reader expects — `top_features` is populated **only for the deterministic stub**, whose score formula is known and reproducible, and is recorded as `null` for a real vendor response because `_ScorerResponse` carries no attribution. A locally-computed "explanation" for a vendor score would be fabricated audit data (`services/decision-service/tests/test_decision.py`) |
-| Sample size adequate for the groups compared | **Unknown.** Not measured; the ZIP3 screen's `min_group_size` is the only size guard anywhere |
+| Sample size adequate for the groups compared | **Unknown, and now unmeasurable at runtime.** Not measured. The ZIP3 screen's `min_group_size` was the only size guard anywhere, and that screen was deleted on 2026-08-24 (§2, superseded); no runtime fairness evaluation exists to size. *This cell cited `min_group_size` as a present guard until that deletion* |
 | Vendor fairness documentation | **No.** None supplied with the licensed scorer |
 | Longitudinal data across a stated window | Partially — `occurred_at` exists, and windowed **reason** reporting is built (§1.3, PR #67). Windowed reporting of approval rates or score distributions is not, and is a *Non-goal* here |
 
@@ -289,8 +289,10 @@ none.
 - A scheduled monitoring platform, dashboard, or alert. The brief asks for a
   spec; a scheduler is a separate decision with its own cost.
 - Alert thresholds. What counts as too few distinct reasons, or an acceptable
-  disparity ratio beyond the four-fifths screen already implemented, is a
-  compliance judgement this repository has no authority to set.
+  disparity ratio, is a compliance judgement this repository has no
+  authority to set. *This bullet read "beyond the four-fifths screen already
+  implemented" until 2026-08-24; that screen is deleted (§2, superseded), so
+  there is no implemented baseline to be beyond.*
 - Inventing vendor reason codes. See *Blocked*.
 - **Any runtime fairness evaluation**, and any proxy for a protected class —
   geographic, surname-based, census-based, BISG or otherwise. Prohibited by the
@@ -316,8 +318,11 @@ none.
    `decision_events` row for a decision that never completed.
 5. A fixture proves the raw vendor code is still **retained as model evidence**
    for decisions that do complete — the mapping must not destroy provenance.
-6. The ZIP3 screen's documentation states 2.2–2.4 wherever its output is
-   presented.
+6. **Withdrawn 2026-08-24, with the screen it was about.** It read: "The ZIP3
+   screen's documentation states 2.2–2.4 wherever its output is presented."
+   There is no output to state anything beside — the screen was deleted, not
+   disabled (§2, superseded). Left numbered rather than renumbered, so a
+   reference to "criterion 7" elsewhere still points at the same criterion.
 7. `docs/model_card.md` and this spec do not contradict one another on what
    fairness evidence exists.
 8. No document in this repository asserts that the model is fair.
@@ -331,18 +336,27 @@ none.
 - A refusal on either of the two rows above → no partial committed state.
 - Reason reporting over a window containing more than one `model_version` →
   reported per version, never merged.
-- ZIP3 groups below `min_group_size` → reported, not flagged.
-- No ZIP data at all → an empty report, not a zero-disparity report. "No
-  evidence of disparity" and "no evidence" are different statements and must not
-  render identically.
+- *Two ZIP3 failure modes were specified here and are withdrawn with the screen
+  (§2, superseded 2026-08-24): groups below `min_group_size` reported rather than
+  flagged, and no ZIP data producing an empty report rather than a zero-disparity
+  one.* The distinction they turned on survives them and still binds anything
+  built later: **"no evidence of disparity" and "no evidence" are different
+  statements and must not render identically.**
 
 ## Security and privacy
 
-- Reason reporting is aggregate. It MUST NOT expose applicant identifiers, and
-  the disparity route is already staff-only.
-- ZIP3 is a truncation of ZIP, retained because the four-fifths screen needs a
-  grouping; full ZIP is not required for it and should not be surfaced by these
-  reports.
+- Reason reporting is aggregate. It MUST NOT expose applicant identifiers.
+  *This bullet also said "the disparity route is already staff-only" until
+  2026-08-24. That route is not staff-only — it is **not registered at all**,
+  which `services/origination-service/tests/test_staff_gated_routes_require_internal_token.py::test_the_zip_analysis_route_is_gone_rather_than_gated`
+  asserts by name. Gated and absent are different answers, and the weaker one
+  was on the page.*
+- `applicants.zip_code` is retained as a **postal-address component and nothing
+  else**. *This bullet read "ZIP3 is a truncation of ZIP, retained because the
+  four-fifths screen needs a grouping" until 2026-08-24; the client prohibited
+  any protected-class proxy including one derived from ZIP or ZIP3, so no
+  grouping needs it and none may be created.* Full ZIP is not required by these
+  reports and must not be surfaced by them.
 - These reports describe applicants. Nothing in them belongs in an external
   trace or a third-party observability tool -- aggregate counts may be exported,
   the rows behind them may not.
@@ -410,7 +424,8 @@ no DTI and therefore cannot offer it as a reason).
   are now written down where a regulator's question would find them.
 - Three follow-ups are unblocked by this spec and one is half-blocked. The
   distinct-reason/frequency measurement (1.3) can be built now against
-  `decision_events`. The ZIP3 documentation (2.2–2.4) can be corrected now. The
+  `decision_events`. *The ZIP3 documentation follow-up (2.2–2.4) is withdrawn: §2 is superseded and
+the screen deleted, so there is nothing left to correct.* The
   mapping **mechanism** (1.6) can be built now, with a fail-closed default and
   no real-vendor entries — which is what actually closes Problem 3. Only the
   mapping's real-vendor **entries** wait on the taxonomy.

@@ -81,12 +81,24 @@ orchestrates the LOS flow and calls them over HTTP.
 - **Run a credit decision:** `POST /los/applications/{id}/decision` (origination orchestrates
   → `decision-service`), or hit `decision-service` directly via `/decision/*`.
 - **Run a KYC/CIP check:** `/kyc/*` → `kyc-service` (origination also calls it inline during intake).
-- **Generate an offer/disclosure:** `POST /los/offer {app_id, principal, annual_rate_pct, term_months}`
+- **Ask what the note rate is:** `GET /los/pricing` — returns the configured
+  rate, its source, and `is_production_pricing_policy: false`.
+- **Generate an offer/disclosure:** `POST /los/offer {app_id, principal, term_months}`
+  — **do not send `annual_rate_pct`.** The server sets the rate. A value that
+  disagrees with the configured one is refused with a 422 rather than ignored, so
+  an operator copying an older command against a non-default
+  `DEMO_NOTE_RATE_PCT` gets a refusal, not a mispriced loan. Sending the
+  server's own figure is accepted, for callers that still do.
   (origination → `disclosure-service`), or `/disclosure/*` directly.
 - **Board an approved app to servicing:** `POST /los/applications/{id}/accept`.
 - **Take a payment:** `/payments/*` → `payment-service` (captures the charge, then calls
-  servicing `POST /accounts/{loan_id}/apply-payment` to post it). The legacy `POST /lss/payments`
-  path is dead-but-present.
+  servicing `POST /accounts/{loan_id}/apply-payment` to post it). The legacy
+  `POST /lss/payments` path is **gone** — deleted rather than disabled, so there
+  is nothing to call and nothing to re-enable (`docs/DEBT.md` D2, asserted by
+  `servicing-service/tests/test_legacy_payments_route_is_retired.py`). This line
+  read "dead-but-present" until 2026-08-24, which is the phrasing D2 exists to
+  argue against: a present-but-dead money route is one deployment away from
+  live.
 - **Look at the portfolio:** `GET /lss/loans?limit=25&offset=0&status=current` (requires auth).
 - **Reconciliation eyeball:** `GET /lss/reconciliation/peek` (ledger vs settlement totals).
 
