@@ -30,6 +30,17 @@ interface Offer {
   monthly_payment: number;
   amount_financed: number;
   total_of_payments: number;
+  // How the amount financed was arrived at, both from the server. NOTHING here
+  // recomputes them: the fee is the difference between the stored principal and
+  // the stored amount financed, derived once in disclosure-service so the box
+  // foots. A second version of the same arithmetic in the browser is how the
+  // fee percentage drifted to three different numbers before (D6).
+  //
+  // Null together on a legacy offer that stored no principal. The cell then says
+  // the breakdown is unavailable rather than inverting the amount financed
+  // through the fee, which lands on a principal nobody was quoted.
+  requested_principal?: number | null;
+  origination_fee?: number | null;
   // Null on a legacy offer that never recorded a schedule.
   regular_payment_count?: number | null;
   final_payment?: number | null;
@@ -638,6 +649,35 @@ function UnderwritingDetailContent() {
                 <div className="tila-cell-value">
                   {usd(offer.amount_financed)}
                 </div>
+                {/* The same breakdown the borrower sees, from the same server
+                    fields. Staff read this box to answer "why is the amount
+                    financed lower than what they applied for?", and a screen
+                    that cannot answer it sends them to the database. No
+                    arithmetic here either -- the fee is the server's difference
+                    between the two stored amounts. */}
+                {offer.requested_principal != null && offer.origination_fee != null ? (
+                  <dl className="tila-breakdown" data-testid="amount-financed-breakdown">
+                    <div>
+                      <dt>Amount requested</dt>
+                      <dd className="num">{usd(offer.requested_principal)}</dd>
+                    </div>
+                    <div>
+                      <dt>Less origination fee (prepaid)</dt>
+                      <dd className="num">&minus;{usd(offer.origination_fee)}</dd>
+                    </div>
+                    <div className="tila-breakdown-total">
+                      <dt>Amount financed</dt>
+                      <dd className="num">{usd(offer.amount_financed)}</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <p
+                    className="tila-cell-note"
+                    data-testid="amount-financed-breakdown-unavailable"
+                  >
+                    Amount financed breakdown unavailable for this historical offer.
+                  </p>
+                )}
               </div>
               <div className="tila-cell">
                 <div className="tila-cell-label">Total of Payments</div>

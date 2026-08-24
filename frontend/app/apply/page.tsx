@@ -120,6 +120,17 @@ interface Disclosure {
   monthly_payment: number;
   amount_financed: number;
   total_of_payments: number;
+  // How the amount financed was arrived at, both from the server. NOTHING here
+  // recomputes them: the fee is the difference between the stored principal and
+  // the stored amount financed, derived once in disclosure-service so the box
+  // foots. A second version of the same arithmetic in the browser is how the
+  // fee percentage drifted to three different numbers before (D6).
+  //
+  // Null together on a legacy offer that stored no principal. The cell then says
+  // the breakdown is unavailable rather than inverting the amount financed
+  // through the fee, which lands on a principal nobody was quoted.
+  requested_principal?: number | null;
+  origination_fee?: number | null;
   // Model B: monthly_payment is the REGULAR payment and the final period bills
   // final_payment instead. Optional -- a pre-0030 offer has no stored schedule
   // and reports null rather than a reconstructed figure.
@@ -1356,6 +1367,18 @@ function OfferPanel({
   acceptedLoanId: string | number | null;
 }) {
   const hasSchedule = !!disclosure.schedule && disclosure.schedule.length > 0;
+  // The breakdown, if the server sent one. A NARROWING, not a calculation:
+  // either both figures arrived or neither did, and the cell then says the
+  // breakdown is unavailable. `!= null` rather than a truthiness check, because
+  // an origination fee of exactly $0.00 is a real disclosure -- a zero-fee offer
+  // has a breakdown, and `0` is falsy.
+  const breakdown =
+    disclosure.requested_principal != null && disclosure.origination_fee != null
+      ? {
+          requested_principal: disclosure.requested_principal,
+          origination_fee: disclosure.origination_fee,
+        }
+      : null;
   // Boardability comes from the SERVER (`offer_ready`, the same
   // _complete_offer_exists check accept_offer enforces over
   // BOARDING_REQUIRED_FIELDS). Deriving it here from the three schedule columns
@@ -1418,6 +1441,45 @@ function OfferPanel({
             <div className="tila-cell-value">
               {usd(disclosure.amount_financed)}
             </div>
+            {/* Still ONE of the four federal boxes -- the breakdown sits inside
+                this cell rather than becoming a fifth. "The amount of credit
+                provided to you" is a NET figure, and a borrower who asked for
+                $9,000 and reads $8,730 has no way to see where the difference
+                went; the origination fee is prepaid, so it never reaches them.
+
+                Every figure below comes from the server. Nothing here
+                subtracts, multiplies or applies a fee percentage: the fee is
+                derived once in disclosure-service as the difference between the
+                two stored amounts, which is what makes these three lines add up
+                exactly on screen. Recomputing it here as principal x 3% would
+                print $30.08 against stored figures implying $30.07. */}
+            {breakdown ? (
+              <dl className="tila-breakdown" data-testid="amount-financed-breakdown">
+                <div>
+                  <dt>Amount you asked for</dt>
+                  <dd className="num">{usd(breakdown.requested_principal)}</dd>
+                </div>
+                <div>
+                  <dt>Less origination fee (prepaid)</dt>
+                  <dd className="num">&minus;{usd(breakdown.origination_fee)}</dd>
+                </div>
+                <div className="tila-breakdown-total">
+                  <dt>Amount financed</dt>
+                  <dd className="num">{usd(disclosure.amount_financed)}</dd>
+                </div>
+              </dl>
+            ) : (
+              /* Said plainly, and said as a limit of the RECORD rather than of
+                 the borrower's offer. A legacy row stored no principal, and the
+                 only way to produce one is to invert the amount financed through
+                 the fee -- which lands on a neighbouring value, because the
+                 amount financed is cent-rounded. A number nobody was quoted,
+                 printed under "amount you asked for", is worse than this
+                 sentence. */
+              <p className="tila-cell-note" data-testid="amount-financed-breakdown-unavailable">
+                Amount financed breakdown unavailable for this historical offer.
+              </p>
+            )}
           </div>
           <div className="tila-cell">
             <div className="tila-cell-label">Total of Payments</div>

@@ -769,3 +769,30 @@ def test_an_accepted_legacy_offer_with_a_null_decision_id_is_not_rewritten(pg):
     for field in ("apr", "finance_charge", "monthly_payment", "amount_financed",
                   "total_of_payments", "fee_pct_used", "accepted_at"):
         assert after[field] == before[field], f"{field} changed on an accepted offer"
+
+
+
+# --- the amount-financed breakdown, on the creation path -----------------------
+#
+# The GET-path cases live in `test_offers.py`, which overrides `get_session` with
+# a stand-in row: that route reads through SQLAlchemy rather than `app.db`, so it
+# does not follow this file's test schema and returns 404 here. Worth stating,
+# because the obvious reading of a 404 in this fixture is "the seed did not
+# work".
+
+
+def test_a_freshly_created_offer_carries_the_breakdown_too(pg):
+    """The POST path, not only the GET. A borrower sees the offer the instant it
+    is generated, and a breakdown that appeared only on a later page load would
+    be missing from the one screen that matters."""
+    app_id = _seed_approved_application(pg)
+
+    resp = _post(app_id)
+
+    assert resp.status_code == 200, resp.text
+    d = resp.json()["disclosure"]
+    assert d["requested_principal"] is not None and d["origination_fee"] is not None
+    assert (round(d["requested_principal"] - d["origination_fee"], 2)
+            == round(d["amount_financed"], 2))
+
+
