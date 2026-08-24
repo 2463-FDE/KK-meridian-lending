@@ -51,6 +51,31 @@ test("two different cards yield different handles", () => {
   expect(sourceHandleFor(VISA, store)).not.toBe(sourceHandleFor(MASTERCARD, store));
 });
 
+test("two cards sharing their last four still get different handles", () => {
+  /**
+   * The defect review caught in the first version: the storage key was
+   * `last4 + length`, so every 16-digit card ending 1111 shared one handle. The
+   * backend then saw same loan, same amount, same channel, same source and filed
+   * a duplicate-review candidate for two genuinely different instruments --
+   * exactly the false positive the source factor exists to prevent, arriving
+   * through the mock rather than through the rule.
+   */
+  const store = memoryStore();
+  const sameTail = ["4111111111111111", "4222222222221111"];
+
+  const [a, b] = sameTail.map((pan) => sourceHandleFor(pan, store));
+
+  expect(sameTail[0].slice(-4)).toBe(sameTail[1].slice(-4));  // the premise
+  expect(a).not.toBe(b);
+});
+
+test("cards differing only in one middle digit get different handles", () => {
+  const store = memoryStore();
+
+  expect(sourceHandleFor("4111111111111111", store))
+    .not.toBe(sourceHandleFor("4111111111112111", store));
+});
+
 test("the handle contains no part of the card number", () => {
   const handle = sourceHandleFor(VISA, memoryStore());
 

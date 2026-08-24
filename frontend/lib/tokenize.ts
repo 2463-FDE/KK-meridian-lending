@@ -78,15 +78,52 @@ function defaultStore(): HandleStore | null {
  * reimplements the logic it is checking proves only that someone can write the
  * same lines twice.
  */
+/**
+ * A stable, non-reversible key for a card, computed in the browser.
+ *
+ * Synchronous on purpose: `tokenizeCard` is called from a click handler and
+ * making it async would ripple through every caller for no gain here. This is
+ * not a cryptographic hash and does not claim to be -- it is a 128-bit
+ * FNV-1a-style mix over the digits, used only to tell two synthetic test cards
+ * apart inside one browser tab. It never leaves the browser, and the value the
+ * server receives is an unrelated random UUID.
+ *
+ * A real integration deletes all of this: the processor supplies a durable
+ * vaulted-source id and no card material is in reach of this code at all.
+ */
+function fingerprint(digits: string): string {
+  // Four independently-seeded lanes, so a collision needs all four to agree.
+  const seeds = [0x811c9dc5, 0x01000193, 0x9e3779b9, 0x85ebca6b];
+  const lanes = seeds.map((seed) => {
+    let h = seed >>> 0;
+    for (let i = 0; i < digits.length; i += 1) {
+      h ^= digits.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(16).padStart(8, "0");
+  });
+  return lanes.join("");
+}
+
 export function sourceHandleFor(digits: string, store?: HandleStore | null): string {
   const fresh = `src_mock_${crypto.randomUUID()}`;
   const storage = store === undefined ? defaultStore() : store;
   if (!storage) return fresh;
 
-  // Keyed by last4 + length rather than by the PAN: the map lives in the
-  // browser, but writing a full card number into storage would be careless even
-  // there, and it is not needed to tell two synthetic test cards apart.
-  const key = `meridian.src.${digits.length}.${digits.slice(-4)}`;
+  // Keyed by a digest of the whole card, not by its last four.
+  //
+  // Review of PR #79 caught the first version: `meridian.src.16.1111` is the
+  // same key for every 16-digit card ending 1111, so two genuinely different
+  // instruments shared one handle -- and the backend then saw same loan, same
+  // amount, same channel, same source and filed a duplicate-review candidate for
+  // two different cards. That is precisely the false positive the source factor
+  // exists to prevent, arriving through the mock rather than through the rule.
+  //
+  // The digest is computed and kept in this browser only; the value SENT to the
+  // server is still a random UUID, so nothing card-derived is persisted server
+  // side. The residual is named rather than hidden: a digest of a synthetic test
+  // card sits in this tab's sessionStorage for the life of the tab.
+  const key = `meridian.src.${fingerprint(digits)}`;
   try {
     const existing = storage.getItem(key);
     if (existing) return existing;

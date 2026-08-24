@@ -22,6 +22,7 @@ import datetime
 from decimal import Decimal
 
 import pytest
+from psycopg2.errors import UniqueViolation
 from fastapi.testclient import TestClient
 
 from app import config, payments, processor, review_signals
@@ -111,7 +112,16 @@ class _Db:
 
         if flat.startswith("UPDATE payments"):
             if "auth_status = 'captured'" in flat:
-                auth_id, captured_at, ref, pid = params
+                # Two capture statements exist: the normal one, and the fallback
+                # that omits `processor_ref` when the reference belongs to
+                # another row (payments.py::_mark_captured). The fake handles
+                # both, because a fake that only knew the happy shape would fail
+                # on the very path this file was extended to cover.
+                if "processor_ref = %s" in flat:
+                    auth_id, captured_at, ref, pid = params
+                else:
+                    auth_id, captured_at, pid = params
+                    ref = None
                 # The real statement is `COALESCE(%s::timestamptz, now())`: the
                 # stub processor reports no timestamp, so production stamps the
                 # local clock. Emulated here rather than storing NULL, because a
@@ -306,3 +316,117 @@ def test_the_review_row_carries_no_amount_or_instrument_data(db, servicing):
         for forbidden in ("250", "1111", "visa", VALID_MOCK_TOKEN, SOURCE_REF):
             assert forbidden not in rendered, (
                 f"a review item carries {forbidden!r}")
+
+
+# --------------------------------------------------------------------------
+# The two paths review of PR #79 found unreachable or unscreened.
+# --------------------------------------------------------------------------
+
+class _CollidingDb(_Db):
+    """A payments table whose `processor_ref` is UNIQUE, like the real one.
+
+    `db/migrations/0041` makes that column unique, so the first version of this
+    feature could never record its own `exact_provider_transaction_id` signal:
+    the capture UPDATE raised the violation, the request failed *after* the card
+    was charged, and the collision went unrecorded (RS-001).
+    """
+
+    def query(self, sql, params=None):
+        flat = " ".join(sql.split())
+        if flat.startswith("UPDATE payments") and "processor_ref = %s" in flat:
+            auth_id, captured_at, ref, pid = params
+            taken = any(row.get("processor_ref") == ref and row["id"] != pid
+                        for row in self._by_id.values())
+            if taken:
+                self.calls.append((flat, params))
+                raise UniqueViolation(
+                    'duplicate key value violates unique constraint '
+                    '"idx_payments_processor_ref"')
+        return super().query(sql, params)
+
+
+def test_a_colliding_settlement_reference_still_records_the_capture(monkeypatch, servicing):
+    """The card was charged. Refusing to write that down is the worst outcome."""
+    fake = _CollidingDb()
+    monkeypatch.setattr(payments, "db", fake)
+    monkeypatch.setattr(review_signals, "db", fake)
+    # Both captures get the same settlement reference from the processor, which
+    # is the collision this test is about.
+    monkeypatch.setattr(processor, "_stub_settlement_reference",
+                        lambda *a, **k: "PR-COLLIDE-1")
+
+    first = client.post("/payments", json=_payload(idempotency_key="idem-a"))
+    second = client.post("/payments", json=_payload(idempotency_key="idem-b"))
+
+    assert first.status_code == 200
+    assert second.status_code == 200, (
+        "a colliding settlement reference failed the request after the card was "
+        "charged")
+    assert fake._by_id[2]["auth_status"] == "captured"
+
+
+def test_a_colliding_settlement_reference_raises_the_exact_signal(monkeypatch, servicing):
+    fake = _CollidingDb()
+    monkeypatch.setattr(payments, "db", fake)
+    monkeypatch.setattr(review_signals, "db", fake)
+    monkeypatch.setattr(processor, "_stub_settlement_reference",
+                        lambda *a, **k: "PR-COLLIDE-2")
+
+    client.post("/payments", json=_payload(idempotency_key="idem-a"))
+    client.post("/payments", json=_payload(idempotency_key="idem-b"))
+
+    assert "exact_provider_transaction_id" in fake.signals(), (
+        "the collision produced no exact-duplicate signal, so the one case that "
+        "signal exists for cannot reach it")
+
+
+def test_a_colliding_reference_is_not_stored_on_the_second_row(monkeypatch, servicing):
+    """The reference belongs to the other row, and the index is not negotiable.
+
+    A capture with no reference is reported by reconciliation as an
+    `unreferenced_capture` break rather than skipped, which is the honest state
+    for this row -- and it is why the fallback is safe.
+    """
+    fake = _CollidingDb()
+    monkeypatch.setattr(payments, "db", fake)
+    monkeypatch.setattr(review_signals, "db", fake)
+    monkeypatch.setattr(processor, "_stub_settlement_reference",
+                        lambda *a, **k: "PR-COLLIDE-3")
+
+    client.post("/payments", json=_payload(idempotency_key="idem-a"))
+    client.post("/payments", json=_payload(idempotency_key="idem-b"))
+
+    assert fake._by_id[1]["processor_ref"] == "PR-COLLIDE-3"
+    assert fake._by_id[2]["processor_ref"] is None, (
+        "the second capture kept a settlement reference that belongs to the "
+        "first, which the unique index exists to prevent")
+
+
+def test_a_recovered_capture_is_screened_too(monkeypatch, servicing):
+    """A capture completed on the retry path used to be screened by nothing.
+
+    That path is the pending-authorization recovery -- "the processor took the
+    money, we crashed before recording it" -- which is exactly the shape a
+    duplicate charge arrives in, so leaving it unscreened left the heuristic
+    covering only first attempts (RS-003).
+    """
+    fake = _Db()
+    monkeypatch.setattr(payments, "db", fake)
+    monkeypatch.setattr(review_signals, "db", fake)
+
+    # An earlier capture from the same source, so the retry has something to
+    # resemble.
+    client.post("/payments", json=_payload(idempotency_key="idem-earlier"))
+
+    # A row left pending, as a crash between authorization and persistence leaves
+    # it -- then retried under the same key, which is what completes it.
+    client.post("/payments", json=_payload(idempotency_key="idem-pending"))
+    fake._by_id[2]["auth_status"] = "pending"
+    fake._by_id[2]["captured_at"] = None
+    fake._by_key["idem-pending"]["auth_status"] = "pending"
+    fake.review_inserts.clear()
+
+    client.post("/payments", json=_payload(idempotency_key="idem-pending"))
+
+    assert "heuristic_30_minute_candidate" in fake.signals(), (
+        "a capture completed on the recovery path raised no heuristic signal")
