@@ -3,6 +3,17 @@
 Three slides, regenerated from the repository. Bullets are what goes on screen.
 Notes are what I say.
 
+> **Superseded in part on 2026-08-24, and left standing as delivered.** Two rows
+> in the tables below are marked **deferred** because they were: the double-fund
+> decision had not been made when this deck was given. The client answered on
+> 2026-08-24 and the answer was review-only -- flag for human reconciliation
+> review, never conclude a duplicate, never move money -- so detection and an
+> in-app queue now exist (`docs/DEBT.md` D22, `docs/ROADMAP.md` Week 7).
+> Reconciliation still raises no break on the shape, which is the decided
+> behaviour rather than the gap this deck described. The rows are NOT edited:
+> a deck records what was said on the day, and rewriting one to look current
+> would destroy the only thing it is evidence of.
+
 **Provenance.** The claims below rest on `92908ce` (the card-path proof),
 `81c16bb74` (the cross-service identifier) and `ee8f733c4` (the allocation
 read). Naming the evidence commits rather than a single head, because a head sha

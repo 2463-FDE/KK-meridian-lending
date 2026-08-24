@@ -1,4 +1,4 @@
-"""Two settled captures on one loan raise no break. Stated, not implied.
+"""Two settled captures on one loan raise no break -- by decision, not by omission.
 
 `docs/DEBT.md` D22. The client reported the shape at the 2026-08-19 demo: two
 captures for the same loan and the same amount, both settled, inside a short
@@ -14,21 +14,27 @@ own settlement line exactly. All four break kinds are about ONE reference:
 Nothing compares two references to each other, so nothing can notice that the
 same loan was funded twice.
 
-**Whether it SHOULD is a product decision this repository will not make.** The
-window, and what counts as a false positive, are the client's to set: a
-legitimate repeat payment has exactly the same shape as a double-fund, and no
-field in the data distinguishes them. D22 records the question, the owner and
-the follow-up.
+**Whether it SHOULD was a product decision, and the client made it on
+2026-08-24 -- the opposite way round from how this file was written to expect.**
 
-So this file is a tripwire, not a control. It pins today's behaviour and cites
-the deferral. If someone builds detection without settling the decision, these
-tests fail and the failure points at the entry that has to be updated -- which
-is the whole reason to write a deferral down rather than to leave a gap
-undescribed.
+The answer was not a fifth break kind. It was to FLAG the payment for human
+reconciliation review and never to treat the flag as a duplicate conclusion, a
+validity conclusion, or permission to move money. So the shape is detected now
+-- `payment-service/app/review_signals.py` raises a signal on it, and a person
+answers it in the in-app queue -- while **reconciliation still raises no break,
+and that is the decided behaviour rather than a pending gap.**
 
-The seeded shape here is the one to reuse when the fifth break kind is built:
-it is already the demo scenario, and a detection test should turn these
-assertions round rather than invent a new fixture.
+Which means the assertions below are unchanged and still pass, and a reader must
+not take that for "nobody noticed the double-fund". They say something narrower
+and still worth saying: the COMPARISON is about one reference at a time, a break
+means the books disagree, and two settled captures that each match their own
+settlement line do not make the books disagree. Turning these round would assert
+a break the client did not ask for.
+
+What this file stopped being is a tripwire for an unmade decision. It is now the
+statement of a boundary: if a fifth break kind ever does appear here, it was not
+this decision that authorised it, and `docs/DEBT.md` D22 would need the new one
+recorded before these tests are rewritten.
 """
 import csv
 from decimal import Decimal
@@ -113,19 +119,22 @@ def test_the_fixture_really_is_two_settled_captures_on_one_loan(double_capture):
     assert result["out_of_scope_captures"] == 0
 
 
-def test_a_double_fund_produces_no_break_today(double_capture):
-    """The gap itself, as an assertion rather than a sentence in a document.
+def test_a_double_fund_produces_no_break(double_capture):
+    """The decided behaviour, as an assertion rather than a sentence in a
+    document.
 
-    Fails the day detection is built -- deliberately. Update D22 and turn this
-    round; do not delete it.
+    Named `..._today` while it was pinning an unmade decision. The decision is
+    made -- review, not a break -- so the "today" is gone and this asserts the
+    answer rather than the wait.
     """
     result = reconciliation.compare()
 
     assert result["breaks_found"] == 0, (
-        "reconciliation now raises %r on two settled captures for one loan. If "
-        "that is the fifth break kind, docs/DEBT.md D22 is out of date: settle "
-        "the window and the false-positive appetite there, then replace this "
-        "test with one that asserts the break." % (result["breaks"],)
+        "reconciliation now raises %r on two settled captures for one loan. The "
+        "client's decision of 2026-08-24 was that this shape is FLAGGED FOR "
+        "HUMAN REVIEW and not raised as a break, so a break here contradicts "
+        "docs/DEBT.md D22 rather than fulfilling it. If a later decision "
+        "authorised one, record it in D22 first." % (result["breaks"],)
     )
     assert result["break_value"] == Decimal("0.00")
 
