@@ -182,6 +182,57 @@ def test_alert_delivery_is_ops_blocked_rather_than_claimed(week7):
         "roadmap is out of date")
 
 
+def test_the_debt_register_and_the_roadmap_agree_about_d7(week7):
+    """The register and the roadmap describe the same control, so they must not
+    disagree about whether it exists.
+
+    D7 read "Partly fixed" while the Week 7 status block called the control
+    closed. Both were describing the same code: the control is implemented and
+    tested, and the missing piece is a destination for a firing alert, which no
+    amount of work in this repository produces. "Partly fixed" reads as unbuilt
+    code, and a reader comparing the two documents cannot tell which is right.
+    """
+    debt = _read(REPO / "docs" / "DEBT.md")
+    row = debt[debt.index("| **D7**"):]
+    row = row[:row.index("\n|")] if "\n|" in row else row
+
+    cells = row.split("|")
+    status = cells[3] if len(cells) > 3 else row
+
+    # The label a reader sees first, not merely a label somewhere in a very long
+    # cell. Mutation testing: restoring "**Partly fixed.**" as the opener passed
+    # while "OPS-BLOCKED" survived further down the same cell.
+    opener = status.strip()[:220]
+    assert not re.match(r"\*\*Partly", opener), (
+        "D7's status opens with 'Partly ...', which reads as unfinished code "
+        "when the control is implemented and the gap is a deployment decision")
+    assert re.search(r"IMPLEMENTED", opener), (
+        "D7's status does not open by saying the control is implemented")
+    assert re.search(r"(CLIENT|VENDOR|OPS)-BLOCKED|CLIENT-DEFERRED", opener), (
+        "D7's status does not open with a classification for what is missing")
+
+    # And the clause about alert delivery specifically has to carry the label --
+    # a header label alone let "(1) Alert delivery to a human -- open" pass.
+    delivery = re.search(r"Alert delivery[^.]{0,120}", status, re.I)
+    assert delivery, "D7 no longer names alert delivery as the missing piece"
+    assert "OPS-BLOCKED" in delivery.group(0), (
+        f"D7 names alert delivery without classifying it: "
+        f"{delivery.group(0).strip()[:160]}")
+    assert "OPS-BLOCKED" in week7, (
+        "the roadmap no longer classifies alert delivery, so D7 now points at "
+        "a label that is not there")
+
+    # Neither document may claim the thing that does not exist.
+    for label, text in (("D7", row), ("the Week 7 section", week7)):
+        for match in re.finditer(r"Alertmanager", text):
+            clause = text[max(0, text.rfind(".", 0, match.start())):
+                          (text.find(".", match.end()) + 1) or len(text)]
+            assert re.search(r"\b(no|not|without|missing|deployed nowhere|"
+                             r"would be|needs)\b", clause, re.I), (
+                f"{label} mentions an Alertmanager without saying there is "
+                f"none: {clause.strip()[:200]}")
+
+
 def test_the_error_rate_slo_is_marked_optional_not_missing(week7):
     """The brief says "one alert on a reconciliation break OR an error-rate
     SLO". The break alert exists, so the SLO is an alternative that was not
