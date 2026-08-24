@@ -65,6 +65,11 @@ _CITATION = re.compile(
 # hedge excuse a broken reference.
 _FORWARD_LOOKING = re.compile(
     r"does not exist on `main`|arrives with|only on that branch|not on `main` yet"
+    # A citation can also be unresolved because the file was REMOVED. Naming a
+    # retired module while saying it is gone is how the record of a reversal
+    # stays readable -- the ZIP3 fair-lending screen, deleted on 2026-08-24 by
+    # client decision, is cited in four documents that explain why it went.
+    r"|deleted, not on `main`|deleted -- not on `main`|since deleted"
     r"|will be added|on that PR's branch"
     # A path may also be cited as an example of one that does NOT resolve --
     # CLAUDE.md does exactly that with `kal_docs/10_WEEK_PLAN.md`, which never

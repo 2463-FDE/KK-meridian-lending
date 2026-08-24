@@ -33,10 +33,29 @@ CARD = pathlib.Path(__file__).resolve().parents[3] / "docs" / "model_card.md"
 _ADVERTISED = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/[A-Za-z0-9/_{}-]+)`")
 
 
+#: A route the card names as GONE is not advertised, it is recorded.
+#:
+#: The ZIP3 disparate-impact route was retired on 2026-08-24 when the client
+#: prohibited ZIP/ZIP3 as a protected-class proxy, and the card still names it so
+#: a reader can see what was removed and why. Demanding that every route written
+#: in the card be served would force the card to either stop explaining the
+#: removal or start advertising a 404 -- so a line that says the route is gone is
+#: read as history, on the same line, the way the citation guards do it.
+_RETIRED_ON_THIS_LINE = re.compile(
+    r"no longer registered|retired|deleted|not on `main`|removed", re.I)
+
+
 def _advertised_routes():
     if not CARD.is_file():
         return []
-    return _ADVERTISED.findall(CARD.read_text(encoding="utf-8"))
+
+    advertised = []
+    for line in CARD.read_text(encoding="utf-8").splitlines():
+        for method, path in _ADVERTISED.findall(line):
+            if _RETIRED_ON_THIS_LINE.search(line):
+                continue
+            advertised.append((method, path))
+    return advertised
 
 
 def _registered():

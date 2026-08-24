@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS applicants (
     email       TEXT,
     phone       TEXT,
     address     TEXT,
-    zip_code    TEXT,             -- W8: fair-lending ZIP-level check needs this; address alone is free text
+    zip_code    TEXT,             -- postal address component. Added for a ZIP3 fair-lending screen (db/migrations/0014); that screen was retired on 2026-08-24 when the client prohibited ZIP/ZIP3 as a protected-class proxy. No runtime path groups decisions by it
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 

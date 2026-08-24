@@ -61,13 +61,24 @@ class ApplicationIn(BaseModel):
     @field_validator("zip_code")
     @classmethod
     def _validate_zip(cls, v: Optional[str]) -> Optional[str]:
-        # W8: fair-lending ZIP-level check needs a real, consistent ZIP --
-        # not "whatever the applicant typed" buried inside free-text address.
+        # A postal address needs a consistent ZIP -- not "whatever the applicant
+        # typed" buried inside free-text address. Normalising it here is what
+        # makes the stored address usable at all.
+        #
+        # *Historical:* this comment said the field existed because "W8:
+        # fair-lending ZIP-level check needs a real, consistent ZIP". That
+        # screen was retired on 2026-08-24 when the client prohibited ZIP and
+        # ZIP3 as a protected-class proxy, so the reason is now postal-address
+        # normalisation and nothing else. The validation itself is unchanged.
         if v is None or v.strip() == "":
             return v
         digits = re.sub(r"\D", "", v)
         if len(digits) == 9:
-            digits = digits[:5]  # ZIP+4 -- the base 5-digit ZIP is all the fairness check needs
+            # ZIP+4 collapses to the base 5-digit ZIP: the +4 is a delivery
+            # segment, not part of the address a person would write. Nothing
+            # downstream groups by any part of this -- see
+            # db/tests/test_no_runtime_protected_class_proxy.py.
+            digits = digits[:5]
         if len(digits) != 5:
             raise ValueError("zip_code must be a 5-digit US ZIP (optionally ZIP+4)")
         return digits

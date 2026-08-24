@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, config, db, decision_state, disclosure_graph, fair_lending, intake, kg, models, reason_distribution
+from .. import clients, config, db, decision_state, disclosure_graph, intake, kg, models, reason_distribution
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -655,22 +655,6 @@ def list_applications(
         for a, name in session.execute(stmt).all()
     ]
     return Page(items=items, total=total, limit=limit, offset=offset)
-
-
-@router.get("/fair-lending/zip-analysis")
-def get_zip_disparate_impact_report(
-    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
-    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
-):
-    """W8: ZIP-level disparate-impact screen (fair_lending.py). Registered
-    before /{app_id} -- a literal path segment must be matched ahead of a
-    catch-all path parameter, or "fair-lending" would be parsed as an app_id
-    and 422 on the int conversion instead of ever reaching this route.
-    Staff only: approval-rate breakdowns are underwriting-sensitive, same bar
-    as get_application_financials below.
-    """
-    _require_staff(x_user_role, x_internal_token)
-    return fair_lending.zip_disparate_impact_report()
 
 
 @router.get("/fair-lending/reason-distribution")

@@ -27,7 +27,13 @@ class Applicant(Base):
     email: Mapped[str | None] = mapped_column(String, nullable=True)
     phone: Mapped[str | None] = mapped_column(String, nullable=True)
     address: Mapped[str | None] = mapped_column(String, nullable=True)
-    zip_code: Mapped[str | None] = mapped_column(String, nullable=True)  # W8: fair-lending ZIP-level check
+    # Part of the postal address, and nothing more. It was added in
+    # `db/migrations/0014_add_applicant_zip.sql` to back a ZIP3 fair-lending
+    # screen; the client prohibited ZIP and ZIP3 as a protected-class proxy on
+    # 2026-08-24, that screen is retired, and no runtime path groups decisions by
+    # this field any more. Kept because an address without a ZIP is an
+    # incomplete address, not because fairness analysis needs it.
+    zip_code: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

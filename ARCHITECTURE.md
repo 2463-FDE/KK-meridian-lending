@@ -270,9 +270,12 @@ model score/version, top features, reason codes — so a decision can be proven,
 asserted. `offers.decision_id` is now FK'd to `decisions.app_id` with a **unique**
 constraint, making offer creation idempotent per decision and closing a leaked-decision
 path where a caller-supplied `decision_id` for an unrelated application used to be trusted
-verbatim. `applicants.zip_code` (Week 8, `db/migrations/0014_add_applicant_zip.sql`) backs the ZIP3-level
-four-fifths-rule disparate-impact screen (`fair_lending.py`) — no field existed to check this
-against before. `payments.pan`/`cvv` are **gone, not dormant**: the writers went first (PR #8,
+verbatim. `applicants.zip_code` (`db/migrations/0014_add_applicant_zip.sql`) is a postal-address
+component. It was added in Week 8 to back a ZIP3-level four-fifths-rule screen; **the client
+prohibited ZIP and ZIP3 as a protected-class proxy on 2026-08-24**, that screen and its route are
+retired, and no runtime path groups decisions by this field. The column stays because an address
+without a ZIP is an incomplete address. *This sentence said the field "backs the ZIP3-level
+four-fifths-rule disparate-impact screen (`fair_lending.py`)" until that decision.* `payments.pan`/`cvv` are **gone, not dormant**: the writers went first (PR #8,
 PR #11), `db/migrations/0029_payments_backfill_last4.sql` back-filled `last4`, and
 `db/migrations/0031_drop_payments_pan_cvv.sql` dropped both columns behind a gate that refuses
 without a completed back-fill and an explicit operator acknowledgement. `db/init/001_schema.sql`

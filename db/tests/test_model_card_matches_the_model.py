@@ -270,21 +270,40 @@ def test_the_card_claims_no_more_fairness_validation_than_exists():
     )
 
 
-def test_the_outcome_screen_is_not_presented_as_model_validation():
-    """The distinction the card itself insists on, kept mechanical.
+def test_the_zip_screen_is_named_only_as_retired_and_prohibited():
+    """The card used to have to say the ZIP screen was an outcome monitor and
+    not model validation. The client removed the screen instead.
 
-    The ZIP screen watches recorded approvals. Reading it as validation of the
-    model's scores is the specific misreading the Week 8 brief warns about, and
-    the card is where someone would acquire it.
+    Client decision, 2026-08-24: no protected-class collection, no approved
+    proxy, and none may be created from ZIP or ZIP3. So the card may still name
+    the screen -- the record of a reversal is worth keeping -- but only as
+    something retired, never as a control that exists. A card that reintroduced
+    it as present-tense fairness evidence would be advertising a control the
+    client prohibited.
     """
     body = _card()
     if "fair_lending" not in body and "zip-analysis" not in body:
-        pytest.skip("the card no longer describes the ZIP outcome screen")
+        return  # the card no longer mentions it at all, which is also fine
 
-    assert re.search(r"not\s+(a\s+)?model validation|outcome monitor", body, re.I), (
-        "the card describes the ZIP screen without saying it is an outcome "
-        "monitor rather than model validation"
-    )
+    assert re.search(r"retired|deleted|no longer registered|prohibit", body, re.I), (
+        "the card names the ZIP screen without saying it is retired; it was "
+        "removed on 2026-08-24 by client decision")
+
+    # And it must not present any runtime fairness analysis as existing.
+    for match in re.finditer(r"fair_lending|zip-analysis|ZIP3", body):
+        window = body[max(0, match.start() - 320):match.end() + 320]
+        assert re.search(r"retired|deleted|no longer|prohibit|was\s|removed",
+                         window, re.I), (
+            "the card mentions the ZIP screen in a passage that does not mark "
+            f"it as gone: ...{window[280:460].strip()}...")
+
+    # Whitespace-normalised: the sentence wraps in the document, and a check
+    # that depends on where a paragraph happens to wrap is a check about
+    # formatting rather than about the claim.
+    flat = re.sub(r"\s+", " ", body)
+    assert re.search(r"No runtime fairness analysis is permitted", flat, re.I), (
+        "the card does not state the current rule -- that no runtime fairness "
+        "evaluation is permitted at all")
 
 
 # --------------------------------------------------------------------------

@@ -83,21 +83,31 @@ origination — see above):
 - **No fairness/disparate-impact testing has ever been run against this
   model.** Still true, and worth stating precisely, because a related control
   now exists and must not be mistaken for this one:
-  - What EXISTS (PR #6, implemented and unit-tested): a **portfolio-level**
-    ZIP3 four-fifths-rule screen over recorded *approval outcomes*
-    (`origination-service/app/fair_lending.py`, staff-only
-    `GET /applications/fair-lending/zip-analysis`,
-    `tests/test_fair_lending.py`). `applicants.zip_code`
-    (`db/migrations/0014`) is the field that made it possible.
-  - What does NOT exist: any fairness evaluation of **the model itself** — no
-    protected-class or proxy analysis of its scores, no disparate-impact
-    testing of `creditai-2026.1`, no adverse-impact ratio computed on model
-    output as distinct from final outcomes, and no vendor fairness
-    documentation.
-  - The screen is therefore an outcome monitor, **not** model validation, and
-    it is local/training-only: it has never been run against production data,
-    because no production environment exists. No compliance conclusion should
-    be drawn from it.
+  - What EXISTS: nothing that evaluates fairness. **No runtime fairness
+    analysis is permitted at all**, by client decision of 2026-08-24 — no real
+    protected-class data may be collected, there is no approved proxy, and one
+    may not be created from ZIP, ZIP3 or any similar field.
+  - What was REMOVED, and why it is not coming back under another name: a
+    portfolio-level ZIP3 four-fifths-rule screen over recorded approval outcomes
+    (`origination-service/app/fair_lending.py` — deleted, not on `main`) at
+    staff-only `GET /applications/fair-lending/zip-analysis` (retired, no longer registered).
+    ZIP3 was a
+    geographic field standing in for nothing that had been validated as a
+    protected-class proxy, and the client has now prohibited exactly that
+    substitution. `db/tests/test_no_runtime_protected_class_proxy.py` fails if
+    the module, the route, or a replacement proxy reappears.
+  - What is PERMITTED instead: evaluation against a single isolated **offline,
+    synthetic** fixture supplied by the client
+    (`fixtures/offline_fairness_training/`), which is not present yet — see
+    `docs/DEBT.md` **D24**. Its labels may never reach a model input, an
+    application record, a decision, a database row, a trace, telemetry or
+    consumer output.
+  - `applicants.zip_code` remains a postal-address component. It is no longer
+    fairness evidence and no runtime path groups decisions by it.
+  - Still absent, and unchanged by any of the above: any fairness evaluation of
+    **the model itself** — no protected-class or proxy analysis of its scores, no
+    disparate-impact testing of `creditai-2026.1`, and no vendor fairness
+    documentation. **No fairness claim may be made, and none is made here.**
 - **No model documentation from the vendor is stored in this repo** beyond
   the version string — no card, no methodology, from `creditai-2026.1`
   itself. This card documents how *Meridian* uses the model, not how the
