@@ -336,6 +336,52 @@ def test_an_http_screen_without_a_request_key_is_refused(monkeypatch):
 # Selection: a stub outside development is a configuration error.
 # --------------------------------------------------------------------------
 
+def test_the_factory_returns_one_stub_so_replay_survives(monkeypatch):
+    """The replay guarantee has to hold for a caller that uses the factory.
+
+    Found in review of PR #75: `provider()` built a fresh `StubScreeningProvider`
+    per call, so its `_by_key` history started empty every time. Two calls with
+    one `request_key` each performed a real screen -- two pieces of evidence
+    about one subject, which is the defect the idempotency contract exists to
+    prevent, reintroduced by the factory rather than by the provider.
+    """
+    monkeypatch.setattr(screening, "ALLOW_SCREENING_STUB", True)
+    screening.stub_provider.reset()
+
+    try:
+        first = screening.provider().screen(name="Test Subject", dob=None,
+                                            address=None, request_key="factory-1")
+        second = screening.provider().screen(name="Test Subject", dob=None,
+                                             address=None, request_key="factory-1")
+
+        assert screening.provider() is screening.provider(), (
+            "the factory hands out a new stub each call, so no replay history "
+            "can accumulate")
+        assert second == first
+        assert screening.stub_provider.screen_count == 1, (
+            "the second call through the factory performed a real screen")
+    finally:
+        screening.stub_provider.reset()
+
+
+def test_a_shared_stub_still_screens_a_genuinely_new_request(monkeypatch):
+    """Sharing the instance must not turn the replay map into a cache of
+    verdicts: a different key is a different onboarding step and screens
+    again."""
+    monkeypatch.setattr(screening, "ALLOW_SCREENING_STUB", True)
+    screening.stub_provider.reset()
+
+    try:
+        screening.provider().screen(name="Test Subject", dob=None, address=None,
+                                    request_key="factory-2")
+        screening.provider().screen(name="Test Subject", dob=None, address=None,
+                                    request_key="factory-3")
+
+        assert screening.stub_provider.screen_count == 2
+    finally:
+        screening.stub_provider.reset()
+
+
 def test_the_stub_is_selected_only_in_a_development_environment(monkeypatch):
     monkeypatch.setattr(screening, "ALLOW_SCREENING_STUB", True)
     assert isinstance(screening.provider(), StubScreeningProvider)

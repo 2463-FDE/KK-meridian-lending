@@ -264,6 +264,17 @@ class HttpScreeningProvider:
                 "the screening provider's response could not be read") from None
 
 
+#: One stub for the process, not one per call.
+#:
+#: The stub's replay guarantee lives in its own `_by_key` map, so a factory that
+#: returned a fresh instance each time would hand every caller an empty history:
+#: two calls with one `request_key` would each perform a real screen, and the
+#: seam's central promise would hold only for a caller that happened to keep the
+#: instance. Review of PR #75 caught exactly that. `decision-service/app/bureau.py`
+#: already solved it the same way -- one module-level `stub_client`.
+stub_provider = StubScreeningProvider()
+
+
 def provider() -> SanctionsScreeningProvider:
     """The configured provider.
 
@@ -273,7 +284,11 @@ def provider() -> SanctionsScreeningProvider:
     as production: a container that boots without one gets the real shape, and a
     deploy that forgot to configure a provider fails closed at the first screen
     rather than quietly clearing everyone.
+
+    The stub is shared; the HTTP provider is not, because it holds no state --
+    its deduplication is the provider's, keyed on the forwarded
+    `Idempotency-Key`, which is where the real guarantee has to live.
     """
     if ALLOW_SCREENING_STUB:
-        return StubScreeningProvider()
+        return stub_provider
     return HttpScreeningProvider()
