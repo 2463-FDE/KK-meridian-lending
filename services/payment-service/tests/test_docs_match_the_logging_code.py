@@ -156,6 +156,24 @@ FALSE_CLAIMS = [
         re.compile(r"\(\s*PAN\s*,\s*CVV\s*,\s*SSN\s*\)\s*at\s+INFO", re.IGNORECASE),
         "servicing's charge logs loan_id/amount/method; it never receives a PAN (ADR 0008)",
     ),
+    (
+        # A different shape of the same class, and the one that outlived every
+        # check here: not "we log a PAN" but "the COLUMNS are still there".
+        # ARCHITECTURE.md said `payments.pan`/`cvv` "survive only as nullable
+        # legacy columns for rows written before tokenization" for two weeks
+        # after db/migrations/0031 dropped them and 001_schema.sql stopped
+        # creating them. A reader auditing PCI scope from that sentence would
+        # look for cardholder data that is not in the table -- and, worse, would
+        # believe historical rows still hold it.
+        re.compile(
+            r"\b(pan|cvv)\b[^.\n|]{0,90}\b(survive|survives|remain|remains|still)\b"
+            r"[^.\n|]{0,60}\b(nullable|legacy|column|columns)\b",
+            re.IGNORECASE,
+        ),
+        "db/migrations/0031 dropped payments.pan/cvv and db/init/001_schema.sql "
+        "no longer creates them, so neither a migrated nor a fresh database has "
+        "either column (D5b/D13)",
+    ),
 ]
 
 
