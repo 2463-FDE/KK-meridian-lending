@@ -245,10 +245,29 @@ def test_the_review_queue_destination_is_recorded_as_delivered(week7):
     assert re.search(r"in-app|/reconciliation", week7, re.I), (
         "the Week 7 section does not name the in-app queue as the authorised "
         "destination, so review candidates read as having nowhere to go")
-    assert re.search(r"CLIENT-PROHIBITED|prohibit", week7, re.I), (
-        "the section does not record that external alert channels are "
-        "prohibited before the freeze -- without it the remaining block reads "
-        "as purely an operations decision a developer could resolve")
+    # The TOKEN, on the alert-delivery row itself. An earlier version of this
+    # assertion accepted the word "prohibit" anywhere in the Week 7 section, and
+    # a mutation that downgraded the row to plain OPS-BLOCKED and softened
+    # "prohibits" to "discourages" still passed -- the word survived in a summary
+    # paragraph two lines below. A classification that is only implied by nearby
+    # prose is the thing this file exists to refuse.
+    delivery = [line for line in week7.splitlines()
+                if "Alert delivery to a human" in line and "breaks" in line]
+    assert delivery, "the Week 7 section has no alert-delivery row for breaks"
+    assert "CLIENT-PROHIBITED" in delivery[0], (
+        "the reconciliation-break alert row does not carry CLIENT-PROHIBITED. "
+        "Without it the block reads as purely an operations decision a developer "
+        "could resolve, when the client has also forbidden every external "
+        "channel before the freeze")
+
+    # And the token has to be defined where the others are, or it is a label a
+    # reader cannot resolve.
+    debt = _read(REPO / "docs" / "DEBT.md")
+    header = debt[:debt.index("| ID |")]
+    assert "CLIENT-PROHIBITED" in header, (
+        "CLIENT-PROHIBITED is used but not defined in DEBT.md's classification "
+        "header, so it reads as a synonym for CLIENT-BLOCKED -- which is the one "
+        "thing it is not")
 
 
 

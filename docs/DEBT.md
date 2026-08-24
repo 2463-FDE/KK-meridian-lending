@@ -20,8 +20,18 @@ as the Week 7/8 status blocks in [docs/ROADMAP.md](ROADMAP.md):
 **CLIENT-BLOCKED** (a policy or appetite decision), **CLIENT-DEFERRED** (the
 client has the question and has not answered it), **VENDOR-BLOCKED** (a taxonomy
 or document nobody has supplied), **OPS-BLOCKED** (a deployment decision -- where
-a page goes, who is on call, what escalates). "Open" on its own reads as unbuilt
+a page goes, who is on call, what escalates), **CLIENT-PROHIBITED** (the client
+has answered and the answer is *no*, for now). "Open" on its own reads as unbuilt
 code, and for several of these entries the code is not the missing part.
+
+**CLIENT-PROHIBITED is not CLIENT-BLOCKED or CLIENT-DEFERRED, and the difference
+decides what a reader may do next.** Blocked and deferred both mean a decision is
+outstanding, so the honest next step is to go and ask. Prohibited means the
+decision was made and it forbids the thing: asking again is not the next step,
+and building it "ready to switch on" is the defect rather than preparation. It
+arrived with the client's decision of 2026-08-24, which prohibited every external
+alert channel and any new credential before the freeze -- an item can therefore
+be OPS-BLOCKED and CLIENT-PROHIBITED at once (D7 is), and both have to lift.
 
 Every entry below was written from the citation site in the code, not from
 memory. The "Cited at" column is where to look for the current detail.
