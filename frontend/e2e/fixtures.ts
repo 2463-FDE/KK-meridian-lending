@@ -142,6 +142,29 @@ export async function signInAsStaff(page: Page, username = "underwriter"): Promi
   await expect(page).not.toHaveURL(/\/login$/, { timeout: 15_000 });
 }
 
+/** The seeded borrower (db/init/002_seed.sql): `maria` owns applicant 1,
+ * application 4471 and loan 4471. Same demo password as the staff logins, same
+ * local-training-repo caveat -- never a real credential. */
+export const SEEDED_BORROWER = { username: "maria", loanId: 4471 } as const;
+
+/** Sign in as the seeded borrower.
+ *
+ * Separate from `signInAsStaff` on purpose rather than passing "maria" to it:
+ * the two land on different role homes, and a borrower spec that silently
+ * depended on a staff helper would stop proving borrower access the moment the
+ * helper grew a staff-only step.
+ */
+export async function signInAsBorrower(
+  page: Page,
+  username: string = SEEDED_BORROWER.username,
+): Promise<void> {
+  await page.goto("/login");
+  await page.locator("#username").fill(username);
+  await page.locator("#password").fill("password");
+  await page.getByRole("button", { name: /Sign in/ }).click();
+  await expect(page).not.toHaveURL(/\/login$/, { timeout: 15_000 });
+}
+
 /** Resolve a REFER from the staff underwriting screen. `reason` is required by
  * the UI -- the Record button stays disabled until it is non-empty, which the
  * callers assert. */

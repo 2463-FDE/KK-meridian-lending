@@ -774,6 +774,40 @@ tbody tr:hover {
   font-size: 14px;
   text-align: right;
 }
+
+/* ---- payment allocation (what a payment was applied to) ------------------ */
+/*
+ * Sits inside a payment-history cell, so it has to stay compact: a borrower with
+ * a dozen payments should still be able to scan the table. Two columns, label
+ * left and amount right, on a fixed minimum width so the amounts line up down
+ * the column instead of jittering with the label length.
+ */
+.alloc {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  min-width: 168px;
+}
+.alloc-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.alloc-row dt {
+  color: var(--muted);
+}
+.alloc-row dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.alloc-empty {
+  display: inline-block;
+  font-size: 13px;
+  max-width: 220px;
+}
 .big-figure {
   font-size: 34px;
   font-weight: 700;
