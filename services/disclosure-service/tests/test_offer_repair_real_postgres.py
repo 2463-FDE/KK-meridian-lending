@@ -794,5 +794,3 @@ def test_a_freshly_created_offer_carries_the_breakdown_too(pg):
     assert d["requested_principal"] is not None and d["origination_fee"] is not None
     assert (round(d["requested_principal"] - d["origination_fee"], 2)
             == round(d["amount_financed"], 2))
-
-
