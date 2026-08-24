@@ -90,7 +90,10 @@ import httpx
 from decimal import Decimal, ROUND_HALF_UP
 
 from .logging_config import get_logger
-from . import db, processor
+from . import db, processor, review_signals
+# The one database error this module handles rather than propagates: a
+# settlement reference another capture already holds (see `_mark_captured`).
+from psycopg2.errors import UniqueViolation
 from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .processor import ChargeDeclinedError
 from .redactor import redact_dict, redact_str
@@ -237,8 +240,122 @@ def _servicing_auth_ok(loan_id: int | None = None) -> bool:
     return True
 
 
+def _mark_captured(payment_id: int, loan_id: int, *, auth_id: str,
+                   captured_at, processor_ref: str | None,
+                   correlation_id: str | None) -> None:
+    """Record the capture, and survive a settlement reference we already hold.
+
+    Three columns travel together here and each has a reason: `captured_at` never
+    moves separately from `auth_status`, because reconciliation scopes its window
+    on it while `created_at` is stamped when the row was still pending
+    (db/migrations/0040); `processor_ref` is the processor's own settlement
+    reference and the only join key a break report can name (0041); and
+    `capture_source = 'processor'` is what puts the row in scope for the
+    comparison at all (0042).
+
+    **`processor_ref` is UNIQUE**, so a settlement reference identifies exactly
+    one row. When a processor hands back a reference another capture already
+    carries, this UPDATE raises a unique violation -- and review of PR #79 found
+    what that cost: the money had already been authorised, the request then failed
+    on the write, and the `exact_provider_transaction_id` signal that collision
+    exists to raise could never be recorded. The one case the signal is for was
+    the one case unable to reach it.
+
+    So the collision is handled where it happens:
+
+      * the capture is still recorded. The card was charged; refusing to write
+        that down is the worst outcome available;
+      * `processor_ref` is left NULL on this row, because the reference belongs to
+        the other one and a UNIQUE index is not negotiable. Reconciliation
+        already has a name for a capture it cannot match by reference --
+        `unreferenced_capture`, reported as a break rather than skipped (0041) --
+        and that is the honest state for this row;
+      * the review signal is raised, naming the payment that holds the reference,
+        so a human sees both ends of the collision.
+
+    The unique index is untouched. This observes its refusal rather than relaxing
+    it.
+    """
+    try:
+        db.query(
+            "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
+            "captured_at = COALESCE(%s::timestamptz, now()), "
+            "processor_ref = %s, capture_source = 'processor' WHERE id = %s",
+            (auth_id, captured_at, processor_ref, payment_id),
+        )
+    except UniqueViolation:
+        # Only the reference can collide in this statement: `id` is this row's own
+        # primary key and nothing else here is constrained.
+        log.warning(
+            "provider settlement reference already recorded against another "
+            "capture -- recording this capture without it and raising a review "
+            "signal payment_id=%s correlation_id=%s", payment_id, correlation_id)
+        db.query(
+            "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
+            "captured_at = COALESCE(%s::timestamptz, now()), "
+            "capture_source = 'processor' WHERE id = %s",
+            (auth_id, captured_at, payment_id),
+        )
+        if processor_ref:
+            review_signals.record_exact_provider_reference_signal(
+                payment_id=payment_id, loan_id=loan_id,
+                processor_ref=processor_ref, correlation_ref=correlation_id)
+
+
+def _flag_review_signals(payment_id: int, loan_id: int,
+                         correlation_id: str | None,
+                         processor_ref: str | None) -> None:
+    """Record any review signals this capture raises. Never raises, never blocks.
+
+    Two questions, asked in the order the evidence appears:
+
+      * did the processor hand back a settlement reference another capture
+        already holds? That is an exact-duplicate signal at any distance in time.
+      * is there an earlier capture on this loan, for the same amount, from the
+        same source, on the same channel, inside 30 minutes? That is a heuristic
+        review candidate -- all four factors, per the client's decision.
+
+    Both are review-only. Neither reverses, refunds, blocks, reallocates or
+    re-applies anything, and neither returns a value the caller acts on.
+    """
+    if processor_ref:
+        try:
+            others = db.query(
+                "SELECT 1 FROM payments WHERE processor_ref = %s AND id <> %s LIMIT 1",
+                (processor_ref, payment_id),
+            )
+        except Exception as exc:  # noqa: BLE001 -- observation must not fail a capture
+            log.error("could not check for a provider-reference collision "
+                      "payment_id=%s: %s", payment_id, type(exc).__name__)
+            others = []
+        if others:
+            review_signals.record_exact_provider_reference_signal(
+                payment_id=payment_id, loan_id=loan_id,
+                processor_ref=processor_ref, correlation_ref=correlation_id)
+
+    try:
+        candidate = db.query(
+            "SELECT id, loan_id, amount, method, source_ref, captured_at, "
+            "       correlation_id "
+            "FROM payments WHERE id = %s",
+            (payment_id,),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("could not read back the capture for review screening "
+                  "payment_id=%s: %s", payment_id, type(exc).__name__)
+        return
+    if candidate:
+        review_signals.record_heuristic_signal_if_any(candidate[0])
+
+
 def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempotency_key: str,
-           brand: str = None, name: str = None, method: str = "card") -> dict:
+           brand: str = None, name: str = None, method: str = "card",
+           # An opaque, non-identifying handle for the funding source, supplied
+           # by the capture boundary (db/migrations/0044). Stored so the
+           # duplicate-review heuristic can require "same source" rather than
+           # guessing from loan and amount; never used for anything else, and
+           # None when the caller cannot prove one.
+           source_ref: str = None) -> dict:
     amount = _to_cents(amount)
     # The key is caller-supplied free text, and every branch below writes it
     # into a log line or an error message. The FIRST log goes through
@@ -287,11 +404,12 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
     # yet confirmed at this point, on purpose (see below).
     inserted = db.query(
         "INSERT INTO payments (loan_id, last4, brand, amount, method, idempotency_key, "
-        "auth_status, correlation_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s) "
+        "auth_status, correlation_id, source_ref) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s) "
         "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
         "RETURNING id, loan_id, amount, correlation_id",
-        (loan_id, last4, brand, amount, method, idempotency_key, correlation_id),
+        (loan_id, last4, brand, amount, method, idempotency_key, correlation_id,
+         source_ref),
     )
     if inserted:
         row = inserted[0]
@@ -319,48 +437,26 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # Review fix: auth_status and authorization_id used to be written in
         # two separate statements -- a crash between them left 'captured'
         # with no authorization id on record. One UPDATE, one atomic write.
-        db.query(
-            "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
-                # captured_at travels with auth_status, never separately.
-                # Reconciliation scopes its window on it; created_at is
-                # stamped at INSERT while the row is still pending, so an
-                # authorization that crosses midnight lands the capture in
-                # the previous day's window and reports a false break
-                # (db/migrations/0040).
-                #
-                # Review fix: this said `now()` unconditionally, because
-                # authorize_charge() returned only the authorization id and
-                # discarded the processor's own timestamp. So the fix landed for
-                # recovered pending rows and not for the FIRST attempt -- the
-                # path almost every capture takes. A charge whose processor
-                # confirmation and this UPDATE straddle midnight (a slow
-                # authorization, a clock skew between us and the processor) was
-                # scoped to the wrong reconciliation day and produced exactly the
-                # false break 0040 exists to prevent.
-                #
-                # COALESCE, not a bare value: a processor that reports no
-                # timestamp leaves our clock as the best available estimate,
-                # which is the previous behaviour -- now a fallback rather than
-                # the rule.
-                "captured_at = COALESCE(%s::timestamptz, now()), "
-                # The processor's own settlement reference (db/migrations/0041).
-                # Written here and nowhere else, in the same statement as the
-                # status, so a captured row cannot exist without whatever join
-                # key the processor gave us for it. NULL when the processor
-                # reports none -- reconciliation then reports the row as an
-                # unreferenced_capture break rather than skipping it.
-                "processor_ref = %s, "
-                # And the row is IN SCOPE for reconciliation, because a processor
-                # authorized it (db/migrations/0042). Review fix: this was
-                # missing, so every newly captured payment kept 0042's default of
-                # 'unknown' and servicing's `capture_source = 'processor'` filter
-                # dropped it from the comparison. The control would have reported
-                # ok while comparing a settlement file against a nearly empty
-                # ledger side -- the vacuous success it exists to prevent,
-                # arriving through the one column that decides what is compared.
-                "capture_source = 'processor' WHERE id = %s",
-            (auth.authorization_id, auth.captured_at, auth.processor_ref, payment_id),
-        )
+        # One statement, and it survives a settlement reference we already
+        # hold -- see `_mark_captured` for what a collision costs if it does not.
+        _mark_captured(payment_id, row["loan_id"], auth_id=auth.authorization_id,
+                       captured_at=auth.captured_at,
+                       processor_ref=auth.processor_ref,
+                       correlation_id=correlation_id)
+        # Flag for human review, AFTER the money path has done its work and
+        # WITHOUT affecting it. Both calls swallow their own failures
+        # (review_signals._record) because a review queue must never be able to
+        # fail a capture: the queue is an observation about the money path, not
+        # part of it.
+        #
+        # The provider-reference signal comes first because the collision is
+        # already visible here: the processor handed back a settlement reference,
+        # and if another capture holds it, that is an exact-duplicate signal
+        # regardless of how long ago the other one was. The unique index on
+        # `payments.processor_ref` is untouched -- this observes the collision, it
+        # does not permit a second row.
+        _flag_review_signals(payment_id, row["loan_id"], correlation_id,
+                             auth.processor_ref)
         applied = _apply_via_servicing(loan_id, row["amount"], payment_id, correlation_id)
     else:
         row = db.query(
@@ -391,6 +487,19 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         log.info("payment recognised as a repeat correlation_id=%s payment_id=%s "
                  "loan_id=%s", correlation_id, row["id"], row["loan_id"])
         payment_id = row["id"]
+        # The idempotency key repeated, regardless of elapsed time -- an
+        # exact-duplicate SIGNAL under the client's decision of 2026-08-24, and
+        # nothing more. The controls below still decide the outcome: no second
+        # row, no second authorization, the original result replayed. One review
+        # item per payment per signal type, so a client retrying ten times gives
+        # an operator one thing to look at.
+        #
+        # Recorded before the conflict check below, deliberately: a key reused
+        # for a DIFFERENT loan or amount raises IdempotencyKeyConflict, and that
+        # attempt is the one most worth a human seeing.
+        review_signals.record_exact_idempotency_key_signal(
+            payment_id=payment_id, loan_id=row["loan_id"],
+            correlation_ref=correlation_id)
         # Review fix: row["amount"] comes back from Postgres as a Decimal
         # (psycopg2 NUMERIC mapping) while `amount` here is a plain float --
         # Decimal('10.99') != 10.99 under Python's float/Decimal comparison,
@@ -483,23 +592,17 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 # its own timestamp our clock IS the capture time.
                 captured_at = auth.captured_at
                 processor_ref = auth.processor_ref
-            db.query(
-                "UPDATE payments SET auth_status = 'captured', authorization_id = %s, "
-                # captured_at travels with auth_status, never separately
-                # (db/migrations/0040). COALESCE so a recovered capture keeps
-                # the processor's own timestamp and a fresh one uses ours.
-                "captured_at = COALESCE(%s::timestamptz, now()), "
-                # The settlement reference, from whichever branch above ran
-                # (db/migrations/0041). A recovered capture inherits the
-                # reference the processor already assigned it, so the row still
-                # matches the settlement line written on the original day.
-                "processor_ref = %s, "
-                # In scope for reconciliation either way: both branches reaching
-                # this statement have a processor authorization behind them, one
-                # recovered and one fresh (db/migrations/0042).
-                "capture_source = 'processor' WHERE id = %s",
-                (auth_id, captured_at, processor_ref, payment_id),
-            )
+            _mark_captured(payment_id, row["loan_id"], auth_id=auth_id,
+                           captured_at=captured_at, processor_ref=processor_ref,
+                           correlation_id=correlation_id)
+            # Screen the recovered capture too. Review of PR #79 found that only
+            # the first-attempt path was screened, so a capture completing on the
+            # retry path -- the pending-authorization recovery, which is exactly
+            # the path a duplicate charge arrives on -- raised no heuristic
+            # signal at all. Same swallow-failures behaviour: an observation must
+            # never fail a payment.
+            _flag_review_signals(payment_id, row["loan_id"], correlation_id,
+                                 processor_ref)
 
         if row["applied_at"] is None:
             # Review fix: the original request's apply either never ran or

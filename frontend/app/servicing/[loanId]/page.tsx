@@ -265,6 +265,10 @@ function LoanDetailContent() {
         processor_token: token.processor_token,
         last4: token.last4,
         brand: token.brand,
+        // The processor's handle for the funding source (a mock one here). Sent
+        // so servicing can flag a genuinely repeated payment for human review
+        // without guessing from loan and amount -- see db/migrations/0044.
+        source_ref: token.source_ref,
         amount: parseFloat(payAmount || "0"),
         method: "card",
         idempotency_key: payIdempotencyKey,

@@ -23,6 +23,8 @@ Both facts are asserted on both branches, and the fallbacks are asserted too: a
 processor that reports no timestamp must not block the capture, and a missing
 timestamp must not cost the reference.
 """
+import pathlib
+
 import pytest
 
 from app import payments, processor
@@ -47,7 +49,8 @@ class _FakeDb:
         if stmt.startswith("INSERT INTO payments"):
             # 0043 added correlation_id to the INSERT; unpacked strictly so a
             # dropped column fails here rather than storing a NULL.
-            loan_id, last4, brand, amount, method, key, correlation_id = params
+            (loan_id, last4, brand, amount, method, key, correlation_id,
+             source_ref) = params
             row = {"id": 501, "loan_id": loan_id, "amount": amount,
                    "auth_status": "pending", "applied_at": None,
                    "correlation_id": correlation_id}
@@ -212,6 +215,13 @@ def test_the_stub_reference_is_unique_per_idempotency_key():
 
 # --- the guard: neither column may drift away from the status write ----------
 
+def _payments_source() -> str:
+    """payments.py as text. Used where the property is about the code's shape --
+    which error it handles, which helper it calls -- rather than a statement."""
+    return (pathlib.Path(__file__).resolve().parents[1] / "app"
+            / "payments.py").read_text(encoding="utf-8")
+
+
 def _capture_statements():
     """The text of every `db.query(...)` call in payments.py that captures.
 
@@ -255,20 +265,17 @@ def test_every_capture_update_writes_both_the_time_and_the_reference():
     statements = _capture_statements()
 
     assert len(statements) == 2, (
-        "expected exactly the two capture paths -- first attempt and recovered "
-        "pending row -- and found %d. A third path would need the same two "
-        "columns and this guard would not have been read." % len(statements)
+        "expected exactly two capture statements -- the normal one and the "
+        "collision fallback, both inside payments.py::_mark_captured -- and "
+        "found %d. Both call sites (first attempt and recovered pending row) go "
+        "through that helper, so a third statement means a new capture path that "
+        "this guard has not been read for." % len(statements)
     )
     for stmt in statements:
         assert "captured_at = COALESCE(" in stmt, (
             "a capture UPDATE sets auth_status without taking captured_at from "
             "the processor, so a charge that straddles midnight is reconciled "
             "against the wrong day"
-        )
-        assert "processor_ref = %s" in stmt, (
-            "a capture UPDATE sets auth_status without processor_ref, so the "
-            "capture has no join key to the settlement file and reconciliation "
-            "reports it as unreferenced"
         )
         assert "capture_source = 'processor'" in stmt, (
             "a capture UPDATE sets auth_status without capture_source, so the "
@@ -277,6 +284,34 @@ def test_every_capture_update_writes_both_the_time_and_the_reference():
             "reports ok while comparing a settlement file against a ledger side "
             "the filter emptied"
         )
+
+    # `processor_ref` on exactly one of them, and the exception is deliberate.
+    #
+    # `payments.processor_ref` is UNIQUE, so a processor returning a reference
+    # another capture already holds cannot have it written here. That case used
+    # to fail the whole request after the card had been charged (PR #79 review,
+    # RS-001); it now records the capture WITHOUT the reference and raises an
+    # `exact_provider_transaction_id` review signal instead. A row with no
+    # reference is reported by reconciliation as an `unreferenced_capture` break
+    # rather than skipped, which is the honest state for a capture whose
+    # reference belongs to another row.
+    with_reference = [s for s in statements if "processor_ref = %s" in s]
+    assert len(with_reference) == 1, (
+        "expected exactly one capture statement to write processor_ref (the "
+        "normal path) and one to omit it (the unique-collision fallback); found "
+        "%d writing it" % len(with_reference)
+    )
+
+    source = _payments_source()
+    assert "except UniqueViolation" in source, (
+        "the collision fallback exists but nothing catches the unique violation "
+        "that reaches it, so a colliding settlement reference still fails the "
+        "request after the card was charged"
+    )
+    assert "record_exact_provider_reference_signal" in source, (
+        "a capture stored without its settlement reference raises no review "
+        "signal, so the collision is invisible to a human"
+    )
 
 
 def test_a_capture_is_marked_in_scope_for_reconciliation(fake, monkeypatch):

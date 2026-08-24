@@ -64,7 +64,8 @@ class _Db:
         self.calls.append((" ".join(sql.split()), params))
         stmt = sql.strip()
         if stmt.startswith("INSERT"):
-            (loan_id, last4, brand, amount, method, key, correlation_id) = params
+            (loan_id, last4, brand, amount, method, key, correlation_id,
+             source_ref) = params
             if key is not None and key in self._by_key:
                 return []
             row = {"id": self._next_id, "loan_id": loan_id,

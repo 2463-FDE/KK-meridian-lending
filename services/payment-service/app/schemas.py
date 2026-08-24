@@ -74,6 +74,35 @@ class PaymentIn(BaseModel):
     # constraint -- a PAN or an SSN cannot be spelled with it, because neither
     # survives without its digits being contiguous.
     idempotency_key: str = Field(min_length=1, max_length=255)
+    # An opaque, non-identifying handle for the funding SOURCE -- in a real
+    # integration the processor's own vaulted-source id, arriving with the token
+    # (db/migrations/0044). It exists so the duplicate-review heuristic can
+    # require "same source" instead of guessing from loan and amount, which is
+    # what would flag a legitimate second installment.
+    #
+    # Optional, and its absence is meaningful: an ACH payment has no tokenizer
+    # and a caller may not have one, in which case the heuristic must not fire at
+    # all. Unknown is not a match.
+    #
+    # Shape-checked like `idempotency_key`, and for the same two reasons: it is
+    # caller-controlled and it is PERSISTED. It must never be a channel for the
+    # data the field named `pan` is rejected for, and it must never be derived
+    # from a PAN -- a card-correlatable value in a database column is the thing
+    # Weeks 5-8 spent their time removing.
+    source_ref: Optional[str] = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("source_ref")
+    @classmethod
+    def _source_ref_is_not_sensitive_content(cls, value):
+        if value is None:
+            return value
+        if redactor.looks_sensitive(value):
+            raise ValueError(
+                "source_ref must be an opaque handle for the funding source -- "
+                "not card or personal data, and not derived from a card number; "
+                "it is stored on the payments row"
+            )
+        return value
 
     @field_validator("processor_token")
     @classmethod

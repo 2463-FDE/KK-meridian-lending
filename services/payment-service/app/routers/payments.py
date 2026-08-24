@@ -58,7 +58,7 @@ def post_payment(
     try:
         return payments.charge(
             body.loan_id, body.processor_token, body.last4, body.amount, body.idempotency_key,
-            body.brand, body.name, body.method,
+            body.brand, body.name, body.method, body.source_ref,
         )
     except IdempotencyKeyConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc))
