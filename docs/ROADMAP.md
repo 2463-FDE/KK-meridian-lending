@@ -863,10 +863,10 @@ noisy, we just adjust to the bank number."
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Payments / Finance | `ledger_total()` sums **every row ever inserted into `payments`**, no date or loan filter; `settlement_total()` sums a fixed CSV covering one specific 7-day window across 3 loans — comparing an all-time, all-loan number to a 1-week, 3-loan number was never going to tie out | ⬜ Open | This isn't noise — the two numbers were never measuring the same population; a correctly-scoped comparison is required before "does it tie out" is even a meaningful question |
-| 2 | Finance | Whether the gap is random or a real, directional leak | ⬜ Open, but verified directional for the comparable slice: the seed data only carries payment rows through 06-03 while `settlement.csv` has captures for the same loans through 06-07 — settlement consistently shows *more* captures than the ledger has rows for | Directional, one-sided gaps are the signature of a real leak, not rounding noise — worth escalating, not writing off |
-| 3 | Payments | A real double-fund event exists in this exact month's data (loan 5582, two identical $410.50 charges 2 seconds apart) and nothing flags it | ⬜ Open | Confirmed: no trace ID or request ID connects the two `POST /payments` attempts — indistinguishable from two genuine charges without a human manually diffing rows by loan_id + amount + near-identical timestamp |
-| 4 | Payments | `payments` has **no `processor_ref` column at all** — even a correctly-scoped reconciliation could only match rows approximately (loan_id + amount + nearby date), never definitively by charge reference | ⬜ Open | This is itself part of why nobody can produce an exact break-report today, not just a missing job. Without the processor's own reference on the row there is no join key, so a comparison can only net totals per loan — and two wrong transactions on one loan then cancel, which is a control that reports success for having hidden its own findings |
+| 1 | Payments / Finance | `ledger_total()` sums **every row ever inserted into `payments`**, no date or loan filter; `settlement_total()` sums a fixed CSV covering one specific 7-day window across 3 loans — comparing an all-time, all-loan number to a 1-week, 3-loan number was never going to tie out | ⬜ Open as of 2026-08-05 | This isn't noise — the two numbers were never measuring the same population; a correctly-scoped comparison is required before "does it tie out" is even a meaningful question |
+| 2 | Finance | Whether the gap is random or a real, directional leak | ⬜ Open as of 2026-08-05, but verified directional for the comparable slice: the seed data only carries payment rows through 06-03 while `settlement.csv` has captures for the same loans through 06-07 — settlement consistently shows *more* captures than the ledger has rows for | Directional, one-sided gaps are the signature of a real leak, not rounding noise — worth escalating, not writing off |
+| 3 | Payments | A real double-fund event exists in this exact month's data (loan 5582, two identical $410.50 charges 2 seconds apart) and nothing flags it | ⬜ Open as of 2026-08-05 | Confirmed: no trace ID or request ID connects the two `POST /payments` attempts — indistinguishable from two genuine charges without a human manually diffing rows by loan_id + amount + near-identical timestamp |
+| 4 | Payments | `payments` has **no `processor_ref` column at all** — even a correctly-scoped reconciliation could only match rows approximately (loan_id + amount + nearby date), never definitively by charge reference | ⬜ Open as of 2026-08-05 | This is itself part of why nobody can produce an exact break-report today, not just a missing job. Without the processor's own reference on the row there is no join key, so a comparison can only net totals per loan — and two wrong transactions on one loan then cancel, which is a control that reports success for having hidden its own findings |
 
 *The four rows above are dated discovery evidence, not current guarantees.
 Since that measurement, transaction-level scheduled reconciliation,
@@ -882,9 +882,19 @@ shared nothing that would let anyone connect them in logs; that ID landed on
 2026-08-20, PR #56) and **one** control (a reconciliation
 job correctly scoped to `settlement.csv`'s actual date range and loan set,
 producing a break-report, plus one alert on a reconciliation break). Run
-against a sampled month (matching the settlement file), not full history —
-per the brief's own quota note. **One path, one control — not full
+against the sampled window the settlement file actually covers, not full
+history — per the brief's own quota note. **One path, one control — not full
 observability.**
+
+**What "sampled" means here, precisely.** The client's brief describes handing
+over "a month of payments"; the file committed to this repository is
+`db/settlement.csv`, and it is **12 rows spanning 2026-06-01 to 2026-06-07** —
+seven days, three loans, eleven captures and one refund. The control is
+exercised against that fixture and the window is derived from the file itself
+(`_settlement_by_ref` returns the min and max `settlement_date` present), so a
+longer file needs no code change. Calling the fixture a month would overstate
+the evidence by three weeks, and no rows are manufactured to close that gap: a
+full month of client data is not in this repository.
 
 > **Superseded 2026-08-20.** Both of Week 7's own deliverables have since
 > landed: the scoped reconciliation control (transaction-level, scheduled, with
@@ -908,6 +918,32 @@ captured-but-unapplied payments, which is a real partial answer to row 3's
 "nothing flags it". It flags the *unapplied* case, not the *double-charge*
 case, and it is on `main` now that PR #8 has merged. *Previously read "not on
 `main` yet".*
+
+### Status (2026-08-24): the week's own acceptance, and what is left classified
+
+The brief asked for **one instrumented path and one control** — structured
+tracing on the payment span, a scheduled reconciliation job with a
+break-report, and one alert on a reconciliation break **or** an error-rate SLO.
+Both are on `main`, and the rows above are the 2026-08-05 discovery evidence
+that led to them rather than current status:
+
+| Week 7 acceptance item | State on `main` | Evidence |
+|---|---|---|
+| Structured trace on the payment span | ✅ Closed | `correlation_id` minted at charge entry, sent to the processor as a header, passed to servicing with the apply, and stamped on every ledger entry the payment writes (`db/migrations/0043_correlation_id.sql`, PR #56) |
+| Cross-service correlation, charge → ledger | ✅ Closed | `services/payment-service/tests/test_correlation_id_survives_the_payment_path.py`, `services/servicing-service/tests/test_correlation_id_is_received_not_minted.py` |
+| Scheduled reconciliation | ✅ Closed | `services/servicing-service/app/reconcile_job.py` (exit 0 clean / 1 breach / 2 could-not-run), driven by `app.reconcile_scheduler` in `docker-compose.yml` — a separate process, not an in-process timer |
+| Transaction-level break report | ✅ Closed | comparison keyed on the processor's own reference (`payments.processor_ref`, `db/migrations/0041_payments_processor_ref.sql`); four break kinds, per capture rather than per loan |
+| Window / sampled scope | ✅ Closed | the window is read from the settlement file itself; see *What "sampled" means here* above |
+| Durable evidence of every run | ✅ Closed | `reconciliation_runs` (`db/migrations/0034_reconciliation_runs.sql`) — "when did this last agree?" has an answer |
+| Prometheus metric + reconciliation alert | ✅ Closed | `servicing_reconciliation_last_run_ok` and `servicing_reconciliation_last_success_timestamp` exported by `services/servicing-service/app/reconciliation.py`; `ReconciliationBreach`, `ReconciliationStale` and `ReconciliationMetricMissing` in `monitoring/alerts.yml`, with `db/tests/test_alert_rules_watch_metrics_that_exist.py` proving each rule watches a metric something actually emits |
+| Operator traceability | ✅ Closed | `docs/runbook.md` follows one payment across services by `correlation_id`, including the pre-0043 rows it cannot cover |
+| Payment error-rate SLO | **OPTIONAL — not required.** The brief says break **or** error-rate SLO, and the break alert satisfies it | no authoritative error-rate objective exists in this repository, and inventing a threshold would repeat the maker-checker mistake (`docs/DEBT.md` D8) |
+| Fuzzy double-fund detection (same loan, same amount, two references, short window) | **CLIENT-DEFERRED** | `docs/DEBT.md` **D22** holds the deferral, the three decisions it needs (raise a break at all? what window? what false-positive appetite?) and the follow-up. Pinned by `services/servicing-service/tests/test_double_capture_is_not_detected_yet.py`, which fails the day detection lands. Note that an exact duplicate `processor_ref` is a *different* problem and is already prevented; D22 is only the fuzzy case |
+| Alert delivery to a human | **OPS-BLOCKED** | the rules evaluate and are visible at `/alerts`, and there is deliberately no Alertmanager: where pages go, who is on call and what the escalation path is are deployment decisions this repository cannot make. Stated in the header of `monitoring/alerts.yml` and in `docs/runbook.md`, in the same words |
+
+**Week 7's required delivery is closed.** The three rows that are not ✅ are a
+client decision, an operations decision, and an item the brief made optional —
+none of them is unbuilt code waiting on this repository.
 
 ---
 
