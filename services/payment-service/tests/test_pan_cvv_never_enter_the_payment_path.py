@@ -86,7 +86,7 @@ class _RecordingDb:
             # Unpacked strictly rather than with a slice: a column silently
             # dropped from the statement should fail here, not store a NULL.
             (loan_id, last4, brand, amount, method, idempotency_key,
-             correlation_id) = params
+             correlation_id, source_ref) = params
             if idempotency_key is not None and idempotency_key in self._by_key:
                 return []
             row = {
@@ -277,6 +277,17 @@ def test_the_insert_names_only_non_card_columns(recording_db):
         # named rather than slipping in because it happened to hold no card data
         # on the day it was added.
         "correlation_id",
+        # An opaque handle for the funding SOURCE (db/migrations/0044), added so
+        # the duplicate-review heuristic can require "same source" rather than
+        # inferring one from loan and amount. Named here after exactly the look
+        # this allowlist is for: it is caller-supplied, it is persisted, and the
+        # question is whether it can carry card data. It cannot -- `PaymentIn`
+        # runs it through `redactor.looks_sensitive`, the same rule that guards
+        # `processor_token` and `idempotency_key`, and the mock tokenizer mints
+        # it as a random `src_mock_<uuid>` rather than deriving it from the PAN.
+        # A PAN-derived value here would be card-correlatable data in a column,
+        # which is what this file exists to prevent.
+        "source_ref",
     }
 
 

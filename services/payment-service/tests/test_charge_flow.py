@@ -81,7 +81,7 @@ class _FakeDb:
             # Unpacked strictly rather than with a slice: a column silently
             # dropped from the statement should fail here, not store a NULL.
             (loan_id, last4, brand, amount, method, idempotency_key,
-             correlation_id) = params
+             correlation_id, source_ref) = params
             if idempotency_key is not None and idempotency_key in self._by_key:
                 return []  # ON CONFLICT DO NOTHING -- a row already exists for this key
             # Real Postgres hands a NUMERIC column back as Decimal regardless

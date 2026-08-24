@@ -90,7 +90,7 @@ import httpx
 from decimal import Decimal, ROUND_HALF_UP
 
 from .logging_config import get_logger
-from . import db, processor
+from . import db, processor, review_signals
 from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .processor import ChargeDeclinedError
 from .redactor import redact_dict, redact_str
@@ -237,8 +237,60 @@ def _servicing_auth_ok(loan_id: int | None = None) -> bool:
     return True
 
 
+def _flag_review_signals(payment_id: int, loan_id: int,
+                         correlation_id: str | None,
+                         processor_ref: str | None) -> None:
+    """Record any review signals this capture raises. Never raises, never blocks.
+
+    Two questions, asked in the order the evidence appears:
+
+      * did the processor hand back a settlement reference another capture
+        already holds? That is an exact-duplicate signal at any distance in time.
+      * is there an earlier capture on this loan, for the same amount, from the
+        same source, on the same channel, inside 30 minutes? That is a heuristic
+        review candidate -- all four factors, per the client's decision.
+
+    Both are review-only. Neither reverses, refunds, blocks, reallocates or
+    re-applies anything, and neither returns a value the caller acts on.
+    """
+    if processor_ref:
+        try:
+            others = db.query(
+                "SELECT 1 FROM payments WHERE processor_ref = %s AND id <> %s LIMIT 1",
+                (processor_ref, payment_id),
+            )
+        except Exception as exc:  # noqa: BLE001 -- observation must not fail a capture
+            log.error("could not check for a provider-reference collision "
+                      "payment_id=%s: %s", payment_id, type(exc).__name__)
+            others = []
+        if others:
+            review_signals.record_exact_provider_reference_signal(
+                payment_id=payment_id, loan_id=loan_id,
+                processor_ref=processor_ref, correlation_ref=correlation_id)
+
+    try:
+        candidate = db.query(
+            "SELECT id, loan_id, amount, method, source_ref, captured_at, "
+            "       correlation_id "
+            "FROM payments WHERE id = %s",
+            (payment_id,),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("could not read back the capture for review screening "
+                  "payment_id=%s: %s", payment_id, type(exc).__name__)
+        return
+    if candidate:
+        review_signals.record_heuristic_signal_if_any(candidate[0])
+
+
 def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempotency_key: str,
-           brand: str = None, name: str = None, method: str = "card") -> dict:
+           brand: str = None, name: str = None, method: str = "card",
+           # An opaque, non-identifying handle for the funding source, supplied
+           # by the capture boundary (db/migrations/0044). Stored so the
+           # duplicate-review heuristic can require "same source" rather than
+           # guessing from loan and amount; never used for anything else, and
+           # None when the caller cannot prove one.
+           source_ref: str = None) -> dict:
     amount = _to_cents(amount)
     # The key is caller-supplied free text, and every branch below writes it
     # into a log line or an error message. The FIRST log goes through
@@ -287,11 +339,12 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
     # yet confirmed at this point, on purpose (see below).
     inserted = db.query(
         "INSERT INTO payments (loan_id, last4, brand, amount, method, idempotency_key, "
-        "auth_status, correlation_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s) "
+        "auth_status, correlation_id, source_ref) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s) "
         "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
         "RETURNING id, loan_id, amount, correlation_id",
-        (loan_id, last4, brand, amount, method, idempotency_key, correlation_id),
+        (loan_id, last4, brand, amount, method, idempotency_key, correlation_id,
+         source_ref),
     )
     if inserted:
         row = inserted[0]
@@ -361,6 +414,20 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                 "capture_source = 'processor' WHERE id = %s",
             (auth.authorization_id, auth.captured_at, auth.processor_ref, payment_id),
         )
+        # Flag for human review, AFTER the money path has done its work and
+        # WITHOUT affecting it. Both calls swallow their own failures
+        # (review_signals._record) because a review queue must never be able to
+        # fail a capture: the queue is an observation about the money path, not
+        # part of it.
+        #
+        # The provider-reference signal comes first because the collision is
+        # already visible here: the processor handed back a settlement reference,
+        # and if another capture holds it, that is an exact-duplicate signal
+        # regardless of how long ago the other one was. The unique index on
+        # `payments.processor_ref` is untouched -- this observes the collision, it
+        # does not permit a second row.
+        _flag_review_signals(payment_id, row["loan_id"], correlation_id,
+                             auth.processor_ref)
         applied = _apply_via_servicing(loan_id, row["amount"], payment_id, correlation_id)
     else:
         row = db.query(
@@ -391,6 +458,19 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         log.info("payment recognised as a repeat correlation_id=%s payment_id=%s "
                  "loan_id=%s", correlation_id, row["id"], row["loan_id"])
         payment_id = row["id"]
+        # The idempotency key repeated, regardless of elapsed time -- an
+        # exact-duplicate SIGNAL under the client's decision of 2026-08-24, and
+        # nothing more. The controls below still decide the outcome: no second
+        # row, no second authorization, the original result replayed. One review
+        # item per payment per signal type, so a client retrying ten times gives
+        # an operator one thing to look at.
+        #
+        # Recorded before the conflict check below, deliberately: a key reused
+        # for a DIFFERENT loan or amount raises IdempotencyKeyConflict, and that
+        # attempt is the one most worth a human seeing.
+        review_signals.record_exact_idempotency_key_signal(
+            payment_id=payment_id, loan_id=row["loan_id"],
+            correlation_ref=correlation_id)
         # Review fix: row["amount"] comes back from Postgres as a Decimal
         # (psycopg2 NUMERIC mapping) while `amount` here is a plain float --
         # Decimal('10.99') != 10.99 under Python's float/Decimal comparison,

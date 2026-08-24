@@ -47,7 +47,8 @@ class _FakeDb:
         if stmt.startswith("INSERT INTO payments"):
             # 0043 added correlation_id to the INSERT; unpacked strictly so a
             # dropped column fails here rather than storing a NULL.
-            loan_id, last4, brand, amount, method, key, correlation_id = params
+            (loan_id, last4, brand, amount, method, key, correlation_id,
+             source_ref) = params
             row = {"id": 501, "loan_id": loan_id, "amount": amount,
                    "auth_status": "pending", "applied_at": None,
                    "correlation_id": correlation_id}
