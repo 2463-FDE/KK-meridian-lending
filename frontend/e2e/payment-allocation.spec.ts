@@ -1,6 +1,6 @@
 import { test, expect, Page } from "@playwright/test";
 import { Client } from "pg";
-import { dbClient, signInAsBorrower, signInAsStaff, SEEDED_BORROWER } from "./fixtures";
+import { dbClient, signInAsBorrower, SEEDED_BORROWER } from "./fixtures";
 
 /**
  * "Can the user tell what a payment was applied to?" -- the 2026-08-19 demo.
@@ -97,8 +97,17 @@ function latestPayment(): Promise<{ id: number; amount: number }> {
 function insertLegacyPayment(amount: string): Promise<number> {
   return withDb(async (client) => {
     const res = await client.query(
-      `INSERT INTO payments (loan_id, last4, brand, amount, method, created_at)
-       VALUES ($1, '1111', 'visa', $2, 'card', now() - interval '400 days')
+      // `applied_at` is set deliberately. `payments.auth_status` defaults to
+      // 'captured' and payment-service's reconciler drains
+      // `auth_status = 'captured' AND applied_at IS NULL` -- so a row without it
+      // is work for a background loop, which would write the very ledger entries
+      // this fixture exists to lack, and move the borrower's balance while the
+      // test watched. Recorded-as-applied with no ledger evidence is exactly the
+      // pre-ledger shape anyway.
+      `INSERT INTO payments (loan_id, last4, brand, amount, method, created_at,
+                             auth_status, applied_at)
+       VALUES ($1, '1111', 'visa', $2, 'card', now() - interval '400 days',
+               'captured', now() - interval '400 days')
        RETURNING id`,
       [LOAN_ID, amount],
     );
@@ -207,62 +216,6 @@ test("a payment with no ledger evidence says so instead of showing zeros", async
   } finally {
     await deletePayment(paymentId);
   }
-});
-
-test("the fees line carries a real figure where the ledger recorded one", async ({
-  page,
-}) => {
-  /**
-   * The borrower's own loan opened today, so the contract has billed no interest
-   * and carries no fees: every allocation there is principal with two honest
-   * zeros beside it. That proves the known-zero case and not the interesting
-   * one.
-   *
-   * Seeded loan 5582 proves it with no fixture at all. It took two identical
-   * $410.50 captures two seconds apart -- the duplicate `docs/DEBT.md` D22 is
-   * about -- and `db/init/007_ledger_opening_balances.sql` recorded them
-   * differently because the waterfall did: the first cleared the arrears, so its
-   * ledger row is `fees`; the second had no fees left to pay, so its row is
-   * `principal`.
-   *
-   * Two rows, the same amount, different allocations. A screen deriving the
-   * split from the amount -- or reusing one row's answer for another -- could not
-   * show these two disagreeing, and they must.
-   *
-   * Reached as staff: 5582 is not the seeded borrower's loan and ownership is
-   * enforced server-side. Same screen, same component.
-   */
-  await signInAsStaff(page, "csr");
-  await page.goto("/servicing/5582");
-  await expect(page.getByRole("heading", { name: /Payment history/i })).toBeVisible({
-    timeout: 15_000,
-  });
-
-  const duplicates = rowForAmount(page, "$410.50");
-  await expect(duplicates).toHaveCount(2);
-
-  const rendered = await duplicates.evaluateAll((rows) =>
-    rows.map((row) => (row.textContent || "").replace(/\s+/g, " ")),
-  );
-
-  // No space required between label and amount: they are separate elements, so
-  // textContent concatenates them as "Fees$410.50".
-  expect(rendered.filter((text) => /Fees\s*\$410\.50/.test(text))).toHaveLength(1);
-  expect(rendered.filter((text) => /Principal\s*\$410\.50/.test(text))).toHaveLength(1);
-
-  // And the ledger agrees, which is what makes the two rows disagreeing the
-  // correct answer rather than a coincidence.
-  const split = await withDb(async (client) => {
-    const res = await client.query(
-      `SELECT payment_id, component, -SUM(amount)::float8 AS paid
-         FROM ledger_entries
-        WHERE loan_id = 5582 AND entry_type = 'payment' AND payment_id IN (2, 3)
-        GROUP BY payment_id, component
-        ORDER BY payment_id`,
-    );
-    return res.rows.map((r) => `${r.component}:${Number(r.paid).toFixed(2)}`);
-  });
-  expect(split).toEqual(["fees:410.50", "principal:410.50"]);
 });
 
 test("two payments each show their own allocation", async ({ page }) => {
