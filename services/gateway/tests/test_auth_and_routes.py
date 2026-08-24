@@ -492,6 +492,43 @@ def test_lss_reconciliation_is_staff_only(monkeypatch):
     assert resp.status_code == 403
 
 
+def test_lss_review_queue_is_staff_only(monkeypatch):
+    """A borrower must not reach the review queue: it lists amounts and capture
+    times for loans that are not theirs."""
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.get("/lss/reconciliation/review-queue",
+                      headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
+def test_lss_review_disposition_is_staff_only(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.post("/lss/reconciliation/review-queue/1/disposition",
+                       json={"disposition": "confirmed_duplicate"},
+                       headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
+def test_a_non_numeric_review_item_id_is_not_proxied(monkeypatch):
+    """The disposition pattern is anchored and numeric. A permissive one here
+    decides which paths reach servicing at all, and the fall-through below is a
+    404 by design -- so a path that does not match must land there rather than
+    being forwarded and refused somewhere less predictable."""
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "x", "role": "admin", "name": "X", "applicant_id": None,
+    })
+
+    resp = client.post("/lss/reconciliation/review-queue/all/disposition",
+                       json={"disposition": "confirmed_duplicate"},
+                       headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 404
+
+
 def test_lss_unrecognized_subpath_fails_closed_not_found(monkeypatch):
     # No authz rule accounts for this shape -- must 404, never silently proxy.
     monkeypatch.setattr(auth, "get_session", lambda token: {

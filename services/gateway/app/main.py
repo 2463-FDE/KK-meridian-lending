@@ -261,6 +261,10 @@ def _borrower_loans(applicant_id: int) -> dict:
 
 _LOAN_SUBPATH_RE = re.compile(r"^loans/(\d+)(?:/(schedule|payments))?$")
 _MOVEMENT_RESOLVE_RE = re.compile(r"^movements/(\d+)/resolve$")
+#: The disposition route on one review-queue item. Anchored and numeric for the
+#: same reason as the one above: a permissive pattern here decides which paths
+#: reach servicing at all, and the fall-through below is a 404 by design.
+_REVIEW_DISPOSITION_RE = re.compile(r"^reconciliation/review-queue/(\d+)/disposition$")
 _ACCOUNT_ACTION_RE = re.compile(r"^accounts/(\d+)/(balance|adjust-balance|waive-fee|late-fee)$")
 # Read-only, ownership-checked for a borrower; every other accounts/ action below
 # (adjust-balance, waive-fee, late-fee) is a money-moving action -- CSR/admin only
@@ -362,6 +366,23 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
     if path == "reconciliation/peek":
         if auth.is_staff(user):
             return await _proxy(SERVICING_URL, f"/{path}", request, user, extra_headers=svc)
+        raise HTTPException(status_code=403, detail="staff only")
+
+    # The review queue (D22) and the disposition route on one of its items. The
+    # client authorised the in-app queue as the ONLY destination for a flagged
+    # payment, which makes this hop the whole delivery mechanism -- there is no
+    # email or webhook fallback behind it, deliberately.
+    #
+    # Staff-only here, and unlike `reconciliation/peek` these carry a SIGNED
+    # PRINCIPAL: the queue returns payment amounts for real loans, and a
+    # disposition stores the reviewer's name. Servicing verifies the assertion
+    # itself, so this check is defence in depth rather than the boundary -- a
+    # caller that reaches servicing directly with the shared internal token is
+    # refused there for having no verified human behind it.
+    if path == "reconciliation/review-queue" or _REVIEW_DISPOSITION_RE.match(path):
+        if auth.is_staff(user):
+            return await _proxy(SERVICING_URL, f"/{path}", request, user,
+                                extra_headers=_principal_headers(svc, user))
         raise HTTPException(status_code=403, detail="staff only")
 
     # Unrecognized /lss sub-path -- fail closed rather than proxy something no
