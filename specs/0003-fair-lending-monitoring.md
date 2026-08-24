@@ -25,21 +25,31 @@ description of it.
 
 | Concern | Where it lives | State |
 |---|---|---|
-| Reason from the real vendor | `services/decision-service/app/decision.py` | vendor's `reason_codes` retained **verbatim as model evidence**; missing, empty, or non-list fails closed. **No mapping layer stands between them and the consumer notice** — see Problem 3 |
+| Reason from the real vendor | `services/decision-service/app/decision.py` | vendor's `reason_codes` retained **verbatim as model evidence**; missing, empty, or non-list fails closed. A vendor code becomes consumer wording only through the approved mapping in `decision.py::consumer_adverse_action_reason` (§1.6, PR #66), and an unmapped code refuses the denial. *Before #66 no mapping layer stood between them and the consumer notice — that defect is Problem 3, kept as the record of what was fixed.* |
 | Reason from the deterministic stub | `decision.py::_reason_codes` | derives from the larger of two shortfalls (bureau vs income); dev/test only, gated by `ALLOW_MODEL_STUB`, `model_version` suffixed `-stub` |
 | Per-decision audit record | `decision_events` (`db/init/004_decision_events.sql`) | append-only by DB trigger; carries `model_version`, `model_score`, `top_features`, the inputs, `decision`, `reason_codes`, `occurred_at` |
 | Outcome disparity | `services/origination-service/app/fair_lending.py` | ZIP3 approval rate, four-fifths screen against the highest rate, groups under `min_group_size=5` excluded from flagging; staff-only `GET /applications/fair-lending/zip-analysis` |
-| Aggregate monitoring over time | — | does not exist; `docs/model_card.md` says so under *Monitoring* |
+| Aggregate reason monitoring over a window | `services/origination-service/app/reason_distribution.py` | distinct adverse-action reasons, each reason's frequency, and the no-reason count, per `model_version` over a stated window; staff-only `GET /applications/fair-lending/reason-distribution` (§1.3, PR #67). On demand — not scheduled, no threshold, no verdict |
+| Approval-rate drift and score-distribution shift over time | — | not built; `docs/model_card.md` says so under *Monitoring*. Not asked for by the Week 8 brief — see *Non-goals* |
 
-## Problem
+## Problem — as measured on the day this spec was accepted (2026-08-21)
 
-Two questions have no answer today, and they are different questions.
+**Status since acceptance, so this section is not read as current state.** The
+mechanism for two of the three problems below was built the same day: the
+mapping seam with its fail-closed default (Problem 3, PR #66) and
+distinct-reason reporting (the second half of Problem 1, PR #67). Problem 2 is
+unchanged and cannot be changed here — it is CLIENT-BLOCKED on protected-class
+evidence, per §3. The three statements are left in the present tense of the day
+they were written, because they are the record of what was wrong; current state
+is the *State* column above, plus §1.3 and §1.6.
+
+Two questions had no answer on that day, and they are different questions.
 
 1. **Are the reasons accurate?** Reg B requires the specific principal reason.
    Nothing measures whether the reason a consumer receives corresponds to the
    driver that actually moved the decision, and nothing reports how many
-   *distinct* reasons the system emits — the brief's first question, which today
-   is answerable only by reading source.
+   *distinct* reasons the system emits — the brief's first question, which before
+   #67 was answerable only by reading source.
 2. **Is the model fair?** The ZIP3 screen measures **outcomes**, not the model.
    It cannot support a statement about the model, and no data exists that could.
 3. **Does a machine token reach the consumer?** Yes, by **two** paths, and the
@@ -188,10 +198,10 @@ current answer.
 | Decisions/outcomes | Yes — `decision_events.decision` |
 | Reason codes | Yes — `decision_events.reason_codes` |
 | Model version alongside each of the above | Yes — `decision_events.model_version` |
-| Feature attribution per decision | Partial — `top_features`, populated by the vendor; not populated for the stub |
+| Feature attribution per decision | Partial, and in the opposite direction to what a reader expects — `top_features` is populated **only for the deterministic stub**, whose score formula is known and reproducible, and is recorded as `null` for a real vendor response because `_ScorerResponse` carries no attribution. A locally-computed "explanation" for a vendor score would be fabricated audit data (`services/decision-service/tests/test_decision.py`) |
 | Sample size adequate for the groups compared | **Unknown.** Not measured; the ZIP3 screen's `min_group_size` is the only size guard anywhere |
 | Vendor fairness documentation | **No.** None supplied with the licensed scorer |
-| Longitudinal data across a stated window | Partially — `occurred_at` exists; no windowed reporting is built |
+| Longitudinal data across a stated window | Partially — `occurred_at` exists, and windowed **reason** reporting is built (§1.3, PR #67). Windowed reporting of approval rates or score distributions is not, and is a *Non-goal* here |
 
 **Consequently, and this is the operative sentence of this spec: Meridian
 cannot today make a fairness claim about this model, and MUST NOT make one.**

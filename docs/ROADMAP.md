@@ -82,7 +82,7 @@ during Week 4); those are marked where they occur.
 | 5 | Card tokenization + payment reconciliation | ✅ Landed |
 | 6 | Servicing RBAC / ledger / maker-checker | ✅ Landed — RBAC, append-only ledger, and maker-checker enforced by `no_self_approval` plus `resolve_pending_movement` (migrations 0036/0037) |
 | 7 | Trace ID + scoped reconciliation control | ✅ Landed — scheduled transaction-level reconciliation, and a shared `correlation_id` minted by `payment-service`, sent to the processor and to servicing, and stamped on every ledger entry a payment writes (`db/migrations/0043`, PR #56) |
-| 8 | Model governance + fair-lending screen | 🟡 Model card, ZIP screen, prompt-injection guard landed; disparity monitoring open |
+| 8 | Model governance + fair-lending screen | ✅ Landed — approved consumer-reason mapping (fail-closed on an unmapped code), `docs/model_card.md`, spec 0003 Accepted, ZIP3 four-fifths screen, windowed reason distribution per `model_version`, prompt-injection guard. Vendor taxonomy content is VENDOR-BLOCKED and protected-class evidence CLIENT-BLOCKED, so no model-fairness claim is made |
 | 9 | BSA/AML — UBO + sanctions screening | ⬜ Open (spec not written) |
 | 10 | Retention-aware redaction + handoff package | ⬜ Open |
 | — | **Not on any brief:** test + CI infrastructure, browser E2E, migration parity, the bureau/decision-attempt seams, this register | ✅ Landed |
@@ -927,10 +927,10 @@ approval-rate breakdown showing a pattern.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Decisioning | Client's claim: every denial gets one of two hardcoded strings regardless of the real driver | ✅ **Already fixed — checked directly against the current code, the client's own attached logs are stale.** `decision.py` no longer has `GENERIC_REASONS` anywhere; Week 3's real fix already replaced it with an input-driven mapping (bureau-score shortfall vs. income shortfall). The still-real gap: that mapping only ever picks between **two** categories, and it isn't fixture-tested against known cases yet — that's this week's actual remaining work | Citing a stale finding as current would be its own credibility problem — the fix already shipped, the remaining gap is narrower than the brief assumes |
+| 1 | Decisioning | Client's claim: every denial gets one of two hardcoded strings regardless of the real driver | ✅ **Already fixed — checked directly against the current code, the client's own attached logs are stale.** `decision.py` no longer has `GENERIC_REASONS` anywhere; Week 3's real fix already replaced it with an input-driven mapping (bureau-score shortfall vs. income shortfall). The still-real gap when this row was written: the mapping only ever picks between **two** categories and was not fixture-tested. *Closed since:* `services/decision-service/tests/test_approved_consumer_reason.py` and `services/origination-service/tests/test_deny_reason_is_approved_wording.py` cover both stub drivers, the unmapped-code refusal, and the graph path that publishes the wording — no live model call (PR #66). Two categories is not a defect where two drivers is what the stub has (spec 0003 §1.6) | Citing a stale finding as current would be its own credibility problem — the fix already shipped, the remaining gap is narrower than the brief assumes |
 | 2 | Decisioning | Does the ZIP-level approval-rate pattern warrant a disparate-impact look? | ✅ **Now checkable — the blocker is gone.** When this row was written no ZIP field existed anywhere; `applicants.zip_code` was added (`db/migrations/0014`) and `fair_lending.py` computes a ZIP3-level four-fifths-rule screen over recorded approval outcomes, staff-only at `GET /applications/fair-lending/zip-analysis`. Local/training-only — never run against real applicants | "Can't check" was itself a reason to pause before "wider." That reason no longer holds, which means the screen's *output* now has to be looked at rather than the check being unavailable |
-| 3 | Decisioning | No model card, no record of which features/model version produced any given decision, no fairness testing ever performed | 🟡 **Two of three closed.** `docs/model_card.md` documents the model, its inputs, its bands and its limits; `decision_events` records the exact model version and score behind every decision (Week 3). **Still fully open: no fairness testing of the model itself** — no protected-class or proxy analysis of its scores, no vendor fairness documentation. The ZIP screen in row 2 is an *outcome* monitor, not model validation, and the model card says so explicitly | Two thirds of the answer now exists. The remaining third is the one a regulator would actually press on, so it is called out rather than folded into a green tick |
-| 4 | Decisioning | What "responsible AI" requires beyond a marketing page | ⬜ Open — reason accuracy is partially there (see #1), a model card and a monitoring spec are not | A marketing claim of "advanced underwriting" with zero governance behind it is the same pattern as the README's earlier false PCI claim — a claim not backed by what the system can prove |
+| 3 | Decisioning | *As of 2026-08-05:* no model card, no record of which features/model version produced any given decision, no fairness testing ever performed | 🟡 **Two of three closed.** `docs/model_card.md` documents the model, its inputs, its bands and its limits; `decision_events` records the exact model version and score behind every decision (Week 3). **The third is not built, and is classified rather than left open: no fairness testing of the model itself** — CLIENT-BLOCKED on protected-class data or a validated proxy (none exists, and spec 0003 forbids synthesising one) and VENDOR-BLOCKED on vendor fairness documentation (none supplied with `creditai-2026.1`). The consequence is stated rather than deferred: Meridian cannot substantiate a model-fairness claim and must not make one. The ZIP screen in row 2 is an *outcome* monitor, not model validation, and the model card says so explicitly | Two thirds of the answer now exists. The remaining third is the one a regulator would actually press on, so it is called out rather than folded into a green tick |
+| 4 | Decisioning | What "responsible AI" requires beyond a marketing page | ✅ Delivered as a governance package — `docs/model_card.md` (PR #62, corrected by #68), `specs/0003-fair-lending-monitoring.md` Accepted (PR #65), the approved consumer-reason mapping with fail-closed unmapped handling (PR #66), and windowed per-`model_version` reason reporting (PR #67). What is left is evidence Meridian does not hold, classified in #3 — not unbuilt code. *This row read "⬜ Open — ... a model card and a monitoring spec are not" until those landed* | A marketing claim of "advanced underwriting" with zero governance behind it is the same pattern as the README's earlier false PCI claim — a claim not backed by what the system can prove |
 
 **This week's real deliverable, stated honestly:** a reason-code →
 specific-reason mapping, **fixture-tested only** (per the brief's own quota
@@ -939,8 +939,23 @@ note — no live-model spam), a model card
 decision bands, and its known limitations, and a fair-lending monitoring spec
 (denial-reason accuracy + disparity-check design, explicitly naming the
 missing-ZIP-field prerequisite). **Governance artifacts — not a model
-rebuild, not a wider rollout, not the marketing page. Not yet started — plan
-only, pending go-ahead to build.**
+rebuild, not a wider rollout, not the marketing page.**
+
+**Status (2026-08-24): ✅ delivered.** All three parts are on `main`: the
+reason-code → approved-consumer-reason mapping, fixture-tested and failing
+closed on any unmapped code
+(`services/decision-service/app/decision.py`, `consumer_adverse_action_reason`,
+PR #66); `docs/model_card.md` (PR #62, corrected by PR #68); and
+`specs/0003-fair-lending-monitoring.md`, Accepted, carrying the
+denial-reason-accuracy contract and the disparity-check design (PR #65) with its
+§1.3 reporting surface built
+(`services/origination-service/app/reason_distribution.py`, PR #67). *This
+paragraph read "Not yet started — plan only, pending go-ahead to build" until
+2026-08-21; it is corrected here rather than deleted, because plan-only is what
+the week started from.* Two limits remain and both are evidence limits rather
+than delivery gaps: vendor reason-taxonomy **content** is VENDOR-BLOCKED and
+protected-class evidence is CLIENT-BLOCKED, so no model-fairness claim may be
+made — spec 0003 §3.
 
 ---
 
