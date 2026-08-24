@@ -7,8 +7,23 @@ a *different* authorised person has to approve it.
 
 **Where each rule is enforced, and why there.**
 
-  * *Identity and role* — `principal.require_money_principal`, from a signature
-    the caller cannot forge. Nothing here reads `X-User-*`.
+  * *Identity* — `principal.require_staff_principal`, from a signature the caller
+    cannot forge. Nothing here reads `X-User-*`. Every route that touches a
+    proposal uses it: `adjust-balance`, `waive-fee`, the queue read and
+    `resolve`.
+  * *Role* — this module's own matrix, because the rule is not one bit.
+    `PROPOSER_ROLES` admits csr, underwriter and admin — any staff member may
+    ask. Approval is narrower and threshold-dependent:
+    `APPROVER_ROLES_AT_OR_BELOW_THRESHOLD` (underwriter or admin) and
+    `APPROVER_ROLES_ABOVE_THRESHOLD` (admin only), with csr never approving. A
+    single csr/admin "may move money" bit cannot express that, which is why the
+    money-mover guard is not what these routes call.
+
+    *Historical:* this bullet read "*Identity and role* —
+    `principal.require_money_principal`". That guard is the csr/admin money bit,
+    and after the maker-checker cutover it is used by `late-fee` alone
+    (`main.py`); pointing a reader at it from here sent them to the wrong guard
+    for the control this module implements.
   * *Refuse-at-creation* — here and in `pending_movements`' constraints. A
     proposal the ledger could never execute must not reach an approver's queue
     (ADR 0011 §3b): an approver should never be shown a request the system was

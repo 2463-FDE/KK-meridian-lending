@@ -321,6 +321,52 @@ def test_the_servicing_docstring_states_the_controls_positively():
         "servicing's module docstring does not state D8's current status")
 
 
+def test_maker_checker_names_the_guard_its_own_routes_use():
+    """The module that implements the second approver must point at the right
+    guard.
+
+    Its docstring named `principal.require_money_principal` -- the csr/admin
+    money-mover bit, which after the cutover is used by `late-fee` alone. Every
+    proposal route calls `require_staff_principal`, and role authority comes from
+    this module's own matrix, because "may move money" cannot express
+    csr-proposes-but-never-approves. A reader tracing the control from here was
+    sent to the wrong function, which is the same defect class as the rest of
+    this file, one layer in.
+    """
+    doc = _read(MAKER_CHECKER)
+    docstring = doc[:doc.index('"""', 3) + 3]
+    flat = _flat(docstring)
+    main = _read(SERVICING_MAIN)
+
+    assert "require_staff_principal" in flat, (
+        "maker_checker's docstring does not name the guard its routes call")
+    body = doc[len(docstring):]
+    for role_set in ("PROPOSER_ROLES", "APPROVER_ROLES_AT_OR_BELOW_THRESHOLD"):
+        # In the DOCSTRING, not merely somewhere in the module: checking the
+        # whole file passed trivially because the constants are defined there,
+        # which mutation testing caught.
+        assert role_set in flat, (
+            f"maker_checker's docstring does not name {role_set}, so its role "
+            f"rule reads as a single bit")
+        assert role_set in body, (
+            f"{role_set} is named in the docstring but no longer defined in the "
+            f"module")
+
+    # If the money-mover guard is mentioned, it must be as the late-fee guard or
+    # as history -- never as this module's identity check.
+    for sentence in _sentences(docstring):
+        if "require_money_principal" not in sentence:
+            continue
+        assert _HISTORICAL.search(sentence) or _LATE_FEE.search(sentence), (
+            f"maker_checker's docstring points at require_money_principal as a "
+            f"current rule for its own routes:\n{sentence[:240]}")
+
+    # And the claim is checked against the routes rather than trusted.
+    assert main.count("principal.require_staff_principal") >= 4, (
+        "the proposal routes no longer call require_staff_principal, so both "
+        "the docstring and this guard need rewriting")
+
+
 def test_the_retired_direct_writers_are_described_as_retired():
     """`models.py` already says `adjust_balance` and `waive_fee` are reachable
     from no route. Their own docstrings said the opposite, which is the version a
