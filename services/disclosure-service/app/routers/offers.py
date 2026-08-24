@@ -226,7 +226,7 @@ def _repair_incomplete_offer(row, missing, terms, fee_pct_used, principal, appli
         "    FROM repaired r"
         ")"
         "SELECT * FROM repaired",
-        (fee_pct_used, float(fees.NOTE_RATE_PCT), terms["apr"], terms["finance_charge"],
+        (fee_pct_used, config.DEMO_NOTE_RATE_PCT, terms["apr"], terms["finance_charge"],
          terms["monthly_payment"], terms["amount_financed"], terms["total_of_payments"],
          terms["regular_payment_count"], terms["final_payment"],
          terms["regular_payment_count"] + 1, fees.SCHEDULE_VERSION, principal,
@@ -291,10 +291,19 @@ def create_offer(
         )
     principal = float(app_rows[0]["amount"])
     term_months = app_rows[0]["term_months"]
-    # One source of truth (fees.py). This is the CONTRACTUAL rate the payment
-    # is calculated on, and it is persisted on the offer so boarding does not
-    # have to infer it from the disclosed APR -- which is a different number.
-    annual_rate = float(fees.NOTE_RATE_PCT)
+    # The configured rate, and the same one origination publishes at
+    # `GET /los/pricing` (both read `DEMO_NOTE_RATE_PCT`). This is the
+    # CONTRACTUAL rate the payment is calculated on, persisted on the offer so
+    # boarding does not have to infer it from the disclosed APR -- a different
+    # and usually higher number.
+    #
+    # It was `fees.NOTE_RATE_PCT`, a module constant, and review of PR #80 caught
+    # what that meant: origination could publish 8.50, refuse any caller that
+    # sent something else, and this service would still build and store the loan
+    # at 7.99. The rate the borrower actually got was decided by a constant
+    # nobody configured. Still not `body.annual_rate` -- see config.py for why the
+    # caller's number is not trusted here.
+    annual_rate = config.DEMO_NOTE_RATE_PCT
 
     o = offer_mod.build_offer(principal, annual_rate, term_months)
 

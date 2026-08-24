@@ -275,6 +275,11 @@ def test_the_regression_case_by_name():
 #
 # Every provenance field is required. A vector with no recorded provenance is
 # not outside evidence, it is a number somebody typed.
+#: The note rate the FFIEC vector below was captured at. Not the configured
+#: rate: this is a recorded external result about one specific cash flow, and it
+#: stays pinned to the loan it describes.
+FFIEC_VECTOR_NOTE_RATE_PCT = 7.99
+
 FFIEC_VECTOR = {
     "tool": None,              # e.g. "FFIEC APR Computational Tool", incl. version
     "url": None,               # where it was obtained
@@ -308,8 +313,16 @@ def test_the_ffiec_vector_describes_the_cash_flow_this_system_actually_discloses
     """
     v = FFIEC_VECTOR
     principal = v["amount_financed"] / (1 - Decimal(str(fees.ORIGINATION_FEE_PCT)))
+    # The rate the vector was captured at, stated here rather than read from a
+    # constant. It used to read `fees.NOTE_RATE_PCT`, which made the vector
+    # follow whatever the current rate happened to be -- and an outside oracle
+    # that silently re-points at a different loan certifies nothing. The rate is
+    # now configuration (`config.DEMO_NOTE_RATE_PCT`), so a demo run at a
+    # different rate must NOT quietly reinterpret this recorded APR: it must fail
+    # loudly, which is what comparing against the captured figure does.
     rows = schedule.amortization(
-        float(principal), fees.NOTE_RATE_PCT, v["regular_payment_count"] + 1
+        float(principal), FFIEC_VECTOR_NOTE_RATE_PCT,
+        v["regular_payment_count"] + 1
     )
     produced = [Decimal(str(r["payment"])) for r in rows]
     assert produced == _ffiec_payment_sequence(v), (

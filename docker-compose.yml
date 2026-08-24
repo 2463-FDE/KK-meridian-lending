@@ -41,6 +41,11 @@ services:
     # ones, but only for requests that actually go through it -- a direct hit on
     # the published port bypassed that entirely.
     environment:
+      # The note rate every new offer is priced at. A training default,
+      # not a pricing policy -- and declared for BOTH services that read it,
+      # because one of them holding a different figure is the split review of
+      # PR #80 caught (db/tests/test_the_note_rate_has_one_source.py).
+      DEMO_NOTE_RATE_PCT: ${DEMO_NOTE_RATE_PCT:-7.99}
       # Shared with decision-service/gateway below -- sent as X-Internal-Token
       # on the server-to-server call to decision-service so it has a check to
       # fail closed on even if a future compose change re-publishes its port.
@@ -231,6 +236,11 @@ services:
       - path: .env
         required: false
     environment:
+      # The note rate every new offer is priced at. A training default,
+      # not a pricing policy -- and declared for BOTH services that read it,
+      # because one of them holding a different figure is the split review of
+      # PR #80 caught (db/tests/test_the_note_rate_has_one_source.py).
+      DEMO_NOTE_RATE_PCT: ${DEMO_NOTE_RATE_PCT:-7.99}
       # Required on every POST /offers (see routers/offers.py) -- defense in
       # depth so a future accidental host-port re-exposure still can't submit
       # offers without also knowing this. Same default as the other services

@@ -269,7 +269,12 @@ def test_create_offer_ignores_client_supplied_principal_and_term(monkeypatch):
     # Positional params are (fee_pct_used, note_rate_pct, apr, ...) since PR #10
     # split the contractual rate out of the disclosed APR. Both are checked:
     # neither may be derived from the caller-supplied principal=49999/rate=35.
-    assert insert_call[1][1] == pytest.approx(7.99)          # note rate, from fees.NOTE_RATE_PCT
+    # The note rate is the CONFIGURED one (config.DEMO_NOTE_RATE_PCT), read from
+    # the same environment variable origination publishes at /los/pricing. It was
+    # `fees.NOTE_RATE_PCT`, a module constant that decided the rate regardless of
+    # configuration -- PR #80's review found that origination could publish 8.50
+    # and this service would still store 7.99.
+    assert insert_call[1][1] == pytest.approx(config.DEMO_NOTE_RATE_PCT)
     assert insert_call[1][2] == expected["apr"]              # disclosed APR
     assert insert_call[1][1] != insert_call[1][2], "note rate and APR must not be the same value"
 

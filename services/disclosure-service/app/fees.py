@@ -18,14 +18,18 @@ SCHEDULE_VERSION = "B1"
 
 # The contractual note rate every offer is written at. It was a bare `7.99`
 # inline in routers/offers.py -- the same shape as the fee constant before D6
-# drifted three copies apart. It lives here so there is one place to change it,
-# and so the value that gets persisted on the offer is provably the value the
-# payment was calculated from.
+# drifted three copies apart.
+#
+# **The note rate is no longer here.** It was `NOTE_RATE_PCT = Decimal("7.99")`,
+# and it was what actually got calculated and persisted -- so when pricing moved
+# to a configured value (`config.DEMO_NOTE_RATE_PCT`, PR #80), this constant
+# would have quietly kept deciding the borrower's rate. Review caught it: set the
+# configured rate to 8.50 and the offer would still have been built at 7.99.
+# Removed rather than aliased, so a sixth copy cannot reappear here.
 #
 # The note rate is NOT the APR. The APR is solved against the amount financed
 # and is higher whenever a prepaid fee exists; the note rate is what the payment
 # schedule actually runs on. Conflating them is what PR #10's review caught.
-NOTE_RATE_PCT = Decimal("7.99")
 LATE_FEE_FLAT = Decimal("35.0")
 NSF_FEE = Decimal("25.0")
 
