@@ -89,6 +89,11 @@ ZIP_TRUNCATION = re.compile(
     r"""|zip[\w.]*\s*~\s*'\^\\\\d\{3\}'""", re.I)
 
 
+def _flatten(text: str) -> str:
+    """One line, so a sentence that wraps is still one sentence."""
+    return re.sub(r"\s+", " ", text)
+
+
 def _runtime_sources():
     """Every service source file that runs in a request or job path.
 
@@ -262,6 +267,59 @@ def test_no_zip_is_sent_to_the_model_or_the_bureau():
 # --------------------------------------------------------------------------
 # The offline fixture boundary.
 # --------------------------------------------------------------------------
+
+def test_no_source_or_migration_says_zip_exists_for_fairness():
+    """A comment is where the retired screen came back first.
+
+    Review of PR #78 found `schemas.py`'s ZIP validator still explaining itself
+    as "W8: fair-lending ZIP-level check needs a real, consistent ZIP", and
+    `db/migrations/0014` still introducing the column as "the one structured
+    field a fairness check actually needs". The code did nothing of the kind --
+    but a reader arriving at the validator learns the field is a fairness
+    variable, and the next person to need a disparity screen has been told where
+    to start.
+
+    Naming the retired screen is allowed, and necessary: the reversal is worth
+    recording. What is not allowed is a present-tense sentence saying ZIP is
+    needed for fairness.
+    """
+    historical = re.compile(
+        r"(?i)(historical|superseded|retired|was written for|no longer|"
+        r"this comment said|prohibited|until|does not exist)")
+    claim = re.compile(
+        r"(?i)(fairness check|fair.lending (?:zip|check)|zip.level check)"
+        r"[^.\n]{0,80}(needs|requires|is all)"
+        r"|zip[^.\n]{0,40}(?:is|as) (?:a |the )?(?:fairness|protected.class) "
+        r"(?:variable|proxy|field)")
+
+    sources = list(_runtime_sources()) + sorted(
+        (REPO / "db" / "migrations").glob("*.sql")) + [
+        REPO / "db" / "init" / "001_schema.sql"]
+
+    offenders = []
+    for path in sources:
+        body = path.read_text(encoding="utf-8", errors="replace")
+        lines = body.splitlines()
+        for match in claim.finditer(body):
+            line_no = body.count("\n", 0, match.start()) + 1
+
+            # Scope: the claim's own line plus the three above it. Comments are
+            # line-based, and sentence-scoping got this wrong in both
+            # directions -- a SQL comment line ending in "needs." has no ". "
+            # after it, so the scope ran on into the next paragraph and borrowed
+            # the word "retired" from a fence that had nothing to do with it.
+            # Mutation testing found that: a reintroduced "a fairness check
+            # actually needs" survived by inheriting an unrelated fence.
+            window = _flatten("\n".join(lines[max(0, line_no - 4):line_no]))
+            if historical.search(window):
+                continue
+            offenders.append(
+                f"{path.relative_to(REPO)}:{line_no}: {lines[line_no - 1].strip()[:160]}")
+
+    assert not offenders, (
+        "a source file or migration says ZIP exists for a fairness check, "
+        "which the client prohibited on 2026-08-24:\n" + "\n".join(offenders))
+
 
 def test_the_offline_fixture_location_is_isolated_and_labelled():
     """The client's package is not in the repository yet.
