@@ -312,7 +312,8 @@ def test_the_debt_register_and_the_roadmap_agree_about_d7(week7):
         "when the control is implemented and the gap is a deployment decision")
     assert re.search(r"IMPLEMENTED", opener), (
         "D7's status does not open by saying the control is implemented")
-    assert re.search(r"(CLIENT|VENDOR|OPS)-BLOCKED|CLIENT-DEFERRED", opener), (
+    assert re.search(r"(CLIENT|VENDOR|OPS)-BLOCKED|CLIENT-DEFERRED|"
+                     r"CLIENT-PROHIBITED", opener), (
         "D7's status does not open with a classification for what is missing")
 
     # And the clause about alert delivery specifically has to carry the label --
@@ -374,9 +375,15 @@ def test_the_superseded_status_paragraph_keeps_its_fence(week7):
 def test_no_week7_item_is_left_bare_open(week7):
     """Every not-built row carries a classification. Bare "Open" is what this
     week's status looked like for two weeks after both deliverables landed."""
+    # `CLIENT-PROHIBITED` is in this list, and review of PR #82 is why. The
+    # token was defined in DEBT.md's header and used on the alert-delivery row,
+    # but not added here -- so it passed only because that row is ALSO
+    # OPS-BLOCKED. A row carrying the prohibition alone would have read as
+    # unclassified, which is the failure this test exists to catch, defeated by
+    # the addition of a new label rather than by anything going stale.
     classified = re.compile(
         r"(CLIENT-DEFERRED|OPS-BLOCKED|OPTIONAL|VENDOR-BLOCKED|CLIENT-BLOCKED|"
-        r"DEFERRED)")
+        r"CLIENT-PROHIBITED|DEFERRED)")
     historical = re.compile(
         r"(?i)(superseded|dated (?:discovery )?evidence|as of \d{4}-\d{2}-\d{2}|"
         r"no longer live status|previously|\bbefore\s+(?:PR\s+)?#\d+|"
