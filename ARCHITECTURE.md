@@ -145,17 +145,24 @@ fails fast rather than hanging the request, and replaying an already-captured pa
 never reaches the check, because it authorizes nothing.
 
 **What this does not close.** `DEBT.md` **D8** is about who may *authorize* a money
-movement, and it is **partly closed** — the sentence here described all of it as open
-long after two thirds of it landed. What landed: a role rule at the gateway
-(`gateway/app/auth.py::can_move_money`, csr/admin only) and a ledger entry for every
-movement, including the direct writes 0035's compatibility bridge captures. What is
-still open, and is the whole of D8 now: **servicing validates no human principal**
-(`adjust_balance` and `waive_fee` take `x_user_role` and never read it) and **no second
-approver exists**, so one account still moves a balance alone and the captured ledger
-entry names nobody.
-That is a different question from who can *reach* the endpoint, which is what the token
-answers; closing either leaves the other open, and an earlier draft conflated them by
-citing D8 as if it tracked the token gap.
+movement, which is a different question from who can *reach* the endpoint — the token
+answers the second one, and closing either leaves the other open. **D8 itself is now
+closed**, in four parts: the gateway's role rule
+(`gateway/app/auth.py::can_move_money`, csr/admin only); a verified human principal
+that servicing checks against a public key it cannot forge
+(`servicing-service/app/principal.py`, PR #33); a second approver — `adjust-balance`
+and `waive-fee` raise proposals and move nothing, and `resolve_pending_movement`
+refuses self-approval including admin (`db/migrations/0036`/`0037`, PRs #34/#35); and a
+ledger entry for every movement, naming the approver on an approved proposal. See
+`docs/DEBT.md` D8 for the bounds, and `adr/0011-maker-checker-for-servicing-adjustments.md`
+*Limitations* for the direct-`INSERT` boundary no application control changes.
+
+*Historical, kept because the drift is instructive:* this passage first described all
+of D8 as open long after two thirds of it had landed, and was then corrected to
+"partly closed — servicing validates no human principal and no second approver
+exists". That correction was itself out of date within a week: both halves landed in
+PRs #33-#35, and the sentence outlived them. `db/tests/test_d8_is_closed_everywhere.py`
+now fails on either wording.
 
 ## Services
 
@@ -285,9 +292,16 @@ No boarding API, event, or contract. ADR 0002.
 
 A second cross-service write now exists on the servicing side: after `payment-service`
 captures a charge and inserts the `payments` row, it calls `servicing POST
-/accounts/{loan_id}/apply-payment` to post the payment against the balance. The
-balance-mutation debt (race / lost-update, mutable balance, no payment waterfall, no
-maker-checker) lives behind that endpoint and is unchanged.
+/accounts/{loan_id}/apply-payment` to post the payment against the balance. The balance-mutation debt that used to live behind that endpoint has since been
+worked through, and none of the four items is still open: the lost update is gone
+because `balances` is a projection of immutable `ledger_entries` (D3,
+`db/migrations/0035`), the same change removed the mutable-total write, the
+payment waterfall applies fees -> accrued interest -> principal (D14,
+`servicing-service/app/waterfall.py`), and maker-checker gates the two staff
+routes (D8, `db/migrations/0036`/`0037`). *This paragraph read "the
+balance-mutation debt (race / lost-update, mutable balance, no payment waterfall,
+no maker-checker) lives behind that endpoint and is unchanged" until those
+landed.*
 
 A third now exists on the disclosure side: on an approved decision, origination's
 `disclosure_graph.py` (two-node LangGraph: KG-read, then assemble) calls disclosure-service

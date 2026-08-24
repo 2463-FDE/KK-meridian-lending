@@ -34,8 +34,12 @@ export default function AppBar() {
 
   // UI-only affordance: nav is built from the session role purely to shape what
   // each role SEES. It does NOT restrict access — every route is reachable by
-  // URL and the gateway/API still accept ANY authenticated caller (debt D8,
-  // fixed in W6). EXCEPTION: "Policy Chat" below actually is backed by a real
+  // URL. What restricts anything is server-side: money movement is csr/admin at
+  // the gateway, principal-verified at servicing and needs a second approver
+  // (`docs/DEBT.md` D8, closed), and a borrower's loan reads are
+  // ownership-checked. *This comment claimed the API accepts ANY authenticated
+  // caller while also citing D8 as fixed; both could not be current.*
+  // EXCEPTION worth naming here: "Policy Chat" below is backed by a real
   // server-side gate — the gateway's /assistant/* proxy only forwards to
   // loan-assistant for csr/underwriter/admin sessions (gateway/app/main.py
   // assistant()) — so unlike every other link here, hiding/showing this one

@@ -29,11 +29,23 @@ than decorative.
     wrong issuer, wrong audience, wrong algorithm, or an unparseable key all fail
     closed with no fallback to headers or to the token (REQ-ID-9).
 
-**What this does NOT do.** It answers "who is acting, and may they act alone?" It
-does not answer "should anyone act alone?" -- that is maker-checker (D8's second
-half, spec 0002 §2), which is not implemented. A csr with a valid assertion can
-still adjust a balance by themselves; what has changed is that servicing knows it
-is a csr, and that nothing on the network can claim to be one.
+**What this module does, and what sits beside it.** It answers "who is acting,
+and may they act at all?" It does not answer "may they act alone?" -- that is
+maker-checker (D8's second half, spec 0002 §2), and it **is implemented**:
+`adjust-balance` and `waive-fee` raise proposals that move nothing, and
+`resolve_pending_movement` requires a *different* verified principal and refuses
+self-approval including admin (`db/migrations/0036`/`0037`,
+`services/servicing-service/app/maker_checker.py`, PRs #34/#35). So a csr with a
+valid assertion cannot adjust a balance by themselves: they can ask, and someone
+else has to agree. `docs/DEBT.md` **D8 is closed**; ADR 0011 *Limitations* holds
+the direct-`INSERT` boundary that no application-layer control changes.
+
+*Historical, kept because it is the reason this module exists:* this paragraph
+read "that is maker-checker (D8's second half), which is not implemented. A csr
+with a valid assertion can still adjust a balance by themselves" -- true on the
+day the signed principal landed (PR #33), and false one PR later. This module was
+the prerequisite for the approver rule, so it is the last place that should still
+describe the gap as open.
 """
 import time
 from dataclasses import dataclass
@@ -225,7 +237,8 @@ def _verified_or_401(assertion: str | None, claimed_role: str | None,
 def require_money_principal(assertion: str | None,
                             claimed_role: str | None = None,
                             claimed_user: str | None = None) -> Principal:
-    """The guard for a route that moves money on ONE person's say-so.
+    """The guard for `late-fee`, the one money route that still acts on ONE
+    person's say-so.
 
     After the maker-checker cutover that is `late-fee` only. `adjust-balance` and
     `waive-fee` raise proposals and use `require_staff_principal` instead,

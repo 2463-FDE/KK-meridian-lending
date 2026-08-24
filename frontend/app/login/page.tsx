@@ -32,7 +32,8 @@ export default function LoginPage() {
       }
       setSession(res.token, res.user);
       // Role-based landing only — every role can still reach any route by URL
-      // (server-side authz is intentionally absent, debt D8, fixed in W6).
+      // (UI-only routing; the server-side controls that matter live at the
+      // gateway and in servicing -- `docs/DEBT.md` D8 is closed).
       router.push(roleHome(res.user?.role));
     } catch (err) {
       const msg =

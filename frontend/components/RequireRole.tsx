@@ -15,10 +15,14 @@ import { apiGet, clearSession, getUser, roleHome } from "../lib/api";
  * next real API call would reject with 401. That surfaced as a confusing
  * "not authenticated" error deep inside a feature instead of a login prompt.
  *
- * UX-layer only -- the gateway/API still accept any authenticated caller on
- * most routes (debt D8, see lib/api.ts::roleHome / AppBar.tsx). This stops a
- * logged-in borrower from *landing* on a staff page by URL; it is not a
- * substitute for the server-side authz fix.
+ * UX-layer only. It stops a logged-in borrower from *landing* on a staff page by
+ * URL; it is not the access control. The controls that matter are server-side
+ * and they exist: money movement is csr/admin at the gateway, principal-verified
+ * at servicing, and gated on a second approver (`docs/DEBT.md` D8, closed);
+ * borrower loan reads are ownership-checked. Routes with nothing sensitive
+ * behind them remain reachable by any authenticated caller. *This comment cited
+ * D8 as the reason "the gateway/API still accept any authenticated caller",
+ * which stopped being true of the money routes in PRs #33-#35.*
  */
 export default function RequireRole({
   allow,

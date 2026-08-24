@@ -841,8 +841,12 @@ actually mutates, the corrected concurrency scenario above), characterization
 tests pinning today's behavior as a baseline, one failing test proving the
 *correctly-paired* lost update, and an ADR proposing RBAC + maker-checker +
 an append-only ledger. **The ledger, its ADR and maker-checker have all since
-landed — the specification was written first and the enforcement followed.** Gateway RBAC still does not replace the required
-server-validated human principal at the servicing trust boundary.
+landed — the specification was written first and the enforcement followed.** The
+server-validated human principal landed too: `servicing-service/app/principal.py`
+verifies a gateway-signed Ed25519 assertion it cannot mint, so the trust boundary no
+longer rests on gateway RBAC alone (PR #33). *This paragraph ended "Gateway RBAC still
+does not replace the required server-validated human principal at the servicing trust
+boundary" until that shipped.*
 
 ---
 

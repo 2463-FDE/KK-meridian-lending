@@ -43,9 +43,18 @@ export function clearSession() {
 
 /**
  * Role -> landing route after login. Used by login redirect + nav.
- * UI-only routing convenience. The gateway/API still accept ANY authenticated
- * caller — server-side authz is intentionally absent (debt D8, fixed in W6).
- * A role can still navigate anywhere by URL; this only sets the default landing.
+ * UI-only routing convenience: a role can still navigate anywhere by URL, and
+ * this only sets the default landing.
+ *
+ * It is not the access control, and it never was — but the server-side authz it
+ * used to disclaim now exists on the routes that matter: money movement is
+ * csr/admin at the gateway AND requires a verified principal at servicing, which
+ * then needs a second approver (`docs/DEBT.md` D8, closed); a borrower's loan
+ * reads are ownership-checked (`gateway/app/auth.py::owns_loan`); and the
+ * assistant proxy is staff-only. Routes with nothing sensitive behind them stay
+ * reachable by any authenticated caller, which is a UI-shaping fact rather than
+ * a tracked defect. *This comment read "server-side authz is intentionally
+ * absent (debt D8, fixed in W6)" — two claims that could not both be current.*
  */
 export function roleHome(role: string | null | undefined): string {
   switch (role) {
