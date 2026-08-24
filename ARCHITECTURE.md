@@ -263,10 +263,15 @@ model score/version, top features, reason codes — so a decision can be proven,
 asserted. `offers.decision_id` is now FK'd to `decisions.app_id` with a **unique**
 constraint, making offer creation idempotent per decision and closing a leaked-decision
 path where a caller-supplied `decision_id` for an unrelated application used to be trusted
-verbatim. `applicants.zip` (Week 8) backs the ZIP3-level four-fifths-rule disparate-impact
-screen (`fair_lending.py`) — no field existed to check this against before. `payments.pan`/`cvv`
-survive only as nullable legacy columns for rows written before tokenization; no code path
-writes them anymore (ADR 0008, PR #8). The
+verbatim. `applicants.zip_code` (Week 8, `db/migrations/0014_add_applicant_zip.sql`) backs the ZIP3-level
+four-fifths-rule disparate-impact screen (`fair_lending.py`) — no field existed to check this
+against before. `payments.pan`/`cvv` are **gone, not dormant**: the writers went first (PR #8,
+PR #11), `db/migrations/0029_payments_backfill_last4.sql` back-filled `last4`, and
+`db/migrations/0031_drop_payments_pan_cvv.sql` dropped both columns behind a gate that refuses
+without a completed back-fill and an explicit operator acknowledgement. `db/init/001_schema.sql`
+no longer creates them either, so neither a migrated nor a freshly initialised database has a
+`payments.pan` or a `payments.cvv` at all (ADR 0008, `docs/DEBT.md` D5b/D13). *This sentence
+previously said the two survived as nullable legacy columns, which was true until 0031 landed.* The
 retried-POST double-charge that D2 described is CLOSED: `payments.idempotency_key` is
 required at the API boundary (`ChargeIn.idempotency_key`, `min_length=1`) and enforced by
 a partial unique index (`db/migrations/0007`), with servicing-side apply-once protection in
