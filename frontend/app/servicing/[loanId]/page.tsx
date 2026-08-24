@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import PaymentAllocation from "../../../components/PaymentAllocation";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
@@ -42,6 +43,15 @@ interface PaymentRow {
   method: string;
   created_at: string;
   masked_pan?: string | null;
+  // What this payment actually paid, read by servicing from the ledger entries
+  // that moved the balance (`_allocations_by_payment`). `null` means there is no
+  // ledger evidence for this payment -- a historical one applied before the
+  // ledger existed -- and is NOT the same fact as 0.00, which means the
+  // component received nothing. `lib/allocation.ts` keeps the two apart; see the
+  // note there about `usd(null)` rendering as "$0.00".
+  applied_to_fees?: number | null;
+  applied_to_interest?: number | null;
+  applied_to_principal?: number | null;
 }
 
 function errMsg(err: unknown, fallback: string): string {
@@ -505,12 +515,13 @@ function LoanDetailContent() {
               <th>Method</th>
               <th>Card</th>
               <th className="num">Amount</th>
+              <th>Applied to</th>
             </tr>
           </thead>
           <tbody>
             {payments.length === 0 ? (
               <tr>
-                <td colSpan={4} className="empty">
+                <td colSpan={5} className="empty">
                   No payments recorded yet.
                 </td>
               </tr>
@@ -530,6 +541,18 @@ function LoanDetailContent() {
                       an honest "not on file" placeholder, never a guess. */}
                   <td>{p.masked_pan || "—"}</td>
                   <td className="num">{usd(p.amount)}</td>
+                  {/* What the payment paid, straight from the API's own
+                      figures. The client asked at the 2026-08-19 demo whether a
+                      borrower can tell what a payment was applied to; the
+                      columns to the left never answered it.
+
+                      Nothing here is computed: no waterfall, no split of
+                      `p.amount`, no reading of the amortization schedule. The
+                      ledger entries that moved the balance are the only faithful
+                      answer, and servicing already reports them. */}
+                  <td>
+                    <PaymentAllocation payment={p} />
+                  </td>
                 </tr>
               ))
             )}
@@ -546,8 +569,12 @@ function LoanDetailContent() {
       <div className="card">
         <div className="row" style={{ alignItems: "flex-end" }}>
           <div className="field">
-            <label>Amount (USD)</label>
+            {/* Associated with `htmlFor`/`id` rather than left as a loose
+                sibling: an unassociated label is read out by nothing, and this
+                is the one control on the borrower's own payment path. */}
+            <label htmlFor="pay-amount">Amount (USD)</label>
             <input
+              id="pay-amount"
               type="number"
               min="0"
               step="0.01"
