@@ -38,6 +38,33 @@ INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 # tighten or loosen via ACCEPT_TOKEN_TTL_SECONDS without a code change.
 ACCEPT_TOKEN_TTL_SECONDS = int(os.getenv("ACCEPT_TOKEN_TTL_SECONDS", str(24 * 60 * 60)))
 
+# --- the note rate an offer is priced at ------------------------------------
+#
+# **A training default, and not a pricing policy.** No client decision
+# authorises risk-based pricing here -- not by score, not by income, not by DTI,
+# not by employment, and not by anything a model produces. There is exactly one
+# rate, it applies to every offer this system generates, and it exists so the
+# demo can produce a Truth-in-Lending disclosure at all.
+#
+# It lives HERE because the browser was deciding it. `frontend/app/apply` and
+# `frontend/app/underwriting` each held `const OFFER_RATE_PCT = 7.99` and posted
+# it into offer creation, so the contractual note rate on a real loan was
+# whatever the client sent -- with the same number written down in four more
+# places (both frontends, this service's OfferIn default, disclosure-service's).
+# Five copies of a contractual term is five chances to disagree, and the one that
+# reaches the borrower's loan was the one furthest from any authority.
+#
+# Environment-overridable so a demo can be run at a different rate without a code
+# change. Seeded and historical loans are NOT affected: they carry the rate they
+# were boarded with (`loans.note_rate_pct`), and the bulk synthetic portfolio
+# deliberately holds a spread of rates. This is the rate for offers made from now
+# on, not a normalisation of what already exists.
+DEMO_NOTE_RATE_PCT = float(os.getenv("DEMO_NOTE_RATE_PCT", "7.99"))
+
+#: What the pricing endpoint tells a caller about where the figure came from, so
+#: nobody reads it as an underwritten, per-applicant rate.
+NOTE_RATE_SOURCE = "training_default"
+
 # How long the SUBMISSION token (ApplicationCreated.access_token) stays valid.
 # It proves ownership for the very first decision call on an application whose
 # borrower has no account yet -- the same bearer-credential-at-rest problem the

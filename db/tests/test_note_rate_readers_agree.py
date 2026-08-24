@@ -354,6 +354,11 @@ def test_a_new_reader_cannot_appear_unnoticed():
         # The two that apply the rule.
         "services/gateway/app/main.py",
         "services/servicing-service/app/routers/loans.py",
+        # Where the rate for a NEW offer comes from. It names the column in a
+        # comment to explain what it does not touch -- seeded and historical
+        # loans keep the rate they were boarded with -- so it decides the figure
+        # for future offers and reports nothing about existing ones.
+        "services/origination-service/app/config.py",
         # Schema/model/boarding files that name the column without deciding
         # anything about it.
         "services/servicing-service/app/models.py",

@@ -67,7 +67,20 @@ async function borrowerOffer(page: any) {
 
 // --- 1. terminology ----------------------------------------------------------
 
-test("the staff offer prompt calls 7.99% a note rate, never an APR", async ({ page }) => {
+test("the staff offer prompt names the server's note rate, never an APR", async ({
+  page,
+  request,
+}) => {
+  /**
+   * The figure comes from `GET /los/pricing` now, not from a constant this
+   * screen owned (PR #80). So the assertion reads the published rate and looks
+   * for that, rather than for a hardcoded 7.99 -- a test pinned to the number
+   * would fail a demo run at a different configured rate while proving nothing
+   * about where the number came from.
+   */
+  const pricing = await (await request.get("http://localhost:8000/los/pricing")).json();
+  const published = `${Number(pricing.note_rate_pct).toFixed(2)}%`;
+
   await signInAsStaff(page);
   const applicant = fictionalApplicant("Teo", /* even ssn */ true, 100_000);
   await submitApplication(page, applicant);
@@ -78,7 +91,11 @@ test("the staff offer prompt calls 7.99% a note rate, never an APR", async ({ pa
   const prompt = page.getByText(/Generate a Truth-in-Lending offer/);
   await expect(prompt).toBeVisible({ timeout: 15_000 });
 
-  await expect(prompt).toContainText("using a 7.99% note rate");
+  await expect(prompt).toContainText(`at a ${published} note rate`);
+  // And it says whose figure it is, so a staff member does not read it as
+  // something this screen decided.
+  await expect(prompt).toContainText(/set by the server/i);
+
   const text = (await prompt.textContent()) ?? "";
   expect(text, "the offer prompt must not call the note rate an APR").not.toMatch(RATE_WORDS);
 });

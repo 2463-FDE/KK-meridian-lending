@@ -107,11 +107,18 @@ class _FakeDb:
 
 
 def _offer_payload(application_id=10, decision_id=None, principal=12000):
+    # `annual_rate` is the CONFIGURED rate, not a literal. It used to be `7.99`,
+    # which was fine while the rate was a constant and became a hidden coupling
+    # the moment it became configuration: a caller sending a rate the server did
+    # not set is now refused (422), so at `DEMO_NOTE_RATE_PCT=8.50` a hardcoded
+    # 7.99 here would fail every test in this file for a reason none of them are
+    # about. The field is optional; it is sent because the two real callers send
+    # it, so this is the shape the service actually receives.
     body = {
         "application_id": application_id,
         "principal": principal,
         "term_months": 36,
-        "annual_rate": 7.99,
+        "annual_rate": config.DEMO_NOTE_RATE_PCT,
     }
     if decision_id is not None:
         body["decision_id"] = decision_id
@@ -252,13 +259,20 @@ def test_create_offer_ignores_client_supplied_principal_and_term(monkeypatch):
     fake_db = _FakeDb(application_rows=[{"amount": 12000, "term_months": 36}])
     monkeypatch.setattr(db, "query", fake_db.query)
 
+    # A mismatched principal and term, and NO rate. The rate is a different
+    # control now: a caller sending one that disagrees with the server is
+    # REFUSED (422) rather than silently overridden, because a caller whose
+    # number is dropped believes it priced the loan -- see
+    # `test_the_offer_request_shape.py`. Refusing it here would end the request
+    # before the handler ran, and the property under test is what the handler
+    # does with principal and term.
     resp = client.post(
         "/offers",
-        json=_offer_payload(application_id=10, principal=49999) | {"term_months": 60, "annual_rate": 35},
+        json=_offer_payload(application_id=10, principal=49999) | {"term_months": 60},
     )
 
     assert resp.status_code == 200
-    expected = offer_mod.build_offer(12000, 7.99, 36)
+    expected = offer_mod.build_offer(12000, config.DEMO_NOTE_RATE_PCT, 36)
     # The point of this test is that caller-supplied principal/term/rate are
     # ignored in favour of the application's own record -- so compare against
     # what build_offer produces for THAT, not against the rate the caller sent.
@@ -269,7 +283,12 @@ def test_create_offer_ignores_client_supplied_principal_and_term(monkeypatch):
     # Positional params are (fee_pct_used, note_rate_pct, apr, ...) since PR #10
     # split the contractual rate out of the disclosed APR. Both are checked:
     # neither may be derived from the caller-supplied principal=49999/rate=35.
-    assert insert_call[1][1] == pytest.approx(7.99)          # note rate, from fees.NOTE_RATE_PCT
+    # The note rate is the CONFIGURED one (config.DEMO_NOTE_RATE_PCT), read from
+    # the same environment variable origination publishes at /los/pricing. It was
+    # `fees.NOTE_RATE_PCT`, a module constant that decided the rate regardless of
+    # configuration -- PR #80's review found that origination could publish 8.50
+    # and this service would still store 7.99.
+    assert insert_call[1][1] == pytest.approx(config.DEMO_NOTE_RATE_PCT)
     assert insert_call[1][2] == expected["apr"]              # disclosed APR
     assert insert_call[1][1] != insert_call[1][2], "note rate and APR must not be the same value"
 
@@ -284,9 +303,13 @@ def test_repeated_create_offer_with_different_body_values_leaves_offer_unchanged
     monkeypatch.setattr(db, "query", fake_db.query)
 
     first = client.post("/offers", json=_offer_payload(application_id=10, principal=12000))
+    # Different principal and term on the repeat. A different RATE is no longer
+    # part of this payload: it is refused at validation now, so the repeat would
+    # never reach the DO NOTHING path this test is about. That the rate is
+    # refused is asserted separately, below.
     second = client.post(
         "/offers",
-        json=_offer_payload(application_id=10, principal=49999) | {"term_months": 60, "annual_rate": 35},
+        json=_offer_payload(application_id=10, principal=49999) | {"term_months": 60},
     )
 
     assert first.status_code == 200
@@ -487,9 +510,11 @@ def test_a_mismatched_body_term_does_not_reach_the_stored_schedule(monkeypatch):
 
     # Caller asks for 60 months and a 49,000 principal; the application says 36
     # months / 15,000. Both request values are inside the schema's own bounds, so
-    # this exercises the trust boundary rather than input validation.
+    # this exercises the trust boundary rather than input validation -- which is
+    # also why no rate is sent: a rate the server did not set is now a 422, and
+    # this test must reach the handler to prove what it stores.
     resp = client.post("/offers", json={"application_id": 10, "principal": 49000,
-                                        "term_months": 60, "annual_rate": 24.0})
+                                        "term_months": 60})
 
     assert resp.status_code == 200, resp.text
     stored = fake_db.stored_offer
@@ -499,6 +524,30 @@ def test_a_mismatched_body_term_does_not_reach_the_stored_schedule(monkeypatch):
     )
     assert int(stored["regular_payment_count"]) + 1 == int(stored["term_months"])
     assert stored["schedule_version"] == "B1"
+
+
+def test_a_mismatched_body_rate_is_refused_before_it_can_be_ignored(monkeypatch):
+    """The rate half of the same trust boundary, which the tests above stopped
+    exercising when they stopped sending a rate.
+
+    Ignoring the caller's rate was already safe -- the handler prices from
+    configuration -- but refusing it is better: the caller learns its number was
+    not used instead of receiving a disclosure it will misread as its own
+    pricing. Asserted through the route, so it is the deployed behaviour and not
+    only the schema's.
+    """
+    fake_db = _FakeDb(application_rows=[{"amount": 12000, "term_months": 36}])
+    monkeypatch.setattr(db, "query", fake_db.query)
+
+    resp = client.post(
+        "/offers",
+        json=_offer_payload(application_id=10) | {"annual_rate": 35},
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "set by the server" in resp.text
+    # And nothing was written on the way to the refusal.
+    assert not [c for c in fake_db.calls if "INSERT INTO offers" in c[0]]
 
 
 # --- the redisplayed schedule comes from the stored contract ------------------

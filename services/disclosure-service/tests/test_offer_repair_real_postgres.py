@@ -181,9 +181,17 @@ def _seed_offer(conn, app_id, *, missing=(), accepted=False, fee_pct=0.030,
 
 
 def _post(app_id):
-    # principal/term_months/annual_rate are still accepted by OfferIn but the
-    # handler ignores them (they are sourced from the application's own record);
-    # they are sent here only to satisfy the schema, as the other tests do.
+    # `principal`/`term_months` are accepted but ignored -- the handler sources
+    # them from the application's own record -- and `annual_rate` is omitted
+    # entirely, because the rate is the server's (`config.DEMO_NOTE_RATE_PCT`)
+    # and this is the shape a direct repair caller actually sends.
+    #
+    # The comment here used to claim it sent `annual_rate` "to satisfy the
+    # schema" while sending three fields. When the field briefly became
+    # required, all 27 requests in this file 422'd before reaching the repair
+    # path -- and the file skips without DATABASE_URL, so the suite still read
+    # green. Hence `test_the_repair_caller_shape_is_accepted` below, which
+    # asserts the shape against the schema with no database at all.
     return client.post(
         "/offers",
         json={"application_id": app_id, "principal": 9000.0, "term_months": 24},
