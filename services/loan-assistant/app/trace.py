@@ -57,11 +57,18 @@ application identifiers, and none of those travel: the application id is not
 recorded anywhere, and the caller appears only as a role. A trace with no id is
 not a trace, so the distinction is drawn deliberately rather than by omission.
 
-**What this module deliberately does NOT do.** It does not touch the policy-chat
-path or decision-service, both of which still trace their content in full when
-`LANGSMITH_TRACING` is set. That is a real exposure, it is named in this PR's
-description with evidence, and it is a different concern from making the agent
-path safe.
+**What this module deliberately does NOT do.** It does not trace the policy-chat
+path, and it never did. This paragraph used to record that as an open exposure --
+policy chat and decision-service both traced their content in full when
+`LANGSMITH_TRACING` was set -- and both are now closed, elsewhere and by
+different means: policy chat by removing the client wrapper that recorded its
+prompts (`llm_client.make_client`), and the LangGraph services by suppressing
+ambient tracing around the graph run. Neither is this module's job, which is why
+they were fixed where they live rather than absorbed into here.
+
+The distinction still matters for anyone extending this: a path is not safe
+because this module exists. It is safe because it emits nothing, or because
+everything it emits was named on purpose.
 """
 from __future__ import annotations
 

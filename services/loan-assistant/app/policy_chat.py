@@ -93,6 +93,25 @@ class _ModelJsonResponse(BaseModel):
     answer: str = Field(min_length=1)
 
 
+#: Bounded, closed set. A length is the most an operator can be told about a
+#: question without being told the question, and a BUCKET rather than the exact
+#: count because an exact length is a fingerprint: it distinguishes one question
+#: from another and can confirm a guess about which one was asked.
+_LENGTH_BUCKETS = ("tiny", "short", "medium", "long")
+
+
+def _length_bucket(question: str) -> str:
+    """Which bucket this question's length falls in. Never the length itself."""
+    size = len(question or "")
+    if size <= 40:
+        return "tiny"
+    if size <= 200:
+        return "short"
+    if size <= 1000:
+        return "medium"
+    return "long"
+
+
 def _build_prompt(question: str, context_text: str) -> str:
     return (
         f"Policy excerpt:\n{context_text}\n\n"
@@ -106,16 +125,36 @@ def answer_policy_question(question: str) -> PolicyAnswer:
     policy excerpt, or say plainly that it isn't recorded. Never calls the LLM
     for a question classify_answerable() has already flagged as ungrounded."""
     safe_question = redact_str(question)
-    log.info("policy_chat question=%s", safe_question)
+
+    # Categorical only. This used to be `log.info("policy_chat question=%s",
+    # safe_question)`, and redaction did not make that acceptable: the user's
+    # query is on the client's prohibited-retention list as a category, and a
+    # redacted user query is still a retained user query. The redactor removes
+    # patterns it recognises -- an SSN, a card number -- and a policy question is
+    # free text, so there is nothing for it to recognise and the question was
+    # written to the log essentially intact.
+    #
+    # This file already applied the correct rule one function down, where the
+    # parse-error branch says "a redacted model response is still a retained
+    # model response. Stage and error class only." Same rule, applied to the
+    # input as well as the output.
+    #
+    # What is left is a stage, an outcome, and a length bucket -- enough to see
+    # traffic, refusal rates and whether questions are getting longer, without
+    # retaining what anyone asked.
+    log.info("policy_chat stage=policy_chat_request length_bucket=%s",
+             _length_bucket(question))
 
     if contains_injection_attempt(safe_question):
-        log.warning("policy_chat blocked a suspected prompt-injection attempt")
+        log.warning("policy_chat stage=policy_chat_request status=blocked "
+                    "reason=suspected_injection")
         return PolicyAnswer(answerable=False, answer=_INJECTION_BLOCKED_ANSWER, source_chunk_id=None)
 
     chunks, embedder, idf = _corpus_state()
     hits = retrieve(safe_question, chunks, embedder, idf)
 
     if not classify_answerable(safe_question, hits):
+        log.info("policy_chat stage=policy_chat_request status=unanswerable")
         return PolicyAnswer(answerable=False, answer=_NOT_RECORDED_ANSWER, source_chunk_id=None)
 
     top_hit = hits[0]
@@ -145,6 +184,11 @@ def answer_policy_question(question: str) -> PolicyAnswer:
             f"Could not parse policy-chat response: {type(exc).__name__}") from exc
 
     is_answerable = parsed.answerable
+    # The outcome, categorically. `answered` and `not_recorded` are both
+    # "accepted" as far as this line is concerned -- the request was served --
+    # and the model's own verdict is the thing worth counting separately.
+    log.info("policy_chat stage=policy_chat_request status=accepted answerable=%s",
+             "yes" if is_answerable else "no")
     return PolicyAnswer(
         answerable=is_answerable,
         answer=parsed.answer,
