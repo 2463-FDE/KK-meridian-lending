@@ -1194,9 +1194,12 @@ five indexes that `db/init` creates and no migration ever did.
 2026-08-24; it said 12 as of 2026-08-11, and the aside below is about exactly this kind of drift — `db/tests/test_the_roadmap_counts_the_specs_it_has.py` recounts it now): approved, denied, existing-offer, both halves of the manual-review
 path, the review-step edit affordance, the submission edit lock, the offer
 disclosure UI, the payment-plan display, the reconstructed-schedule warning,
-regeneration repricing the offer, and the summary's external signal. *This read
-7 until the audit; five specs were added by PRs #10–#14 without the count being
-updated.* The count is of `*.spec.ts` files in that directory — `fixtures.ts` is
+regeneration repricing the offer, the fee-waiver ceiling and preview, and the
+summary's external signal. *Not exhaustive, and deliberately said so: the list
+has now been out of date at 7, 12, 22, 23 and 24 specs, every time because a
+name has to be added by hand when a spec is. The COUNT is recomputed by
+`db/tests/test_the_roadmap_counts_the_specs_it_has.py`; the list is prose and a
+reader should treat it as examples.* The count is of `*.spec.ts` files in that directory — `fixtures.ts` is
 shared helpers, not a spec. Each verifies
 PostgreSQL rows directly rather than trusting the screen. The interactive
 verification these replace was never checked in, so it was not repeatable by
