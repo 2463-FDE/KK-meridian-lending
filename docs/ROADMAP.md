@@ -1225,15 +1225,20 @@ Not on any week's brief. It came from a **client instruction of 2026-08-24**,
 after the Week 7/8 closure: a borrower or a member of staff must be able to
 answer basic questions about an account **without querying PostgreSQL**.
 
-**The instruction itself is not committed to this repository**, and saying so
-is part of recording it honestly — it arrived outside the repo, like the demo
-findings behind D22 and D23. What IS committed, and what a reader can check
-the claim against, is the set of decisions the same instruction produced on
-the same date: `docs/DEBT.md` **D22** (duplicate review, review-only) and
-**D24** (the fairness boundary) both carry `2026-08-24`, and the Week 7
-double-fund row records the same date. The PRs in the table below are the
-delivery. Anything a reader cannot verify from those is prose and should be
-read as prose.
+**No committed record carries this scope, and the first version of this
+paragraph overstated what its cross-references proved.** It cited
+`docs/DEBT.md` D22 and D24 as corroboration; review of PR #89 was right that
+they share the DATE and not the scope — they are adjacent same-day decisions
+about duplicate review and the fairness boundary, and neither mentions
+answering account questions without a database client.
+
+So the record is this: **source unavailable — an external client instruction
+dated 2026-08-24, accepted and implemented by Kalab (the PRs in the table
+below are the delivery), with no committed ticket, thread or decision-log
+entry behind it.** A maintainer who needs the scope confirmed has a person to
+ask rather than a document to find, which is worth stating precisely because
+it is the weaker of the two. Inventing a ticket reference would have satisfied
+the letter of the finding and been false.
 
 Each item is one merged PR. **Ordered by the question a user asks, not by PR
 number** — the disclosure before the account, the account before the controls
