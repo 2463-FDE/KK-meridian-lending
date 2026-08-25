@@ -68,6 +68,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import os
 import re
 import time
 import uuid
@@ -408,6 +409,38 @@ def summary_trace(role: str | None = None, parent_headers: dict | None = None):
                         type(exc).__name__)
 
 
+#: The project name the SDK falls back to when none is configured. Duplicated
+#: here on purpose: `langsmith.utils.get_tracer_project()` memoises its
+#: environment read, so calling it would return whatever the first caller in the
+#: process saw -- correct in production, stale anywhere the value changes.
+_SDK_DEFAULT_PROJECT = "default"
+
+
+def _own_project() -> str:
+    """The project THIS process files runs under. Never the sender's.
+
+    Review finding (LS-PROJECT-SCRUB). This used to read
+    `config.LANGSMITH_PROJECT or parent.session_name`, and the `or` was the bug:
+    `LANGSMITH_PROJECT` is unset in the shipped `.env.example`, so on a default
+    deployment the fallback handed the choice straight back to the caller --
+    the precise attack the scrub exists to close, live in the configuration most
+    likely to be running.
+
+    Worse, my own test for it passed anyway, because the fixture set
+    `LANGSMITH_PROJECT`. The test was asserting the guarded branch and calling it
+    proof of the unguarded one.
+
+    So there is no inbound fallback now: a configured project, or the SDK's
+    default, and nothing else. Read at call time so an operator's value applies
+    without a restart.
+    """
+    for name in ("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return _SDK_DEFAULT_PROJECT
+
+
 def _inbound_parent(headers: dict | None):
     """The gateway's run, rebuilt from its propagation headers -- identity only.
 
@@ -447,7 +480,7 @@ def _inbound_parent(headers: dict | None):
         return None
     parent.extra = {}
     parent.tags = []
-    parent.session_name = config.LANGSMITH_PROJECT or parent.session_name
+    parent.session_name = _own_project()
     return parent
 
 

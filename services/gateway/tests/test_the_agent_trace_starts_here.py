@@ -204,6 +204,29 @@ def staff_client(monkeypatch):
     return c
 
 
+def _runs(blob):
+    """Every run object in the posted bytes.
+
+    The sink receives multipart ingest bodies, so the JSON objects sit inside a
+    stream. Scanned with the JSON decoder rather than a regex: `raw_decode`
+    consumes exactly one value and stops, which is what makes it safe to walk a
+    mixed stream, and a regex over nested braces would either miss runs or invent
+    them.
+    """
+    decoder = json.JSONDecoder()
+    found = []
+    for index, ch in enumerate(blob):
+        if ch != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(blob, index)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and "id" in value and "name" in value:
+            found.append(value)
+    return found
+
+
 def _forwarded():
     assert _Upstream.calls, "nothing reached the upstream service"
     return _Upstream.calls[-1]
@@ -449,6 +472,122 @@ def test_the_forwarded_context_contains_no_request_identifiers(
     # is a test asserting against its own contract rather than a leak check.
     for forbidden in ("4242", str(USER_ID), "Bearer", "applications/"):
         assert forbidden not in blob, forbidden + " rides on the trace context"
+
+
+# ------------------------------------------------- the root always closes
+
+def test_the_root_is_ended_when_the_upstream_call_raises(tracing_on,
+                                                        staff_client,
+                                                        monkeypatch):
+    """Review finding GTRACE-OPEN-ROOT.
+
+    `_proxy` makes an outbound HTTP call, so an upstream timeout or a refused
+    connection leaves the route by exception. The root has already been posted by
+    then, and `finish_root` used to sit after the await -- so on that path the run
+    was never ended and an operator saw a root with no outcome, which looks like a
+    request still in flight rather than one that failed. That is the precise
+    confusion this trace exists to remove.
+
+    Asserted on the bytes: the run must arrive with an end time.
+    """
+    class _Exploding:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, *a, **k):
+            raise httpx.ConnectError("simulated: loan-assistant unreachable")
+
+    monkeypatch.setattr("app.main.httpx.AsyncClient", _Exploding)
+
+    with pytest.raises(httpx.ConnectError):
+        staff_client.post(SUMMARY_PATH)
+
+    blob = tracing_on.text()
+    assert agent_trace.STAGE in blob, "the root was never posted at all"
+    runs = [r for r in _runs(blob) if r.get("name") == agent_trace.STAGE]
+    assert runs, "no gateway_entry run in the posted bytes"
+    assert any(r.get("end_time") for r in runs), (
+        "the gateway_entry run was posted but never ended, so the trace shows a "
+        "root that never finished")
+
+
+def test_a_failed_hop_is_told_apart_from_an_upstream_that_answered(
+        tracing_on, staff_client, monkeypatch):
+    """A status code alone cannot say which happened.
+
+    An upstream returning 502 and a proxy that raised before any response existed
+    read identically as `http_status: 502`. The categorical `status` separates
+    them, so an operator counting failures is not counting two different events
+    as one.
+    """
+    class _Exploding:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, *a, **k):
+            raise httpx.ReadTimeout("simulated: upstream timed out")
+
+    monkeypatch.setattr("app.main.httpx.AsyncClient", _Exploding)
+
+    with pytest.raises(httpx.ReadTimeout):
+        staff_client.post(SUMMARY_PATH)
+
+    blob = tracing_on.text()
+    assert '"status":"error"' in blob.replace(" ", ""), (
+        "a hop that never completed was not marked as an error")
+
+
+def test_no_exception_text_reaches_the_trace(tracing_on, staff_client,
+                                             monkeypatch):
+    """An error path is where a raw provider error would try to travel.
+
+    Raw provider errors are on the prohibited list, and the closing path is the
+    one that runs when something went wrong -- so the sentinel goes in the
+    exception message and must not appear in the bytes.
+    """
+    sentinel = "PROVIDERERROR-SENTINEL-G9 credential=abcdef"
+
+    class _Exploding:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, *a, **k):
+            raise httpx.ConnectError(sentinel)
+
+    monkeypatch.setattr("app.main.httpx.AsyncClient", _Exploding)
+
+    with pytest.raises(httpx.ConnectError):
+        staff_client.post(SUMMARY_PATH)
+
+    assert sentinel not in tracing_on.text()
+    assert "PROVIDERERROR-SENTINEL-G9" not in tracing_on.text()
+
+
+def test_a_normal_response_still_records_its_status(tracing_on, staff_client):
+    """The success path did not regress into the failure branch."""
+    staff_client.post(SUMMARY_PATH)
+
+    blob = tracing_on.text().replace(" ", "")
+    assert '"status":"ok"' in blob
+    assert '"http_status":200' in blob
 
 
 # ------------------------------------------------------- guard the guard

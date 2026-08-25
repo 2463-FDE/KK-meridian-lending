@@ -610,7 +610,28 @@ async def assistant(path: str, request: Request, authorization: str | None = Hea
         trace_headers, root = agent_trace.start_root(
             role=str(user.get("role", "")), route_class="agent_summary")
 
-    resp = await _proxy(LOAN_ASSISTANT_URL, f"/{path}", request, user,
-                        extra_headers=trace_headers or None)
-    agent_trace.finish_root(root, resp.status_code)
+    # `finally`, because `_proxy` can raise rather than return.
+    #
+    # It makes an outbound HTTP call, so an upstream timeout or a refused
+    # connection leaves this frame by exception. The root has already been
+    # posted at that point, and without this the run is never ended: the
+    # operator sees a root with no outcome, which looks like a request still in
+    # flight rather than one that failed. Found in review (GTRACE-OPEN-ROOT).
+    #
+    # The exception itself is re-raised untouched and never recorded -- raw
+    # provider errors are on the prohibited list. Only the two categorical
+    # fields travel.
+    resp = None
+    try:
+        resp = await _proxy(LOAN_ASSISTANT_URL, f"/{path}", request, user,
+                            extra_headers=trace_headers or None)
+    finally:
+        if resp is not None:
+            agent_trace.finish_root(root, resp.status_code, status="ok")
+        else:
+            # No response ever existed. 502 is what a caller would have been
+            # told had this been mapped to one, and `status=error` says the hop
+            # did not complete, which a bare 502 would not distinguish from an
+            # upstream that answered 502.
+            agent_trace.finish_root(root, 502, status="error")
     return resp

@@ -204,7 +204,6 @@ def sink(monkeypatch):
     monkeypatch.setenv("LANGSMITH_API_KEY", S_CREDENTIAL)
     monkeypatch.setenv("LANGSMITH_PROJECT", "join-regression")
     monkeypatch.setattr(config, "LANGSMITH_API_KEY", S_CREDENTIAL)
-    monkeypatch.setattr(config, "LANGSMITH_PROJECT", "join-regression")
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
     yield s
     s.close()
@@ -519,6 +518,50 @@ def test_a_hostile_project_name_does_not_redirect_the_runs(
     gateway_trace.finish_root(root, resp.status_code)
 
     assert "attacker-project" not in sink.text()
+
+
+def test_a_hostile_project_is_refused_with_no_project_configured(
+        sink, client, monkeypatch):
+    """Review finding LS-PROJECT-SCRUB, and the configuration that ships.
+
+    The scrub used to read `config.LANGSMITH_PROJECT or parent.session_name`. With
+    `LANGSMITH_PROJECT` set -- which the fixture above did -- the left side won and
+    the test passed. With it UNSET, which is what `.env.example` ships, the `or`
+    fell through and handed the choice back to the caller. So the guarded branch
+    was being asserted and the unguarded one was being claimed.
+
+    This is the unguarded one: no project configured, a hostile project in
+    `baggage`, and the runs must still not go there.
+    """
+    for name in ("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"):
+        monkeypatch.delenv(name, raising=False)
+    _real_agent_over_a_fake_model(monkeypatch)
+
+    headers, root = _through_the_gateway(
+        extra_headers={"baggage": "langsmith-project=attacker-project"})
+
+    resp = _post(client, headers)
+    assert resp.status_code == 200
+    gateway_trace.finish_root(root, resp.status_code)
+
+    assert "attacker-project" not in sink.text(), (
+        "with no project configured, the inbound project name was accepted")
+
+
+def test_the_project_comes_from_this_process_not_the_sender(monkeypatch):
+    """The resolver, directly.
+
+    Asserted on the function as well as through the wire test: the wire test can
+    only show the value that was used, and this shows the rule -- a configured
+    project wins, and with none configured the answer is the SDK default, never
+    anything that arrived.
+    """
+    for name in ("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"):
+        monkeypatch.delenv(name, raising=False)
+    assert trace._own_project() == trace._SDK_DEFAULT_PROJECT
+
+    monkeypatch.setenv("LANGSMITH_PROJECT", "meridian-real-project")
+    assert trace._own_project() == "meridian-real-project"
 
 
 def test_a_malformed_parent_context_still_emits_a_trace(sink, client, monkeypatch):

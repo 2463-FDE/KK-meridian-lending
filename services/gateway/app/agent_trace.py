@@ -47,6 +47,7 @@ STAGE = "gateway_entry"
 #: than trusted: see `_safe`.
 ALLOWED_FIELDS = frozenset({
     "stage", "service", "role", "route_class", "tracing_mode", "schema_version",
+    "status", "http_status",
 })
 
 #: Closed vocabularies, so a categorical-looking key cannot carry free text.
@@ -62,6 +63,10 @@ VOCABULARIES = {
     # would start tracing a path nobody asked to have traced.
     "route_class": {"agent_summary"},
     "tracing_mode": {"privacy_safe_categorical"},
+    # Whether the hop completed at all, as distinct from what it answered. A
+    # 502 the upstream returned and a proxy that raised before any response
+    # existed are different events and read identically as a status code alone.
+    "status": {"ok", "error"},
 }
 
 SCHEMA_VERSION = "1"
@@ -146,17 +151,31 @@ def start_root(role: str | None, route_class: str) -> tuple[dict, object | None]
         return {}, None
 
 
-def finish_root(run, http_status: int) -> None:
-    """Close the root run with the status the caller actually received.
+def finish_root(run, http_status: int, status: str = "ok") -> None:
+    """Close the root run.
 
-    The status is the only outcome recorded here. Whether the agent answered, or
-    refused, or failed, is the downstream trace's business and is already
-    categorical there.
+    Review finding (GTRACE-OPEN-ROOT). This must run on EVERY exit from the
+    traced route, including the ones that raise. `_proxy` calls out over HTTP, so
+    an upstream timeout or a refused connection propagates as an exception -- and
+    on that path the root had been posted and never ended. The operator is left
+    looking at a root run with no outcome, which is indistinguishable from a
+    request still in flight and is exactly the confusion this trace was added to
+    remove. The caller now closes it from a `finally`.
+
+    `status` separates "the hop completed and answered with this code" from "the
+    hop did not complete". A proxy that raised before any response existed and an
+    upstream that returned 502 are different events, and a status code alone
+    reads the same for both.
+
+    Both fields go through `_safe`, so this cannot become a place where an
+    exception message reaches the trace -- raw provider errors are on the
+    prohibited list, and an error path is where one would try to travel.
     """
     if run is None:
         return
     try:
-        run.end(outputs={"http_status": int(http_status)})
+        outcome = _safe({"http_status": int(http_status), "status": status})
+        run.end(outputs=outcome)
         run.patch()
     except Exception as exc:
         log.warning("stage=%s status=trace_finish_failed error_class=%s",
