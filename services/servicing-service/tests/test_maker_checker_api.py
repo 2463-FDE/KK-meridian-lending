@@ -432,6 +432,12 @@ def test_late_fee_on_a_loan_with_no_balance_is_a_404_not_a_500(keys, monkeypatch
     ("fees", "40.00", "1000.00", -80.00, "fee_waived"),
     ("fees", "40.00", "1000.00", -80.00, "adjustment"),
     ("principal", "40.00", "100.00", -100.01, "adjustment"),
+    # No fees owed at all, which is the case the servicing form used to offer:
+    # an operator typed 350 against a zero fee balance, the client sent -350,
+    # and the refusal arrived from the server. The form stops asking now, and
+    # this is the proof that stopping asking is a usability guard rather than the
+    # control -- a direct caller still gets a 422.
+    ("fees", "0.00", "1000.00", -350.00, "fee_waived"),
 ])
 def test_a_movement_below_zero_is_refused_at_creation(keys, fake_db, no_money,
                                                       component, past_due, balance,

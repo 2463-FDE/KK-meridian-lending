@@ -170,9 +170,42 @@ function LoanDetailContent() {
   // the browser is a second source for one number, and this page already says
   // why it leaves those to the server.
   const adjustWouldGoNegative = adjustDelta !== 0 && adjustBase + adjustDelta < 0;
+
   const [adjustReason, setAdjustReason] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
   const [waiveReason, setWaiveReason] = useState("");
+  // --- fee waiver -----------------------------------------------------------
+  //
+  // A waiver removes an EXISTING fee. It is not a credit, not a principal
+  // reduction, not a refund and not a payment -- so what can be waived is
+  // bounded by what is owed, and the operator has to be able to see that number
+  // before typing.
+  //
+  // `waiveBase` is the authoritative fee balance from the server
+  // (`GET /lss/accounts/{id}/balance` -> `past_due`, the projection of
+  // `component = 'fees'` per db/migrations/0035). NOT derived from payment
+  // history, the schedule, the principal or anything summed in the browser.
+  //
+  // The operator types a POSITIVE figure and the client sends a negative delta
+  // -- that boundary already existed and stays exactly as it is. What was
+  // missing was any way to see the fee balance the delta lands on: the form
+  // accepted 350 against 0.00 of fees, sent -350, and the server refused it
+  // with "the ledger cannot hold a negative fees". The refusal was right; the
+  // form should not have offered the request.
+  const waiveBase = loan?.past_due ?? 0;
+  const waiveEntered = Number.isFinite(parseFloat(waiveAmount))
+    ? parseFloat(waiveAmount)
+    : 0;
+  const waiveNothingToWaive = loan != null && waiveBase <= 0;
+  // Strictly greater: waiving exactly the balance is legal and lands on zero,
+  // which is the server's own condition (`component_now + delta < 0`).
+  const waiveExceedsFees = waiveEntered > 0 && waiveEntered > waiveBase;
+  const waiveIsProposable =
+    loan != null &&
+    waiveBase > 0 &&
+    waiveEntered > 0 &&
+    !waiveExceedsFees &&
+    waiveReason.trim().length > 0;
   // POST /payments now requires an idempotency_key (review fix -- a retry or
   // a double-click used to double-charge). Minted once and reused across
   // retries of the SAME submit attempt; a fresh one is minted only after the
@@ -804,6 +837,29 @@ function LoanDetailContent() {
               <div className="card-title" style={{ marginBottom: 10 }}>
                 Propose a fee waiver
               </div>
+              {/* The fee balance a waiver acts on, and the ceiling it implies,
+                  both from the server. "Maximum CURRENTLY waivable" is deliberate
+                  wording: this is a snapshot, and the balance is re-read under
+                  lock when a different member of staff approves -- so a waiver
+                  valid when raised can still be refused later. Promising more
+                  than that would be a claim the browser cannot keep. */}
+              <div className="dl" data-testid="waive-context">
+                <div className="dl-row">
+                  <dt>Current outstanding fees</dt>
+                  <dd>{usd(waiveBase)}</dd>
+                </div>
+                <div className="dl-row">
+                  <dt>Maximum currently waivable</dt>
+                  <dd>{usd(waiveBase)}</dd>
+                </div>
+              </div>
+
+              {waiveNothingToWaive ? (
+                <p className="hint" data-testid="waive-nothing-to-waive">
+                  There are no outstanding fees to waive.
+                </p>
+              ) : null}
+
               <label htmlFor="waive-amount">Waiver amount (USD)</label>
               <input
                 id="waive-amount"
@@ -815,8 +871,43 @@ function LoanDetailContent() {
                 placeholder="0.00"
               />
               <p className="hint">
-                How much to take off the borrower&apos;s fees. Enter it as a
-                positive figure.
+                How much to take off the borrower&apos;s existing fees. Enter the
+                amount as a positive figure.
+              </p>
+
+              {waiveExceedsFees ? (
+                /* Named for what it is: more than is owed. The server refuses
+                   this at proposal time and again at approval, so this is a
+                   usability guard rather than the control -- it exists so the
+                   operator learns before submitting instead of after. */
+                <p className="alert alert-error" data-testid="waive-exceeds-fees">
+                  You can currently waive at most {usd(waiveBase)}. A waiver
+                  removes an existing fee, so it cannot exceed the fees owed --
+                  the ledger cannot hold a negative fee balance.
+                </p>
+              ) : null}
+
+              {waiveIsProposable ? (
+                <div className="dl" data-testid="waive-preview">
+                  <div className="dl-row">
+                    <dt>Current fees</dt>
+                    <dd>{usd(waiveBase)}</dd>
+                  </div>
+                  <div className="dl-row">
+                    <dt>Waiver</dt>
+                    <dd>&minus;{usd(waiveEntered)}</dd>
+                  </div>
+                  <div className="dl-row">
+                    <dt>After approval</dt>
+                    <dd>{usd(waiveBase - waiveEntered)}</dd>
+                  </div>
+                </div>
+              ) : null}
+
+              <p className="hint">
+                Preview only. Submitting raises a proposal and moves no money. A
+                different authorized staff member must approve it, and the
+                authoritative fee balance is revalidated again at approval time.
               </p>
               <label htmlFor="waive-reason" style={{ marginTop: 10 }}>
                 Reason
@@ -832,7 +923,11 @@ function LoanDetailContent() {
                 className="btn-ghost btn-block"
                 style={{ marginTop: 14 }}
                 onClick={waiveFee}
-                disabled={actionBusy || !waiveAmount || !waiveReason.trim()}
+                /* Every condition the server would refuse on, plus a reason.
+                   `waiveIsProposable` requires the authoritative balance to have
+                   LOADED -- a form enabled before `loan` arrives would be
+                   offering a ceiling nobody has read yet. */
+                disabled={actionBusy || !waiveIsProposable}
               >
                 Submit for approval
               </button>
