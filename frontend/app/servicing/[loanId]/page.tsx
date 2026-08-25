@@ -202,6 +202,11 @@ function LoanDetailContent() {
   //
   // These are not two changes. They are one expression that has to be right:
   // the proposer set, read from an identity the caller cannot edit.
+  // Bumped whenever this page has re-read the account, so the activity panel
+  // re-reads too. Review of PR #87: it fetched on mount only, so a payment the
+  // operator had just captured appeared in payment history and not in activity
+  // -- two panels on one screen disagreeing about the same account.
+  const [activityReloadKey, setActivityReloadKey] = useState(0);
   const [canRepActions, setCanRepActions] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -284,6 +289,11 @@ function LoanDetailContent() {
     if (pay.status === "fulfilled") {
       setPayments((pay.value as { items?: PaymentRow[] })?.items ?? []);
     }
+    // Whatever just changed the balance or the payment list changed the account,
+    // so the activity panel is stale by definition. Bumped here rather than at
+    // each call site: this function is what every money action already calls,
+    // and one place cannot be half-updated.
+    setActivityReloadKey((n) => n + 1);
   }, [loanId]);
 
   async function makePayment() {
@@ -558,7 +568,9 @@ function LoanDetailContent() {
           one, because the only identity it can see is an unsigned
           `X-User-Role`; staff provenance belongs behind a signed principal and
           is a separate concern. */}
-      {loanId ? <AccountActivity loanId={loanId} /> : null}
+      {loanId ? (
+        <AccountActivity loanId={loanId} reloadKey={activityReloadKey} />
+      ) : null}
 
       {/* Payment history */}
       <h2>Payment history</h2>

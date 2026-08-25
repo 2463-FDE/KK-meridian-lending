@@ -54,6 +54,10 @@ function MyLoanContent() {
   const [items, setItems] = useState<LoanRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Refresh reloads the loan cards; without this the mounted activity panels
+  // kept their old state, because their keys and loan ids do not change. Review
+  // of PR #87.
+  const [activityReloadKey, setActivityReloadKey] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -64,6 +68,11 @@ function MyLoanContent() {
       // trusted here; if ownership can't be established the gateway 403s.
       const res = (await apiGet(`/lss/loans?limit=200&offset=0`)) as LoansResponse;
       setItems(res.items ?? []);
+      // The activity panels re-read too. Refresh means "show me the current
+      // state of my account", and a page that reloaded the summary while
+      // leaving the movement list at whatever it said before is answering a
+      // different question than the one the button asks.
+      setActivityReloadKey((n) => n + 1);
     } catch (err) {
       setError(errMsg(err, "Could not load your loans."));
       setItems([]);
@@ -190,6 +199,7 @@ function MyLoanContent() {
             <AccountActivity
               key={`activity-${String(l.id)}`}
               loanId={l.id}
+              reloadKey={activityReloadKey}
               heading={
                 items.length > 1
                   ? `Account activity — loan #${String(l.id)}`

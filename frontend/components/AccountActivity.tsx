@@ -67,9 +67,25 @@ const LIMITED_NOTE =
 export default function AccountActivity({
   loanId,
   heading = "Account activity",
+  reloadKey = 0,
 }: {
   loanId: string | number;
   heading?: string;
+  /**
+   * Bumped by the parent when something on the page has changed the account.
+   *
+   * Review of PR #87 (AA-FRESH-001): this fetched on mount only, so a payment
+   * the user had just captured appeared in payment history -- which the page
+   * re-reads -- and NOT in activity, sitting stale beside it. Two panels on one
+   * screen disagreeing about the same account is worse than either being
+   * absent, because both look authoritative.
+   *
+   * A counter rather than a callback ref: the parent already knows when it has
+   * changed something, and an effect dependency is the smallest thing that
+   * cannot be forgotten halfway. A parent that never bumps it behaves exactly as
+   * before.
+   */
+  reloadKey?: number;
 }) {
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [note, setNote] = useState<string | null>(null);
@@ -101,7 +117,9 @@ export default function AccountActivity({
 
   useEffect(() => {
     load();
-  }, [load]);
+    // `reloadKey` is a dependency, not an argument: `load` is memoised on
+    // `loanId`, so without this the effect never re-runs for the same loan.
+  }, [load, reloadKey]);
 
   return (
     <section className="card" style={{ marginTop: 20 }} data-testid="account-activity">

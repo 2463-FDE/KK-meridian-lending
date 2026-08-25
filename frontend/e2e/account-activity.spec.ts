@@ -193,29 +193,126 @@ test("no staff reason, actor or correlation id reaches the borrower's screen", a
   expect(body.toLowerCase()).not.toContain("legacy direct write");
 });
 
-test("a borrower cannot read another loan's activity", async ({ request }) => {
+test("an authenticated borrower is refused another borrower's activity", async ({
+  page,
+}) => {
   /**
-   * The gateway's refusal, which is the check that matters -- `RequireRole`
-   * decides what renders, not who may read.
+   * Review of PR #87 (AA-TEST-001), and the finding was right: this used the
+   * isolated `request` fixture with no session and accepted a 401, so an
+   * ANONYMOUS refusal passed for an ownership check. The two are different
+   * claims -- "you must log in" and "this is not your loan" -- and only the
+   * second is what the gateway rule exists to enforce.
+   *
+   * Signed in as a real borrower now, sending that session's own token, against
+   * a loan they demonstrably do not own.
    */
-  const res = await request.get(
-    "http://localhost:8000/lss/loans/999999/activity",
+  await signInAsBorrower(page);
+
+  // A loan that exists and belongs to someone else, so the refusal cannot be
+  // "no such loan".
+  const otherLoanId = await withDb(
+    async (c) =>
+      (
+        await c.query(
+          `SELECT l.id FROM loans l
+            WHERE l.id <> $1 AND l.status = 'current'
+            ORDER BY l.id LIMIT 1`,
+          [SEEDED_BORROWER.loanId],
+        )
+      ).rows[0]?.id,
   );
+  expect(otherLoanId, "no second serviced loan to test ownership against")
+    .toBeTruthy();
 
-  expect([401, 403, 404]).toContain(res.status());
+  const outcome = await page.evaluate(async (loanId) => {
+    const token = window.localStorage.getItem("meridian.token") ?? "";
+    const res = await fetch(`http://localhost:8000/lss/loans/${loanId}/activity`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return { status: res.status, sentToken: token.length > 0 };
+  }, otherLoanId);
+
+  // The session really was sent -- otherwise this is the anonymous test again
+  // under a new name.
+  expect(outcome.sentToken).toBe(true);
+  expect(outcome.status).toBe(403);
+
+  // And the borrower's OWN loan is readable with the same token, so the 403
+  // above is about ownership rather than about the route being unreachable.
+  const own = await page.evaluate(async (loanId) => {
+    const token = window.localStorage.getItem("meridian.token") ?? "";
+    const res = await fetch(`http://localhost:8000/lss/loans/${loanId}/activity`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return res.status;
+  }, SEEDED_BORROWER.loanId);
+  expect(own).toBe(200);
 });
 
-test("an unlisted loan sub-path is still refused", async ({ request }) => {
+
+test("activity re-reads when the page refreshes, without a reload", async ({
+  page,
+}) => {
   /**
-   * Adding `activity` to the gateway's owner-or-staff alternation must not have
-   * turned it into a wildcard. Asserted from the browser side as well as in the
-   * gateway's own tests, because this is the boundary that keeps `/lss/*` from
-   * being a generic proxy.
+   * Review of PR #87 (AA-FRESH-001). The panel fetched on mount only, so a
+   * payment the user had just captured showed in payment history -- which the
+   * page re-reads -- and not in activity beside it. Two panels on one screen
+   * disagreeing about the same account is worse than either being absent,
+   * because both look authoritative.
+   *
+   * Driven from the BORROWER page, because that is where the refresh path has a
+   * button. The staff page bumps the same prop from
+   * `refreshBalanceAndHistory()`, which only runs after a money action -- and
+   * exercising it would mean capturing a real card payment into a shared demo
+   * database on every run.
+   *
+   * Asserted with an intercepted response that CHANGES between the two reads. A
+   * panel that never re-fetched would still be showing the first answer, so the
+   * assertion cannot pass for the wrong reason.
    */
-  const res = await request.get("http://localhost:8000/lss/loans/1/ledger");
+  let served = 0;
+  await signInAsBorrower(page);
+  await page.route("**/lss/loans/*/activity", (route) => {
+    served += 1;
+    const items =
+      served <= 1
+        ? []
+        : [
+            {
+              id: "payment:9100",
+              occurred_at: "2026-08-24T12:00:00+00:00",
+              category: "payment",
+              description: "Payment received",
+              amount: -120,
+              components: { principal: -120 },
+              payment_id: 9100,
+              provenance: "processor",
+            },
+          ];
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        loan_id: SEEDED_BORROWER.loanId,
+        items,
+        note: "Authoritative movements that changed this account, read from the immutable ledger.",
+      }),
+    });
+  });
 
-  expect(res.status()).not.toBe(200);
+  await page.goto("/my-loan");
+  const activity = page.getByTestId("account-activity").first();
+  await expect(activity).toBeVisible({ timeout: 30_000 });
+  // First read: nothing yet.
+  await expect(activity.getByText(/No movements have been recorded/i)).toBeVisible();
+
+  await page.getByRole("button", { name: /Refresh/i }).first().click();
+
+  await expect(activity.locator("tbody tr")).toHaveCount(1, { timeout: 30_000 });
+  await expect(activity.getByText(/payment 9100/)).toBeVisible();
+  expect(served).toBeGreaterThan(1);
 });
+
 
 test("the amounts on screen are the server's, to the cent", async ({
   page,
