@@ -1221,14 +1221,24 @@ anyone else — the same closure gap as the roadmap itself.
 
 ### Account clarity — ✅ Landed
 
-Not on any week's brief. It came from a client instruction after the Week 7/8
-closure: a borrower or a member of staff must be able to answer basic questions
-about an account **without querying PostgreSQL**. Recorded here because the
-week structure has no row for it, which is exactly how the earlier off-brief
-work went unrecorded.
+Not on any week's brief. It came from a **client instruction of 2026-08-24**,
+after the Week 7/8 closure: a borrower or a member of staff must be able to
+answer basic questions about an account **without querying PostgreSQL**.
 
-Each item is one merged PR, and each one is a *presentation* change over
-existing accounting. No accounting semantics were altered by any of them:
+**The instruction itself is not committed to this repository**, and saying so
+is part of recording it honestly — it arrived outside the repo, like the demo
+findings behind D22 and D23. What IS committed, and what a reader can check
+the claim against, is the set of decisions the same instruction produced on
+the same date: `docs/DEBT.md` **D22** (duplicate review, review-only) and
+**D24** (the fairness boundary) both carry `2026-08-24`, and the Week 7
+double-fund row records the same date. The PRs in the table below are the
+delivery. Anything a reader cannot verify from those is prose and should be
+read as prose.
+
+Each item is one merged PR. **Ordered by the question a user asks, not by PR
+number** — the disclosure before the account, the account before the controls
+over it — which is why #87 sits above #86. Each one is a *presentation* change
+over existing accounting. No accounting semantics were altered by any of them:
 `loans.principal` remains the contractual original, the balances projection
 remains the authority for what is currently owed, the server keeps the
 fees → interest → principal waterfall, and nothing here computes money in the
@@ -1237,7 +1247,7 @@ browser.
 | What a user could not answer before | Now | PR |
 |---|---|---|
 | "I applied for $9,000 — why does the disclosure say $8,730?" | The Amount Financed cell shows the subtraction: requested principal, less the prepaid origination fee. Inside the existing four federal boxes, not a fifth. A legacy offer that stored no principal says the breakdown is unavailable rather than inverting the amount financed to invent one | #83 |
-| "What actually changed this account?" | `GET /loans/{id}/activity`, read from `ledger_entries` and grouped by payment identity, so one payment is one movement rather than three charges. Separate from payment history on purpose: an approved adjustment and a fee waiver change what is owed **without being payments**, and folding them in would report money the borrower did not pay as part of what they paid | #85 |
+| "What actually changed this account?" | `GET /loans/{id}/activity`, read from `ledger_entries` and grouped on `ledger_entries.payment_id` — the authoritative payment identity, not a derived key — so one payment is one movement rather than three charges. Separate from payment history on purpose: an approved adjustment and a fee waiver change what is owed **without being payments**, and folding them in would report money the borrower did not pay as part of what they paid | #85 |
 | Same, on screen | The panel on `/my-loan` and the staff loan page, and the summary card renamed to **Current principal balance** — `balances.balance` is projected only from `component = 'principal'` entries and `past_due` only from `'fees'` (db/migrations/0035), so "Current balance" read as everything owed, which it is not | #87 |
 | "Does +450 mean they owe more or less, and against what?" | The adjustment form shows the selected component's own balance, the signed change, and where it lands — previewing fees against `past_due` and principal against `balance`. A change that would drive the component below zero reads "Not permitted" and cannot be submitted, because `maker_checker.propose` refuses exactly that | #86 |
 
@@ -1253,11 +1263,17 @@ component under lock and can still refuse.
 work reads the same evidence the Week 7 control does. No PR above changed the
 comparison algorithm, its input semantics, `processor_ref`, `captured_at`,
 `capture_source`, `auth_status`, the settlement parsing or the reconciliation
-query. #85 proves it by A/B rather than by assertion — run the comparison, read
-the activity endpoint, run it again, and require the counts, totals, break list
-and break value to be identical — on the netting fixture, where per-loan totals
-agree while two real defects sit underneath. An approved adjustment appears in
-activity and creates no capture, because no processor money moved.
+query. #85 proves it by A/B rather than by assertion, and the proof is a test rather
+than a paragraph:
+`services/servicing-service/tests/test_activity_does_not_touch_reconciliation.py`
+`::test_reading_activity_leaves_the_comparison_identical` runs the comparison,
+reads the activity endpoint, runs it again, and requires the counts, totals,
+break list and break value to be identical. It uses the netting fixture, where
+per-loan totals agree while two real defects sit underneath — and
+`::test_the_fixture_really_is_the_netting_case` in the same file guards that,
+because two clean runs would be equal for the wrong reason. That file also
+asserts an approved adjustment appears in activity and creates no capture,
+because no processor money moved.
 
 **Three database invariants shaped this work and are worth naming**, because
 each refused a fixture before it refused anything real: a payment's ledger rows
