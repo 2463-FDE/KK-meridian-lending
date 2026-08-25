@@ -150,6 +150,25 @@ function LoanDetailContent() {
   const adjustDelta = Number.isFinite(parseFloat(adjustAmount))
     ? parseFloat(adjustAmount)
     : 0;
+  // Would this take the component below zero? The server refuses that at
+  // PROPOSAL time -- `maker_checker.propose` checks
+  // `component_now + delta < 0` against the same `past_due`/`balance` pairing
+  // used above (REQ-VAL-8/AC-20), so the person who can fix the request is the
+  // one who is told.
+  //
+  // Review of PR #86 found the preview promising the opposite: on a clean
+  // portfolio with `past_due = 0`, Fees and -10 rendered "After approval
+  // -$10.00" with submit still enabled. A preview that shows a refused state as
+  // an approved outcome is worse than no preview -- it is the screen telling an
+  // operator their request will work.
+  //
+  // Predicted here, not enforced here: the server decides, and it re-checks at
+  // approval too because the balance moves while a proposal waits. This only
+  // stops the page from claiming otherwise. The threshold rules are
+  // deliberately NOT predicted -- a copy of the configured limit compiled into
+  // the browser is a second source for one number, and this page already says
+  // why it leaves those to the server.
+  const adjustWouldGoNegative = adjustDelta !== 0 && adjustBase + adjustDelta < 0;
   const [adjustReason, setAdjustReason] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
   const [waiveReason, setWaiveReason] = useState("");
@@ -692,10 +711,24 @@ function LoanDetailContent() {
                 <div className="dl-row">
                   <dt>After approval</dt>
                   <dd>
-                    {adjustDelta === 0 ? "—" : usd(adjustBase + adjustDelta)}
+                    {adjustDelta === 0
+                      ? "—"
+                      : adjustWouldGoNegative
+                        ? "Not permitted"
+                        : usd(adjustBase + adjustDelta)}
                   </dd>
                 </div>
               </div>
+              {adjustWouldGoNegative ? (
+                <p className="alert alert-error" data-testid="adjust-below-zero">
+                  This would take{" "}
+                  {adjustComponent === "fees" ? "past-due fees" : "principal"}{" "}
+                  below zero ({usd(adjustBase)} {adjustDelta > 0 ? "+" : "−"}{" "}
+                  {usd(Math.abs(adjustDelta))}). The ledger cannot hold a negative
+                  balance, so the server refuses a proposal like this rather than
+                  queueing one that cannot be approved.
+                </p>
+              ) : null}
               <p className="hint">
                 A change, not a new total. <strong>+</strong> increases the amount
                 owed; <strong>−</strong> reduces it.
@@ -723,7 +756,12 @@ function LoanDetailContent() {
                    is otherwise asked to authorise a number with no account of
                    why. Blocked here so the operator does not lose the amount
                    they typed to a 422. */
-                disabled={actionBusy || !adjustAmount || !adjustReason.trim()}
+                disabled={
+                  actionBusy ||
+                  !adjustAmount ||
+                  !adjustReason.trim() ||
+                  adjustWouldGoNegative
+                }
               >
                 Submit for approval
               </button>
