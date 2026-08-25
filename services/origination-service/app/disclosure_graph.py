@@ -20,6 +20,7 @@ from langgraph.graph import END, StateGraph
 
 from . import clients, config, kg
 from .logging_config import get_logger
+from .tracing import suppressed_tracing
 
 log = get_logger("disclosure_graph")
 
@@ -78,7 +79,16 @@ def auto_generate_offer(app_id: int) -> dict | None:
     the decision that already happened; the loan officer can still build the
     offer manually via POST /los/offer if this is skipped or fails.
     """
-    state = _graph.invoke({"app_id": app_id})
+    # Ambient tracing off for the whole graph run. `langgraph` brings
+    # `langchain-core`, which traces every `invoke` automatically whenever
+    # LANGSMITH_TRACING and LANGSMITH_API_KEY are set -- and both are set in
+    # every deployed environment here. The payload is the graph state, which
+    # holds the application id, the approved amount and term, and the assembled
+    # offer. Nobody asked for an auto-offer trace; see app/tracing.py.
+    #
+    # Nothing inside the block changed: same nodes, same order, same offer.
+    with suppressed_tracing():
+        state = _graph.invoke({"app_id": app_id})
     if state.get("skipped"):
         log.warning("auto offer-generation skipped: %s", state["skipped"])
         return None

@@ -29,6 +29,7 @@ from langgraph.graph import END, StateGraph
 
 from . import decision
 from .logging_config import get_logger
+from .tracing import suppressed_tracing
 
 log = get_logger("decision.graph")
 
@@ -122,5 +123,22 @@ _graph = (
 
 
 async def run(application: dict) -> dict:
-    state = await _graph.ainvoke({"application": application})
+    # Ambient tracing off for the whole graph run.
+    #
+    # `langgraph` brings `langchain-core`, which traces every `ainvoke`
+    # automatically whenever LANGSMITH_TRACING and LANGSMITH_API_KEY are set --
+    # and both are set in every deployed environment here. The payload is the
+    # graph state, and `DecisionState.application` is the entire application
+    # dict, SSN included (`_node_pull_credit` reads it). Measured at ~30KB per
+    # decision with the SSN, bureau score, bureau reference id, applicant name,
+    # application id, income and bureau request key all present.
+    #
+    # Nobody asked for a decision-service trace; the client asked for a trace of
+    # the agent. So this sends nothing rather than filtering, which is the same
+    # decision loan-assistant made for the same reason. See app/tracing.py for
+    # why the mechanism is a contextvar and not the environment.
+    #
+    # Nothing inside the block changed: same nodes, same order, same result.
+    with suppressed_tracing():
+        state = await _graph.ainvoke({"application": application})
     return state["final"]
