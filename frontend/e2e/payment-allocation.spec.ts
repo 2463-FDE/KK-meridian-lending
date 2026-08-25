@@ -154,10 +154,19 @@ async function payOnce(page: Page, amount: string): Promise<void> {
   // field, which a substring label match picks up as well.
   await page.getByLabel("Amount (USD)", { exact: true }).fill(amount);
   await page.getByRole("button", { name: /Pay with card on file/ }).click();
-  // The page refreshes balance and history itself once the charge is confirmed.
-  await expect(page.locator(".alert-success")).toContainText(/submitted|pending/i, {
-    timeout: 20_000,
-  });
+  // Wait for the OUTCOME the page now reports, whichever of the three it is.
+  //
+  // This waited for `.alert-success` to say "submitted" or "pending" -- the copy
+  // before the payment states were told apart. A captured payment now renders a
+  // receipt ("Payment posted"), and a decline renders an error rather than a
+  // success alert at all, so waiting on the old wording timed out on a page that
+  // was working. Keyed on the outcome test ids instead of on prose.
+  await expect(
+    page
+      .getByTestId("payment-posted")
+      .or(page.getByTestId("payment-pending"))
+      .or(page.getByTestId("payment-declined")),
+  ).toBeVisible({ timeout: 20_000 });
 }
 
 test("a borrower sees what their payment was applied to, and the figures are the ledger's", async ({

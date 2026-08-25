@@ -1190,7 +1190,7 @@ indexes, foreign keys and defaults. Four migrations could not replay onto a
 fresh database at all before this; the legacy-versus-fresh comparison then found
 five indexes that `db/init` creates and no migration ever did.
 
-**Browser end-to-end** (`frontend/e2e/`, **25** spec files, recounted by
+**Browser end-to-end** (`frontend/e2e/`, **26** spec files, recounted by
 `db/tests/test_the_roadmap_counts_the_specs_it_has.py` rather than by hand).
 
 **What they cover**, grouped rather than listed one by one, and these are
@@ -1206,7 +1206,8 @@ stale:
 - *money movement and its authority* — the payment allocation (twice: the read
   path and the view), the payment source handle, a proposal being raised, the
   rep-actions role matrix, self-approval in the approval queue, the adjustment
-  preview, and the fee-waiver ceiling and preview;
+  preview, the fee-waiver ceiling and preview, and the payment outcome states
+  with their receipt;
 - *the controls* — the reconciliation review queue and account activity;
 - *the assistant* — the summary's external signal.
 
