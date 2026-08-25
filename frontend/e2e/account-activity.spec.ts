@@ -64,79 +64,20 @@ test("a staff member sees each ledger movement once", async ({ page }) => {
   await expect(activity.locator("tbody tr")).toHaveCount(expected);
 });
 
-test("a multi-component payment is one row, not three charges", async ({ page }) => {
-  /**
-   * Built through the real waterfall rather than by hand: the database refuses a
-   * partial allocation (`ledger_payment_allocation_exact` is DEFERRABLE
-   * INITIALLY DEFERRED and requires a payment's entries to sum to its captured
-   * amount), so a fixture inserting one component at a time cannot exist. Any
-   * seeded payment that split across components will do.
-   */
-  const payments = await withDb(
-    async (c) =>
-      (
-        await c.query(
-          `SELECT payment_id, loan_id, count(*) AS parts,
-                  sum(amount)::float8 AS total
-             FROM ledger_entries
-            WHERE entry_type = 'payment' AND payment_id IS NOT NULL
-            GROUP BY payment_id, loan_id
-            ORDER BY count(*) DESC, payment_id
-            LIMIT 1`,
-        )
-      ).rows,
-  );
-
-  // **No `test.skip` here, deliberately.** The first version skipped when no
-  // seeded payment split across components -- and none does, so it skipped every
-  // run, and a skip reads exactly like a pass in a summary. The seeded portfolio
-  // has no arrears, so every payment goes wholly to principal; producing a real
-  // split would mean assessing a fee first, and a fee cannot be assessed against
-  // a zero past-due balance.
-  //
-  // So the multi-component case is proven where the data can be built:
-  // `servicing-service/tests/test_account_activity.py::
-  // test_a_payment_split_three_ways_is_one_movement`, and again on real
-  // PostgreSQL in `test_activity_does_not_touch_reconciliation.py`, whose
-  // fixture allocates a 250.00 capture across fees, interest and principal.
-  //
-  // What this test asserts against real data is the property that survives: a
-  // payment is ONE row whose amount is the server's, and the parts appear
-  // beneath it when there are several.
-  expect(payments.length).toBe(1);
-  const payment = payments[0];
-
-  await signInAsStaff(page, "csr");
-  await page.goto(`/servicing/${payment.loan_id}`);
-
-  const activity = page.getByTestId("account-activity");
-  await expect(activity).toBeVisible({ timeout: 20_000 });
-
-  const row = activity.locator("tbody tr", {
-    hasText: `payment ${payment.payment_id}`,
-  });
-  await expect(row).toHaveCount(1);
-  expect(money(await row.locator("td.num").textContent())).toBeCloseTo(
-    Math.abs(payment.total),
-    2,
-  );
-
-  // "Applied to" appears only when the movement has more than one component --
-  // so on this data it must NOT, and asserting its absence is what proves the
-  // line is driven by the components rather than printed unconditionally.
-  if (Number(payment.parts) > 1) {
-    await expect(row.getByText(/Applied to/i)).toBeVisible();
-  } else {
-    await expect(row.getByText(/Applied to/i)).toHaveCount(0);
-  }
-});
-
 test("a three-component payment renders as one row, on a payload that has one", async ({
   page,
 }) => {
   /**
-   * The grouping defect, caught in the browser -- which the tests above cannot
-   * do, and a mutation proved it.
+   * The grouping defect, caught in the browser.
+   *
+   * **This replaced a test that read the split from the database, and CI is why.**
+   * That version asked for a payment with ledger entries and asserted one came
+   * back. Locally one always did -- earlier browser runs had created payments --
+   * and on CI's freshly seeded database there are none at all, so it failed with
+   * `Expected: 1, Received: 0`. A test whose subject is the RENDERING should not
+   * depend on the seed having produced a particular payment; the row count
+   * against whatever the ledger holds is asserted separately, above, and works
+   * with zero.
    *
    * Rendering one row per COMPONENT instead of per movement passed every other
    * test in this file. On the seeded portfolio every payment goes wholly to
