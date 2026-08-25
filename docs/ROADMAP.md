@@ -1190,7 +1190,7 @@ indexes, foreign keys and defaults. Four migrations could not replay onto a
 fresh database at all before this; the legacy-versus-fresh comparison then found
 five indexes that `db/init` creates and no migration ever did.
 
-**Browser end-to-end** (`frontend/e2e/`, **21** spec files, re-counted
+**Browser end-to-end** (`frontend/e2e/`, **22** spec files, re-counted
 2026-08-24; it said 12 as of 2026-08-11, and the aside below is about exactly this kind of drift — `db/tests/test_the_roadmap_counts_the_specs_it_has.py` recounts it now): approved, denied, existing-offer, both halves of the manual-review
 path, the review-step edit affordance, the submission edit lock, the offer
 disclosure UI, the payment-plan display, the reconstructed-schedule warning,
