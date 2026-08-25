@@ -52,7 +52,8 @@ def health():
 
 
 @app.post("/applications/{app_id}/summary")
-def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias="X-User-Role")):
+def summarize(request: Request, app_id: int,
+              x_user_role: str | None = Header(default=None, alias="X-User-Role")):
     # The gateway only proxies here for csr/underwriter/admin sessions (see
     # gateway/app/main.py assistant()) and forwards the resolved role as this
     # header; pass it through so origination-service will release financials.
@@ -67,13 +68,21 @@ def summarize(app_id: int, x_user_role: str | None = Header(default=None, alias=
     # /financials call just below) -- this call used to send neither header
     # at all, only /financials did. Send both here too, or every summary
     # request now 403s.
-    # One trace per request, opened at THIS SERVICE's ingress -- which is one
-    # hop downstream of the gateway, where the session is actually resolved and
-    # the staff check happens. Deliberately not called gateway entry; see
-    # app/trace.py. Carries the caller's ROLE, never their identity: role is
-    # what explains an authorisation outcome, who they are is on the
-    # prohibited list.
-    with trace.summary_trace(role=x_user_role):
+    # One trace per request, and it is no longer this service's root.
+    #
+    # The gateway now opens a `gateway_entry` run after it resolves the session
+    # and applies the staff check, and forwards that context on two headers
+    # (gateway/app/agent_trace.py). Joining it is what makes the trace start
+    # where the client asked -- at the authenticated entry point -- instead of
+    # one hop downstream of it. Only those two headers are handed over, and the
+    # gateway strips any inbound copies, so the context is server-minted rather
+    # than caller-chosen.
+    #
+    # Still carries the caller's ROLE and never their identity: role is what
+    # explains an authorisation outcome, who they are is on the prohibited list.
+    with trace.summary_trace(
+            role=x_user_role,
+            parent_headers=trace.parent_headers_from(request.headers)):
         # Every exit records an outcome, including the ones that never reach
         # the agent. Found in review: a 404, a 403 or an unreachable upstream
         # emitted a trace containing only the `request` stage, which reads as a

@@ -29,6 +29,8 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
+from . import agent_trace
+
 from . import auth, config, db, principal
 from .config import (
     DECISION_URL,
@@ -145,10 +147,20 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
     # on every internal-token route: /kyc/*, /decision/*, /disclosure/*,
     # /payments/*, and origination's staff checks on /los/*. Fails closed, so it
     # was availability rather than escalation, but it was a stranger's switch.
+    #
+    # The trace-propagation headers are stripped here too, on EVERY route. They
+    # are how a LangSmith parent context travels between services
+    # (`RunTree.to_headers()`), and this proxy forwards inbound headers by
+    # default -- so without this line a caller could hand us its own
+    # `langsmith-trace` and have Meridian's internal spans attach under a tree
+    # it chose. The authoritative context is minted by this service, after
+    # authorisation, and put back via `extra_headers` below; anything the caller
+    # sent under those names does not survive this hop.
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "content-length", "authorization",
                              "x-internal-token", "x-principal-assertion")
+        and k.lower() not in agent_trace.PROPAGATION_HEADERS
         and not k.lower().startswith("x-user-")
     }
     if user:
@@ -568,6 +580,12 @@ async def assistant_policy_chat(request: Request, authorization: str | None = He
     return await _proxy(LOAN_ASSISTANT_URL, "/policy-chat", request, user)
 
 
+#: The one assistant route whose work is traced end to end: the underwriting
+#: summary. Closed alternation and anchored, like the servicing matchers above --
+#: a prefix test would also match paths this service knows nothing about.
+_ASSISTANT_SUMMARY_RE = re.compile(r"^applications/(\d+)/summary$")
+
+
 @app.api_route("/assistant/{path:path}", methods=["GET", "POST"])
 async def assistant(path: str, request: Request, authorization: str | None = Header(None)):
     # AI summary returns risk tier + internal flags — staff only, not the
@@ -575,4 +593,24 @@ async def assistant(path: str, request: Request, authorization: str | None = Hea
     user = _require_user(authorization)
     if not auth.is_staff(user):
         raise HTTPException(status_code=403, detail="Forbidden")
-    return await _proxy(LOAN_ASSISTANT_URL, f"/{path}", request, user)
+
+    # The trace root opens HERE, and deliberately after the two lines above.
+    #
+    # The client asked to see the agent run from the authenticated entry point
+    # onward. loan-assistant's trace began one hop downstream, so the step that
+    # decides whether the agent runs at all -- this authorisation -- was not in
+    # the picture. Opening the run after the check means a rejected request
+    # produces no run, and a run that exists is one that was allowed.
+    #
+    # Only the summary route is traced; `/health` and anything else forwards
+    # untraced rather than minting a run for work nobody asked to see.
+    traced = bool(_ASSISTANT_SUMMARY_RE.match(path))
+    trace_headers, root = ({}, None)
+    if traced:
+        trace_headers, root = agent_trace.start_root(
+            role=str(user.get("role", "")), route_class="agent_summary")
+
+    resp = await _proxy(LOAN_ASSISTANT_URL, f"/{path}", request, user,
+                        extra_headers=trace_headers or None)
+    agent_trace.finish_root(root, resp.status_code)
+    return resp

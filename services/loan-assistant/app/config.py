@@ -50,6 +50,12 @@ AWS_REGION = os.getenv("AWS_REGION", "")
 #: presence is ever consulted.
 LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY", "")
 
+#: The project runs are filed under. Read because a distributed parent arrives
+#: with a project name in its `baggage` header, and accepting that would let the
+#: sender decide where Meridian's runs land; this is the value that overrides it.
+#: Empty means "whatever the SDK defaults to", which is the SDK's own business.
+LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "")
+
 # --- agentic underwriting summary --------------------------------------------
 #
 # The summary path runs as a LangChain v1 agent with ONE bounded policy tool

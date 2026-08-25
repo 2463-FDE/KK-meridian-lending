@@ -9,3 +9,11 @@ prometheus-fastapi-instrumentator==7.0.0
 # with a pinned single-algorithm allowlist; cryptography for Ed25519 itself.
 PyJWT==2.13.0
 cryptography==48.0.0
+# The trace root. The gateway is where an agent request is authenticated, so it
+# is where the client's trace has to start (app/agent_trace.py); minting and
+# propagating that context needs LangSmith's own RunTree, because the parenting
+# contract on the wire is the SDK's to define, not this service's to guess.
+#
+# ONLY langsmith -- no LangChain. This service runs no agent, no graph and no
+# model call; it opens one run and forwards two headers.
+langsmith>=0.10.0

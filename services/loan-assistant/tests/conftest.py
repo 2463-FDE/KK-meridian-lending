@@ -57,3 +57,37 @@ def macro_stays_disabled(monkeypatch):
     monkeypatch.setattr(macro, "provider", macro.StubMacroProvider(), raising=False)
     monkeypatch.setattr(macro.httpx, "get", _no_network)
     yield
+
+
+@pytest.fixture(autouse=True)
+def langsmith_client_is_not_shared_between_tests():
+    """Each test gets a LangSmith client that reads the CURRENT endpoint.
+
+    `RunTree` resolves its client through `langsmith.run_trees.get_cached_client`,
+    which memoises one `Client` in a module global for the life of the process.
+    That is right in production -- one client, one connection pool, one
+    background batching thread -- and wrong here, because the trace tests each
+    stand up their own sink on a fresh port and point `LANGSMITH_ENDPOINT` at it.
+    The first test to emit binds the cached client to its port; every later test
+    posts to a port that has since been closed, and reads an empty sink.
+
+    Found the first time the emitter went through `RunTree` instead of building
+    runs on an explicitly constructed `Client`. It presents as seven unrelated
+    assertion failures with `Connection refused` in the captured log, and the
+    guard-the-guard test failing for the wrong reason -- the sentinel it looks
+    for is absent because NOTHING arrived, not because the scrub worked. A leak
+    check that cannot distinguish "clean" from "nothing was sent" is not a leak
+    check, so this is reset per test rather than worked around in one file.
+    """
+    try:
+        from langsmith import run_trees
+    except ImportError:  # pragma: no cover - langsmith is a hard dependency
+        yield
+        return
+
+    previous = run_trees._CLIENT
+    run_trees._CLIENT = None
+    try:
+        yield
+    finally:
+        run_trees._CLIENT = previous
