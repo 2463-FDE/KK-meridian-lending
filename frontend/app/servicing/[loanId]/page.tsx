@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import PaymentAllocation from "../../../components/PaymentAllocation";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
+import AccountActivity from "../../../components/AccountActivity";
 import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
 import { tokenizeCard } from "../../../lib/tokenize";
@@ -544,6 +545,20 @@ function LoanDetailContent() {
           ) : null}
         </>
       )}
+
+      {/* Account activity, ABOVE payment history and separate from it.
+          Two different questions, and staff are the readers most likely to need
+          the second: "what moved this account" includes the approved
+          adjustments and fee waivers that payment history deliberately excludes
+          (`_allocations_by_payment` is scoped to `entry_type = 'payment'`, so
+          folding them in would report money the borrower did not pay as part of
+          what they paid).
+
+          The same borrower-safe representation, deliberately. The endpoint has
+          one, because the only identity it can see is an unsigned
+          `X-User-Role`; staff provenance belongs behind a signed principal and
+          is a separate concern. */}
+      {loanId ? <AccountActivity loanId={loanId} /> : null}
 
       {/* Payment history */}
       <h2>Payment history</h2>
