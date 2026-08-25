@@ -28,16 +28,26 @@ field added carelessly does not travel -- it raises in tests and is dropped in
 production.
 
 **Where the trace actually starts, stated precisely.** The client asked for
-"UI/gateway entry through ... final outcome". This trace opens in
-loan-assistant's summary route, which is one hop DOWNSTREAM of that: the gateway
-is where a session is resolved and where the staff check happens
-(`gateway/app/main.py::assistant`), and this service only ever sees an already
-forwarded `X-User-Role`. So the first span is the service's own ingress, not
-gateway entry, and it is named `request` rather than anything that would imply
-otherwise. Extending the trace across the gateway means instrumenting a second
-service and propagating a correlation id into this one -- a different concern
-than making this path safe, and named as a remaining gap rather than quietly
-claimed.
+"UI/gateway entry through ... final outcome", and this used to fall one hop
+short: the trace opened in loan-assistant's summary route, while the gateway --
+where the session is resolved and the staff check happens -- was outside it. That
+gap is now closed from the other end. `gateway/app/agent_trace.py` opens a
+`gateway_entry` run after it authorises the caller and forwards the context on
+LangSmith's two propagation headers; `_inbound_parent` below joins it, so these
+spans attach beneath the authenticated entry point.
+
+The stage names did not change and `request` still means what it said: this
+service's own ingress. It is now the second stage rather than the first, which is
+the honest shape -- the gateway's run is the one that describes the entry, and
+renaming this span `gateway_entry` would have relabelled the gap instead of
+closing it.
+
+**The parent context is server-minted, never caller-chosen.** The gateway strips
+inbound copies of both propagation headers before proxying, and `_inbound_parent`
+keeps only the identity fields from what arrives -- because `baggage` also
+carries metadata, tags and a project name, and the SDK merges a parent's metadata
+into its children. Without that second lock, inbound baggage would be a way to
+put text into these spans from outside the allow-list. See `_inbound_parent`.
 
 **On identifiers.** The prohibited list includes identifiers, and every run here
 carries a `trace_id` and per-span UUIDs. Those are generated in this process for
@@ -58,6 +68,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import os
 import re
 import time
 import uuid
@@ -230,11 +241,15 @@ class SummaryTrace:
     to tell a refusal from a failure.
     """
 
-    def __init__(self):
+    def __init__(self, parent_headers: dict | None = None):
         self.id = str(uuid.uuid4())
         self.spans: list[_Span] = []
         self.started_at = time.time()
         self._open: dict[str, _Span] = {}
+        #: The gateway's propagation headers, when this request came through it.
+        #: Held rather than parsed here so that a malformed context degrades to
+        #: an unparented trace at emission time instead of failing a request.
+        self.parent_headers = dict(parent_headers or {})
 
     def record(self, stage: str, **fields) -> None:
         """Add a completed stage."""
@@ -346,10 +361,37 @@ def is_enabled() -> bool:
     return tracing_is_requested() and bool(config.LANGSMITH_API_KEY)
 
 
+#: The propagation headers this service accepts a parent context from, lowercased
+#: because HTTP header names are case-insensitive and the sender's casing is not
+#: something to depend on.
+PROPAGATION_HEADERS = ("langsmith-trace", "baggage")
+
+
+def parent_headers_from(headers) -> dict:
+    """Pick the propagation headers out of an inbound request, and nothing else.
+
+    Named and separate so the route hands over two known headers rather than the
+    whole request: a call that forwards every inbound header is one refactor away
+    from forwarding an Authorization header into an observability path.
+    """
+    if not headers:
+        return {}
+    lowered = {str(k).lower(): v for k, v in dict(headers).items()}
+    return {name: lowered[name] for name in PROPAGATION_HEADERS
+            if lowered.get(name)}
+
+
 @contextlib.contextmanager
-def summary_trace(role: str | None = None):
-    """Open a trace for one summary request and emit it at the end."""
-    trace = SummaryTrace()
+def summary_trace(role: str | None = None, parent_headers: dict | None = None):
+    """Open a trace for one summary request and emit it at the end.
+
+    `parent_headers` is the gateway's server-minted context, when the request
+    came through the gateway. With it, this service's spans attach beneath the
+    `gateway_entry` run and the trace covers the authenticated entry point --
+    which is what the client asked to see and what the module docstring used to
+    name as a remaining gap. Without it, the trace stands alone.
+    """
+    trace = SummaryTrace(parent_headers=parent_headers)
     token = _current.set(trace)
     trace.record("request", service="loan-assistant",
                  role=(role or "unknown").lower(),
@@ -367,6 +409,81 @@ def summary_trace(role: str | None = None):
                         type(exc).__name__)
 
 
+#: The project name the SDK falls back to when none is configured. Duplicated
+#: here on purpose: `langsmith.utils.get_tracer_project()` memoises its
+#: environment read, so calling it would return whatever the first caller in the
+#: process saw -- correct in production, stale anywhere the value changes.
+_SDK_DEFAULT_PROJECT = "default"
+
+
+def _own_project() -> str:
+    """The project THIS process files runs under. Never the sender's.
+
+    Review finding (LS-PROJECT-SCRUB). This used to read
+    `config.LANGSMITH_PROJECT or parent.session_name`, and the `or` was the bug:
+    `LANGSMITH_PROJECT` is unset in the shipped `.env.example`, so on a default
+    deployment the fallback handed the choice straight back to the caller --
+    the precise attack the scrub exists to close, live in the configuration most
+    likely to be running.
+
+    Worse, my own test for it passed anyway, because the fixture set
+    `LANGSMITH_PROJECT`. The test was asserting the guarded branch and calling it
+    proof of the unguarded one.
+
+    So there is no inbound fallback now: a configured project, or the SDK's
+    default, and nothing else. Read at call time so an operator's value applies
+    without a restart.
+    """
+    for name in ("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return _SDK_DEFAULT_PROJECT
+
+
+def _inbound_parent(headers: dict | None):
+    """The gateway's run, rebuilt from its propagation headers -- identity only.
+
+    `RunTree.from_headers` is LangSmith's documented way to pick up a distributed
+    parent, and it reads both halves of what `to_headers` wrote: `langsmith-trace`
+    carries the ids, and **`baggage` carries metadata, tags and a project name**.
+
+    That second half is why this function exists rather than the one-liner. A
+    parent built from `baggage` arrives with the sender's metadata attached, and
+    `create_child` MERGES a parent's metadata into its children -- verified
+    against the installed SDK: a parent carrying `{"x": "LEAK"}` produces a child
+    whose metadata contains `x: "LEAK"` alongside its own fields. So inbound
+    baggage is a path by which text this module never named ends up inside this
+    module's spans, defeating the allow-list from the outside.
+
+    The gateway strips inbound copies of these headers, so through the front door
+    the context is always server-minted. This is the second lock: only the
+    identity fields -- which run, which trace, what order -- are kept, and the
+    metadata, the tags and the project are dropped. `session_name` in particular
+    comes straight from baggage, so an unscrubbed parent could file Meridian's
+    runs under a project of the caller's choosing.
+    """
+    if not headers:
+        return None
+    try:
+        from langsmith.run_trees import RunTree
+
+        parent = RunTree.from_headers(headers)
+    except Exception as exc:
+        # An unusable context is not a reason to lose the trace: it emits
+        # unparented instead, which is what this service did before the gateway
+        # had a root at all.
+        log.warning("trace: inbound parent context rejected error_class=%s",
+                    type(exc).__name__)
+        return None
+    if parent is None:
+        return None
+    parent.extra = {}
+    parent.tags = []
+    parent.session_name = _own_project()
+    return parent
+
+
 def emit(trace: SummaryTrace) -> None:
     """Ship the trace to LangSmith, if enabled.
 
@@ -378,36 +495,49 @@ def emit(trace: SummaryTrace) -> None:
         return
     payload = trace.payload()
     try:
-        from langsmith import Client
+        from langsmith.run_trees import RunTree
     except ImportError:  # pragma: no cover - langsmith is a hard dependency
         return
 
-    client = Client()
     run_id = uuid.UUID(trace.id)
     started = trace.started_at
-    client.create_run(
-        name="underwriting_summary",
-        run_type="chain",
-        id=run_id,
-        inputs={},
-        extra={"metadata": {"schema_version": SCHEMA_VERSION,
-                            "tracing_mode": "privacy_safe_categorical"}},
-        start_time=_dt(started),
-    )
+    root_metadata = {"schema_version": SCHEMA_VERSION,
+                     "tracing_mode": "privacy_safe_categorical"}
+
+    # `RunTree` rather than hand-built `create_run` calls, because the parenting
+    # is no longer local. A distributed child needs its trace id and its
+    # dotted_order derived from the parent's, and those are the SDK's to compute
+    # -- deriving them here would be inventing a wire contract the SDK already
+    # documents (`from_headers` / `create_child`).
+    parent = _inbound_parent(trace.parent_headers)
+    common = dict(name="underwriting_summary", run_type="chain", inputs={},
+                  extra={"metadata": root_metadata}, start_time=_dt(started))
+    if parent is None:
+        # No gateway context: emit as its own root, exactly as before. A request
+        # that reached this service another way still gets a trace rather than
+        # nothing.
+        root = RunTree(id=run_id, **common)
+    else:
+        root = parent.create_child(run_id=run_id, **common)
+    root.post()
+
     for span in payload["spans"]:
-        client.create_run(
+        child = root.create_child(
             name=span["name"],
             run_type="chain",
-            id=uuid.UUID(span["id"]),
-            parent_run_id=run_id,
+            run_id=uuid.UUID(span["id"]),
             inputs={},
             outputs=span["metadata"],
             extra={"metadata": span["metadata"]},
             start_time=_dt(started),
         )
-        client.update_run(uuid.UUID(span["id"]), outputs=span["metadata"],
-                          end_time=_dt(started + span["duration_ms"] / 1000))
-    client.update_run(run_id, outputs=payload, end_time=_dt(time.time()))
+        child.post()
+        child.end(outputs=span["metadata"],
+                  end_time=_dt(started + span["duration_ms"] / 1000))
+        child.patch()
+
+    root.end(outputs=payload, end_time=_dt(time.time()))
+    root.patch()
 
 
 def _dt(epoch: float):
