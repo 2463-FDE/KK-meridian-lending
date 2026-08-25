@@ -133,7 +133,20 @@ async function openAccountAsBorrower(page: Page): Promise<void> {
 }
 
 function rowForAmount(page: Page, amountText: string) {
-  return page.locator("tbody tr").filter({ hasText: amountText });
+  // Scoped to the payment-history table by name.
+  //
+  // This read `page.locator("tbody tr")` across the whole page, which was
+  // unambiguous while payment history was the only table on it. The account
+  // activity panel added a second one ABOVE it, and a payment appears in both --
+  // so `.first()` began matching the activity row, which carries no allocation
+  // label, and this spec failed on a page that was rendering correctly.
+  //
+  // Scoped rather than reordered or loosened: what this test is about is what
+  // PAYMENT HISTORY shows, and naming that table says so.
+  return page
+    .getByTestId("payment-history")
+    .locator("tbody tr")
+    .filter({ hasText: amountText });
 }
 
 async function payOnce(page: Page, amount: string): Promise<void> {

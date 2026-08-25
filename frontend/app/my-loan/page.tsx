@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import RequireRole from "../../components/RequireRole";
 import StatusChip from "../../components/StatusChip";
+import AccountActivity from "../../components/AccountActivity";
 import { apiGet } from "../../lib/api";
 import { usd, pct, shortDate } from "../../lib/format";
 
@@ -53,6 +54,10 @@ function MyLoanContent() {
   const [items, setItems] = useState<LoanRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Refresh reloads the loan cards; without this the mounted activity panels
+  // kept their old state, because their keys and loan ids do not change. Review
+  // of PR #87.
+  const [activityReloadKey, setActivityReloadKey] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -63,6 +68,11 @@ function MyLoanContent() {
       // trusted here; if ownership can't be established the gateway 403s.
       const res = (await apiGet(`/lss/loans?limit=200&offset=0`)) as LoansResponse;
       setItems(res.items ?? []);
+      // The activity panels re-read too. Refresh means "show me the current
+      // state of my account", and a page that reloaded the summary while
+      // leaving the movement list at whatever it said before is answering a
+      // different question than the one the button asks.
+      setActivityReloadKey((n) => n + 1);
     } catch (err) {
       setError(errMsg(err, "Could not load your loans."));
       setItems([]);
@@ -123,7 +133,14 @@ function MyLoanContent() {
 
                 <div className="dl">
                   <div className="dl-row">
-                    <dt>Current balance</dt>
+                    {/* Named for what the column actually holds.
+                        `balances.balance` is projected only from
+                        `component = 'principal'` ledger entries, and `past_due`
+                        only from `'fees'` (db/migrations/0035) -- interest is
+                        owed within a payment and carried nowhere. So "Current
+                        balance" read as everything owed, which it is not: the
+                        fees are the row below it. */}
+                    <dt>Current principal balance</dt>
                     <dd>{usd(l.balance)}</dd>
                   </div>
                   <div className="dl-row">
@@ -172,6 +189,24 @@ function MyLoanContent() {
               </div>
             ))}
           </div>
+
+          {/* The page has promised "account activity" in its subtitle since it
+              was written, and there was none. Rendered per loan, below the
+              summary cards, because a movement belongs to one account -- a
+              merged list across loans would need the borrower to work out which
+              account each line changed. */}
+          {items.map((l) => (
+            <AccountActivity
+              key={`activity-${String(l.id)}`}
+              loanId={l.id}
+              reloadKey={activityReloadKey}
+              heading={
+                items.length > 1
+                  ? `Account activity — loan #${String(l.id)}`
+                  : "Account activity"
+              }
+            />
+          ))}
         </>
       )}
     </main>

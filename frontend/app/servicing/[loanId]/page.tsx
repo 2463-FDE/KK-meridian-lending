@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import PaymentAllocation from "../../../components/PaymentAllocation";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
+import AccountActivity from "../../../components/AccountActivity";
 import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
 import { tokenizeCard } from "../../../lib/tokenize";
@@ -201,6 +202,11 @@ function LoanDetailContent() {
   //
   // These are not two changes. They are one expression that has to be right:
   // the proposer set, read from an identity the caller cannot edit.
+  // Bumped whenever this page has re-read the account, so the activity panel
+  // re-reads too. Review of PR #87: it fetched on mount only, so a payment the
+  // operator had just captured appeared in payment history and not in activity
+  // -- two panels on one screen disagreeing about the same account.
+  const [activityReloadKey, setActivityReloadKey] = useState(0);
   const [canRepActions, setCanRepActions] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -283,6 +289,11 @@ function LoanDetailContent() {
     if (pay.status === "fulfilled") {
       setPayments((pay.value as { items?: PaymentRow[] })?.items ?? []);
     }
+    // Whatever just changed the balance or the payment list changed the account,
+    // so the activity panel is stale by definition. Bumped here rather than at
+    // each call site: this function is what every money action already calls,
+    // and one place cannot be half-updated.
+    setActivityReloadKey((n) => n + 1);
   }, [loanId]);
 
   async function makePayment() {
@@ -545,9 +556,32 @@ function LoanDetailContent() {
         </>
       )}
 
+      {/* Account activity, ABOVE payment history and separate from it.
+          Two different questions, and staff are the readers most likely to need
+          the second: "what moved this account" includes the approved
+          adjustments and fee waivers that payment history deliberately excludes
+          (`_allocations_by_payment` is scoped to `entry_type = 'payment'`, so
+          folding them in would report money the borrower did not pay as part of
+          what they paid).
+
+          The same borrower-safe representation, deliberately. The endpoint has
+          one, because the only identity it can see is an unsigned
+          `X-User-Role`; staff provenance belongs behind a signed principal and
+          is a separate concern. */}
+      {loanId ? (
+        <AccountActivity loanId={loanId} reloadKey={activityReloadKey} />
+      ) : null}
+
       {/* Payment history */}
       <h2>Payment history</h2>
-      <div className="table-wrap">
+      {/* `data-testid` so a test can name THIS table. Adding the activity table
+          above put a second `tbody` on the page, and `payment-allocation.spec.ts`
+          located its row with an unscoped `page.locator("tbody tr")` -- so
+          `.first()` started matching an activity row for the same payment, which
+          carries no allocation label. The regression was in the DOM, not in the
+          logic, and a stable hook is the fix rather than relying on which table
+          happens to come first. */}
+      <div className="table-wrap" data-testid="payment-history">
         <table>
           <thead>
             <tr>
