@@ -1,5 +1,7 @@
-"""Loan portfolio read API: list, detail, amortization schedule, payment history."""
+"""Loan portfolio read API: list, detail, schedule, payment history, activity."""
 import logging
+
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -8,6 +10,8 @@ from sqlalchemy.orm import Session
 from .. import models, schedule
 from ..database import get_session
 from ..schemas import (
+    ActivityItem,
+    ActivityOut,
     LoanDetail,
     LoanListItem,
     Page,
@@ -267,3 +271,127 @@ def loan_payments(loan_id: int, session: Session = Depends(get_session)):
             applied_to_principal=split.get("principal", 0.0) if split else None,
         ))
     return PaymentsOut(loan_id=loan_id, items=items)
+
+
+def _dec(value):
+    """Exact cents for the one place this module sums money.
+
+    `models.LedgerEntry.amount` is mapped `asdecimal=False`, so SQLAlchemy hands
+    back a float regardless of the NUMERIC(14,2) column. Summing three of those
+    for a payment's components and comparing the total against the payment is how
+    a cent goes missing on a borrower's screen. `Decimal(str(x))` recovers the
+    exact stored cent amount, the same boundary `disclosure-service` draws.
+    """
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+# --- account activity ---------------------------------------------------------
+#
+# "What authoritative movements changed this account?" -- a different question
+# from `/payments` above, which asks "what payments did I make and where did each
+# one go". Keeping them apart is deliberate: an approved adjustment and a fee
+# waiver change the account without being payments, and folding them into payment
+# history would make a staff correction look like a card charge the borrower made.
+
+
+#: `ledger_entries.entry_type` -> (category, description, provenance).
+#:
+#: **The raw type never leaves the server.** `legacy_direct_write` is the name of
+#: a mechanism -- a balance change captured by the 0035 trigger from a direct
+#: UPDATE that predates the ledger -- and it is meaningless to a borrower and
+#: alarming to anyone who guesses. It maps to a truthful category with its
+#: provenance marked `limited`, because that row genuinely cannot name an actor or
+#: a reason: the trigger could prove what changed and in which transaction, not
+#: who did it or why.
+_CATEGORIES = {
+    "payment":             ("payment", "Payment received", "processor"),
+    "adjustment":          ("adjustment", "Approved balance adjustment", "recorded"),
+    "fee_assessed":        ("fee", "Fee assessed", "recorded"),
+    "fee_waived":          ("fee_waiver", "Fee waived", "recorded"),
+    "disbursement":        ("disbursement", "Loan funded", "recorded"),
+    "opening_balance":     ("opening_balance", "Opening balance when the ledger began", "limited"),
+    "legacy_direct_write": ("balance_change", "Recorded balance change", "limited"),
+}
+
+#: What the list is, and is not, carried in the payload rather than only in the
+#: UI -- a client that renders it under a heading of its own choosing still ships
+#: the sentence.
+_ACTIVITY_NOTE = (
+    "Authoritative movements that changed this account, read from the immutable "
+    "ledger. A proposal that has not been approved moves no money and does not "
+    "appear here."
+)
+
+
+@router.get("/{loan_id}/activity", response_model=ActivityOut)
+def loan_activity(loan_id: int, session: Session = Depends(get_session)):
+    """Every authoritative movement on this loan, grouped by what caused it.
+
+    **Read, never recomputed.** The ledger is the record of what moved; deriving
+    activity from balances and payments would produce a second account of the
+    same history, free to disagree with the first. Nothing here writes, and
+    nothing here touches `payments.processor_ref`, `captured_at`,
+    `capture_source` or `auth_status` -- the columns Week 7 reconciliation reads.
+    An approved adjustment appears in this list and creates no processor capture,
+    because no processor money moved.
+
+    **Grouped by `payment_id`, which is authoritative identity.** One $500 card
+    payment writes up to three ledger rows -- fees, interest, principal -- and
+    listing them separately would show a borrower three charges they did not
+    make. Grouping by amount, timestamp or minute would be worse than useless:
+    two legitimate payments can share all three, and the duplicate-review work
+    (D22) exists precisely because same-loan-same-amount is not identity.
+
+    **Borrower-safe by construction, not by sanitisation.** `reason`, `actor_id`,
+    `actor_role` and `correlation_id` are never selected. Staff-entered reason
+    text carries internal operations and compliance language, and the only
+    identity this route can see is an unsigned `X-User-Role` the gateway
+    forwards -- not a verified principal. Gating PII on a header a direct caller
+    could assert would be the weaker arrangement; so this route has one
+    representation and it is the safe one. Staff provenance, if it is wanted
+    later, belongs behind `require_staff_principal` like every other privileged
+    read in this service.
+    """
+    rows = session.execute(
+        select(models.LedgerEntry.id, models.LedgerEntry.entry_type,
+               models.LedgerEntry.component, models.LedgerEntry.amount,
+               models.LedgerEntry.payment_id, models.LedgerEntry.occurred_at)
+        .where(models.LedgerEntry.loan_id == loan_id)
+        .order_by(models.LedgerEntry.occurred_at.desc(),
+                  models.LedgerEntry.id.desc())
+    ).all()
+
+    # Keyed by authoritative identity: the payment when there is one, otherwise
+    # this single ledger row. An entry_type is part of the key as well as the
+    # payment id -- a fee assessed against a payment and the payment itself are
+    # two movements even where a row carries both.
+    grouped: dict = {}
+    order: list = []
+    for entry_id, entry_type, component, amount, payment_id, occurred_at in rows:
+        key = ("payment", payment_id) if payment_id is not None else ("entry", entry_id)
+        if key not in grouped:
+            category, description, provenance = _CATEGORIES.get(
+                entry_type, ("balance_change", "Recorded balance change", "limited"))
+            grouped[key] = {
+                "id": "%s:%s" % key,
+                "occurred_at": occurred_at.isoformat() if occurred_at else None,
+                "category": category,
+                "description": description,
+                "amount": 0.0,
+                "components": {},
+                "payment_id": payment_id,
+                "provenance": provenance,
+            }
+            order.append(key)
+        item = grouped[key]
+        # Decimal on the way in, float only at the boundary: several rows are
+        # summed here, and cent errors compound across a group.
+        item["components"][component] = float(
+            _dec(item["components"].get(component, 0.0)) + _dec(amount))
+        item["amount"] = float(_dec(item["amount"]) + _dec(amount))
+
+    return ActivityOut(
+        loan_id=loan_id,
+        items=[ActivityItem(**grouped[key]) for key in order],
+        note=_ACTIVITY_NOTE,
+    )

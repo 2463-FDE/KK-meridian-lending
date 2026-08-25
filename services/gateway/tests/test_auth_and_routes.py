@@ -492,6 +492,66 @@ def test_lss_reconciliation_is_staff_only(monkeypatch):
     assert resp.status_code == 403
 
 
+def test_lss_activity_is_readable_by_the_loan_owner(monkeypatch):
+    """Account activity joins `schedule` and `payments` on the owner-or-staff
+    rule, because it is the same authority question: your loan, or a loan you
+    service."""
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: True)
+
+    resp = client.get("/lss/loans/1/activity",
+                      headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200, resp.text
+
+
+def test_lss_activity_refuses_another_borrowers_loan(monkeypatch):
+    """The check that matters. Activity lists what moved on an account, so
+    reaching someone else's is reading their money history."""
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+    monkeypatch.setattr(auth, "owns_loan", lambda user, loan_id: False)
+
+    resp = client.get("/lss/loans/999/activity",
+                      headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
+def test_lss_activity_refuses_an_anonymous_caller(monkeypatch):
+    monkeypatch.setattr(auth, "get_session", lambda token: None)
+
+    resp = client.get("/lss/loans/1/activity")
+
+    assert resp.status_code in (401, 403)
+
+
+def test_lss_activity_is_readable_by_staff(monkeypatch):
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "c", "role": "csr", "name": "C", "applicant_id": None,
+    })
+
+    resp = client.get("/lss/loans/1/activity",
+                      headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 200, resp.text
+
+
+def test_an_unlisted_loan_subpath_still_fails_closed(monkeypatch):
+    """Adding `activity` to the alternation must not turn it into a wildcard.
+    The rule stays CLOSED: anything unlisted falls through to the 404, which is
+    what keeps `/lss/*` from being a generic proxy."""
+    monkeypatch.setattr(auth, "get_session", lambda token: {
+        "id": 2, "username": "a", "role": "admin", "name": "A", "applicant_id": None,
+    })
+
+    for path in ("loans/1/ledger", "loans/1/activity/all", "loans/1/reason"):
+        resp = client.get("/lss/" + path,
+                          headers={"Authorization": "Bearer faketoken123"})
+        assert resp.status_code == 404, "%s was proxied: %s" % (path, resp.status_code)
+
+
 def test_lss_review_queue_is_staff_only(monkeypatch):
     """A borrower must not reach the review queue: it lists amounts and capture
     times for loans that are not theirs."""
