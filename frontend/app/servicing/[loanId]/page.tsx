@@ -133,6 +133,23 @@ function LoanDetailContent() {
   // sent the retired field until this commit, so every attempt 422'd.
   const [adjustComponent, setAdjustComponent] = useState<"principal" | "fees">("principal");
   const [adjustAmount, setAdjustAmount] = useState("");
+  // The balance the chosen component actually has, from the server, and the
+  // delta the operator typed. Both feed the preview below the amount field.
+  //
+  // `balance` is projected from `component = 'principal'` ledger entries and
+  // `past_due` from `'fees'` (db/migrations/0035) -- so this pairing is the
+  // projection's own, not an assumption. Previewing a fees change against the
+  // principal balance would put a starting number on screen that has nothing to
+  // do with what the operator is changing.
+  //
+  // `Number.isFinite` rather than a truthiness check: "0" is a real thing to
+  // type on the way to "0.50", and an empty or half-typed field must read as no
+  // change rather than as NaN.
+  const adjustBase =
+    adjustComponent === "fees" ? (loan?.past_due ?? 0) : (loan?.balance ?? 0);
+  const adjustDelta = Number.isFinite(parseFloat(adjustAmount))
+    ? parseFloat(adjustAmount)
+    : 0;
   const [adjustReason, setAdjustReason] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
   const [waiveReason, setWaiveReason] = useState("");
@@ -639,9 +656,54 @@ function LoanDetailContent() {
                 onChange={(e) => setAdjustAmount(e.target.value)}
                 placeholder="0.00"
               />
+              {/* The component's OWN authoritative balance, and the
+                  arithmetic spelled out against it.
+
+                  Component-aware on purpose: a fees adjustment previewed
+                  against the principal balance would show an operator a
+                  starting number that has nothing to do with what they are
+                  changing. `balance` is fed only by `component = 'principal'`
+                  ledger entries and `past_due` only by `'fees'`
+                  (db/migrations/0035), so the pairing here is the projection's
+                  own, not a guess.
+
+                  Both figures come from the server -- `GET
+                  /lss/accounts/{id}/balance`. The only arithmetic is adding the
+                  delta the operator just typed to the balance the server sent,
+                  which is the sentence a reader needs in order to know which
+                  direction they have chosen. It is labelled a preview because
+                  that is all it is: the authoritative balance is re-read and
+                  revalidated when a different member of staff approves. */}
+              <div className="dl" data-testid="adjust-preview">
+                <div className="dl-row">
+                  <dt>{adjustComponent === "fees"
+                    ? "Past-due fees now"
+                    : "Current principal balance"}</dt>
+                  <dd>{usd(adjustBase)}</dd>
+                </div>
+                <div className="dl-row">
+                  <dt>Balance change</dt>
+                  <dd className={adjustDelta > 0 ? "danger-text" : ""}>
+                    {adjustDelta === 0
+                      ? "—"
+                      : `${adjustDelta > 0 ? "+" : "−"}${usd(Math.abs(adjustDelta))}`}
+                  </dd>
+                </div>
+                <div className="dl-row">
+                  <dt>After approval</dt>
+                  <dd>
+                    {adjustDelta === 0 ? "—" : usd(adjustBase + adjustDelta)}
+                  </dd>
+                </div>
+              </div>
               <p className="hint">
-                A change, not a new total. Positive increases what the borrower
-                owes; negative reduces it.
+                A change, not a new total. <strong>+</strong> increases the amount
+                owed; <strong>−</strong> reduces it.
+              </p>
+              <p className="hint">
+                Preview only. No money moves when this proposal is submitted. The
+                authoritative balance is revalidated when a different authorized
+                staff member approves it.
               </p>
               <label htmlFor="adjust-reason" style={{ marginTop: 10 }}>
                 Reason
