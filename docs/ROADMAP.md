@@ -1190,20 +1190,105 @@ indexes, foreign keys and defaults. Four migrations could not replay onto a
 fresh database at all before this; the legacy-versus-fresh comparison then found
 five indexes that `db/init` creates and no migration ever did.
 
-**Browser end-to-end** (`frontend/e2e/`, **25** spec files, re-counted
-2026-08-24; it said 12 as of 2026-08-11, and the aside below is about exactly this kind of drift — `db/tests/test_the_roadmap_counts_the_specs_it_has.py` recounts it now): approved, denied, existing-offer, both halves of the manual-review
-path, the review-step edit affordance, the submission edit lock, the offer
-disclosure UI, the payment-plan display, the reconstructed-schedule warning,
-regeneration repricing the offer, the fee-waiver ceiling and preview, and the
-summary's external signal. *Not exhaustive, and deliberately said so: the list
-has now been out of date at 7, 12, 22, 23 and 24 specs, every time because a
-name has to be added by hand when a spec is. The COUNT is recomputed by
-`db/tests/test_the_roadmap_counts_the_specs_it_has.py`; the list is prose and a
-reader should treat it as examples.* The count is of `*.spec.ts` files in that directory — `fixtures.ts` is
+**Browser end-to-end** (`frontend/e2e/`, **25** spec files, recounted by
+`db/tests/test_the_roadmap_counts_the_specs_it_has.py` rather than by hand).
+
+**What they cover**, grouped rather than listed one by one, and these are
+EXAMPLES rather than an inventory — a list of filenames is the part that goes
+stale:
+
+- *the application path* — approved, denied, existing-offer, both halves of the
+  manual-review path, the review-step edit affordance, the submission edit lock,
+  intake retry idempotency;
+- *the offer and its disclosure* — the disclosure UI, the payment-plan display,
+  the reconstructed-schedule warning, regeneration repricing the offer, who owns
+  the note rate, and the amount-financed breakdown;
+- *money movement and its authority* — the payment allocation (twice: the read
+  path and the view), the payment source handle, a proposal being raised, the
+  rep-actions role matrix, self-approval in the approval queue, the adjustment
+  preview, and the fee-waiver ceiling and preview;
+- *the controls* — the reconciliation review queue and account activity;
+- *the assistant* — the summary's external signal.
+
+*The count has been wrong at 7, 12, 22, 23 and 24, every time for the same
+reason: a hand-maintained figure beside a hand-maintained list. The figure is
+recomputed now. The list is prose, which is why it describes areas instead of
+filenames and says so.* The count is of `*.spec.ts` files in that directory — `fixtures.ts` is
 shared helpers, not a spec. Each verifies
 PostgreSQL rows directly rather than trusting the screen. The interactive
 verification these replace was never checked in, so it was not repeatable by
 anyone else — the same closure gap as the roadmap itself.
+
+### Account clarity — ✅ Landed
+
+Not on any week's brief. It came from a **client instruction of 2026-08-24**,
+after the Week 7/8 closure: a borrower or a member of staff must be able to
+answer basic questions about an account **without querying PostgreSQL**.
+
+**No committed record carries this scope, and the first version of this
+paragraph overstated what its cross-references proved.** It cited
+`docs/DEBT.md` D22 and D24 as corroboration; review of PR #89 was right that
+they share the DATE and not the scope — they are adjacent same-day decisions
+about duplicate review and the fairness boundary, and neither mentions
+answering account questions without a database client.
+
+So the record is this: **source unavailable — an external client instruction
+dated 2026-08-24, accepted and implemented by Kalab (the PRs in the table
+below are the delivery), with no committed ticket, thread or decision-log
+entry behind it.** A maintainer who needs the scope confirmed has a person to
+ask rather than a document to find, which is worth stating precisely because
+it is the weaker of the two. Inventing a ticket reference would have satisfied
+the letter of the finding and been false.
+
+Each item is one merged PR. **Ordered by the question a user asks, not by PR
+number** — the disclosure before the account, the account before the controls
+over it — which is why #87 sits above #86. Each one is a *presentation* change
+over existing accounting. No accounting semantics were altered by any of them:
+`loans.principal` remains the contractual original, the balances projection
+remains the authority for what is currently owed, the server keeps the
+fees → interest → principal waterfall, and nothing here computes money in the
+browser.
+
+| What a user could not answer before | Now | PR |
+|---|---|---|
+| "I applied for $9,000 — why does the disclosure say $8,730?" | The Amount Financed cell shows the subtraction: requested principal, less the prepaid origination fee. Inside the existing four federal boxes, not a fifth. A legacy offer that stored no principal says the breakdown is unavailable rather than inverting the amount financed to invent one | #83 |
+| "What actually changed this account?" | `GET /loans/{id}/activity`, read from `ledger_entries` and grouped on `ledger_entries.payment_id` — the authoritative payment identity, not a derived key — so one payment is one movement rather than three charges. Separate from payment history on purpose: an approved adjustment and a fee waiver change what is owed **without being payments**, and folding them in would report money the borrower did not pay as part of what they paid | #85 |
+| Same, on screen | The panel on `/my-loan` and the staff loan page, and the summary card renamed to **Current principal balance** — `balances.balance` is projected only from `component = 'principal'` entries and `past_due` only from `'fees'` (db/migrations/0035), so "Current balance" read as everything owed, which it is not | #87 |
+| "Does +450 mean they owe more or less, and against what?" | The adjustment form shows the selected component's own balance, the signed change, and where it lands — previewing fees against `past_due` and principal against `balance`. A change that would drive the component below zero reads "Not permitted" and cannot be submitted, because `maker_checker.propose` refuses exactly that | #86 |
+
+**What deliberately did not change.** The proposal/approval contract is
+untouched: a proposal still moves no money, a different verified human still has
+to approve it, self-approval is still refused, and the amount is still a signed
+delta rather than a target — `new_balance` stayed removed (spec 0002 REQ-VAL-1).
+The previews are labelled previews and say the authoritative balance is
+revalidated at approval, because `resolve_pending_movement` re-reads the
+component under lock and can still refuse.
+
+**Reconciliation was treated as a regression boundary throughout**, since this
+work reads the same evidence the Week 7 control does. No PR above changed the
+comparison algorithm, its input semantics, `processor_ref`, `captured_at`,
+`capture_source`, `auth_status`, the settlement parsing or the reconciliation
+query. #85 proves it by A/B rather than by assertion, and the proof is a test rather
+than a paragraph:
+`services/servicing-service/tests/test_activity_does_not_touch_reconciliation.py`
+`::test_reading_activity_leaves_the_comparison_identical` runs the comparison,
+reads the activity endpoint, runs it again, and requires the counts, totals,
+break list and break value to be identical. It uses the netting fixture, where
+per-loan totals agree while two real defects sit underneath — and
+`::test_the_fixture_really_is_the_netting_case` in the same file guards that,
+because two clean runs would be equal for the wrong reason. That file also
+asserts an approved adjustment appears in activity and creates no capture,
+because no processor money moved.
+
+**Three database invariants shaped this work and are worth naming**, because
+each refused a fixture before it refused anything real: a payment's ledger rows
+must sum to the captured amount (deferred, so they land in one transaction); an
+`adjustment` entry must name an *approved* proposal resolved by someone other
+than the requester, and the trigger overwrites the actor with the approver so a
+caller cannot choose who is credited; and an approved proposal must point back
+at its ledger entry. A fourth — `pending_movements_are_retained()` — refuses to
+delete a proposal at all, which is why the browser tests stop short of
+submitting one.
 
 ### Review-driven architecture work — ✅ Landed (PR #6)
 
