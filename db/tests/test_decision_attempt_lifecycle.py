@@ -500,6 +500,47 @@ def test_two_simultaneous_reruns_have_one_deterministic_winner(setup_conn):
         assert cur.fetchone()["n"] == 1, "exactly one attempt row -- the second thread's INSERT must never run"
 
 
+def _backends_holding_open_transactions_on_this_schema(conn) -> int:
+    """How many OTHER backends sit `idle in transaction` holding a lock on this
+    test schema's relations.
+
+    The scoping is the whole point. This check used to count every
+    `idle in transaction` backend in the database:
+
+        SELECT count(*) FROM pg_stat_activity
+         WHERE state = 'idle in transaction' AND datname = current_database()
+
+    Nothing tied that to the attempt under test, so any unrelated client idling
+    in a transaction failed it -- and a running `docker compose` stack has
+    several. The test passed in CI (where the stack is down during the
+    db-migrations job) and failed locally for anyone with the application
+    running, which is the worst combination: a red test that says nothing about
+    the code and cannot be reproduced by the job that is green.
+
+    What the requirement actually says is narrower and checkable: after TXN A
+    commits, no connection is left holding a transaction against the rows this
+    attempt touched. So the query joins `pg_locks` and asks only about locks on
+    `applications` and `decision_attempts` IN THIS SCHEMA, excluding our own
+    backend.
+
+    `to_regclass` rather than a name comparison: it resolves the schema-qualified
+    name to the oid `pg_locks.relation` actually holds, and returns NULL instead
+    of raising if the relation is gone.
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT count(DISTINCT a.pid) AS n "
+            "  FROM pg_stat_activity a "
+            "  JOIN pg_locks l ON l.pid = a.pid "
+            " WHERE a.state = 'idle in transaction' "
+            "   AND a.datname = current_database() "
+            "   AND a.pid <> pg_backend_pid() "
+            "   AND l.relation IN (to_regclass(%s), to_regclass(%s))",
+            (f"{SCHEMA}.applications", f"{SCHEMA}.decision_attempts"),
+        )
+        return cur.fetchone()["n"]
+
+
 def test_no_open_transaction_during_the_external_call(setup_conn):
     """Requirement: no database transaction is open during the external
     HTTP call. Proven directly: after start_decision_attempt's TXN A
@@ -516,13 +557,65 @@ def test_no_open_transaction_during_the_external_call(setup_conn):
     assert started["outcome"] == "started"
 
     # Simulate "the external call is now in flight" -- a real gap where no
-    # transaction related to this attempt should be open anywhere.
-    with setup_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            "SELECT count(*) AS n FROM pg_stat_activity "
-            "WHERE state = 'idle in transaction' AND datname = current_database()"
-        )
-        assert cur.fetchone()["n"] == 0, "no connection may be left holding an open transaction after TXN A"
+    # transaction related to this attempt may be open.
+    #
+    # Scoped to locks on THIS schema's relations rather than to every
+    # transaction in the database; see the helper for why the unscoped version
+    # failed on any machine with the application running.
+    assert _backends_holding_open_transactions_on_this_schema(setup_conn) == 0, (
+        "a connection is left holding an open transaction on this attempt's "
+        "rows after TXN A committed")
+
+
+def test_the_open_transaction_check_still_detects_a_real_leak(setup_conn):
+    """Guard the guard, and this one earns its place.
+
+    Narrowing a check is how a check becomes vacuous: the previous version failed
+    on unrelated traffic, and the obvious repair -- scoping it -- could just as
+    easily have scoped it to nothing and passed forever. So this plants exactly
+    the leak the requirement forbids: a second connection that locks
+    `applications` and then sits there without committing, which is what a
+    network call made inside TXN A would look like from the database's side.
+
+    The check must see it. If this test ever passes with the assertion below
+    reversed, the scoping has gone too far.
+    """
+    _seed_app(setup_conn, 21)
+
+    leaked = _new_conn()
+    try:
+        with leaked.cursor() as cur:
+            cur.execute(f"SET search_path TO {SCHEMA}")
+            # FOR UPDATE, then no commit -- the connection goes idle holding the
+            # row lock, exactly the state TXN A must not be in during a call out.
+            cur.execute("SELECT id FROM applications WHERE id = 21 FOR UPDATE")
+            cur.fetchall()
+
+        # The leaked backend has to have reached `idle in transaction` before
+        # pg_stat_activity reports it that way. Polled rather than slept once:
+        # a fixed sleep is either flaky or slower than it needs to be.
+        seen = 0
+        for _ in range(50):
+            seen = _backends_holding_open_transactions_on_this_schema(setup_conn)
+            if seen:
+                break
+            time.sleep(0.05)
+
+        assert seen == 1, (
+            "the scoped check did not notice a connection idling in a "
+            "transaction while holding a lock on this schema's applications row "
+            "-- it has been narrowed until it proves nothing")
+    finally:
+        leaked.rollback()
+        leaked.close()
+
+    # And it goes back to zero once the leak is gone, so the check is reporting
+    # the state rather than latching.
+    for _ in range(50):
+        if _backends_holding_open_transactions_on_this_schema(setup_conn) == 0:
+            break
+        time.sleep(0.05)
+    assert _backends_holding_open_transactions_on_this_schema(setup_conn) == 0
 
 
 def test_failed_external_call_releases_the_attempt_for_retry(setup_conn):
