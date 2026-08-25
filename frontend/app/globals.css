@@ -1103,3 +1103,49 @@ tbody tr:hover {
   font-size: 14px;
   margin: 0;
 }
+
+/* ---- the amount-financed breakdown inside the TILA cell ------------------ */
+/*
+ * Three lines under "Amount Financed": what was asked for, the prepaid fee, and
+ * the net. Still inside ONE of the four federal boxes -- a fifth box would
+ * change what the federal disclosure looks like, and the four are the disclosure.
+ *
+ * A definition list because that is what it is: three labelled amounts, not a
+ * data table. The rule above the total is the only visual weight; the point is
+ * that a borrower can see the subtraction, not that it draws the eye away from
+ * the APR.
+ */
+.tila-breakdown {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+.tila-breakdown > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+.tila-breakdown dt {
+  margin: 0;
+}
+.tila-breakdown dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.tila-breakdown-total {
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 4px !important;
+  font-weight: 600;
+  color: var(--fg);
+}
+.tila-cell-note {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}

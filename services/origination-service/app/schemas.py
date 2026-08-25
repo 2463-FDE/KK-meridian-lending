@@ -190,6 +190,17 @@ class Disclosure(BaseModel):
     monthly_payment: float
     amount_financed: float
     total_of_payments: float
+    # How the amount financed was arrived at: requested principal, less the
+    # prepaid origination fee. Forwarded from disclosure-service, which derives
+    # the fee by SUBTRACTING the two stored figures rather than applying the fee
+    # percentage again -- so the breakdown foots on screen.
+    #
+    # Both null on a legacy offer that stored no principal. The borrower page
+    # says the breakdown is unavailable for a historical offer; it does not
+    # invert the amount financed through the fee to fill the line in, because
+    # that lands on a principal nobody was ever quoted.
+    requested_principal: Optional[float] = None
+    origination_fee: Optional[float] = None
     # Null on a legacy offer with no stored schedule. The staff console shows a
     # single monthly figure when these are absent, rather than inventing a final
     # payment to fill the sentence out.

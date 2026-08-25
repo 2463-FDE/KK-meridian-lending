@@ -149,6 +149,40 @@ def terms_needing_regeneration(row) -> list[str]:
     return missing_terms(row) + missing_schedule_terms(row)
 
 
+def _amount_financed_breakdown(stored_principal, amount_financed):
+    """`(requested_principal, origination_fee)`, or `(None, None)`.
+
+    The fee is the DIFFERENCE between the two stored figures, never the fee
+    percentage applied a second time. `amount_financed` is stored as
+    `ROUND_HALF_UP(principal - principal * fee_pct)` -- the difference is
+    rounded, so that the TILA box foots against its own values
+    (`apr.amount_financed_decimal`). On a $1,002.50 principal the stored figures
+    are 1002.50 and 972.43, whose difference is 30.07; recomputing the fee as
+    `round(1002.50 * 0.03)` gives 30.08, and the breakdown would visibly fail to
+    add up by a cent. Subtracting needs no fee percentage and cannot disagree
+    with what is stored.
+
+    Both None unless the principal was STORED. A legacy row's principal can only
+    be recovered by inverting `amount_financed` through the fee, which lands on a
+    neighbouring value -- fine for redrawing a schedule that is labelled a
+    reconstruction, not fine as "the amount you asked for" printed beside
+    genuine disclosed terms.
+    """
+    if stored_principal is None or amount_financed is None:
+        return None, None
+    principal = _dec(stored_principal)
+    fee = principal - _dec(amount_financed)
+    if fee < 0:
+        # Stored figures that say the borrower received MORE than they asked
+        # for. That is a real inconsistency in a signed disclosure, so it is
+        # reported rather than displayed: a negative "fee" on the borrower's
+        # screen is worse than an absent breakdown.
+        log.error("stored amount financed exceeds stored principal: "
+                  "principal=%s amount_financed=%s", principal, amount_financed)
+        return None, None
+    return float(principal), float(fee)
+
+
 def _repair_incomplete_offer(row, missing, terms, fee_pct_used, principal, application_id):
     """Regenerate the canonical terms of an existing INCOMPLETE offer, in place.
 
@@ -516,11 +550,14 @@ def create_offer(
             "stored payment schedule. Regenerate the offer to record exact terms."
         )
 
+    _breakdown_post = _amount_financed_breakdown(row.get("principal"),
+                                                 row.get("amount_financed"))
     disclosure = Disclosure(
         note_rate_pct=(float(row["note_rate_pct"]) if row.get("note_rate_pct") is not None else None),
         apr=float(row["apr"]), finance_charge=float(row["finance_charge"]),
         monthly_payment=float(row["monthly_payment"]), amount_financed=float(row["amount_financed"]),
         total_of_payments=float(row["total_of_payments"]),
+        requested_principal=_breakdown_post[0], origination_fee=_breakdown_post[1],
         # Straight from the stored row. Never derived here: the final payment is
         # not a function of the other amounts, so a value computed at read time
         # would be this generator's opinion presented as a disclosed term.
@@ -716,6 +753,7 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
             "contract. Regenerate the offer to record exact terms."
         )
 
+    _breakdown_get = _amount_financed_breakdown(offer.principal, offer.amount_financed)
     disclosure = Disclosure(
         # STORED only. `note_rate` above may be a value recovered from an
         # already-rounded payment, and recovery is not exact -- a genuine 7.99%
@@ -732,6 +770,10 @@ def get_offer(application_id: int, session: Session = Depends(get_session)):
         apr=float(offer.apr), finance_charge=float(offer.finance_charge),
         monthly_payment=monthly_payment, amount_financed=amount_financed,
         total_of_payments=total_of_payments,
+        # `offer.principal`, NOT the `principal` local above -- that one falls
+        # back to the inverted legacy value, which is exactly what must not be
+        # printed as the amount the borrower asked for.
+        requested_principal=_breakdown_get[0], origination_fee=_breakdown_get[1],
         # Stored values only. This endpoint reconstructs a SCHEDULE for display
         # when none was recorded, but it must not manufacture the contractual
         # terms themselves -- a legacy row reports null and the caller can tell.

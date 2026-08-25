@@ -80,6 +80,31 @@ class Disclosure(BaseModel):
     monthly_payment: float
     amount_financed: float
     total_of_payments: float
+    # --- how the amount financed was arrived at ------------------------------
+    #
+    # "The amount of credit provided to you" is a net figure, and a borrower who
+    # applied for $9,000 and reads $8,730 has no way to see where the difference
+    # went. These two make the box foot: requested principal, less the prepaid
+    # origination fee, is the amount financed.
+    #
+    # **Both are null unless the offer STORED the principal.** A legacy row
+    # (pre-0030) has none, and the read path can only recover one by inverting
+    # amount_financed through the fee -- which lands on a NEIGHBOURING principal,
+    # because amount_financed is cent-rounded. That inversion is legitimate for
+    # redrawing a schedule and is labelled as a reconstruction when it is used;
+    # printing it here as "your requested principal" would be a contractual
+    # figure the borrower was never quoted, presented beside genuine disclosed
+    # amounts. Null, and the caller says the breakdown is unavailable.
+    requested_principal: float | None = None
+    # **The difference, not the percentage applied again.** `amount_financed` is
+    # `ROUND_HALF_UP(principal - principal * fee_pct)` -- the DIFFERENCE is
+    # rounded, deliberately, so the box foots against its own stored values
+    # (see `apr.amount_financed_decimal`). Recomputing the fee as
+    # `round(principal * fee_pct)` gives 30.08 where the stored figures imply
+    # 30.07, and the breakdown would then fail to add up by a cent on screen.
+    # So this is `stored principal - stored amount financed`: exact by
+    # construction, and it needs no fee percentage at all.
+    origination_fee: float | None = None
     # How many periods bill `monthly_payment`, and what the last one bills.
     # Optional because pre-0030 rows have no stored schedule -- and a legacy row
     # must report null here rather than a plausible guess, since a reconstructed

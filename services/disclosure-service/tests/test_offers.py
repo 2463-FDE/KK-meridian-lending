@@ -566,6 +566,60 @@ def _offer_response_for(offer, app_id: int):
     return resp.json()
 
 
+# --- the amount-financed breakdown on the read path ----------------------------
+#
+# "Amount Financed -- the amount of credit provided to you" is a NET figure, and
+# a borrower who applied for $9,000 and reads $8,730 has nothing on the page
+# explaining the $270. The arithmetic is covered in
+# `test_amount_financed_breakdown.py`; what matters here is WHICH principal the
+# route reaches. Two locals hold one: `offer.principal` (stored) and `principal`
+# (inverted from `amount_financed` for a legacy row). They differ by a cent on
+# exactly the offers this feature is for.
+
+
+def test_the_breakdown_comes_from_the_stored_principal():
+    offer = _FakeOffer(
+        id=42, app_id=10, decision_id=10, fee_pct_used=0.030, note_rate_pct=7.99,
+        apr=9.584, finance_charge=1174.46, monthly_payment=407.12,
+        amount_financed=972.43, total_of_payments=9770.88,
+        principal=1002.50, regular_payment_count=23, final_payment=407.10,
+        term_months=24, schedule_version="B1",
+    )
+
+    d = _offer_response_for(offer, 10)["disclosure"]
+
+    assert d["requested_principal"] == 1002.50
+    # 30.07, not 30.08. `amount_financed` stores the ROUNDED DIFFERENCE, so the
+    # fee the borrower actually paid is what the subtraction gives; applying 3%
+    # to 1002.50 and rounding gives a cent more, and the box would not foot.
+    assert d["origination_fee"] == 30.07
+    assert round(d["requested_principal"] - d["origination_fee"], 2) == 972.43
+
+
+def test_a_legacy_offer_reports_no_breakdown_rather_than_an_inverted_principal():
+    """`_FakeOffer.principal` defaults to None -- the pre-0030 shape.
+
+    The read path still inverts `amount_financed` through the fee to redraw the
+    SCHEDULE, and labels those rows a reconstruction. The breakdown must not
+    borrow that number: 972.43 / (1 - 0.03) is 1002.51, a cent above what the
+    borrower asked for, and printing it under "the amount you asked for" states a
+    contractual figure nobody was ever quoted.
+    """
+    offer = _FakeOffer(id=42, app_id=10, decision_id=10, fee_pct_used=0.030,
+                       apr=9.584, finance_charge=1174.46, monthly_payment=407.12,
+                       amount_financed=972.43, total_of_payments=9770.88)
+
+    d = _offer_response_for(offer, 10)["disclosure"]
+
+    # None, not 0.0. Absent and zero are different claims: a fee of $0.00 says
+    # the borrower was charged nothing, while null says this record cannot show
+    # it. The browser narrows on `!= null` for the same reason.
+    assert d["requested_principal"] is None
+    assert d["origination_fee"] is None
+    # And the schedule is still drawn, still from the inversion, still labelled.
+    assert _offer_response_for(offer, 10)["schedule_source"] == "reconstructed"
+
+
 def test_the_schedule_is_built_from_the_stored_principal_not_an_inversion():
     """The reviewed defect, at the principal that exposes it.
 

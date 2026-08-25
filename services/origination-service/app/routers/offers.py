@@ -101,6 +101,12 @@ def _to_offer_out(app_id: int, resp: dict, offer_ready: bool = False) -> OfferOu
         monthly_payment=d.get("monthly_payment", 0),
         amount_financed=d.get("amount_financed", 0),
         total_of_payments=d.get("total_of_payments", 0),
+        # Forwarded with None, not 0. A fee of $0.00 is a real and different
+        # claim from "we cannot show you the breakdown", and this is the mapping
+        # layer that dropped `note_rate_pct` once already -- which is what let a
+        # 5.43% APR sit under a 7.99% loan without looking wrong.
+        requested_principal=d.get("requested_principal"),
+        origination_fee=d.get("origination_fee"),
         # Forwarded, not defaulted. `.get(x, 0)` is right for the four amounts
         # -- an offer that reached this point has them, and Gap F refuses the row
         # otherwise -- but a MISSING final payment is meaningfully different from

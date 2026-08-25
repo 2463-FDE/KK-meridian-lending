@@ -1,5 +1,8 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 import json
+# Decimal, not float, for the one subtraction on this module's money path: the
+# amount-financed breakdown has to foot to the cent on the borrower's screen.
+from decimal import Decimal
 
 import httpx
 import psycopg2.errors
@@ -136,6 +139,44 @@ def _complete_offer_exists(app_id: int) -> bool:
     return bool(rows)
 
 
+def _amount_financed_breakdown(offer):
+    """`(requested_principal, origination_fee)` for this row, or `(None, None)`.
+
+    **A SUBTRACTION of two stored amounts, never the fee percentage applied
+    again.** `amount_financed` is stored as
+    `ROUND_HALF_UP(principal - principal * fee_pct)` -- the difference is
+    rounded, deliberately, so the TILA box foots against its own values. Applying
+    3% to a $1,002.50 principal and rounding gives $30.08 where the stored
+    figures imply $30.07, and the borrower's screen would show three numbers
+    that do not add up.
+
+    **Why this exists here as well as in disclosure-service.** This function
+    serves `GET /applications/{id}`, which reads the offers row directly -- the
+    path the underwriting console and the borrower's returning page use. Two
+    services, two images, no shared library (ADR 0002), so the rule is written
+    twice; `db/tests/test_the_origination_fee_has_one_rule.py` fails if the two
+    copies stop agreeing, or if either starts reading a fee percentage. Same
+    treatment the maker-checker limits and the note rate get.
+
+    Both None unless the principal was STORED. A pre-0030 row has none, and the
+    only recoverable value is `amount_financed / (1 - fee_pct)` -- a cent away
+    from what the borrower asked for. Fine for redrawing a schedule labelled a
+    reconstruction; not fine printed under "amount requested".
+    """
+    principal = getattr(offer, "principal", None)
+    financed = getattr(offer, "amount_financed", None)
+    if principal is None or financed is None:
+        return None, None
+    requested = Decimal(str(principal))
+    fee = requested - Decimal(str(financed))
+    if fee < 0:
+        log.error("stored amount financed exceeds stored principal app_id=%s "
+                  "offer_id=%s", getattr(offer, "app_id", None),
+                  getattr(offer, "id", None))
+        return None, None
+    return float(requested), float(fee)
+
+
 def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
     """Render an offers row as a Disclosure, or None if it is incomplete.
 
@@ -162,11 +203,17 @@ def _offer_disclosure_or_none(offer, app_id: int) -> Disclosure | None:
             app_id, getattr(offer, "id", None), ",".join(missing),
         )
         return None
+    requested_principal, origination_fee = _amount_financed_breakdown(offer)
     return Disclosure(
         note_rate_pct=getattr(offer, "note_rate_pct", None),
         apr=offer.apr, finance_charge=offer.finance_charge,
         monthly_payment=offer.monthly_payment, amount_financed=offer.amount_financed,
         total_of_payments=offer.total_of_payments,
+        # How the amount financed was arrived at. Null together on a legacy row,
+        # and the screen then says the breakdown is unavailable rather than
+        # inverting the amount financed to fill the line in.
+        requested_principal=requested_principal,
+        origination_fee=origination_fee,
         # Passed through as stored, including None. A legacy offer reports no
         # final payment rather than a recomputed one: shown beside four genuinely
         # disclosed amounts, a reconstructed figure is indistinguishable from a
