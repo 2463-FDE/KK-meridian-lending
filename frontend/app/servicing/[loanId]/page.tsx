@@ -574,7 +574,14 @@ function LoanDetailContent() {
 
       {/* Payment history */}
       <h2>Payment history</h2>
-      <div className="table-wrap">
+      {/* `data-testid` so a test can name THIS table. Adding the activity table
+          above put a second `tbody` on the page, and `payment-allocation.spec.ts`
+          located its row with an unscoped `page.locator("tbody tr")` -- so
+          `.first()` started matching an activity row for the same payment, which
+          carries no allocation label. The regression was in the DOM, not in the
+          logic, and a stable hook is the fix rather than relying on which table
+          happens to come first. */}
+      <div className="table-wrap" data-testid="payment-history">
         <table>
           <thead>
             <tr>
