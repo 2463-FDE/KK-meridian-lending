@@ -259,7 +259,13 @@ def _borrower_loans(applicant_id: int) -> dict:
     return {"items": items, "total": len(items), "limit": len(items) or 1, "offset": 0}
 
 
-_LOAN_SUBPATH_RE = re.compile(r"^loans/(\d+)(?:/(schedule|payments))?$")
+#: The owner-or-staff loan reads. `activity` joined `schedule` and `payments`
+#: here rather than getting a rule of its own: it is the same authority
+#: question -- your loan or a loan you service -- and a second rule is a
+#: second place for the ownership check to be forgotten. The alternation
+#: stays CLOSED: an unlisted sub-path falls through to the 404 below, which
+#: is what keeps `/lss/*` from being a generic proxy.
+_LOAN_SUBPATH_RE = re.compile(r"^loans/(\d+)(?:/(schedule|payments|activity))?$")
 _MOVEMENT_RESOLVE_RE = re.compile(r"^movements/(\d+)/resolve$")
 #: The disposition route on one review-queue item. Anchored and numeric for the
 #: same reason as the one above: a permissive pattern here decides which paths

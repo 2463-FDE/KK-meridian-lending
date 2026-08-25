@@ -112,6 +112,56 @@ class PaymentsOut(BaseModel):
     items: list[PaymentItem]
 
 
+class ActivityItem(BaseModel):
+    """One authoritative movement that changed this account.
+
+    Distinct from `PaymentItem`, which answers a different question. Payment
+    history asks "what payments did I make, and where did each go"; activity asks
+    "what movements changed this account" -- and the answers differ, because an
+    approved adjustment and a fee waiver change the account without being
+    payments, while a declined proposal changes nothing at all and appears in
+    neither.
+    """
+
+    #: Stable within a loan, and derived from authoritative identity: the payment
+    #: id when there is one, the ledger row id otherwise. Never a hash of amount
+    #: and time -- two legitimate payments can share both.
+    id: str
+    occurred_at: Optional[str] = None
+    #: A truthful category, mapped server-side from `ledger_entries.entry_type`.
+    #: Never the raw type: `legacy_direct_write` is an implementation name for a
+    #: balance change captured by a database trigger, and putting it in front of a
+    #: borrower would be both meaningless and alarming.
+    category: str
+    description: str
+    #: The SIGNED effect on what the borrower owes, in the ledger's own
+    #: convention: negative reduces the amount owed, positive increases it. Not
+    #: flipped, unlike payment history -- the sign IS the information here, and it
+    #: is the same convention the adjustment form uses (+450 owes more).
+    amount: float
+    #: The same movement split by component, for the payments that have a split.
+    #: `interest` appears here even though it projects to no balance column: it is
+    #: money the borrower paid, and omitting it would make a payment's parts fail
+    #: to sum to its whole.
+    components: dict[str, float] = {}
+    #: Present only for movements that came from a payment. This is what groups
+    #: several ledger rows into one movement, and what a caller can join against
+    #: payment history.
+    payment_id: Optional[int] = None
+    #: How well this movement's origin is known. `processor` is a real captured
+    #: payment; `recorded` is an entry written by a service with full provenance;
+    #: `limited` is a pre-ledger or trigger-captured row whose actor and reason
+    #: were never recorded. A reader must be able to tell the difference.
+    provenance: str
+
+
+class ActivityOut(BaseModel):
+    loan_id: int
+    items: list[ActivityItem]
+    #: What this list is and is not, in the payload rather than only in the UI.
+    note: str
+
+
 class Page(BaseModel, Generic[T]):
     items: list[T]
     total: int
