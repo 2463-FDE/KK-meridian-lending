@@ -7,6 +7,7 @@ import PaymentAllocation from "../../../components/PaymentAllocation";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import AccountActivity from "../../../components/AccountActivity";
+import PaymentOutcome from "../../../components/PaymentOutcome";
 import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
 import { tokenizeCard } from "../../../lib/tokenize";
@@ -213,6 +214,19 @@ function LoanDetailContent() {
   // "pending" response (charged, balance apply not yet confirmed) keeps the
   // same key on the next retry instead of starting a new, undetectable charge.
   const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => crypto.randomUUID());
+  // The outcome of the last completed attempt, kept so the receipt below can
+  // describe THAT payment rather than whatever is newest.
+  //
+  // `paymentId` is the server's own `payment_id` from the charge response. It is
+  // the only safe way to identify the payment that just completed: two
+  // legitimate payments can share an amount, a timestamp and a card, so
+  // "the most recent row" or "the row matching this amount" can describe
+  // someone else's money.
+  const [payResult, setPayResult] = useState<{
+    status: "captured" | "pending" | "failed";
+    paymentId: number | null;
+    amount: number;
+  } | null>(null);
 
   // Who SEES the proposal forms, decided from the VERIFIED principal.
   //
@@ -333,6 +347,12 @@ function LoanDetailContent() {
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
+    // The previous attempt's outcome is cleared before this one starts. Leaving
+    // it up meant a receipt for an earlier payment stayed on screen while a new
+    // charge was in flight -- and anything waiting for "an outcome" was
+    // satisfied by the stale one, which is how `payment-allocation.spec.ts`
+    // came to read the first payment's row twice.
+    setPayResult(null);
     try {
       // ADR 0008 (Week 5 tokenization): the card never leaves the browser as
       // a raw PAN/CVV -- tokenizeCard() (a mock standing in for a real
@@ -352,23 +372,55 @@ function LoanDetailContent() {
         amount: parseFloat(payAmount || "0"),
         method: "card",
         idempotency_key: payIdempotencyKey,
-      })) as { status?: string };
+      })) as {
+        status?: "captured" | "pending" | "failed";
+        payment_id?: number | null;
+      };
 
-      // Review fix: payment-service deliberately returns HTTP 200 with
-      // status: "pending" when the charge captured but applying it to the
-      // balance failed/hasn't been confirmed yet -- that is NOT success. Only
-      // rotate the key once the server confirms "captured"; on "pending" keep
-      // the same key so a retry reconciles the SAME payment instead of the
-      // server having no way to tell it apart from a brand-new charge.
-      if (resp?.status === "captured") {
-        setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+      // THREE states, each handled explicitly. payment-service returns HTTP 200
+      // with a `status` of "captured", "pending" or "failed"
+      // (`PaymentOut.status`), and they are not interchangeable.
+      //
+      // This used to be `captured` or else-pending, so a processor DECLINE was
+      // shown to the borrower as "pending -- click again to retry". That was
+      // worse than a wrong label: the key was not rotated either, and
+      // `payments.py` is explicit that a declined key stays declined ("A
+      // borrower who wants to actually retry the charge needs a new
+      // idempotency_key"). So the screen invited a retry that could never
+      // succeed, however many times it was clicked.
+      const status = resp?.status ?? "pending";
+
+      // Refresh BEFORE showing the outcome, not after. Setting it first made the
+      // receipt render against the stale payment list for one frame, so a
+      // captured payment flashed "allocation details are not currently
+      // available" and then corrected itself -- which conflates "not loaded yet"
+      // with "no ledger evidence", and those are different facts. The awaited
+      // refresh is what makes the receipt's first render its only render.
+      await refreshBalanceAndHistory();
+
+      setPayResult({
+        status,
+        paymentId: resp?.payment_id ?? null,
+        amount: parseFloat(payAmount || "0"),
+      });
+
+      if (status === "captured") {
+        // Applied and confirmed. The next payment is a new one.
+        setActionMsg(null);
+        setPayIdempotencyKey(crypto.randomUUID());
+      } else if (status === "failed") {
+        // Declined, and nothing was applied. A retry of THIS key stays
+        // declined by design, so the next attempt has to be a genuinely new
+        // one -- which means a new key. Rotating here is what makes the
+        // button work again rather than replaying a refusal.
+        setActionMsg(null);
         setPayIdempotencyKey(crypto.randomUUID());
       } else {
-        setActionMsg(
-          `Payment of ${usd(payAmount)} is pending -- click "Pay with card on file" again to retry.`
-        );
+        // Pending: the processor confirmed, Meridian has not confirmed the
+        // application. KEEP the key -- retrying with it reconciles the SAME
+        // payment, where a new key would authorise a second charge.
+        setActionMsg(null);
       }
-      await refreshBalanceAndHistory();
     } catch (err) {
       setActionErr(errMsg(err, "Payment failed."));
     } finally {
@@ -697,8 +749,39 @@ function LoanDetailContent() {
           </button>
         </div>
         <p className="hint" style={{ marginTop: 10 }}>
-          Charged to card ending 1111. Payments post immediately.
+          Charged to card ending 1111. A payment is applied once the processor
+          capture and Meridian&apos;s application to the loan are both confirmed.
         </p>
+
+        {/* Authoritative context, so the borrower is not deciding an amount
+            blind. Both figures are the server's: `balances.balance` is the
+            principal projection and `past_due` the fees one
+            (db/migrations/0035). The order below is EXPLANATORY -- the server
+            owns the waterfall and this predicts no dollar amounts, because a
+            second allocation in the browser is a second answer that can
+            disagree with the ledger. */}
+        <div className="dl" data-testid="payment-context">
+          <div className="dl-row">
+            <dt>Current principal balance</dt>
+            <dd>{loan ? usd(loan.balance) : "\u2014"}</dd>
+          </div>
+          <div className="dl-row">
+            <dt>Outstanding fees</dt>
+            <dd>{loan ? usd(loan.past_due) : "\u2014"}</dd>
+          </div>
+        </div>
+        <p className="hint">
+          Payments are applied in this order: <strong>fees</strong>, then{" "}
+          <strong>interest</strong>, then <strong>principal</strong>. The exact
+          split is decided by servicing and shown below once the payment is
+          applied.
+        </p>
+
+        {payResult ? <PaymentOutcome
+          result={payResult}
+          payments={payments}
+          currentPrincipal={loan?.balance ?? null}
+        /> : null}
       </div>
 
       {/* Proposal actions — shown to the verified staff proposal roles (csr,   */}
