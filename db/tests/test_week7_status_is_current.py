@@ -358,9 +358,22 @@ def test_the_superseded_status_paragraph_keeps_its_fence(week7):
     a live claim that neither deliverable landed, which is the failure mode this
     week's own history is about.
     """
-    stale = re.search(r"deliverables are still \*\*⬜ Open\*\*", week7)
-    if stale is None:
-        pytest.skip("the 2026-08-05 status paragraph is no longer quoted here")
+    # Matched on the durable part of the sentence, not on its marker.
+    #
+    # This searched for the literal `deliverables are still **⬜ Open**`, and
+    # when that row's glyph changed to the historical marker the search missed
+    # and `pytest.skip` made this guard go QUIET -- a fence check that stopped
+    # checking, discoverable only because the suite's skip count went from 0 to
+    # 1. That is the same defect this file exists to catch, in the file itself.
+    #
+    # An absent paragraph is now a FAILURE rather than a skip. Preserving it is
+    # the convention; if it has gone, that is the finding, not a reason to stop
+    # looking.
+    stale = re.search(r"deliverables (?:are|were) still \*\*[^*]*[Oo]pen", week7)
+    assert stale is not None, (
+        "Week 7 no longer quotes its 2026-08-05 status paragraph. It is kept "
+        "verbatim on purpose -- rewriting it erases the gap rather than closing "
+        "it -- so its absence is a finding, not a reason to skip this check")
 
     before = week7[:stale.start()]
     fence = [line for line in before.splitlines() if line.startswith(">")]
