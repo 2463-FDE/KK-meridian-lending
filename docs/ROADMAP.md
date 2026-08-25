@@ -18,6 +18,7 @@ short of that is inventory, not delivery. So the status key distinguishes them:
 | ❌ **Stale or incorrect claim** | Corrected in place, with what it was |
 | 🟡 **Partial** | Some conditions met, named individually so the gap is visible |
 | ⬜ **Open** | Not built. Either not started, or deliberately deferred with a reason |
+| 🕒 **Was open on `<date>`** | A dated FINDING, kept as written and no longer live status. Discovery evidence is preserved rather than rewritten -- rewriting it erases what was found instead of recording that it was fixed -- so it needs a marker that cannot be mistaken for ⬜. A reader scanning for open work must not count these; the prose beside each one says what closed it |
 
 Every `D<n>` / `RF-<n>` citation in the tables below is defined in
 [`DEBT.md`](DEBT.md) — the debt register.
@@ -867,10 +868,10 @@ noisy, we just adjust to the bank number."
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |
 |---|---|---|---|---|
-| 1 | Payments / Finance | `ledger_total()` sums **every row ever inserted into `payments`**, no date or loan filter; `settlement_total()` sums a fixed CSV covering one specific 7-day window across 3 loans — comparing an all-time, all-loan number to a 1-week, 3-loan number was never going to tie out | ⬜ Open as of 2026-08-05 | This isn't noise — the two numbers were never measuring the same population; a correctly-scoped comparison is required before "does it tie out" is even a meaningful question |
-| 2 | Finance | Whether the gap is random or a real, directional leak | ⬜ Open as of 2026-08-05, but verified directional for the comparable slice: the seed data only carries payment rows through 06-03 while `settlement.csv` has captures for the same loans through 06-07 — settlement consistently shows *more* captures than the ledger has rows for | Directional, one-sided gaps are the signature of a real leak, not rounding noise — worth escalating, not writing off |
-| 3 | Payments | A real double-fund event exists in this exact month's data (loan 5582, two identical $410.50 charges 2 seconds apart) and nothing flags it | ⬜ Open as of 2026-08-05 | Confirmed: no trace ID or request ID connects the two `POST /payments` attempts — indistinguishable from two genuine charges without a human manually diffing rows by loan_id + amount + near-identical timestamp |
-| 4 | Payments | `payments` has **no `processor_ref` column at all** — even a correctly-scoped reconciliation could only match rows approximately (loan_id + amount + nearby date), never definitively by charge reference | ⬜ Open as of 2026-08-05 | This is itself part of why nobody can produce an exact break-report today, not just a missing job. Without the processor's own reference on the row there is no join key, so a comparison can only net totals per loan — and two wrong transactions on one loan then cancel, which is a control that reports success for having hidden its own findings |
+| 1 | Payments / Finance | `ledger_total()` sums **every row ever inserted into `payments`**, no date or loan filter; `settlement_total()` sums a fixed CSV covering one specific 7-day window across 3 loans — comparing an all-time, all-loan number to a 1-week, 3-loan number was never going to tie out | 🕒 Was open on 2026-08-05 | This isn't noise — the two numbers were never measuring the same population; a correctly-scoped comparison is required before "does it tie out" is even a meaningful question |
+| 2 | Finance | Whether the gap is random or a real, directional leak | 🕒 Was open on 2026-08-05, and verified directional for the comparable slice: the seed data only carries payment rows through 06-03 while `settlement.csv` has captures for the same loans through 06-07 — settlement consistently shows *more* captures than the ledger has rows for | Directional, one-sided gaps are the signature of a real leak, not rounding noise — worth escalating, not writing off |
+| 3 | Payments | A real double-fund event exists in this exact month's data (loan 5582, two identical $410.50 charges 2 seconds apart) and nothing flags it | 🕒 Was open on 2026-08-05 | Confirmed: no trace ID or request ID connects the two `POST /payments` attempts — indistinguishable from two genuine charges without a human manually diffing rows by loan_id + amount + near-identical timestamp |
+| 4 | Payments | `payments` has **no `processor_ref` column at all** — even a correctly-scoped reconciliation could only match rows approximately (loan_id + amount + nearby date), never definitively by charge reference | 🕒 Was open on 2026-08-05 | This is itself part of why nobody can produce an exact break-report today, not just a missing job. Without the processor's own reference on the row there is no join key, so a comparison can only net totals per loan — and two wrong transactions on one loan then cancel, which is a control that reports success for having hidden its own findings |
 
 *The four rows above are dated discovery evidence, not current guarantees.
 Since that measurement, transaction-level scheduled reconciliation,
@@ -911,7 +912,7 @@ full month of client data is not in this repository.
 week scoped.** A Prometheus + Grafana stack landed early (`monitoring/`,
 scraping `/metrics` off all eight services) during the Week 4 branch, so this
 week is no longer "not started". But metrics are not what the four rows above
-ask for. Both of Week 7's own deliverables are still **⬜ Open**: there is no
+ask for. Both of Week 7's own deliverables were still **🕒 open on that date**: there is no
 shared trace/correlation ID connecting `payment-service.charge()` to
 `servicing-service.apply_payment`, and `reconciliation.py`'s `ledger_total()` /
 `settlement_total()` still take no date or loan filter — re-verified today — so
