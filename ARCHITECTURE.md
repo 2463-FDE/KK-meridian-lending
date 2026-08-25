@@ -49,7 +49,7 @@ paths below.
         origination-service (8001)                                servicing-service (8002)
         LOS: intake + LOS→LSS boarding                             LSS: loans, balances,
         orchestrator + KG traversal (kg.py)                        schedule, delinquency,
-        + fair-lending ZIP screen (fair_lending.py)                 reconciliation, apply-payment
+        + note-rate publication (GET /pricing)                      reconciliation, apply-payment
                      │                                                       ▲
         ┌────────────┼─────────────┬───────────────────┐                    │ POST apply-payment
         ▼            ▼             ▼                   ▼                   │
@@ -169,7 +169,7 @@ now fails on either wording.
 | Service | Port | Tech | Owns / Responsibility |
 |---------|------|------|-----------------------|
 | `gateway` | 8000 | FastAPI + httpx + Redis | Session auth (`/auth/*`), role/ownership enforcement, reverse-proxy. Per-client-IP rate limiting (fixed window, fails open on a Redis outage). Forwards the resolved identity as `X-User-Id`/`X-User-Role`, stripping any inbound `X-User-*` the caller sent itself. See "Auth & roles" for the per-route tiers. |
-| `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (intake logs `app_id`/`applicant_id` only, never the request payload — enforced by `tests/test_intake_pii_not_logged.py`; this cell previously claimed a request-logging middleware in `logging_config.py` logged full POST bodies, which is false — no such middleware has ever existed, see `DEBT.md` D5c), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the fair-lending ZIP screen. |
+| `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (intake logs `app_id`/`applicant_id` only, never the request payload — enforced by `tests/test_intake_pii_not_logged.py`; this cell previously claimed a request-logging middleware in `logging_config.py` logged full POST bodies, which is false — no such middleware has ever existed, see `DEBT.md` D5c), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. `kg.py` walks the applicant→application→decision→offer chain (FK-linked relational data, no separate graph store) to drive `disclosure_graph.py`'s two-agent auto-offer-on-approval LangGraph and the reason-distribution report at `GET /applications/fair-lending/reason-distribution`. It drove a ZIP3 fair-lending screen until 2026-08-24, when the client prohibited any protected-class proxy including one derived from ZIP; `fair_lending.py` was deleted rather than disabled (PR #78), and `kg.py` no longer references ZIP at all. |
 | `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. `POST /accounts/{loan_id}/apply-payment` (called by payment-service) applies a captured charge by writing an immutable `ledger_entries` row; `balances` is the projection that trigger maintains (ADR 0010, `db/migrations/0035`). This cell said "still a single mutable column, no ledger" — a wording variant of the claim corrected further down this same file, which is why the regression pins now match the concept rather than one phrasing. No host port; every money-moving route requires `X-Internal-Token` — `adjust-balance`, `waive-fee`, `late-fee` and `apply-payment`. (A fifth, the legacy `/payments` duplicate, was retired with D2; it is listed in the guarded set nowhere because it no longer exists.) Read routes stay ownership-checked at the gateway. |
 | `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`, scoped to the application it ran for. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR (`DEBT.md` D11). No host port; `POST /kyc/check` requires `X-Internal-Token` — this cell read "Host-published **and** does not check `X-Internal-Token`", which was the bypass described in the boundary note above. |
 | `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`). **Compute-only — persists nothing.** Origination is the sole writer of both `decisions` and the append-only `decision_events` audit row, written atomically after its own finality recheck (PR #6). The bureau call goes through a `BureauClient` seam that forwards an idempotency key so a retry after an ambiguous timeout recovers the original pull. Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
@@ -241,9 +241,19 @@ The gateway enforces per-route tiers rather than a single authenticated-or-not g
 - **Fail-closed**: anything else under a role-gated prefix 404s rather than being
   silently proxied with no authz decision made for it.
 
-Downstream services (kyc/decision/disclosure/payment/servicing) still trust the forwarded
-`X-User-Role` without re-checking it themselves — the gateway is the only enforcement
-point for role/ownership. decision-service, disclosure-service, and payment-service add one
+Downstream services (kyc/decision/disclosure/payment) still trust the forwarded
+`X-User-Role` without re-checking it themselves; for those, the gateway is the only
+enforcement point for role/ownership.
+
+**servicing-service is the exception, and the sentence above included it until
+2026-08-24.** It verifies a gateway-minted, Ed25519-signed principal assertion
+itself — `principal.require_money_principal` and `require_staff_principal`, on
+every money route, the maker-checker queue and the reconciliation review queue
+(PR #33 introduced it; PR #81 added the newest two routes). So a caller that
+reaches servicing directly with the shared internal token is refused there for
+having no verified human behind it, rather than arriving
+authenticated-as-a-human. The old wording understated the control that exists
+and would have let a reader conclude the money routes rest on one hop. decision-service, disclosure-service, and payment-service add one
 more layer specifically against a *network*-level bypass (not a role bypass): each requires
 a shared `X-Internal-Token` header on its write route, checked fail-closed (an unset
 config token can never match). This is deliberately narrow — it doesn't replace the
