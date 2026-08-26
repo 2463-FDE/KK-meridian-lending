@@ -273,23 +273,72 @@ test("keyboard focus on a header control is visibly marked", async ({ page }) =>
   await signInAsStaff(page, "admin");
   await page.goto("/admin");
 
-  // What this does and does not prove, stated plainly. `globals.css` had no
-  // `:focus-visible` rule for links or buttons, and this test PASSES without one
-  // -- Chromium paints its own focus ring, so the header was never actually
-  // missing a focus indicator. Confirmed by running this file against the
-  // pre-change stylesheet: the six layout tests failed and this one passed.
+  // Focus is reached by PRESSING TAB, not by calling `.focus()`.
   //
-  // The header rule added alongside this test therefore makes the ring explicit
-  // and consistent with the palette rather than fixing an invisible state. The
-  // test earns its place as a guard against the thing that WOULD break it: an
-  // `outline: none` added later for tidiness, which is a common and quiet way to
-  // remove keyboard affordance.
-  const outline = await policyChat(page).first().evaluate((el) => {
-    (el as HTMLElement).focus();
+  // This test was written with `el.focus()` and was unreliable: it passed on its
+  // own and failed inside a batch run. `:focus-visible` is not a plain focus
+  // state -- Chromium applies it only when it judges the interaction to be
+  // keyboard-driven, and a programmatic focus after a preceding mouse click is
+  // judged the other way. So the test was measuring the browser's modality
+  // heuristic and reporting it as a styling result.
+  //
+  // Tabbing is also the honest form of the assertion. The requirement is that a
+  // KEYBOARD user can see where they are; a rule that only paints under
+  // `.focus()` would not satisfy it.
+  await page.keyboard.press("Tab");
+
+  // Tab until focus lands inside the NAV, then until it lands on this link.
+  //
+  // Anchored on containment rather than on a press count. A fixed count is a
+  // positional assumption: a skip link, a banner control or a cookie notice added
+  // ahead of the header would exhaust it, and the failure would read as a problem
+  // with the header rule rather than with the new control in front of it. Asking
+  // "is focus in the header nav yet" survives anything inserted before it.
+  const target = policyChat(page).first();
+  const nav = page.locator(".appbar-nav");
+  let reachedNav = false;
+  let reached = false;
+
+  // Still bounded, so a genuinely unreachable target fails instead of spinning.
+  // The cap is generous rather than tuned: it is a runaway guard, not a
+  // prediction of the tab order.
+  for (let i = 0; i < 60; i += 1) {
+    if (!reachedNav) {
+      reachedNav = await nav.evaluate(
+        (el) => !!document.activeElement && el.contains(document.activeElement));
+    }
+    if (await target.evaluate((el) => el === document.activeElement)) {
+      reached = true;
+      break;
+    }
+    await page.keyboard.press("Tab");
+  }
+
+  expect(reachedNav, "tabbing never reached the header navigation at all -- "
+    + "something before the header is swallowing focus").toBe(true);
+  expect(reached, "tabbing reached the header navigation but never the Policy "
+    + "Chat link").toBe(true);
+
+  // Now the assertion that matters, and it is about `:focus-visible` explicitly
+  // rather than about any colour value.
+  const focus = await target.evaluate((el) => {
     const cs = getComputedStyle(el);
-    return { width: cs.outlineWidth, style: cs.outlineStyle };
+    return {
+      matchesFocusVisible: el.matches(":focus-visible"),
+      outlineStyle: cs.outlineStyle,
+      outlineWidth: parseFloat(cs.outlineWidth) || 0,
+    };
   });
 
-  expect(outline.style).not.toBe("none");
-  expect(parseFloat(outline.width)).toBeGreaterThan(0);
+  // `:focus-visible` is close to tautological after a real Tab press -- Chromium
+  // sets it regardless of this stylesheet -- and it is kept for two narrower
+  // reasons: it documents WHY this test tabs instead of calling `.focus()`, and
+  // it fails if the link ever stops being focusable at all.
+  expect(focus.matchesFocusVisible).toBe(true);
+
+  // THIS is the assertion that guards the header rule. It is what fails when the
+  // rule is replaced with `outline: none`, and it is the reason this test is a
+  // mutation-detecting guard rather than a restatement of the browser default.
+  expect(focus.outlineStyle).not.toBe("none");
+  expect(focus.outlineWidth).toBeGreaterThan(0);
 });
