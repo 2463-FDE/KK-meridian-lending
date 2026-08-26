@@ -31,6 +31,7 @@ name into its fixtures on purpose, and test code cannot authorize the drop --
 running images.
 """
 import ast
+import re
 import pathlib
 
 import pytest
@@ -253,3 +254,95 @@ def test_the_walk_treats_an_annotated_assignment_like_a_plain_one(table_pattern)
     # And a declaration with no value binds nothing, rather than crashing on
     # `node.value` being None.
     assert composed(ast.parse("def read():\n    sql: str\n")) == []
+
+
+# ── D20: the second premise, previously true and unasserted ──────────────────
+#
+# `check_no_pan_readers.py` decides whether anything still reads
+# `payments.pan` / `payments.cvv` by folding SQL out of the syntax tree, and
+# `docs/DEBT.md` D20 is explicit that a static folder cannot resolve an
+# arbitrarily dynamic program. The response to that has been to enforce the
+# PREMISE instead: while no application code composes SQL against `payments`,
+# the folder never has to resolve anything interesting to be right here.
+#
+# There is a second premise doing the same work, and until now nothing asserted
+# it. `SELECT *` names no columns, so a wildcard read is a statement the folder
+# cannot reason about at all -- it can prove the statement touches `payments`
+# and nothing whatever about which columns come back. Today no application code
+# does it. That fact is load-bearing and was resting on nobody having written one.
+#
+# Kept narrow on purpose. This is not a general ban on `SELECT *`, which would
+# be a style rule; it is a ban on wildcard reads of the ONE table whose dropped
+# columns the checker exists to police.
+
+WILDCARD_PAYMENTS = r"select\s+\*\s+from\s+(?:public\.)?payments(?!\w)"
+
+
+@pytest.fixture(scope="module")
+def wildcard_pattern():
+    import re
+
+    pattern = re.compile(WILDCARD_PAYMENTS, re.I)
+    # Exercised before it is trusted, for the same reason `table_pattern` is: a
+    # pattern that cannot match makes the assertion below vacuous.
+    assert pattern.search("SELECT * FROM payments WHERE id = 1")
+    assert pattern.search("select  *  from public.payments p")
+    assert not pattern.search("SELECT * FROM offers")
+    assert not pattern.search("SELECT id, amount FROM payments")
+    return pattern
+
+
+def _string_literals_in_application_code():
+    """Every string constant in service application code, with its location."""
+    for path in sorted(REPO.glob("services/*/app/**/*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                yield path, node.lineno, node.value
+
+
+def test_no_application_code_reads_the_payments_table_with_a_wildcard(
+        wildcard_pattern):
+    """A wildcard read is the one shape the checker can say nothing about.
+
+    It can prove the statement names `payments`; it cannot name a single column
+    the query returns. So `SELECT *` would reintroduce exactly the uncertainty
+    D20 records, in a form no amount of folding resolves -- and it would do it
+    while the checker still reported clean.
+    """
+    offenders = [
+        (path, line) for path, line, text in _string_literals_in_application_code()
+        if wildcard_pattern.search(text)
+    ]
+
+    assert not offenders, (
+        "application code reads the `payments` table with a wildcard:\n"
+        + "\n".join("  %s:%d" % (p.relative_to(REPO).as_posix(), line)
+                    for p, line in offenders)
+        + "\n\n`SELECT *` names no columns, so `check_no_pan_readers.py` cannot\n"
+          "tell whether a dropped column comes back in the result set. Name the\n"
+          "columns the query actually needs. See docs/DEBT.md (D20)."
+    )
+
+
+def test_the_wildcard_walk_actually_reads_application_code(wildcard_pattern):
+    """Guard the guard: the assertion above must not pass on an empty walk.
+
+    A glob pointed at the wrong directory also reports "no wildcard reads". So
+    this proves the walk sees real SQL naming `payments` -- the same population
+    the composed-SQL test asserts on -- and that the pattern would fire if such
+    a statement existed.
+    """
+    saw_payments_sql = False
+    for _, _, text in _string_literals_in_application_code():
+        if re.search(TABLE_REFERENCE, text, re.I):
+            saw_payments_sql = True
+            break
+
+    assert saw_payments_sql, (
+        "the walk found no SQL naming the payments table at all, so the "
+        "wildcard assertion above is indistinguishable from a no-op")
+
+    # And the pattern fires on the shape it exists to catch, proving the clean
+    # result above is the code's doing rather than the regex's.
+    assert wildcard_pattern.search("SELECT * FROM payments")
