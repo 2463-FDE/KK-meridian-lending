@@ -275,21 +275,84 @@ def test_the_walk_treats_an_annotated_assignment_like_a_plain_one(table_pattern)
 # be a style rule; it is a ban on wildcard reads of the ONE table whose dropped
 # columns the checker exists to police.
 
-WILDCARD_PAYMENTS = r"select\s+\*\s+from\s+(?:public\.)?payments(?!\w)"
+# Three shapes, because one regex was not enough and a reviewer proved it
+# (D20-WILDCARD-QUALIFIED). The first version matched only the bare
+# `SELECT * FROM payments`, so `SELECT p.* FROM payments p` -- which
+# `check_no_pan_readers.py` also reports clean on -- would have walked straight
+# through the guard that exists to catch exactly that.
+#
+#   1. bare       SELECT * FROM payments
+#   2. qualified  SELECT payments.* / public.payments.*
+#   3. aliased    FROM payments p ... SELECT p.*   (also via JOIN, with or
+#                 without AS)
+#
+# Favouring false positives deliberately: a false positive is a loud test failure
+# whose fix is to name the columns, which is what this wants anyway. A false
+# negative is the gap.
+_BARE_WILDCARD = r"select\s+[^;]*?\*\s+from\s+(?:public\.)?payments(?!\w)"
+_QUALIFIED_WILDCARD = r"(?:public\s*\.\s*)?payments\s*\.\s*\*"
+_PAYMENTS_ALIAS = (r"(?:from|join)\s+(?:public\.)?payments(?!\w)"
+                   r"(?:\s+as)?\s+([a-z_][a-z0-9_]*)")
+
+#: Words that follow a table name but are not an alias.
+_NOT_AN_ALIAS = {
+    "where", "on", "using", "join", "inner", "left", "right", "full", "cross",
+    "group", "order", "limit", "offset", "having", "returning", "set", "union",
+    "for", "as", "natural",
+}
+
+
+def wildcard_payments_reasons(sql: str) -> list:
+    """Why `sql` reads the payments table with a wildcard, or an empty list.
+
+    Returns reasons rather than a boolean so a failure names the shape it found,
+    which is the difference between a fixable message and a puzzle.
+    """
+    reasons = []
+    if re.search(_BARE_WILDCARD, sql, re.I | re.S):
+        reasons.append("SELECT * FROM payments")
+    if re.search(_QUALIFIED_WILDCARD, sql, re.I):
+        reasons.append("payments.*")
+    for match in re.finditer(_PAYMENTS_ALIAS, sql, re.I):
+        alias = match.group(1)
+        if alias.lower() in _NOT_AN_ALIAS:
+            continue
+        if re.search(r"(?<![a-z0-9_])%s\s*\.\s*\*" % re.escape(alias), sql, re.I):
+            reasons.append("%s.* where %s is payments" % (alias, alias))
+    return reasons
 
 
 @pytest.fixture(scope="module")
-def wildcard_pattern():
-    import re
+def wildcard_reader():
+    """The detector, exercised on every shape before it is trusted.
 
-    pattern = re.compile(WILDCARD_PAYMENTS, re.I)
-    # Exercised before it is trusted, for the same reason `table_pattern` is: a
-    # pattern that cannot match makes the assertion below vacuous.
-    assert pattern.search("SELECT * FROM payments WHERE id = 1")
-    assert pattern.search("select  *  from public.payments p")
-    assert not pattern.search("SELECT * FROM offers")
-    assert not pattern.search("SELECT id, amount FROM payments")
-    return pattern
+    Same discipline as `table_pattern`: a detector that cannot match makes the
+    assertion below vacuous, and here there are four ways to write the thing it
+    is looking for.
+    """
+    # Matches -- each of the shapes the reviewer named.
+    assert wildcard_payments_reasons("SELECT * FROM payments WHERE id = 1")
+    assert wildcard_payments_reasons("select  *  from public.payments p")
+    assert wildcard_payments_reasons("SELECT payments.* FROM payments")
+    assert wildcard_payments_reasons("SELECT public.payments.* FROM public.payments")
+    assert wildcard_payments_reasons("SELECT p.* FROM payments p")
+    assert wildcard_payments_reasons("SELECT p.* FROM payments AS p")
+    assert wildcard_payments_reasons(
+        "SELECT l.id, p.* FROM loans l JOIN payments p ON p.loan_id = l.id")
+
+    # Non-matches -- a guard that fires on these would be worse than none.
+    assert not wildcard_payments_reasons("SELECT * FROM offers")
+    assert not wildcard_payments_reasons("SELECT id, amount FROM payments")
+    assert not wildcard_payments_reasons("SELECT total_of_payments FROM offers")
+    assert not wildcard_payments_reasons("SELECT o.* FROM offers o")
+    # An alias bound to another table, in a statement that also names payments:
+    # `l.*` is loans, and banning it here would be a false positive.
+    assert not wildcard_payments_reasons(
+        "SELECT l.* FROM loans l JOIN payments ON payments.loan_id = l.id")
+    # The word after the table is a keyword, not an alias.
+    assert not wildcard_payments_reasons(
+        "SELECT id FROM payments WHERE x IN (SELECT 1)")
+    return wildcard_payments_reasons
 
 
 def _string_literals_in_application_code():
@@ -302,30 +365,37 @@ def _string_literals_in_application_code():
 
 
 def test_no_application_code_reads_the_payments_table_with_a_wildcard(
-        wildcard_pattern):
+        wildcard_reader):
     """A wildcard read is the one shape the checker can say nothing about.
 
     It can prove the statement names `payments`; it cannot name a single column
-    the query returns. So `SELECT *` would reintroduce exactly the uncertainty
+    the query returns. So a wildcard would reintroduce exactly the uncertainty
     D20 records, in a form no amount of folding resolves -- and it would do it
     while the checker still reported clean.
+
+    Covers the qualified and aliased forms as well as the bare one. The first
+    version of this test caught only `SELECT * FROM payments`, and a reviewer
+    demonstrated that `SELECT p.* FROM payments p` passes both it AND
+    `check_no_pan_readers.py` -- so the guard had a hole in exactly the shape it
+    was written to close.
     """
-    offenders = [
-        (path, line) for path, line, text in _string_literals_in_application_code()
-        if wildcard_pattern.search(text)
-    ]
+    offenders = []
+    for path, line, text in _string_literals_in_application_code():
+        reasons = wildcard_reader(text)
+        if reasons:
+            offenders.append((path, line, ", ".join(reasons)))
 
     assert not offenders, (
         "application code reads the `payments` table with a wildcard:\n"
-        + "\n".join("  %s:%d" % (p.relative_to(REPO).as_posix(), line)
-                    for p, line in offenders)
-        + "\n\n`SELECT *` names no columns, so `check_no_pan_readers.py` cannot\n"
+        + "\n".join("  %s:%d  (%s)" % (p.relative_to(REPO).as_posix(), line, why)
+                    for p, line, why in offenders)
+        + "\n\nA wildcard names no columns, so `check_no_pan_readers.py` cannot\n"
           "tell whether a dropped column comes back in the result set. Name the\n"
           "columns the query actually needs. See docs/DEBT.md (D20)."
     )
 
 
-def test_the_wildcard_walk_actually_reads_application_code(wildcard_pattern):
+def test_the_wildcard_walk_actually_reads_application_code(wildcard_reader):
     """Guard the guard: the assertion above must not pass on an empty walk.
 
     A glob pointed at the wrong directory also reports "no wildcard reads". So
@@ -343,6 +413,10 @@ def test_the_wildcard_walk_actually_reads_application_code(wildcard_pattern):
         "the walk found no SQL naming the payments table at all, so the "
         "wildcard assertion above is indistinguishable from a no-op")
 
-    # And the pattern fires on the shape it exists to catch, proving the clean
-    # result above is the code's doing rather than the regex's.
-    assert wildcard_pattern.search("SELECT * FROM payments")
+    # And the detector fires on every shape it exists to catch, proving the clean
+    # result above is the code's doing rather than the detector's.
+    for statement in ("SELECT * FROM payments",
+                      "SELECT payments.* FROM payments",
+                      "SELECT p.* FROM payments p",
+                      "SELECT l.id, p.* FROM loans l JOIN payments p ON p.loan_id = l.id"):
+        assert wildcard_reader(statement), statement
