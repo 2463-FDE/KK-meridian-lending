@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { clearSession, getUser, type SessionUser } from "../lib/api";
 
 export default function AppBar() {
@@ -108,9 +108,15 @@ export default function AppBar() {
           </span>
         </Link>
 
-        <nav className="appbar-nav">
+        {/* Labelled because a page can carry more than one nav landmark, and a
+            screen-reader user choosing between them needs them named. The links
+            were each wrapped in a bare <span> that carried no styling and made
+            every link a flex item's only child, which is one more box between
+            the flex container and the thing whose wrapping it is trying to
+            control. */}
+        <nav className="appbar-nav" aria-label="Primary navigation">
           {navItems.map((item) => (
-            <span key={item.href}>{navLink(item.href, item.label)}</span>
+            <Fragment key={item.href}>{navLink(item.href, item.label)}</Fragment>
           ))}
         </nav>
 
@@ -119,7 +125,13 @@ export default function AppBar() {
           {!mounted ? null : user ? (
             <>
               <span className="auth-user">
-                {user.name || user.username}
+                {/* One string, kept whole. `users.display_name` is a single
+                    column -- "Dana Whitfield (VP Lending Ops)" is not a name and
+                    a title, it is a name, and there is no title field to read.
+                    So it is not split on its bracket: that would be the UI
+                    inventing structure from punctuation. It is allowed to
+                    ellipsis at very narrow widths rather than wrap mid-name. */}
+                <span className="auth-name">{user.name || user.username}</span>
                 <span className="auth-role">{user.role}</span>
               </span>
               <button className="btn-ghost btn-sm" onClick={logout}>
