@@ -280,8 +280,8 @@ given.
 | Item | Status | Owner |
 |---|---|---|
 | **D23** late-fee reassessment / compounding | **OPEN CLIENT DECISION** — may a fee be assessed again, at what cadence, and do previously assessed fees enter the next 5% base | Lending Operations |
-| **Payment-allocation placement** | **ENGINEERING DONE / PRODUCT DECISION OPEN** — both a ledger-backed Payment History and an immediate captured-payment receipt exist and work. The client has **not** chosen the final placement: history only, receipt only, both, or something else. Neither surface may be removed without direction | Client / product |
-| **D24** fairness training package | **POLICY ANSWERED / ARTIFACT PENDING** — the policy is settled (8a). What is missing is the physical package at `fixtures/offline_fairness_training/`; searched for and not present anywhere in the engagement workspace | Client (delivery) |
+| **Payment-allocation placement** | **ENGINEERING DONE / PRODUCT DECISION OPEN** — both a ledger-backed Payment History and an immediate captured-payment receipt exist and work, each with tests cited in [§9](#9-evidence-references). The client has **not** chosen the final placement: history only, receipt only, both, or something else. Neither surface may be removed without direction | Client / product |
+| **D24** fairness training package | **POLICY ANSWERED / ARTIFACT PENDING** — the policy is settled (8a). What is missing is the physical package: **not present in this repository** (`fixtures/offline_fairness_training/` holds only the containment README). A wider search of external locations on 2026-08-26 also found nothing, recorded at D24 as a dated observation rather than a standing claim — external state changes with no diff to catch it, so re-run the search rather than trust this row | Client (delivery) |
 | **RF-25** manual DTI entry | **OPEN CLIENT DECISION** — whether staff may apply DTI manually in a referred review, and what evidence authorises it | Lending Ops / Compliance |
 | **D7** external alert delivery, after the freeze | **OPS-BLOCKED + CLIENT-PROHIBITED** — the current phase is decided and built (8a); a *firing* alert with nobody watching still has no human destination | Operations, then client |
 | **Week 9** KYC/AML/UBO/sanctions | **COMPLIANCE- / VENDOR- / CLIENT- / OPS-BLOCKED** | Multi-party |
@@ -304,6 +304,9 @@ Each path below exists at this SHA.
 | Auto-offer graph transmits nothing | `services/origination-service/tests/test_the_auto_offer_graph_transmits_nothing.py` |
 | Runtime tool evidence is required, not simulated | `services/loan-assistant/tests/test_agent_tool_gate.py` |
 | Staff card names the balance it shows | `frontend/e2e/staff-balance-label.spec.ts` |
+| A captured payment shows its ledger-backed split; pending and failed claim nothing | `frontend/e2e/payment-state-and-receipt.spec.ts` |
+| Allocation follows fees, then interest, then principal | `frontend/e2e/payment-allocation.spec.ts`, `frontend/e2e/payment-allocation-view.spec.ts` |
+| Payment History reads back each ledger movement once | `frontend/e2e/account-activity.spec.ts`, `services/servicing-service/tests/test_account_activity.py` |
 | Header holds one row at presentation widths | `frontend/e2e/appbar-layout.spec.ts` |
 | Late fee follows the published schedule | `services/servicing-service/tests/test_late_fee_follows_the_published_schedule.py` |
 | Reconciliation is a control, matched at transaction level | `services/servicing-service/tests/test_reconciliation_is_a_control.py`, `services/servicing-service/tests/test_reconciliation_matches_transactions.py` |
