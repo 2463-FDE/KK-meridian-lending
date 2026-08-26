@@ -21,7 +21,9 @@ correctness IS its WHERE clause and its atomicity with the audit insert. A
 mocked cursor would assert nothing about either. Only the schema is a throwaway
 -- app.db is the real module, pointed at a test schema.
 """
+import importlib.util
 import os
+import pathlib
 
 import psycopg2
 import psycopg2.extras
@@ -42,26 +44,43 @@ AUTH = {"X-Internal-Token": config.INTERNAL_SERVICE_TOKEN}
 CANONICAL = ("apr", "finance_charge", "monthly_payment", "amount_financed", "total_of_payments")
 
 
-def _schema_sql():
-    """Mirrors db/init/001_schema.sql for the tables this endpoint touches.
+#: `db/tests/real_schema.py`, loaded by path. It depends on nothing but the
+#: standard library, so it imports cleanly from a service test without dragging
+#: in `db/tests`' own fixtures.
+_REAL_SCHEMA_PATH = (pathlib.Path(__file__).resolve().parents[3]
+                     / "db" / "tests" / "real_schema.py")
+assert _REAL_SCHEMA_PATH.is_file(), (
+    "expected the canonical schema helper at %s -- if it moved, this test must "
+    "fail rather than fall back to a hand-written table" % _REAL_SCHEMA_PATH)
 
-    offers is created WITHOUT offers_canonical_terms_present on purpose: this
-    file exists to test the repair of rows that predate that constraint, and on
+
+def _load_real_schema():
+    spec = importlib.util.spec_from_file_location(
+        "meridian_real_schema", _REAL_SCHEMA_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+real_schema = _load_real_schema()
+
+
+def _schema_sql():
+    """The tables this endpoint touches.
+
+    **`applications` and `decisions` come from `db/init/001_schema.sql` verbatim**
+    (RF-26). They used to be hand-written here, and `applications` had five of its
+    twenty-four columns -- fine until a migration added one the endpoint writes,
+    at which point this file fails with `UndefinedColumn` and the error points at
+    the harness rather than at the change.
+
+    offers is created WITHOUT offers_canonical_terms_present on purpose, and that
+    deviation is the reason this file cannot simply build everything from the real
+    files: this test exists to repair rows that predate that constraint, and on
     a real upgraded database 0026 adds it NOT VALID precisely so those rows
     survive to be repaired.
     """
-    return f"""
-        SET search_path TO {SCHEMA};
-        CREATE TABLE applications (
-            id SERIAL PRIMARY KEY,
-            amount NUMERIC(14,2) NOT NULL,
-            term_months INTEGER NOT NULL,
-            status TEXT DEFAULT 'submitted'
-        );
-        CREATE TABLE decisions (
-            app_id INTEGER PRIMARY KEY REFERENCES applications(id),
-            outcome TEXT NOT NULL
-        );
+    return real_schema.sql_for(SCHEMA, ["applications", "decisions"]) + f"""
         CREATE TABLE offers (
             id SERIAL PRIMARY KEY,
             app_id INTEGER REFERENCES applications(id) UNIQUE,
