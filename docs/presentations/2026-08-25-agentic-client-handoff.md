@@ -1,14 +1,19 @@
 # Agentic underwriting — client handoff
 
-**Current main:** `aa9fc34212bc29c361513d088a2752cb6812ee35`
+**Recorded at main:** `aa9fc34212bc29c361513d088a2752cb6812ee35` (which was `main`
+on 2026-08-25 — `main` has advanced since, and that is expected)
 **Recorded:** 2026-08-25
 **Author:** Kalab Kebede
 
-This is a **current-main** record. Every number and status below was produced from
-that SHA, on images rebuilt from it, in the run described in
-[§3](#3-the-run-this-document-records). It is not a summary of earlier
-demonstrations, and it does not reuse figures from the two existing
-`docs/presentations/*-three-slides.md` files — those are historical and remain so.
+Every number and status below was produced from that SHA, on images rebuilt from
+it, in the run described in [§3](#3-the-run-this-document-records). It is not a
+summary of earlier demonstrations, and it does not reuse figures from the two
+existing `docs/presentations/*-three-slides.md` files — those are historical and
+remain so.
+
+To reproduce the figures, check out the pinned SHA ([§2, Mode A](#mode-a--pinned-replay)).
+To verify a later `main`, use Mode B and re-record the figures rather than quoting
+these.
 
 ---
 
@@ -28,13 +33,38 @@ component actually did in the recorded run, not about what it is capable of.
 
 ## 2. Rebuild procedure
 
-Run in order. Do not skip the verification step; its whole purpose is to catch the
-failure this section exists for.
+**This document has two modes, and mixing them is how the procedure below stopped
+working the moment it was written.** `aa9fc34` was `main` on 2026-08-25. `main`
+advances; this file does not. So:
+
+* **Mode A — replay the recorded run.** Check out the pinned SHA. The figures in
+  [§3](#3-the-run-this-document-records) are reproducible only here.
+* **Mode B — verify a later `main`.** Check out `main`. The structural and
+  behavioural checks below still apply, because they test features rather than a
+  commit, but the run figures will differ and must be re-recorded rather than
+  quoted from this file.
+
+Do not skip the verification step; its whole purpose is to catch the failure this
+section exists for.
+
+### Mode A — pinned replay
+
+```bash
+git checkout aa9fc34212bc29c361513d088a2752cb6812ee35
+git rev-parse HEAD          # aa9fc34212bc29c361513d088a2752cb6812ee35
+```
+
+### Mode B — current main
 
 ```bash
 git checkout main
 git pull --ff-only origin main
-git rev-parse HEAD          # must print aa9fc34212bc29c361513d088a2752cb6812ee35
+git rev-parse HEAD          # will NOT be aa9fc34 -- that is expected, not a failure
+```
+
+### Then, in either mode
+
+```bash
 
 # Visible build. Do not suppress this output -- a build that fails quietly is how
 # a stale image survives.
@@ -44,7 +74,9 @@ docker compose build gateway loan-assistant decision-service \
 docker compose up -d
 ```
 
-**Verification — the images actually contain this SHA's work:**
+**Verification — the images actually contain this work.** These greps test for
+files that exist because of #93, #94 and #95, so they hold on any `main` at or
+after those merges, not only on the pinned SHA:
 
 ```bash
 docker exec meridian-lending-gateway-1             test -f /app/app/agent_trace.py       # PR #93
@@ -57,9 +89,11 @@ docker exec meridian-lending-loan-assistant-1 \
 All four verified present on the recorded run.
 
 **Behavioural stale-frontend checks** (these fail if an old frontend image is
-serving):
+serving). Bring the stack up **with the E2E overlay** first — see the box below:
 
 ```bash
+docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+
 cd frontend
 DATABASE_URL=... npx playwright test e2e/staff-balance-label.spec.ts \
                                     e2e/appbar-layout.spec.ts --workers=1
@@ -68,10 +102,24 @@ DATABASE_URL=... npx playwright test e2e/staff-balance-label.spec.ts \
 The staff loan page's top card must read **"Current principal balance"**, and the
 admin header must hold one row at 1366×768.
 
-> **Run the browser suite with `--workers=1`.** The suite shares one database with
-> no per-spec isolation (RF-24), and the gateway rate-limits at 120 requests per 60
-> seconds per IP. Parallel or back-to-back runs produce `ECONNRESET` and HTTP 429
-> failures that look exactly like product defects. See [§7](#7-known-limitations).
+> **Two separate harness requirements, and both are needed.**
+>
+> **`docker-compose.e2e.yml`** raises the gateway's rate limit for the browser
+> suite. The default stack ships the real limit — 120 requests per 60 seconds per
+> client IP — and a dozen browser journeys from one IP trip it. When that happens
+> `signInAsStaff` never leaves `/login`, and the failure surfaces as a URL
+> assertion on whichever spec drew the short straw — indistinguishable from the
+> stale-image failure this section exists to catch. The overlay is a separate file
+> so the raise cannot leak into the demo stack.
+>
+> **`--workers=1`** is still required on top of it, for a different reason: the
+> suite shares one database with no per-spec isolation (RF-24), and parallel
+> workers produce `ECONNRESET`. The overlay does not fix that and is not a
+> substitute for it.
+>
+> Recorded plainly because it cost this engagement real time: every rate-limit
+> failure diagnosed during this work was avoidable, and the overlay that avoids it
+> was already in the repository with the reason written in its own header comment.
 
 ---
 
@@ -93,7 +141,7 @@ Bedrock. Application **7289** (seeded synthetic data — not a real person).
 | Tool gate | `agent accepted stage=tool_gate tool_calls=2 policy_evidence=hit` |
 | Framework tracing | suppressed (`agent tracing suppressed stage=privacy_interim`) |
 | Result | HTTP 200, 7 response fields, `flags: []` |
-| Macro signal | live `GET https://api.bls.gov/.../LNS14000000` → HTTP 200 |
+| Macro signal | live `GET https://api.bls.gov/.../LNS14000000` → `HTTP 200`; value 4.1%, period July 2026. The provider caches and fails open — see the macro row in [§4](#4-real--fixture--fallback) |
 
 Credentials are not recorded here, and none appear in any log line quoted above.
 
@@ -125,7 +173,7 @@ metadata: {'stage': 'gateway_entry', 'service': 'gateway', 'role': 'underwriter'
 | **LangChain agent** | **REAL** | LangChain v1 `create_agent` runtime. The model decides to call the tool, the runtime executes it, and a real `ToolMessage` is required — there is no app-side `tool_called = True`. |
 | **Bedrock model** | **REAL** | `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, `us-east-1`, 2 Converse turns in the recorded run. |
 | **LangSmith** | **REAL** | Project `2463-fde`. The gateway mints a `gateway_entry` root after authorisation; the agent path emits a categorical trace beneath it. Framework tracing is suppressed everywhere. |
-| **Macro source** | **REAL** | Live BLS API call, series `LNS14000000`, HTTP 200. |
+| **Macro source** | **REAL, cached, fails open** | A live HTTPS request to `api.bls.gov` was observed (`GET /publicAPI/v1/timeseries/data/LNS14000000` -> `HTTP/1.1 200 OK`), and the value read back was **4.1%, period July 2026**, series `LNS14000000`. Two qualifications a bare "REAL" would hide: the provider **caches**, so an individual summary may be served from cache rather than a fresh fetch, and it **fails open** -- an unreachable provider yields no signal rather than an error, so an absent signal is not evidence of a failed call. The test suite deliberately blocks real BLS traffic (`services/loan-assistant/tests/conftest.py`), so no test result speaks to this row. |
 | **Payment processor** | **FIXTURE** | Stub processor; `PROCESSOR_API_KEY` is unset and tokens are mock (`tok_mock_…`). A stub processor is not a processor. |
 | **Credit bureau** | **FIXTURE** | `EXPERIAN_KEY` is unset, so a deterministic development stub score is used. Outside a development or test environment the service **refuses to decide** rather than scoring from a fake — see `services/decision-service/app/decision.py`. |
 | **AI scorer** | **FIXTURE** | `AI_MODEL_API_KEY` unset → deterministic stub score. |
@@ -192,8 +240,8 @@ Bedrock → deterministic validation → outcome.
 
 | Limitation | Effect | Owner |
 |---|---|---|
-| **RF-24** — browser suite shares one database, no per-spec isolation | Parallel runs produce `ECONNRESET`; failures look like product defects. Run `--workers=1`. | Engineering |
-| **Gateway rate limit in tests** — 120 req/60s per IP | Back-to-back suite runs return HTTP 429 on `/auth/me`; the staff section then never renders and the failure presents as "element not found", moving between tests. Diagnosed from the gateway log, not by retrying. | Engineering |
+| **RF-24** — browser suite shares one database, no per-spec isolation | Parallel runs produce `ECONNRESET`. Run `--workers=1`; the E2E compose overlay does **not** address this. | Engineering |
+| **Gateway rate limit in tests** — 120 req/60s per IP | Back-to-back or parallel suite runs return HTTP 429. `signInAsStaff` then never leaves `/login` and the failure presents as a URL assertion, or as "element not found" when the staff section never renders — moving between tests on each run. **Mitigation already exists:** bring the stack up with `docker-compose.e2e.yml` ([§2](#2-rebuild-procedure)). Every occurrence during this work was diagnosed from the gateway log rather than retried past, and every one of them was avoidable by using that overlay. | Engineering |
 | **`appbar-layout.spec.ts` focus test is order-dependent** | It passes alone and failed once inside a batch. Chromium only applies `:focus-visible` when it judges the last interaction to be keyboard-driven, and the test focuses programmatically. It is my test and it is not yet reliable; the fix is to drive focus with the keyboard. | Kalab (open) |
 | **Synthetic data throughout** | No conclusion about production behaviour follows from a seeded portfolio. | — |
 | **Stub processor and stub bureau** | Payment capture and credit scoring are not exercised against real providers. | — |
@@ -249,4 +297,7 @@ Each path below exists at this SHA.
 - Not "the client chose the payment-allocation placement" — no such decision exists.
 - Not "late-fee compounding is settled" — it is open.
 - Not "fairness has been evaluated" — no approved dataset exists (D24).
-- Not "the E2E suite is green in parallel" — it requires `--workers=1`.
+- Not "the E2E suite is green in parallel" — it requires `--workers=1`, and the
+  browser step additionally requires the `docker-compose.e2e.yml` overlay.
+- Not "the macro signal is fetched fresh for every summary" — the provider caches,
+  and it fails open.
