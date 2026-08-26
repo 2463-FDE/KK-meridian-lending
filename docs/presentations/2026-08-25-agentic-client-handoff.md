@@ -117,6 +117,12 @@ admin header must hold one row at 1366×768.
 > workers produce `ECONNRESET`. The overlay does not fix that and is not a
 > substitute for it.
 >
+> **Use `127.0.0.1` in `DATABASE_URL`, not `localhost`** — on the workstation this
+> was recorded on, connections over the IPv6 loopback dropped intermittently and
+> surfaced as an apparent database fault. Measurement, environment and the test
+> that tells this apart from RF-24 are in [§7](#7-known-limitations); the rule here
+> is just the host to use.
+>
 > Recorded plainly because it cost this engagement real time: every rate-limit
 > failure diagnosed during this work was avoidable, and the overlay that avoids it
 > was already in the repository with the reason written in its own header comment.
@@ -240,7 +246,10 @@ Bedrock → deterministic validation → outcome.
 
 | Limitation | Effect | Owner |
 |---|---|---|
+| **IPv6 loopback dropped connections — observed on one workstation, not asserted as a general rule** | `localhost` resolves to `::1` first there, and connects over it dropped intermittently: **1 failure in 12** sequential attempts versus **0 in 12** over `127.0.0.1`. Twelve samples cannot support a rate, so treat this as a direction, not a percentage. It surfaces as `psycopg2.OperationalError: ... server closed the connection unexpectedly`, which reads as a database fault. Same commit, changing only the host: `localhost` → 1008 passed / **4 failed** (reproduced twice); `127.0.0.1` → **1012 passed / 0 failed**. Ruled out: connection exhaustion (12 of 100 in use) and a Postgres restart (`restarts=0`). **Measured on:** Windows 11 10.0.26200, Docker Desktop engine 28.5.1, `postgres:16-alpine` published on `0.0.0.0:5432` **and** `[::]:5432`, psycopg2 2.9.12, Python 3.14.6; connect probe was `psycopg2.connect(host=…, port=5432, connect_timeout=3)` ×12 per host. A different Windows or Docker build may not reproduce it — check the address in the error text before applying the workaround. | Environment |
+| **Telling the IPv6 fault apart from RF-24** — they hit the same file | Both make `test_offer_creation_concurrency.py` fail, for different reasons, which is the confusion most likely to repeat. **IPv6 fault:** happens when a Python/DB connection is *opened*, the error text names the address `(::1)`, and it disappears when `DATABASE_URL`'s host is `127.0.0.1`. **RF-24:** happens under *parallel browser workers* sharing one database, surfaces as `ECONNRESET`, and disappears with `--workers=1`. RF-24 is real and unfixed — it was simply not the cause of these particular failures, which I initially attributed to it and got wrong. | Engineering / Environment |
 | **RF-24** — browser suite shares one database, no per-spec isolation | Parallel runs produce `ECONNRESET`. Run `--workers=1`; the E2E compose overlay does **not** address this. | Engineering |
+| **Browser specs time out when another heavy suite runs concurrently** | Running the browser suite while `db/tests` was running produced 30s `page.goto`/`locator.fill` timeouts in **8 of 25** targeted specs; **all 25 passed** on an idle machine. Run suites sequentially. The rule is narrow on purpose: a timeout that reproduces **only** while another heavy suite is running is not a product finding — but it is only cleared once it has been **re-run idle and passed**. A timeout that also reproduces idle is a finding, and may be a performance regression. | Environment |
 | **Gateway rate limit in tests** — 120 req/60s per IP | Back-to-back or parallel suite runs return HTTP 429. `signInAsStaff` then never leaves `/login` and the failure presents as a URL assertion, or as "element not found" when the staff section never renders — moving between tests on each run. **Mitigation already exists:** bring the stack up with `docker-compose.e2e.yml` ([§2](#2-rebuild-procedure)). Every occurrence during this work was diagnosed from the gateway log rather than retried past, and every one of them was avoidable by using that overlay. | Engineering |
 | **`appbar-layout.spec.ts` focus test is order-dependent** | It passes alone and failed once inside a batch. Chromium only applies `:focus-visible` when it judges the last interaction to be keyboard-driven, and the test focuses programmatically. It is my test and it is not yet reliable; the fix is to drive focus with the keyboard. | Kalab (open) |
 | **Synthetic data throughout** | No conclusion about production behaviour follows from a seeded portfolio. | — |
