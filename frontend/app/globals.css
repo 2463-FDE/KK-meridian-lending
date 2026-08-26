@@ -111,15 +111,28 @@ h3 {
   backdrop-filter: saturate(140%) blur(8px);
   border-bottom: 1px solid var(--line);
 }
+/* The header is NOT the page body, and it was being measured as if it were.
+   `max-width: 1080px` is the body's content width; the header carries a wordmark,
+   up to seven navigation destinations and a user block, which does not fit in it.
+   Measured at 1440px: the inner bar rendered 1080px wide with 180px of unused
+   space on each side, while the wordmark wrapped to two lines inside it.
+   1400px is chosen to fit the widest role's nav (admin, seven items) on one row
+   at 1280px and up, not as a round number. */
 .appbar-inner {
-  max-width: 1080px;
+  max-width: 1400px;
   margin: 0 auto;
-  padding: 0 20px;
-  height: 60px;
+  padding: 0 24px;
+  min-height: 60px;
   display: flex;
   align-items: center;
-  gap: 28px;
+  /* Was 28px. The nav needs that space more than the three groups do. */
+  gap: 20px;
+  /* So the nav below is allowed to be the thing that shrinks. */
+  min-width: 0;
 }
+/* "Meridian Lending" is one name and reads as one. It was wrapping to
+   "Meridian / Lending" at every width including 1440px, because nothing stopped
+   it and the flex parent was happy to shrink it. */
 .wordmark {
   display: flex;
   align-items: center;
@@ -128,6 +141,8 @@ h3 {
   font-weight: 700;
   font-size: 17px;
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .wordmark:hover {
   text-decoration: none;
@@ -143,15 +158,26 @@ h3 {
 }
 .appbar-nav {
   display: flex;
-  gap: 6px;
-  margin-left: 6px;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  /* The nav is the flexible element: it may shrink, and the wordmark and the
+     auth block may not. Without `min-width: 0` a flex item refuses to shrink
+     below its content size, which is what pushed the wrapping into the
+     neighbours instead. */
+  min-width: 0;
+  flex-wrap: nowrap;
 }
+/* A destination name is a label, not prose. "Policy Chat" was rendering as
+   "Policy / Chat" -- two lines inside a 60px bar. */
 .nav-link {
   color: var(--muted);
   font-weight: 600;
   font-size: 14px;
-  padding: 7px 11px;
+  padding: 7px 10px;
   border-radius: 7px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .nav-link:hover {
   color: var(--ink);
@@ -167,7 +193,14 @@ h3 {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-shrink: 0;
 }
+/* Two deliberate lines: the identity as the session gives it, then the role.
+   `display_name` is a single column in `users` -- "Dana Whitfield (VP Lending
+   Ops)" is ONE string, and there is no separate title field. So it is kept whole
+   and NOT parsed on its punctuation: splitting it would be the UI inventing
+   business metadata out of a bracket. What is fixed is that it was wrapping
+   mid-string at arbitrary points, which is what made the role look detached. */
 .auth-user {
   display: flex;
   flex-direction: column;
@@ -175,6 +208,13 @@ h3 {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.2;
+  min-width: 0;
+}
+.auth-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 .auth-role {
   font-size: 11px;
@@ -182,6 +222,70 @@ h3 {
   color: var(--muted-2);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* "Log out" is one action. It was rendering as "Log / out". Secondary by weight
+   -- it stays a ghost button rather than becoming a primary action. */
+.appbar-auth .btn-ghost {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Keyboard focus has to be visible, and there was no focus-visible rule for
+   links or buttons anywhere in this file. Scoped to the header rather than
+   applied globally, so this change cannot alter focus behaviour on pages it was
+   not measured against. */
+.appbar a:focus-visible,
+.appbar button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 7px;
+}
+
+/* ---- responsive header -------------------------------------------------- */
+
+/* Below the width where seven destinations fit on one row, tighten before
+   rearranging: smaller gaps and padding buy roughly 60px across the admin nav,
+   which is enough to keep one row down to ~1100px. */
+@media (max-width: 1200px) {
+  .appbar-inner {
+    gap: 14px;
+    padding: 0 16px;
+  }
+  .nav-link {
+    padding: 7px 8px;
+    font-size: 13px;
+  }
+  .appbar-nav {
+    gap: 2px;
+  }
+}
+
+/* Below that, a controlled second row rather than word-by-word wrapping: the
+   wordmark and the user block keep the first row, and the navigation becomes its
+   own full-width row. Deliberately not a hamburger -- every destination stays
+   visible and reachable, which is what the role-shaped nav is for. */
+@media (max-width: 1040px) {
+  .appbar-inner {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 8px 16px;
+    row-gap: 4px;
+  }
+  .appbar-nav {
+    order: 3;
+    width: 100%;
+    flex-wrap: wrap;
+    row-gap: 2px;
+    margin-left: 0;
+    /* The nav may wrap onto more rows here; individual LABELS still may not. */
+    justify-content: flex-start;
+  }
+  .appbar-auth {
+    /* Stays on the first row, beside the wordmark. */
+    order: 2;
+  }
 }
 
 /* ---- footer ------------------------------------------------------------- */
