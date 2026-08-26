@@ -98,14 +98,54 @@ test.describe("fixture namespace", () => {
     }
   });
 
-  test("repeated calls in one worker still differ in the SSN characters", async () => {
-    // The property the original counter was added for, kept asserted: the fix
-    // must not buy cross-worker uniqueness by losing within-worker uniqueness.
-    const seen = new Set(
-      Array.from({ length: 40 }, () => uniqueDigits(9).slice(0, 5)),
-    );
+  test("a worker mints 1000 distinct SSNs with the clock frozen", async () => {
+    // Review finding B1, pinned. The first version of the worker fix took the
+    // room for the worker digit out of the counter, leaving two digits -- so the
+    // 101st call inside one timestamp bucket reused an SSN. Forty calls against a
+    // live clock did not catch it, because the timestamp kept changing and hid
+    // the wrap.
+    //
+    // The clock is frozen here so the counter is the ONLY thing that can vary.
+    // That is the condition the defect needed, and it is the condition a real
+    // burst of fixture creation inside one millisecond approximates.
+    const realNow = Date.now;
+    try {
+      Date.now = () => 1_800_000_000_000;
 
-    expect(seen.size).toBe(40);
+      const seen = new Set(
+        Array.from({ length: 1000 }, () => fictionalApplicant("burst", true, 90_000).ssn),
+      );
+
+      expect(seen.size).toBe(1000);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test("the wrap point is where the counter says, not somewhere earlier", async () => {
+    // States the boundary rather than leaving it to be discovered. The counter
+    // is three digits, so the 1001st call in a frozen bucket is the first that
+    // can repeat -- and asserting that is what makes the 1000 above a measured
+    // margin instead of a hopeful one.
+    const realNow = Date.now;
+    try {
+      Date.now = () => 1_900_000_000_000;
+
+      const first = fictionalApplicant("wrap", true, 90_000).ssn;
+      const following = new Set(
+        Array.from({ length: 999 }, () => fictionalApplicant("wrap", true, 90_000).ssn),
+      );
+
+      // Nothing in the next 999 repeats the first.
+      expect(following.has(first)).toBe(false);
+
+      // The one after that does, because the counter has come round. If this
+      // ever stops being true the margin has changed and this test should be
+      // updated deliberately.
+      expect(fictionalApplicant("wrap", true, 90_000).ssn).toBe(first);
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   test("the SSN keeps its decision-band last digit", async () => {

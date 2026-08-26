@@ -43,9 +43,27 @@ export function uniqueDigits(len: number): string {
   // stay one digit: beyond ten workers two of them share a leading digit and the
   // guarantee degrades back to the counter plus timestamp, which is the current
   // behaviour rather than a regression.
+  // Layout: worker(1) + counter(3) + timestamp(5) = 9, the length
+  // `fictionalApplicant` asks for. The counter keeps all THREE of its digits.
+  //
+  // Review finding B1: the first version of this fix took the room for the
+  // worker digit out of the counter, leaving two digits. That reintroduced the
+  // original defect at a tenth of the old scale -- the 101st call in one worker
+  // inside the same timestamp bucket reuses an SSN, demonstrated at exactly
+  // `dupAt: 100`. Buying cross-worker uniqueness with a 10x cut to within-worker
+  // uniqueness is not a fix, and "ample" was an assumption I had not measured.
+  //
+  // The digit comes out of the TIMESTAMP instead, which costs nothing that
+  // matters: the counter is what guarantees uniqueness within a worker, and the
+  // timestamp only has to break ties between processes that happen to be at the
+  // same counter. Five digits still distinguish those to 100 seconds.
+  //
+  // Every one of the SSN's source characters is now meaningful: it is cut from
+  // `d.slice(0, 5)`, which is the worker digit plus the whole counter plus one
+  // timestamp digit.
   const worker = (Number(process.env.TEST_WORKER_INDEX ?? 0) % 10).toString();
-  const counter = (_seq++ % 100).toString().padStart(2, "0");
-  const stamp = Date.now().toString().slice(-6);
+  const counter = (_seq++ % 1000).toString().padStart(3, "0");
+  const stamp = Date.now().toString().slice(-5);
   return (worker + counter + stamp).slice(-len).padStart(len, "0");
 }
 
