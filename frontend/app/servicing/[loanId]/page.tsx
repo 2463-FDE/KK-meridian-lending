@@ -521,8 +521,27 @@ function LoanDetailContent() {
       {/* Balance / terms cards */}
       <div className="grid grid-3" style={{ margin: "20px 0" }}>
         <div className="kpi">
-          <div className="kpi-label">Current balance</div>
-          <div className="kpi-value">{usd(loan?.balance)}</div>
+          {/* "Current principal balance", because that is what this number is.
+              `balances.balance` is projected ONLY from `component = 'principal'`
+              ledger entries (db/migrations/0035); fees land in `past_due`, the
+              card beside this one, and interest projects nowhere. So "Current
+              balance" read as everything owed, which it is not -- an operator
+              reading it that way understates what a borrower owes by the whole
+              fee balance sitting in the next card.
+
+              The same page already said "Current principal balance" twice
+              lower down, over the same figure, so this card was contradicting
+              its own page. The borrower-facing view was corrected in #87; this
+              is the staff view, which was left saying the old thing.
+
+              Label only. The value, the projection, the ledger and every API
+              are untouched. */}
+          <div className="kpi-label" data-testid="kpi-principal-label">
+            Current principal balance
+          </div>
+          <div className="kpi-value" data-testid="kpi-principal-value">
+            {usd(loan?.balance)}
+          </div>
         </div>
         <div className="kpi">
           <div className="kpi-label">Past due</div>
