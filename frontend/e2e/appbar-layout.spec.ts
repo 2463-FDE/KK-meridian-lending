@@ -273,23 +273,47 @@ test("keyboard focus on a header control is visibly marked", async ({ page }) =>
   await signInAsStaff(page, "admin");
   await page.goto("/admin");
 
-  // What this does and does not prove, stated plainly. `globals.css` had no
-  // `:focus-visible` rule for links or buttons, and this test PASSES without one
-  // -- Chromium paints its own focus ring, so the header was never actually
-  // missing a focus indicator. Confirmed by running this file against the
-  // pre-change stylesheet: the six layout tests failed and this one passed.
+  // Focus is reached by PRESSING TAB, not by calling `.focus()`.
   //
-  // The header rule added alongside this test therefore makes the ring explicit
-  // and consistent with the palette rather than fixing an invisible state. The
-  // test earns its place as a guard against the thing that WOULD break it: an
-  // `outline: none` added later for tidiness, which is a common and quiet way to
-  // remove keyboard affordance.
-  const outline = await policyChat(page).first().evaluate((el) => {
-    (el as HTMLElement).focus();
+  // This test was written with `el.focus()` and was unreliable: it passed on its
+  // own and failed inside a batch run. `:focus-visible` is not a plain focus
+  // state -- Chromium applies it only when it judges the interaction to be
+  // keyboard-driven, and a programmatic focus after a preceding mouse click is
+  // judged the other way. So the test was measuring the browser's modality
+  // heuristic and reporting it as a styling result.
+  //
+  // Tabbing is also the honest form of the assertion. The requirement is that a
+  // KEYBOARD user can see where they are; a rule that only paints under
+  // `.focus()` would not satisfy it.
+  await page.keyboard.press("Tab");
+
+  const target = policyChat(page).first();
+  let reached = false;
+  // The header is the first thing in the tab order (wordmark, then each nav
+  // link), so the link is within a bounded number of presses. Bounded rather
+  // than `while (true)`: if the tab order ever changes, this should fail with a
+  // clear message instead of spinning.
+  for (let i = 0; i < 25; i += 1) {
+    if (await target.evaluate((el) => el === document.activeElement)) {
+      reached = true;
+      break;
+    }
+    await page.keyboard.press("Tab");
+  }
+  expect(reached, "tabbing never reached the Policy Chat link").toBe(true);
+
+  // Now the assertion that matters, and it is about `:focus-visible` explicitly
+  // rather than about any colour value.
+  const focus = await target.evaluate((el) => {
     const cs = getComputedStyle(el);
-    return { width: cs.outlineWidth, style: cs.outlineStyle };
+    return {
+      matchesFocusVisible: el.matches(":focus-visible"),
+      outlineStyle: cs.outlineStyle,
+      outlineWidth: parseFloat(cs.outlineWidth) || 0,
+    };
   });
 
-  expect(outline.style).not.toBe("none");
-  expect(parseFloat(outline.width)).toBeGreaterThan(0);
+  expect(focus.matchesFocusVisible).toBe(true);
+  expect(focus.outlineStyle).not.toBe("none");
+  expect(focus.outlineWidth).toBeGreaterThan(0);
 });
