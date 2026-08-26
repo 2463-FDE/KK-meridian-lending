@@ -44,12 +44,6 @@ from . import agent, policy_tool, trace
 from .redactor import redact_dict, redact_str
 from .schemas import ExternalSignal, LoanSummary
 
-try:
-    from langsmith.wrappers import wrap_anthropic
-except ImportError:  # pragma: no cover -- langsmith is a real dependency now,
-    # but tracing must never be a hard requirement to serve a real request.
-    wrap_anthropic = None
-
 log = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
@@ -193,18 +187,30 @@ def make_client() -> "anthropic.Anthropic | anthropic.AnthropicBedrock":
             raise EnvironmentError("ANTHROPIC_API_KEY not set")
         client = anthropic.Anthropic(api_key=api_key)
 
-    # wrap_anthropic() patches .messages.create in place and returns the same
-    # object -- confirmed against the installed SDK -- and its patched call is
-    # a no-op passthrough unless LANGSMITH_TRACING/LANGSMITH_API_KEY are set in
-    # the environment, so this is safe to always attempt. Tracing is
-    # observability, not a compliance guardrail (unlike EXPERIAN_KEY/
-    # AI_MODEL_API_KEY in decision-service) -- a missing package or bad
-    # LangSmith config must never block a real call, so this fails open.
-    if wrap_anthropic is not None:
-        try:
-            client = wrap_anthropic(client)
-        except Exception as exc:
-            log.warning("could not wrap client for LangSmith tracing: %s", exc)
+    # NOT wrapped for LangSmith tracing, and the removal is the point.
+    #
+    # This used to end with `client = wrap_anthropic(client)`. That patches
+    # `.messages.create` in place, and what it records is the call: the prompt
+    # going out and the completion coming back. For this client that means the
+    # user's question and the retrieved policy excerpt, both of which are on the
+    # client's prohibited-retention list, exported to a third party.
+    #
+    # Measured rather than assumed, and the measurement had a surprise in it: a
+    # wrapped client posted ~5KB carrying the prompt sentinel even when the API
+    # call FAILED on authentication. The export is not conditional on a
+    # successful model call -- attempting one is enough -- so "it only traces
+    # when it works" was never a defence.
+    #
+    # The old comment argued this was safe because the patched call is a no-op
+    # unless LANGSMITH_TRACING and LANGSMITH_API_KEY are set. Both are set in
+    # every deployed environment here, from the shared `.env`, pointed at a real
+    # project. The condition it relied on was never false in practice.
+    #
+    # `make_client` has exactly one production caller: `policy_chat.py`. The
+    # underwriting summary path does not use it -- that runs through
+    # `ChatBedrockConverse` under `agent.suppressed_tracing()`. So removing this
+    # affects Policy Chat and nothing else, and the client never asked for raw
+    # Policy Chat traces.
     return client
 
 

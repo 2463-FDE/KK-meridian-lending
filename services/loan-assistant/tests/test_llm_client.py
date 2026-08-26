@@ -174,36 +174,63 @@ def test_make_client_uses_bedrock_when_configured(monkeypatch):
 # safe to always attempt. Must fail open: tracing is observability, not a
 # compliance guardrail, so a broken wrap must never block a real call.
 
-def test_make_client_wraps_for_tracing_when_available(monkeypatch):
+def test_make_client_does_not_wrap_for_tracing(monkeypatch):
+    """The client is handed back unwrapped, even with tracing switched on.
+
+    `make_client` used to end with `wrap_anthropic(client)`, which patches
+    `.messages.create` in place and records the call -- for this client, the
+    user's question and the retrieved policy excerpt, both on the prohibited
+    list. The client never asked for raw Policy Chat traces.
+
+    Detected structurally rather than by behaviour: `wrap_anthropic` installs an
+    instance attribute over the class method, so a wrapped client has `create` in
+    `vars(client.messages)` and an unwrapped one does not. Verified against the
+    installed SDK in both states, which is what makes this assertion meaningful
+    rather than a guess about an implementation detail.
+
+    Tracing is deliberately ON here. With it off the assertion would hold for the
+    wrong reason -- the old wrapper was a passthrough when tracing was
+    unconfigured, and this test has to fail if the wrapping comes back.
+    """
     monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_pt_not_real")
 
-    calls = []
-
-    def _spy_wrap(client):
-        calls.append(client)
-        return client
-
-    monkeypatch.setattr(llm_client, "wrap_anthropic", _spy_wrap)
     client = make_client()
 
-    assert len(calls) == 1
-    assert calls[0] is client
     assert isinstance(client, anthropic.Anthropic)
+    assert "create" not in vars(client.messages), (
+        "make_client returned a client whose messages.create has been patched -- "
+        "the LangSmith wrapper is back, and with it the prompt and completion")
 
 
-def test_make_client_falls_back_when_wrapping_fails(monkeypatch):
-    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+def test_the_wrapper_is_gone_from_the_module_entirely(monkeypatch):
+    """Not merely unused -- absent.
 
-    def _broken_wrap(client):
-        raise RuntimeError("simulated LangSmith misconfiguration")
+    A module-level `wrap_anthropic` left in place is one edit away from being
+    called again, and the edit would look like a one-line restoration of
+    observability rather than the re-opening of a content-retention hole.
+    """
+    assert not hasattr(llm_client, "wrap_anthropic"), (
+        "llm_client still holds a reference to wrap_anthropic")
 
-    monkeypatch.setattr(llm_client, "wrap_anthropic", _broken_wrap)
 
-    # Must not raise -- a broken trace wrapper must never block a real call.
+def test_a_bedrock_client_is_not_wrapped_either(monkeypatch):
+    """Both provider branches, because the wrapping used to sit after the if.
+
+    A fix applied to one branch and not the other is the shape of this bug
+    reappearing on the provider nobody tested.
+    """
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_pt_not_real")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "not-a-real-token")
+
     client = make_client()
-    assert isinstance(client, anthropic.Anthropic)
+
+    assert "create" not in vars(client.messages)
 
 
 # --- Review finding: an unrecognized LLM_PROVIDER (e.g. a typo like "berock")
