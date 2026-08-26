@@ -343,23 +343,40 @@ def test_the_review_row_carries_no_amount_or_instrument_data(db, servicing):
     client.post("/payments", json=_payload(idempotency_key="idem-b"))
 
     assert db.review_inserts, "no review item was recorded, so this proves nothing"
+    assert_review_rows_carry_no_money(db.review_inserts)
 
+
+#: `payments.new_correlation_id()` returns `pay_` + a uuid4 hex. Anchored, so a
+#: value with anything appended or prepended fails.
+_OPAQUE_HANDLE = re.compile(r"^pay_[0-9a-f]{32}$")
+
+
+def assert_review_rows_carry_no_money(review_inserts) -> None:
+    """The row-privacy assertion, in one place so it can be tested itself.
+
+    Review finding RVG-001: the guard-the-guard test below used to assert on its
+    OWN filtered list rather than on this assertion, which meant it would have
+    stayed green if someone deleted the opaque-handle check from the real test.
+    A guard that re-implements what it guards is not guarding it. Now both the
+    real test and the guard call this, and the guard calls it under
+    `pytest.raises`.
+    """
     correlation_index = REVIEW_COLUMNS.index("correlation_ref")
-    for params in db.review_inserts:
+    for params in review_inserts:
         assert len(params) == len(REVIEW_COLUMNS), (
             "the review INSERT changed shape; update REVIEW_COLUMNS so this test "
             "keeps scanning the columns it thinks it is scanning")
 
-        content = [str(p) for i, p in enumerate(params) if i != correlation_index]
-        rendered = " ".join(content)
+        content = " ".join(
+            str(p) for i, p in enumerate(params) if i != correlation_index)
         for forbidden in FORBIDDEN_VALUES:
-            assert forbidden not in rendered, (
+            assert forbidden not in content, (
                 f"a review item carries {forbidden!r}")
 
         # The correlation ref is opaque, and that is the whole of its contract:
-        # server-minted, decides nothing, and derived from nothing about the
-        # payment. Asserted by shape rather than by substring, so a random uuid
-        # cannot fail it and a handcrafted "corr-250.00-visa" cannot pass it.
+        # server-minted, decides nothing, derived from nothing about the payment.
+        # Asserted by SHAPE rather than by substring, so a random uuid cannot
+        # fail it and a handcrafted "corr-250.00-visa" cannot pass it.
         ref = params[correlation_index]
         assert ref is None or _is_opaque_handle(ref), (
             f"the correlation ref {ref!r} is not an opaque server-minted handle")
@@ -367,11 +384,6 @@ def test_the_review_row_carries_no_amount_or_instrument_data(db, servicing):
             for forbidden in ("visa", VALID_MOCK_TOKEN, SOURCE_REF):
                 assert forbidden not in str(ref), (
                     f"the correlation ref carries {forbidden!r}")
-
-
-#: `payments.new_correlation_id()` returns `pay_` + a uuid4 hex. Anchored, so a
-#: value with anything appended or prepended fails.
-_OPAQUE_HANDLE = re.compile(r"^pay_[0-9a-f]{32}$")
 
 
 def test_a_correlation_ref_that_happens_to_contain_the_amount_is_not_a_leak(
@@ -424,14 +436,14 @@ def test_an_amount_smuggled_into_the_correlation_ref_is_still_caught(
     client.post("/payments", json=_payload(idempotency_key="idem-b"))
 
     assert db.review_inserts
-    correlation_index = REVIEW_COLUMNS.index("correlation_ref")
-    offenders = [params[correlation_index] for params in db.review_inserts
-                 if params[correlation_index] is not None
-                 and not _is_opaque_handle(params[correlation_index])]
-    assert offenders, (
-        "a correlation ref carrying the amount and the card brand passed the "
-        "opaque-handle check, so excluding that column from the digit scan is a "
-        "hole rather than a fix")
+
+    # Calls the REAL assertion, not a re-implementation of it. Review finding
+    # RVG-001: the previous version filtered the rows itself and asserted its own
+    # list was non-empty, so deleting the opaque-handle check from
+    # `assert_review_rows_carry_no_money` would have left this green. Now the
+    # thing under test is the assertion.
+    with pytest.raises(AssertionError, match="opaque server-minted handle"):
+        assert_review_rows_carry_no_money(db.review_inserts)
 
 
 def _is_opaque_handle(value) -> bool:
