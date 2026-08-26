@@ -10,6 +10,7 @@ got in 0022.
 Runs against real PostgreSQL: the point of most of these cases is what is (and
 is not) in the applications row, which a mocked cursor cannot demonstrate.
 """
+import importlib.util
 import os
 from pathlib import Path
 
@@ -20,6 +21,25 @@ from fastapi.testclient import TestClient
 
 from app import clients, db, decision_state, disclosure_graph, intake
 from app.main import app
+
+#: `db/tests/real_schema.py`, loaded by path -- it depends on nothing but the
+#: standard library, so it imports cleanly from a service test.
+_REAL_SCHEMA_PATH = (Path(__file__).resolve().parents[3]
+                     / "db" / "tests" / "real_schema.py")
+assert _REAL_SCHEMA_PATH.is_file(), (
+    "expected the canonical schema helper at %s -- if it moved, this test must "
+    "fail rather than fall back to a hand-written table" % _REAL_SCHEMA_PATH)
+
+
+def _load_real_schema():
+    spec = importlib.util.spec_from_file_location(
+        "meridian_real_schema", _REAL_SCHEMA_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+real_schema = _load_real_schema()
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against")
@@ -41,45 +61,17 @@ def real_db(monkeypatch):
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
     conn.commit()
     with conn.cursor() as cur:
+        # `applicants` and `applications` verbatim from db/init/001_schema.sql
+        # (RF-26). They were hand-written here and had already drifted --
+        # `created_at` was missing -- and a comment inside the applications block
+        # said the quiet part out loud: it "has to be kept in step by hand, which
+        # is why adding a column to the real schema breaks these tests rather
+        # than the code". It does not any more.
+        cur.execute(real_schema.sql_for(SCHEMA, ["applications"]))
         cur.execute(f"""
             SET search_path TO {SCHEMA};
-            CREATE TABLE applicants (
-                id SERIAL PRIMARY KEY, name TEXT NOT NULL, dob DATE, ssn TEXT,
-                ein TEXT, is_entity BOOLEAN DEFAULT FALSE, email TEXT,
-                phone TEXT, address TEXT, zip_code TEXT
-            );
-            CREATE TABLE applications (
-                id SERIAL PRIMARY KEY,
-                applicant_id INTEGER REFERENCES applicants(id),
-                amount NUMERIC(14,2) NOT NULL, term_months INTEGER NOT NULL,
-                purpose TEXT, income NUMERIC(14,2), employer TEXT,
-                job_title TEXT, employment_years DOUBLE PRECISION,
-                status TEXT DEFAULT 'submitted',
-                access_token_hash TEXT,
-                access_token_expires_at TIMESTAMPTZ,
-                access_token_consumed_at TIMESTAMPTZ,
-                accept_token_hash TEXT,
-                accept_token_expires_at TIMESTAMPTZ,
-                accept_token_consumed_at TIMESTAMPTZ,
-                idempotency_key TEXT,
-                resume_token_hash TEXT,
-                resume_token_expires_at TIMESTAMPTZ,
-                resume_token_consumed_at TIMESTAMPTZ,
-                -- db/migrations/0038. This block is a hand-written copy of
-                -- db/init/001_schema.sql and drifts every time that file gains
-                -- a column: the write path then fails here with UndefinedColumn
-                -- while the real schema is fine. Kept in step rather than
-                -- rebuilt from db/init, which is a larger change than this PR
-                -- should carry -- but the duplication is the reason this test
-                -- broke, not the migration.
-                request_fingerprint TEXT,
-                -- db/migrations/0039. Same hand-written-copy problem as the
-                -- line above: this block duplicates db/init/001_schema.sql and
-                -- has to be kept in step by hand, which is why adding a column
-                -- to the real schema breaks these tests rather than the code.
-                prev_access_token_hash TEXT,
-                prev_access_token_expires_at TIMESTAMPTZ
-            );
+            -- Still created here: db/init/001_schema.sql carries this index too,
+            -- and the helper extracts table definitions rather than indexes.
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
             CREATE TABLE kyc_checks (

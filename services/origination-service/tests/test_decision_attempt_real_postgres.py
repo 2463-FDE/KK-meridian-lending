@@ -25,6 +25,7 @@ db.query() every other test in this directory uses -- only the HTTP
 boundary to decision-service (app.clients.post) is mocked, exactly what
 "mocking only the external HTTP boundary is acceptable" calls for.
 """
+import importlib.util
 import os
 import threading
 from pathlib import Path
@@ -39,6 +40,25 @@ from fastapi.testclient import TestClient
 from app import clients, config, db, decision_state, disclosure_graph
 from app.main import app
 
+#: `db/tests/real_schema.py`, loaded by path -- standard library only, so it
+#: imports cleanly from a service test.
+_REAL_SCHEMA_PATH = (Path(__file__).resolve().parents[3]
+                     / "db" / "tests" / "real_schema.py")
+assert _REAL_SCHEMA_PATH.is_file(), (
+    "expected the canonical schema helper at %s -- if it moved, this test must "
+    "fail rather than fall back to a hand-written table" % _REAL_SCHEMA_PATH)
+
+
+def _load_real_schema():
+    spec = importlib.util.spec_from_file_location(
+        "meridian_real_schema", _REAL_SCHEMA_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+real_schema = _load_real_schema()
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against")
 
@@ -50,36 +70,13 @@ client = TestClient(app)
 
 
 def _full_schema_sql():
-    return f"""
+    # `applicants` and `applications` verbatim from db/init/001_schema.sql
+    # (RF-26). Hand-written here they had drifted by six columns, including
+    # `request_fingerprint` -- which is the column the retry contract this file
+    # tests is keyed on, so the drift was one migration away from failing the
+    # harness instead of the code.
+    return real_schema.sql_for(SCHEMA, ["applications"]) + f"""
         SET search_path TO {SCHEMA};
-        CREATE TABLE applicants (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            ssn TEXT
-        );
-        CREATE TABLE applications (
-            id SERIAL PRIMARY KEY,
-            applicant_id INTEGER REFERENCES applicants(id),
-            amount NUMERIC(14,2) NOT NULL,
-            term_months INTEGER NOT NULL,
-            income NUMERIC(14,2),
-            status TEXT DEFAULT 'submitted',
-            access_token_hash TEXT,
-            access_token_expires_at TIMESTAMPTZ,
-            access_token_consumed_at TIMESTAMPTZ,
-            -- db/migrations/0039. Another hand-written copy of
-            -- db/init/001_schema.sql; ACCESS_TOKEN_FIELDS selects these,
-            -- so omitting them fails the read, not the feature.
-            prev_access_token_hash TEXT,
-            prev_access_token_expires_at TIMESTAMPTZ,
-            accept_token_hash TEXT,
-            accept_token_expires_at TIMESTAMPTZ,
-            accept_token_consumed_at TIMESTAMPTZ,
-            idempotency_key TEXT,
-                resume_token_hash TEXT,
-                resume_token_expires_at TIMESTAMPTZ,
-                resume_token_consumed_at TIMESTAMPTZ
-        );
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
         CREATE TABLE kyc_checks (
