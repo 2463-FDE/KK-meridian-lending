@@ -290,6 +290,14 @@ def test_the_walk_treats_an_annotated_assignment_like_a_plain_one(table_pattern)
 # whose fix is to name the columns, which is what this wants anyway. A false
 # negative is the gap.
 _BARE_WILDCARD = r"select\s+[^;]*?\*\s+from\s+(?:public\.)?payments(?!\w)"
+
+#: Every relation named by a FROM or JOIN, so position stops mattering.
+_RELATIONS = r"(?:from|join)\s+(?:public\s*\.\s*)?([a-z_][a-z0-9_]*)"
+
+#: An unqualified `*` in a select list -- `SELECT *`, `SELECT a, *` -- as opposed
+#: to a qualified one like `p.*`, which the alias branch already handles. The
+#: negative lookbehind is what separates them.
+_SELECT_LIST_STAR = r"(?<![a-z0-9_.])\*"
 _QUALIFIED_WILDCARD = r"(?:public\s*\.\s*)?payments\s*\.\s*\*"
 _PAYMENTS_ALIAS = (r"(?:from|join)\s+(?:public\.)?payments(?!\w)"
                    r"(?:\s+as)?\s+([a-z_][a-z0-9_]*)")
@@ -302,6 +310,36 @@ _NOT_AN_ALIAS = {
 }
 
 
+def _has_select_list_star(sql: str) -> bool:
+    """Whether any SELECT list in `sql` contains an unqualified `*`.
+
+    Each `select` is examined up to its own `from`, which is where a select list
+    ends. Approximate on purpose and in one known direction: a statement whose
+    only bare star belongs to an outer query while `payments` appears solely in a
+    subquery will be flagged even though the outer `*` returns no payments
+    column. That is an over-approximation, and it is the safe one -- the fix for a
+    false positive is to name the columns, which is what this guard wants anyway,
+    while a false negative is the hole the review found twice.
+    """
+    for match in re.finditer(r"\bselect\b", sql, re.I):
+        rest = sql[match.end():]
+        from_match = re.search(r"\bfrom\b", rest, re.I)
+        select_list = rest[:from_match.start()] if from_match else rest
+
+        # `count(*)` is an aggregate over rows, not a projection of columns, and
+        # it is everywhere in legitimate code. The star's left neighbour there is
+        # `(`, which the lookbehind alone does not exclude -- caught by this
+        # file's own non-matching fixture case, which is why those cases are
+        # worth writing. Removed before the search rather than added to the
+        # lookbehind, because Python lookbehinds are fixed-width and `count( * )`
+        # is legal.
+        select_list = re.sub(r"\(\s*\*\s*\)", "()", select_list)
+
+        if re.search(_SELECT_LIST_STAR, select_list):
+            return True
+    return False
+
+
 def wildcard_payments_reasons(sql: str) -> list:
     """Why `sql` reads the payments table with a wildcard, or an empty list.
 
@@ -311,6 +349,17 @@ def wildcard_payments_reasons(sql: str) -> list:
     reasons = []
     if re.search(_BARE_WILDCARD, sql, re.I | re.S):
         reasons.append("SELECT * FROM payments")
+
+    # An unqualified `*` returns every column of every joined relation, so
+    # `SELECT * FROM loans l JOIN payments p ON ...` reads all of `payments`
+    # while naming none of it. Review finding D20-WILDCARD-JOIN-STAR: the two
+    # branches above are both positional -- one wants `* FROM payments`
+    # adjacency, the other wants an alias-qualified star -- and neither sees a
+    # join. This one drops position entirely and asks the only question that
+    # matters: is there a bare star, and is `payments` among the relations?
+    relations = {r.lower() for r in re.findall(_RELATIONS, sql, re.I)}
+    if "payments" in relations and _has_select_list_star(sql):
+        reasons.append("unqualified SELECT * over a relation set including payments")
     if re.search(_QUALIFIED_WILDCARD, sql, re.I):
         reasons.append("payments.*")
     for match in re.finditer(_PAYMENTS_ALIAS, sql, re.I):
@@ -340,6 +389,22 @@ def wildcard_reader():
     assert wildcard_payments_reasons(
         "SELECT l.id, p.* FROM loans l JOIN payments p ON p.loan_id = l.id")
 
+    # D20-WILDCARD-JOIN-STAR: an unqualified star over a join. Reads every
+    # payments column while naming none, and both positional branches miss it.
+    assert wildcard_payments_reasons(
+        "SELECT * FROM loans l JOIN payments p ON p.loan_id = l.id")
+    assert wildcard_payments_reasons(
+        "SELECT * FROM loans l JOIN public.payments p ON p.loan_id = l.id")
+    assert wildcard_payments_reasons(
+        "SELECT l.id, * FROM loans l JOIN payments p ON p.loan_id = l.id")
+
+    # The known over-approximation, asserted so it is a documented decision
+    # rather than a surprise: the outer star here returns no payments column,
+    # and this still flags. Naming the columns is the fix, which is what the
+    # guard wants regardless.
+    assert wildcard_payments_reasons(
+        "SELECT * FROM loans WHERE id IN (SELECT loan_id FROM payments)")
+
     # Non-matches -- a guard that fires on these would be worse than none.
     assert not wildcard_payments_reasons("SELECT * FROM offers")
     assert not wildcard_payments_reasons("SELECT id, amount FROM payments")
@@ -352,6 +417,14 @@ def wildcard_reader():
     # The word after the table is a keyword, not an alias.
     assert not wildcard_payments_reasons(
         "SELECT id FROM payments WHERE x IN (SELECT 1)")
+    # A join with a bare star that names no payments relation at all -- the
+    # counterpart to the join case above, so that branch cannot pass by
+    # flagging every join it sees.
+    assert not wildcard_payments_reasons(
+        "SELECT * FROM loans l JOIN offers o ON o.app_id = l.app_id")
+    # A multiplication, not a wildcard. `count(*)` is the other shape that would
+    # make a naive star search fire on half the codebase.
+    assert not wildcard_payments_reasons("SELECT count(*) FROM payments")
     return wildcard_payments_reasons
 
 
