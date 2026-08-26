@@ -26,9 +26,45 @@ export function uniqueDigits(len: number): string {
   //
   // Putting the counter in the leading digits guarantees every call differs in
   // exactly the characters the SSN is cut from.
+  //
+  // **The counter alone is per PROCESS, which is not the same as unique** (RF-24).
+  // `_seq` is module scope, so it starts at 0 in every Playwright worker. Under
+  // `workers: 1` that is genuinely collision-free, which is why the comment above
+  // could end where it did. Run the suite with four workers and four processes
+  // each begin at `000` -- from then on uniqueness rests entirely on the six
+  // timestamp digits differing, which is timing luck rather than a guarantee.
+  // Two workers calling this inside the same millisecond window produce the same
+  // SSN, and the failure surfaces exactly where the old one did: a wizard that
+  // never reaches Step 5, in whichever spec lost the race.
+  //
+  // So the worker index goes in front of the counter. `TEST_WORKER_INDEX` is set
+  // by Playwright per worker process and is absent when the file is run outside
+  // it, where 0 is correct because there is only one process. Taken modulo 10 to
+  // stay one digit: beyond ten workers two of them share a leading digit and the
+  // guarantee degrades back to the counter plus timestamp, which is the current
+  // behaviour rather than a regression.
+  // Layout: worker(1) + counter(3) + timestamp(5) = 9, the length
+  // `fictionalApplicant` asks for. The counter keeps all THREE of its digits.
+  //
+  // Review finding B1: the first version of this fix took the room for the
+  // worker digit out of the counter, leaving two digits. That reintroduced the
+  // original defect at a tenth of the old scale -- the 101st call in one worker
+  // inside the same timestamp bucket reuses an SSN, demonstrated at exactly
+  // `dupAt: 100`. Buying cross-worker uniqueness with a 10x cut to within-worker
+  // uniqueness is not a fix, and "ample" was an assumption I had not measured.
+  //
+  // The digit comes out of the TIMESTAMP instead, which costs nothing that
+  // matters: the counter is what guarantees uniqueness within a worker, and the
+  // timestamp only has to break ties between processes that happen to be at the
+  // same counter. Five digits still distinguish those to 100 seconds.
+  //
+  // Every one of the SSN's source characters is now meaningful: it is cut from
+  // `d.slice(0, 5)`, which is the worker digit plus the whole counter plus one
+  // timestamp digit.
+  const worker = (Number(process.env.TEST_WORKER_INDEX ?? 0) % 10).toString();
   const counter = (_seq++ % 1000).toString().padStart(3, "0");
-  const stamp = Date.now().toString().slice(-6);
-  return (counter + stamp).slice(-len).padStart(len, "0");
+  const stamp = Date.now().toString().slice(-5);
+  return (worker + counter + stamp).slice(-len).padStart(len, "0");
 }
 
 export interface FictionalApplicant {
