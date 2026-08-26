@@ -19,6 +19,7 @@ Two properties matter more than the signals themselves:
    reporting feature into an availability incident on capture.
 """
 import datetime
+import re
 from decimal import Decimal
 
 import pytest
@@ -305,17 +306,147 @@ def test_a_review_table_outage_does_not_fail_the_payment(monkeypatch, servicing)
     assert fake.review_inserts == [], "the failing insert somehow recorded a row"
 
 
+#: The positional shape of the review INSERT, from
+#: `review_signals._record_review_item`. Named here because the assertion below
+#: needs to treat one column differently from the rest, and doing that by index
+#: silently rots the day a column is added.
+REVIEW_COLUMNS = ("signal_type", "payment_id", "related_payment_id", "loan_id",
+                  "correlation_ref", "queue")
+
+#: Values that would mean money or an instrument had reached the review row.
+#: `250` is the amount and `1111` the card's last four, and both are just DIGITS
+#: -- which matters for where they can be searched for.
+FORBIDDEN_VALUES = ("250", "1111", "visa", VALID_MOCK_TOKEN, SOURCE_REF)
+
+
 def test_the_review_row_carries_no_amount_or_instrument_data(db, servicing):
     """Privacy: the row names the payments, the loan and a correlation handle.
-    The reviewer reads the money and the instrument from the payment itself."""
+    The reviewer reads the money and the instrument from the payment itself.
+
+    **Why this is not a substring scan over the whole row.** It was, and that
+    made it flaky at about one run in a hundred. `correlation_ref` is a
+    server-minted uuid4, and a uuid4 contains the digits "250" roughly 0.5% of
+    the time (measured: 0.0056 over 200k samples, and this test mints two of
+    them). So the assertion failed on a random identifier that had nothing to do
+    with the amount -- a red build reporting a privacy leak that did not exist,
+    which is worse than no test, because the next person to see it learns to
+    re-run rather than to read it.
+
+    The digit sentinels are therefore checked against the columns where they
+    would actually mean something, and `correlation_ref` is asserted for what it
+    IS: an opaque handle that carries no content of its own. Nothing about the
+    guarantee is weakened -- an amount reaching the row would land in a column
+    this still scans, and an amount smuggled INTO the correlation ref is caught
+    by the shape assertion below.
+    """
     client.post("/payments", json=_payload(idempotency_key="idem-a"))
     client.post("/payments", json=_payload(idempotency_key="idem-b"))
 
+    assert db.review_inserts, "no review item was recorded, so this proves nothing"
+
+    correlation_index = REVIEW_COLUMNS.index("correlation_ref")
     for params in db.review_inserts:
-        rendered = " ".join(str(p) for p in params)
-        for forbidden in ("250", "1111", "visa", VALID_MOCK_TOKEN, SOURCE_REF):
+        assert len(params) == len(REVIEW_COLUMNS), (
+            "the review INSERT changed shape; update REVIEW_COLUMNS so this test "
+            "keeps scanning the columns it thinks it is scanning")
+
+        content = [str(p) for i, p in enumerate(params) if i != correlation_index]
+        rendered = " ".join(content)
+        for forbidden in FORBIDDEN_VALUES:
             assert forbidden not in rendered, (
                 f"a review item carries {forbidden!r}")
+
+        # The correlation ref is opaque, and that is the whole of its contract:
+        # server-minted, decides nothing, and derived from nothing about the
+        # payment. Asserted by shape rather than by substring, so a random uuid
+        # cannot fail it and a handcrafted "corr-250.00-visa" cannot pass it.
+        ref = params[correlation_index]
+        assert ref is None or _is_opaque_handle(ref), (
+            f"the correlation ref {ref!r} is not an opaque server-minted handle")
+        if ref is not None:
+            for forbidden in ("visa", VALID_MOCK_TOKEN, SOURCE_REF):
+                assert forbidden not in str(ref), (
+                    f"the correlation ref carries {forbidden!r}")
+
+
+#: `payments.new_correlation_id()` returns `pay_` + a uuid4 hex. Anchored, so a
+#: value with anything appended or prepended fails.
+_OPAQUE_HANDLE = re.compile(r"^pay_[0-9a-f]{32}$")
+
+
+def test_a_correlation_ref_that_happens_to_contain_the_amount_is_not_a_leak(
+        db, servicing, monkeypatch):
+    """The flake this file used to have, pinned so it cannot come back.
+
+    A uuid4 contains the digits "250" about 0.5% of the time -- measured at
+    0.0056 over 200k samples -- and this path mints one per payment. The previous
+    assertion rendered every INSERT parameter into one string and searched it for
+    "250", so roughly one CI run in a hundred reported a privacy leak that did
+    not exist.
+
+    Here the collision is forced rather than waited for: the correlation id is
+    pinned to a value containing both digit sentinels. The row is still clean,
+    because those digits are in an opaque server-minted handle and not in any
+    column that carries money.
+    """
+    monkeypatch.setattr(payments, "new_correlation_id",
+                        lambda: "pay_250abc1111def4444abcd5555ef66660")
+
+    client.post("/payments", json=_payload(idempotency_key="idem-a"))
+    client.post("/payments", json=_payload(idempotency_key="idem-b"))
+
+    assert db.review_inserts, "no review item was recorded, so this proves nothing"
+    correlation_index = REVIEW_COLUMNS.index("correlation_ref")
+    for params in db.review_inserts:
+        ref = params[correlation_index]
+        # The digits really are present in the handle -- otherwise this test is
+        # not exercising the collision it claims to.
+        assert ref is None or "250" in str(ref)
+        content = " ".join(
+            str(p) for i, p in enumerate(params) if i != correlation_index)
+        for forbidden in FORBIDDEN_VALUES:
+            assert forbidden not in content
+
+
+def test_an_amount_smuggled_into_the_correlation_ref_is_still_caught(
+        db, servicing, monkeypatch):
+    """Guard the guard: excluding a column from the scan must not blind it.
+
+    The fix above stops scanning `correlation_ref` for digits. That would be a
+    hole if the shape check were weak, so this pins a ref that is NOT an opaque
+    handle -- it carries the amount and the brand in readable form -- and
+    requires the assertion to reject it.
+    """
+    monkeypatch.setattr(payments, "new_correlation_id",
+                        lambda: "corr-250.00-visa-1111")
+
+    client.post("/payments", json=_payload(idempotency_key="idem-a"))
+    client.post("/payments", json=_payload(idempotency_key="idem-b"))
+
+    assert db.review_inserts
+    correlation_index = REVIEW_COLUMNS.index("correlation_ref")
+    offenders = [params[correlation_index] for params in db.review_inserts
+                 if params[correlation_index] is not None
+                 and not _is_opaque_handle(params[correlation_index])]
+    assert offenders, (
+        "a correlation ref carrying the amount and the card brand passed the "
+        "opaque-handle check, so excluding that column from the digit scan is a "
+        "hole rather than a fix")
+
+
+def _is_opaque_handle(value) -> bool:
+    """True when `value` is exactly a server-minted correlation handle.
+
+    Deliberately strict, and matched against the real generator's format rather
+    than a guess: the first version of this helper accepted only a BARE uuid and
+    failed on the actual `pay_<hex>` value, which is the sort of thing a test
+    should discover about itself before a reviewer does.
+
+    A `pay_` prefix plus 32 hex characters cannot encode an amount, a card brand
+    or a token, so proving the shape proves the absence of content -- which a
+    substring scan over a random identifier can never do in either direction.
+    """
+    return bool(_OPAQUE_HANDLE.match(str(value)))
 
 
 # --------------------------------------------------------------------------
