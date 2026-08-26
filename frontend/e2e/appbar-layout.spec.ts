@@ -287,20 +287,37 @@ test("keyboard focus on a header control is visibly marked", async ({ page }) =>
   // `.focus()` would not satisfy it.
   await page.keyboard.press("Tab");
 
+  // Tab until focus lands inside the NAV, then until it lands on this link.
+  //
+  // Anchored on containment rather than on a press count. A fixed count is a
+  // positional assumption: a skip link, a banner control or a cookie notice added
+  // ahead of the header would exhaust it, and the failure would read as a problem
+  // with the header rule rather than with the new control in front of it. Asking
+  // "is focus in the header nav yet" survives anything inserted before it.
   const target = policyChat(page).first();
+  const nav = page.locator(".appbar-nav");
+  let reachedNav = false;
   let reached = false;
-  // The header is the first thing in the tab order (wordmark, then each nav
-  // link), so the link is within a bounded number of presses. Bounded rather
-  // than `while (true)`: if the tab order ever changes, this should fail with a
-  // clear message instead of spinning.
-  for (let i = 0; i < 25; i += 1) {
+
+  // Still bounded, so a genuinely unreachable target fails instead of spinning.
+  // The cap is generous rather than tuned: it is a runaway guard, not a
+  // prediction of the tab order.
+  for (let i = 0; i < 60; i += 1) {
+    if (!reachedNav) {
+      reachedNav = await nav.evaluate(
+        (el) => !!document.activeElement && el.contains(document.activeElement));
+    }
     if (await target.evaluate((el) => el === document.activeElement)) {
       reached = true;
       break;
     }
     await page.keyboard.press("Tab");
   }
-  expect(reached, "tabbing never reached the Policy Chat link").toBe(true);
+
+  expect(reachedNav, "tabbing never reached the header navigation at all -- "
+    + "something before the header is swallowing focus").toBe(true);
+  expect(reached, "tabbing reached the header navigation but never the Policy "
+    + "Chat link").toBe(true);
 
   // Now the assertion that matters, and it is about `:focus-visible` explicitly
   // rather than about any colour value.
@@ -313,7 +330,15 @@ test("keyboard focus on a header control is visibly marked", async ({ page }) =>
     };
   });
 
+  // `:focus-visible` is close to tautological after a real Tab press -- Chromium
+  // sets it regardless of this stylesheet -- and it is kept for two narrower
+  // reasons: it documents WHY this test tabs instead of calling `.focus()`, and
+  // it fails if the link ever stops being focusable at all.
   expect(focus.matchesFocusVisible).toBe(true);
+
+  // THIS is the assertion that guards the header rule. It is what fails when the
+  // rule is replaced with `outline: none`, and it is the reason this test is a
+  // mutation-detecting guard rather than a restatement of the browser default.
   expect(focus.outlineStyle).not.toBe("none");
   expect(focus.outlineWidth).toBeGreaterThan(0);
 });
