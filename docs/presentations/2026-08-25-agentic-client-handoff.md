@@ -117,6 +117,15 @@ admin header must hold one row at 1366×768.
 > workers produce `ECONNRESET`. The overlay does not fix that and is not a
 > substitute for it.
 >
+> **Use `127.0.0.1` in `DATABASE_URL`, not `localhost`.** On Windows `localhost`
+> resolves to the IPv6 loopback first, and Docker Desktop's IPv6 port forwarding
+> drops connections intermittently. Measured: 12 sequential connects to `::1`
+> produced one failure, while `127.0.0.1` produced none. That single dropped
+> connect surfaces as
+> `psycopg2.OperationalError: ... server closed the connection unexpectedly`
+> against whichever test happened to be opening a connection, so it looks like a
+> database or product fault and is neither.
+>
 > Recorded plainly because it cost this engagement real time: every rate-limit
 > failure diagnosed during this work was avoidable, and the overlay that avoids it
 > was already in the repository with the reason written in its own header comment.
@@ -240,7 +249,9 @@ Bedrock → deterministic validation → outcome.
 
 | Limitation | Effect | Owner |
 |---|---|---|
+| **IPv6 loopback drops connections** — Docker Desktop on Windows | `localhost` resolves to `::1` first, and connects there fail intermittently: 1 failure in 12 sequential attempts, versus 0 in 12 over `127.0.0.1`. It surfaces as `psycopg2.OperationalError: ... server closed the connection unexpectedly` on an arbitrary test, which reads as a database fault. `db/tests` failed 4 tests twice over `localhost` and passed **1012/1012** over `127.0.0.1` on the same commit. **Use `127.0.0.1`.** Not a product defect and not RF-24 — I initially attributed it to RF-24 and was wrong. | Environment |
 | **RF-24** — browser suite shares one database, no per-spec isolation | Parallel runs produce `ECONNRESET`. Run `--workers=1`; the E2E compose overlay does **not** address this. | Engineering |
+| **Browser specs time out under concurrent load** | Running the browser suite while `db/tests` is running produces 30s `page.goto`/`locator.fill` timeouts — 8 of 25 targeted specs failed that way, and all 25 passed when run with the machine idle. Run suites sequentially; a timeout under load is not a finding. | Environment |
 | **Gateway rate limit in tests** — 120 req/60s per IP | Back-to-back or parallel suite runs return HTTP 429. `signInAsStaff` then never leaves `/login` and the failure presents as a URL assertion, or as "element not found" when the staff section never renders — moving between tests on each run. **Mitigation already exists:** bring the stack up with `docker-compose.e2e.yml` ([§2](#2-rebuild-procedure)). Every occurrence during this work was diagnosed from the gateway log rather than retried past, and every one of them was avoidable by using that overlay. | Engineering |
 | **`appbar-layout.spec.ts` focus test is order-dependent** | It passes alone and failed once inside a batch. Chromium only applies `:focus-visible` when it judges the last interaction to be keyboard-driven, and the test focuses programmatically. It is my test and it is not yet reliable; the fix is to drive focus with the keyboard. | Kalab (open) |
 | **Synthetic data throughout** | No conclusion about production behaviour follows from a seeded portfolio. | — |
