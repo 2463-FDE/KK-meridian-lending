@@ -220,9 +220,10 @@ conclude a duplicate, does not reverse or refund, does not move money from a rev
 signal, and does not raise an automatic reconciliation break from one.
 
 **Where should payment allocation be visible?**
-Engineering now supports a ledger-backed Payment History and a captured-payment
-receipt. We must **not** claim the client formally selected a final placement
-preference — no such decision is on record.
+Engineering is done: a ledger-backed Payment History and an immediate
+captured-payment receipt both exist and work. The **product decision is open** —
+the client has not chosen history only, receipt only, both, or something else, and
+we must not claim they did. Neither surface is removed while that is unanswered.
 
 **Is late-fee compounding intended?**
 Still open. The amount formula is fixed: the lesser of $35 or 5% of arrears (5%
@@ -259,16 +260,32 @@ Bedrock → deterministic validation → outcome.
 
 ---
 
-## 8. Open client decisions — do not answer these for the client
+## 8. What is still open, and who owns it
 
-| Item | Status |
-|---|---|
-| **D23** late-fee reassessment / compounding | **OPEN CLIENT DECISION** — cadence, repeat assessment, and whether earlier fees enter the next 5% base |
-| **D24** fairness fixture | **CLIENT-BLOCKED** — no approved protected-class or proxy dataset exists; one must not be manufactured |
-| **RF-25** manual DTI entry | **OPEN CLIENT DECISION** — whether staff may enter it, and what evidence authorises it |
-| **D7** external alert destination | **OPS-BLOCKED / CLIENT-PROHIBITED before freeze** — in-app visibility exists; email, Slack, PagerDuty, SMS and webhooks were ruled out |
-| **Week 9** KYC/AML/UBO/sanctions | **COMPLIANCE- and VENDOR-BLOCKED** |
-| **Week 10** retention-aware redaction | Plan only, pending go-ahead |
+Split into two tables on purpose. Collapsing them invites the reading this
+section exists to prevent: that the client owes a decision they have already
+given.
+
+### 8a. Decisions the client HAS made — implemented, not open
+
+| Item | The decision | Where it lives |
+|---|---|---|
+| Fairness data policy | No real protected-class collection; no approved proxy; ZIP/ZIP3 prohibited as one; synthetic labels only inside an isolated offline fixture; aggregate output only; training only | Recorded at D24; the runtime ZIP3 screen was retired the same day |
+| Vendor governance boundary | The referenced package is **synthetic and training-only** — it is *not* vendor-issued, not production validation, and not authority for live vendor calls. Real approved materials must replace it before any non-training use | D24 |
+| Duplicate-looking payments | Review signal to a human, never an automatic money action. Exact match on provider transaction id or idempotency key with **no** window; heuristic on loan + amount + source + channel inside a rolling 30 minutes | D22, implemented |
+| Where findings go, this phase | The **in-app reconciliation queue**. No email, Slack, PagerDuty, SMS or webhook before the freeze, and no new credentials | D7, implemented |
+
+### 8b. Genuinely open — do not answer these for the client
+
+| Item | Status | Owner |
+|---|---|---|
+| **D23** late-fee reassessment / compounding | **OPEN CLIENT DECISION** — may a fee be assessed again, at what cadence, and do previously assessed fees enter the next 5% base | Lending Operations |
+| **Payment-allocation placement** | **ENGINEERING DONE / PRODUCT DECISION OPEN** — both a ledger-backed Payment History and an immediate captured-payment receipt exist and work. The client has **not** chosen the final placement: history only, receipt only, both, or something else. Neither surface may be removed without direction | Client / product |
+| **D24** fairness training package | **POLICY ANSWERED / ARTIFACT PENDING** — the policy is settled (8a). What is missing is the physical package at `fixtures/offline_fairness_training/`; searched for and not present anywhere in the engagement workspace | Client (delivery) |
+| **RF-25** manual DTI entry | **OPEN CLIENT DECISION** — whether staff may apply DTI manually in a referred review, and what evidence authorises it | Lending Ops / Compliance |
+| **D7** external alert delivery, after the freeze | **OPS-BLOCKED + CLIENT-PROHIBITED** — the current phase is decided and built (8a); a *firing* alert with nobody watching still has no human destination | Operations, then client |
+| **Week 9** KYC/AML/UBO/sanctions | **COMPLIANCE- / VENDOR- / CLIENT- / OPS-BLOCKED** | Multi-party |
+| **Week 10** retention-aware redaction | **PLAN ONLY** — needs a scope separating legally required evidence from identifying data | Pending authorisation |
 
 ---
 
@@ -308,5 +325,9 @@ Each path below exists at this SHA.
 - Not "fairness has been evaluated" — no approved dataset exists (D24).
 - Not "the E2E suite is green in parallel" — it requires `--workers=1`, and the
   browser step additionally requires the `docker-compose.e2e.yml` overlay.
+- Not "the client has not decided fairness policy" — they decided it on
+  2026-08-24; only the artifact is outstanding.
+- Not "the synthetic package is vendor-issued documentation" — it is training-only
+  material, and real approved documents must replace it before non-training use.
 - Not "the macro signal is fetched fresh for every summary" — the provider caches,
   and it fails open.
