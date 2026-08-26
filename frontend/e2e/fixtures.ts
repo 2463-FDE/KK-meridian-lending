@@ -26,9 +26,27 @@ export function uniqueDigits(len: number): string {
   //
   // Putting the counter in the leading digits guarantees every call differs in
   // exactly the characters the SSN is cut from.
-  const counter = (_seq++ % 1000).toString().padStart(3, "0");
+  //
+  // **The counter alone is per PROCESS, which is not the same as unique** (RF-24).
+  // `_seq` is module scope, so it starts at 0 in every Playwright worker. Under
+  // `workers: 1` that is genuinely collision-free, which is why the comment above
+  // could end where it did. Run the suite with four workers and four processes
+  // each begin at `000` -- from then on uniqueness rests entirely on the six
+  // timestamp digits differing, which is timing luck rather than a guarantee.
+  // Two workers calling this inside the same millisecond window produce the same
+  // SSN, and the failure surfaces exactly where the old one did: a wizard that
+  // never reaches Step 5, in whichever spec lost the race.
+  //
+  // So the worker index goes in front of the counter. `TEST_WORKER_INDEX` is set
+  // by Playwright per worker process and is absent when the file is run outside
+  // it, where 0 is correct because there is only one process. Taken modulo 10 to
+  // stay one digit: beyond ten workers two of them share a leading digit and the
+  // guarantee degrades back to the counter plus timestamp, which is the current
+  // behaviour rather than a regression.
+  const worker = (Number(process.env.TEST_WORKER_INDEX ?? 0) % 10).toString();
+  const counter = (_seq++ % 100).toString().padStart(2, "0");
   const stamp = Date.now().toString().slice(-6);
-  return (counter + stamp).slice(-len).padStart(len, "0");
+  return (worker + counter + stamp).slice(-len).padStart(len, "0");
 }
 
 export interface FictionalApplicant {
