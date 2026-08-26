@@ -131,6 +131,68 @@ for (const size of DESKTOP) {
   });
 }
 
+/**
+ * The two boundary widths, asserted on both sides of the breakpoint.
+ *
+ * Review finding APPBAR-BP-GAP asked whether a band existed between the
+ * tightened-spacing rule and the two-row rule where neither helped and the
+ * header broke. Measured: it does not. Swept every 10px from 1020 to 1220 and
+ * every 1-2px across 1039-1052, the header holds one row down to 1041px with
+ * 14px still between the nav and the user block, and the two-row layout takes
+ * over at 1040px.
+ *
+ * The finding was right about the coverage though: the suite tested 1024 and
+ * 1280+ and never the boundary, so nothing would have noticed if a spacing
+ * change moved the real limit above the breakpoint and opened the band for
+ * real. These two tests are that guard.
+ */
+test("one row still fits at 1041px, the width just above the breakpoint", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1041, height: 800 });
+  await signInAsStaff(page, "admin");
+  await page.goto("/admin");
+
+  await expect(page.locator(".nav-link")).toHaveCount(7);
+  expect(await textLineCount(page.locator(".wordmark"))).toBe(1);
+  expect(await textLineCount(policyChat(page))).toBe(1);
+  expect(await textLineCount(logout(page))).toBe(1);
+  expect(await overlaps(page.locator(".appbar-nav"), page.locator(".appbar-auth")))
+    .toBe(false);
+  expect(await documentOverflowsHorizontally(page)).toBe(false);
+
+  // Still ONE row here: the nav and the user block share a baseline. If a future
+  // spacing change pushes the real limit above 1041, this is what fails -- which
+  // is the band the review asked about.
+  const nav = await page.locator(".appbar-nav").boundingBox();
+  const auth = await page.locator(".appbar-auth").boundingBox();
+  expect(Math.abs(nav!.y - auth!.y)).toBeLessThan(20);
+
+  // And there is margin, not a hairline. A clearance that has silently gone to
+  // 1px is a layout about to break on the next label added.
+  expect(auth!.x - (nav!.x + nav!.width)).toBeGreaterThan(4);
+});
+
+test("1040px is where the second row deliberately begins", async ({ page }) => {
+  await page.setViewportSize({ width: 1040, height: 800 });
+  await signInAsStaff(page, "admin");
+  await page.goto("/admin");
+
+  // Two rows now -- by decision, not by accident. Asserted so the breakpoint
+  // cannot drift away from the width the rule names without a test saying so.
+  const nav = await page.locator(".appbar-nav").boundingBox();
+  const auth = await page.locator(".appbar-auth").boundingBox();
+  expect(Math.abs(nav!.y - auth!.y)).toBeGreaterThan(20);
+
+  // Everything that mattered on one row still holds on two.
+  await expect(page.locator(".nav-link")).toHaveCount(7);
+  expect(await textLineCount(page.locator(".wordmark"))).toBe(1);
+  expect(await textLineCount(policyChat(page))).toBe(1);
+  expect(await textLineCount(logout(page))).toBe(1);
+  await expect(logout(page)).toBeVisible();
+  expect(await documentOverflowsHorizontally(page)).toBe(false);
+});
+
 test("a narrower viewport rearranges deliberately instead of wrapping words", async ({
   page,
 }) => {

@@ -245,9 +245,16 @@ h3 {
 
 /* ---- responsive header -------------------------------------------------- */
 
-/* Below the width where seven destinations fit on one row, tighten before
-   rearranging: smaller gaps and padding buy roughly 60px across the admin nav,
-   which is enough to keep one row down to ~1100px. */
+/* Below the width where seven destinations fit comfortably, tighten before
+   rearranging: smaller gaps and padding buy roughly 60px across the admin nav.
+   MEASURED, not estimated -- an earlier version of this comment guessed
+   "~1100px" and was wrong by about 60px, which is exactly the kind of number
+   that should not be asserted from intuition. Swept every 10px from 1020 to 1220
+   and every 1-2px across 1039-1052: with this rule active the admin header holds
+   one row down to 1041px, where the gap between the nav and the user block is
+   still 14px. The two-row rule below takes over at 1040px, so there is no width
+   at which neither applies. Both boundaries are asserted in
+   e2e/appbar-layout.spec.ts. */
 @media (max-width: 1200px) {
   .appbar-inner {
     gap: 14px;
