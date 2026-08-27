@@ -40,6 +40,7 @@ pytest.importorskip("langsmith")
 pytest.importorskip("langchain")
 
 from app import agent, config, llm_client, main, policy_tool, trace  # noqa: E402
+from tests.conftest import STAFF_HEADERS
 
 # --- one sentinel per prohibited category ----------------------------------
 S_APPLICANT = "APPLICANTDATA-SENTINEL-A1"
@@ -213,7 +214,7 @@ def _run(monkeypatch, runner):
 
 def _post(client):
     return client.post(f"/applications/{S_APP_ID}/summary",
-                       headers={"X-User-Role": "underwriter"})
+                       headers=STAFF_HEADERS)
 
 
 def _span_names(blob):

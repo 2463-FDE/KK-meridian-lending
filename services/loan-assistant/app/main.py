@@ -6,6 +6,7 @@ system of record) rather than talking to Postgres directly.
 """
 import logging
 import os
+import secrets
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -51,9 +52,43 @@ def health():
     return {"status": "ok", "service": "loan-assistant"}
 
 
+#: Roles the gateway resolves to a staff session. Same three as the gateway's
+#: STAFF_ROLES and origination-service's _STAFF_ROLES -- this list already
+#: exists in more than one place, and adding a fourth copy is cheaper than
+#: giving this service a dependency on another service's module.
+_STAFF_ROLES = ("csr", "underwriter", "admin")
+
+
+def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> None:
+    """Two parts, and the role is the weaker one.
+
+    A role header says who the caller claims to be. It proves nothing: every
+    service on the Compose network can set it, and this service holds an
+    INTERNAL_SERVICE_TOKEN it will spend on the caller's behalf to fetch
+    staff-only financials from origination-service. Role alone therefore made
+    this route a confused deputy -- origination refuses `X-User-Role` without
+    the token (`_is_staff`), and this route was handing over the token for it.
+
+    X-Internal-Token proves the request came through the gateway, which is the
+    only component that turns a session into a role. It is the same check
+    origination, payment, kyc and decision already apply, and the same reason.
+
+    Fails closed on an unset configured token: an empty secret must never be
+    the thing a caller can match.
+    """
+    expected = INTERNAL_SERVICE_TOKEN
+    if not expected or not x_internal_token or not secrets.compare_digest(
+            x_internal_token, expected):
+        raise HTTPException(status_code=403, detail="staff only")
+    if x_user_role not in _STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="staff only")
+
+
 @app.post("/applications/{app_id}/summary")
 def summarize(request: Request, app_id: int,
-              x_user_role: str | None = Header(default=None, alias="X-User-Role")):
+              x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+              x_internal_token: str | None = Header(
+                  default=None, alias="X-Internal-Token")):
     # The gateway only proxies here for csr/underwriter/admin sessions (see
     # gateway/app/main.py assistant()) and forwards the resolved role as this
     # header; pass it through so origination-service will release financials.
@@ -80,6 +115,11 @@ def summarize(request: Request, app_id: int,
     #
     # Still carries the caller's ROLE and never their identity: role is what
     # explains an authorisation outcome, who they are is on the prohibited list.
+    # Before the trace opens, deliberately. The gateway's rule is that a
+    # rejected request produces no run and a run that exists is one that was
+    # allowed; a refusal traced here would break that on the second hop.
+    _require_staff(x_user_role, x_internal_token)
+
     with trace.summary_trace(
             role=x_user_role,
             parent_headers=trace.parent_headers_from(request.headers)):

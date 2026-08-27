@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.schemas import LoanSummary
+from tests.conftest import STAFF_HEADERS
 
 client = TestClient(main.app, raise_server_exceptions=False)
 
@@ -58,7 +59,7 @@ def test_summary_endpoint_never_issues_a_write_call(monkeypatch):
         ),
     )
 
-    resp = client.post("/applications/42/summary", headers={"X-User-Role": "underwriter"})
+    resp = client.post("/applications/42/summary", headers=STAFF_HEADERS)
 
     assert resp.status_code == 200
 
@@ -77,8 +78,8 @@ def test_repeated_summary_calls_can_return_the_same_result_when_data_is_unchange
     )
     monkeypatch.setattr(main, "summarize_application", lambda app_data: fixed_summary)
 
-    first = client.post("/applications/42/summary", headers={"X-User-Role": "underwriter"})
-    second = client.post("/applications/42/summary", headers={"X-User-Role": "underwriter"})
+    first = client.post("/applications/42/summary", headers=STAFF_HEADERS)
+    second = client.post("/applications/42/summary", headers=STAFF_HEADERS)
 
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()

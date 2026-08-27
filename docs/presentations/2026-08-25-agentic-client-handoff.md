@@ -337,7 +337,7 @@ Each path below exists at this SHA.
   storage, session architecture, browser-token handling, perimeter TLS, Redis
   authentication, container runtime identity, the bounded forwarded-role trust
   boundary and dependency governance — is tracked separately under
-  `SEC-01`..`SEC-16` in `docs/DEBT.md` and is **not**
+  `SEC-01`..`SEC-17` in `docs/DEBT.md` and is **not**
   claimed as production-ready. Naming that plainly is what lets the rest of this
   document be believed.
 - Not "the macro signal is fetched fresh for every summary" — the provider caches,

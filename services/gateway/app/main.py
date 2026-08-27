@@ -623,8 +623,14 @@ async def assistant(path: str, request: Request, authorization: str | None = Hea
     # fields travel.
     resp = None
     try:
+        # X-Internal-Token, for the same reason /los/* carries it: it proves
+        # this request came through the gateway, which is the only component
+        # that turned a session into a role. Without it loan-assistant's staff
+        # routes had nothing but the role header to go on, and a role header is
+        # something any caller on the Compose network can type.
         resp = await _proxy(LOAN_ASSISTANT_URL, f"/{path}", request, user,
-                            extra_headers=trace_headers or None)
+                            extra_headers={**trace_headers,
+                                           "X-Internal-Token": INTERNAL_SERVICE_TOKEN})
     finally:
         if resp is not None:
             agent_trace.finish_root(root, resp.status_code, status="ok")
