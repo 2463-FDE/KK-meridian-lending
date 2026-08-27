@@ -1,4 +1,4 @@
-"""The SEC register has to keep two promises it made in prose.
+"""The SEC register has to keep the promises it made in prose.
 
 The first is a coverage promise: the section's introduction says
 `gateway/app/auth.py`'s docstring names three brownfield caveats and that all
@@ -14,8 +14,14 @@ promises a marker the table never uses is worse than no footer, because a reader
 who cannot find the marker concludes there are no runtime-dependent rows rather
 than that the marker was never applied.
 
-Both are wording, and wording is what goes stale. So both are checked here
-rather than left to a reviewer noticing twice.
+The third is a range promise, and it is the one this file learned last: the
+handoff note points a client reader at a span of SEC rows, and adding a row past
+the end of that span silently drops it out of what the reader is told is tracked.
+The change that added SEC-16 did exactly that, which is how the assertion got
+written.
+
+All three are wording, and wording is what goes stale. So all three are checked
+here rather than left to a reviewer noticing each time.
 
 What is deliberately NOT asserted: which rows carry the marker. That is a
 judgement about evidence, and freezing it would turn a re-verified row into a
@@ -199,3 +205,36 @@ def test_the_register_still_declines_to_rank_severity():
     assert offenders == [], (
         "a severity label appeared in a register that says it has no severity "
         "system:\n  %s" % "\n  ".join(offenders))
+
+
+def test_a_cited_sec_range_still_covers_every_row():
+    """A range citation goes stale the moment a row is added past its end.
+
+    Found by review on the change that added SEC-16: the handoff note pointed
+    a client reader at `SEC-01`..`SEC-15`, so the row this PR existed to add
+    fell outside the range it was supposedly tracked under. That is the
+    citation rule this repository already enforces on paths, applied to the
+    other thing a document can point at and miss.
+
+    The alternative was to write `SEC-*` and let the range stop meaning
+    anything. An explicit range says how much there is to read; a guard is
+    what keeps it true.
+    """
+    rows = _sec_rows(_sec_section())
+    highest = max(int(rid.split("-")[1]) for rid in rows)
+    lowest = min(int(rid.split("-")[1]) for rid in rows)
+
+    ranges = re.compile(r"SEC-(\d+)`?\s*(?:\.\.|--|—|–|-|to)\s*`?SEC-(\d+)")
+    stale = []
+    for doc in sorted((REPO / "docs").rglob("*.md")):
+        for m in ranges.finditer(doc.read_text(encoding="utf-8")):
+            first, last = int(m.group(1)), int(m.group(2))
+            if first > lowest or last < highest:
+                stale.append("%s: %s covers SEC-%02d..SEC-%02d, register holds "
+                             "SEC-%02d..SEC-%02d"
+                             % (doc.relative_to(REPO).as_posix(), m.group(0),
+                                first, last, lowest, highest))
+
+    assert stale == [], (
+        "a document points a reader at a range of SEC rows that no longer "
+        "covers the register:\n  %s" % "\n  ".join(stale))

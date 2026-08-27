@@ -335,8 +335,9 @@ Each path below exists at this SHA.
 - Not "production-ready", "fully secure", "PCI certified" or "SOC 2 compliant".
   **This is a synthetic training deployment.** Production hardening — password
   storage, session architecture, browser-token handling, perimeter TLS, Redis
-  authentication, container runtime identity and dependency governance — is
-  tracked separately under `SEC-01`..`SEC-15` in `docs/DEBT.md` and is **not**
+  authentication, container runtime identity, the bounded forwarded-role trust
+  boundary and dependency governance — is tracked separately under
+  `SEC-01`..`SEC-16` in `docs/DEBT.md` and is **not**
   claimed as production-ready. Naming that plainly is what lets the rest of this
   document be believed.
 - Not "the macro signal is fetched fresh for every summary" — the provider caches,
