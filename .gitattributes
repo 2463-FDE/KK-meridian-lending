@@ -29,4 +29,4 @@ fixtures/offline_fairness_training/client_package_2026-08-24/** -text
 # checkout and every figure would be wrong -- which is exactly what happened on
 # the first attempt (17,443 bytes on disk, 17,232 stored). Same rule, same
 # reason as the client package above.
-docs/evidence/2026-08-27-demo-proof/*.bin -text
+docs/evidence/**/*.bin -text
