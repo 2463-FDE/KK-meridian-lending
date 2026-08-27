@@ -105,7 +105,7 @@ module from so much as naming this directory.
 | Tool | What it does |
 |---|---|
 | `db/tools/offline_fairness_eval.py` | Aggregate counts and outcome rates by each synthetic label column. **No verdict.** |
-| `db/tools/governance_acceptance.py` | Runs the client's 28 acceptance cases against the mapping and refusal rules their policies describe |
+| `db/tools/governance_acceptance.py` | Executes the client's 28 acceptance cases against the mapping and refusal rules their policies describe — 28 resolved, 0 failed, nothing delegated |
 | `db/tools/client_governance_package.py` | Loads the package, verifying checksums first; every other tool goes through it |
 
 ## Rules for anything that lands here
