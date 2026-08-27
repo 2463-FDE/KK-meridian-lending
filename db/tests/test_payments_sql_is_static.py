@@ -292,15 +292,20 @@ def test_the_walk_treats_an_annotated_assignment_like_a_plain_one(table_pattern)
 _BARE_WILDCARD = r"select\s+[^;]*?\*\s+from\s+(?:public\.)?payments(?!\w)"
 
 #: Every relation named by a FROM or JOIN, so position stops mattering.
-_RELATIONS = r"(?:from|join)\s+(?:public\s*\.\s*)?([a-z_][a-z0-9_]*)"
+_RELATIONS = (r'(?:from|join)\s+(?:"?public"?\s*\.\s*)?'
+              r'(?:"([^"]+)"|([a-z_][a-z0-9_]*))')
 
 #: An unqualified `*` in a select list -- `SELECT *`, `SELECT a, *` -- as opposed
 #: to a qualified one like `p.*`, which the alias branch already handles. The
 #: negative lookbehind is what separates them.
 _SELECT_LIST_STAR = r"(?<![a-z0-9_.])\*"
 _QUALIFIED_WILDCARD = r"(?:public\s*\.\s*)?payments\s*\.\s*\*"
-_PAYMENTS_ALIAS = (r"(?:from|join)\s+(?:public\.)?payments(?!\w)"
-                   r"(?:\s+as)?\s+([a-z_][a-z0-9_]*)")
+#: An alias bound to `payments`, quoted or bare. The quoted branch exists
+#: because `SELECT "p".* FROM payments AS "p"` is valid PostgreSQL and the bare
+#: character class could never match it (D20-WILDCARD-QUOTED-ALIAS). The table
+#: name may be quoted too -- `FROM "payments"` -- for the same reason.
+_PAYMENTS_ALIAS = (r'(?:from|join)\s+(?:"?public"?\s*\.\s*)?"?payments"?(?!\w)'
+                   r'(?:\s+as)?\s+(?:"([^"]+)"|([a-z_][a-z0-9_]*))')
 
 #: Words that follow a table name but are not an alias.
 _NOT_AN_ALIAS = {
@@ -357,17 +362,29 @@ def wildcard_payments_reasons(sql: str) -> list:
     # adjacency, the other wants an alias-qualified star -- and neither sees a
     # join. This one drops position entirely and asks the only question that
     # matters: is there a bare star, and is `payments` among the relations?
-    relations = {r.lower() for r in re.findall(_RELATIONS, sql, re.I)}
+    relations = {
+        (quoted or bare).lower()
+        for quoted, bare in re.findall(_RELATIONS, sql, re.I)
+    }
     if "payments" in relations and _has_select_list_star(sql):
         reasons.append("unqualified SELECT * over a relation set including payments")
     if re.search(_QUALIFIED_WILDCARD, sql, re.I):
         reasons.append("payments.*")
     for match in re.finditer(_PAYMENTS_ALIAS, sql, re.I):
-        alias = match.group(1)
-        if alias.lower() in _NOT_AN_ALIAS:
+        quoted, bare = match.group(1), match.group(2)
+        alias = quoted if quoted is not None else bare
+        # A keyword can only be mistaken for an alias in the unquoted form; a
+        # quoted "where" really is an identifier.
+        if quoted is None and alias.lower() in _NOT_AN_ALIAS:
             continue
-        if re.search(r"(?<![a-z0-9_])%s\s*\.\s*\*" % re.escape(alias), sql, re.I):
-            reasons.append("%s.* where %s is payments" % (alias, alias))
+
+        if quoted is not None:
+            projection = r'"%s"\s*\.\s*\*' % re.escape(alias)
+        else:
+            projection = r"(?<![a-z0-9_])%s\s*\.\s*\*" % re.escape(alias)
+
+        if re.search(projection, sql, re.I):
+            reasons.append('%s.* where %s is payments' % (alias, alias))
     return reasons
 
 
@@ -398,6 +415,17 @@ def wildcard_reader():
     assert wildcard_payments_reasons(
         "SELECT l.id, * FROM loans l JOIN payments p ON p.loan_id = l.id")
 
+    # D20-WILDCARD-QUOTED-ALIAS: quoted identifiers are valid PostgreSQL, and a
+    # bare character class can never match them.
+    assert wildcard_payments_reasons(
+        'SELECT "p".* FROM loans l JOIN payments AS "p" ON "p".loan_id = l.id')
+    assert wildcard_payments_reasons(
+        'SELECT "p".* FROM loans l JOIN public.payments AS "p" ON "p".loan_id = l.id')
+    assert wildcard_payments_reasons('SELECT "p".* FROM payments AS "p"')
+    # The table name quoted as well, which is the same gap one step over.
+    assert wildcard_payments_reasons('SELECT "p".* FROM "payments" AS "p"')
+    assert wildcard_payments_reasons('SELECT * FROM "payments"')
+
     # The known over-approximation, asserted so it is a documented decision
     # rather than a surprise: the outer star here returns no payments column,
     # and this still flags. Naming the columns is the fix, which is what the
@@ -425,6 +453,12 @@ def wildcard_reader():
     # A multiplication, not a wildcard. `count(*)` is the other shape that would
     # make a naive star search fire on half the codebase.
     assert not wildcard_payments_reasons("SELECT count(*) FROM payments")
+    # A QUOTED alias bound to a different table, in a statement that also names
+    # payments. `"l".*` is loans; firing here would be a false positive, and it
+    # is the counterpart to the quoted matches above.
+    assert not wildcard_payments_reasons(
+        'SELECT "l".id, "l".status FROM loans AS "l" '
+        'JOIN payments ON payments.loan_id = "l".id')
     return wildcard_payments_reasons
 
 
