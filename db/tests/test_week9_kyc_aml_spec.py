@@ -496,7 +496,6 @@ def test_the_spec_does_not_claim_regulatory_compliance(spec):
                      scope, re.I):
             pytest.fail(f"spec 0004 asserts compliance: {scope.strip()[:240]}")
 
-
 # ── the roadmap must not ask for work the spec already delivered ─────────────
 #
 # The guards above check what the spec and ADR SAY. Nothing checked whether the
@@ -506,7 +505,7 @@ def test_the_spec_does_not_claim_regulatory_compliance(spec):
 # document that was already on `main`.
 #
 # The awkward part, and the reason this is written the way it is: the roadmap's
-# house style is to record what a cell USED to say (`*This clause read ... *`),
+# house style is to record what a cell USED to say (`*This clause read ...*`),
 # and the correction for this row necessarily quotes the stale phrase. A guard
 # that simply banned the phrase would fire on the history note that documents
 # its removal -- the same trap as putting a flagged literal into the comment
@@ -514,13 +513,40 @@ def test_the_spec_does_not_claim_regulatory_compliance(spec):
 # exactly as `test_week7_status_is_current.py` and
 # `test_historical_findings_do_not_look_open.py` treat dated findings: preserved
 # as evidence, excluded from live status.
+#
+# The first version of these guards got the SCOPE wrong in both directions, and
+# both mistakes had the same consequence -- a test that stays green while the
+# cell it names goes stale:
+#
+#   * `_HISTORY_NOTE` was compiled with `re.S`, so an unclosed emphasis marker
+#     let one cell's note run on until the next `*` anywhere below it, taking
+#     whole live table rows out of the guard's view on the way.
+#   * the "screening is not built" assertion searched the entire Week 9
+#     section, so row 4 could be rewritten to claim delivery and the assertion
+#     would still be satisfied by unrelated prose three paragraphs down.
+#
+# Both are fixed by working on the row rather than the section: the table is
+# parsed into rows, each row is its own scope, and the claims that belong to
+# row 4 are asserted against row 4's own cell.
 
 ROADMAP = REPO / "docs" / "ROADMAP.md"
 
+#: The Week 9 detail row these guards are about, and the column carrying status.
+_ROW = "4"
+_STATUS_HEADING = "Fixed?"
+
 #: The roadmap's marker for "this text used to say something else". Anything
 #: inside one is history, not a live claim.
-_HISTORY_NOTE = re.compile(r"\*This (?:cell|clause|paragraph|row|section) read.*?\*",
-                           re.S)
+#:
+#: Deliberately narrow. `[^*|]*` cannot cross an emphasis marker or a table-cell
+#: boundary, there is no `re.S` and the units it is applied to never contain a
+#: newline, and `(?=\s|$)` requires the closing `*` to actually close something
+#: rather than be the opening marker of the next emphasis run. An unclosed or
+#: malformed note therefore matches nothing and stays fully visible to the
+#: guard, which is the safe direction: the cost of not stripping a real note is
+#: a loud failure, and the cost of over-stripping is silence.
+_HISTORY_NOTE = re.compile(
+    r"\*This (?:cell|clause|paragraph|row|section) read[^*|]*\*(?=\s|$)")
 
 #: Phrasings that assert the Week 9 spec is still owed.
 _SPEC_STILL_OWED = re.compile(
@@ -530,17 +556,124 @@ _SPEC_STILL_OWED = re.compile(
     r"|no spec (?:exists|yet)",
     re.I)
 
+_SPEC_CITATION = "specs/0004-kyc-aml-ubo-and-sanctions-screening.md"
+_ADR_CITATION = "adr/0012-sanctions-screening-integration.md"
 
-def _week9_section() -> str:
-    text = ROADMAP.read_text(encoding="utf-8")
+
+def _week9_section(roadmap: str = None) -> str:
+    text = ROADMAP.read_text(encoding="utf-8") if roadmap is None else roadmap
     start = text.index("## Week 9")
     end = text.index("## Week 10", start)
     return text[start:end]
 
 
+def _units(section: str) -> list:
+    """The section split into scopes a history note may not escape.
+
+    A table row is one scope on its own; wrapped prose is flattened into one
+    scope per paragraph, because the roadmap wraps its notes across lines and a
+    note that legitimately spans two prose lines must still be strippable. What
+    a note may never span is a table row -- which is exactly the failure the
+    `re.S` version allowed.
+    """
+    units, prose = [], []
+    for line in section.splitlines():
+        if line.lstrip().startswith("|"):
+            if prose:
+                units.append(_flat(" ".join(prose)))
+                prose = []
+            units.append(line)
+        elif line.strip():
+            prose.append(line.strip())
+        elif prose:
+            units.append(_flat(" ".join(prose)))
+            prose = []
+    if prose:
+        units.append(_flat(" ".join(prose)))
+    return units
+
+
 def _live_text(section: str) -> str:
-    """The section with its historical quotes removed."""
-    return _HISTORY_NOTE.sub("", section)
+    """The section with its properly closed historical quotes removed."""
+    return "\n".join(_HISTORY_NOTE.sub("", unit) for unit in _units(section))
+
+
+def _cells(row: str) -> list:
+    return [c.strip() for c in re.split(r"(?<!\\)\|", row.strip())[1:-1]]
+
+
+def _detail_row(section: str, number: str) -> dict:
+    """The Week 9 detail table's row `number`, as {heading: cell}.
+
+    Keying on the header row rather than a column index means a column inserted
+    before `Fixed?` moves the assertions with it instead of silently pointing
+    them at the wrong cell.
+    """
+    headings = None
+    for unit in _units(section):
+        if not unit.lstrip().startswith("|"):
+            continue
+        cells = _cells(unit)
+        if headings is None:
+            if cells and cells[0] == "#":
+                headings = cells
+            continue
+        if set("".join(cells)) <= set("-: "):
+            continue
+        if cells and cells[0] == number:
+            assert len(cells) == len(headings), (
+                "Week 9 detail row %s has %d cells against %d headings"
+                % (number, len(cells), len(headings)))
+            return dict(zip(headings, cells))
+    raise AssertionError(
+        "the Week 9 detail table has no row '%s' -- the guards below name that "
+        "row specifically, so a renumbered table has to be re-pointed rather "
+        "than left to pass vacuously" % number)
+
+
+def _stale_spec_claims(section: str) -> list:
+    """Live (non-historical) text anywhere in Week 9 asking for the spec."""
+    return [m.group(0) for m in _SPEC_STILL_OWED.finditer(_live_text(section))]
+
+
+def _row_defects(section: str) -> list:
+    """Everything row 4's own status cell has to say, and does not.
+
+    Every one of these is asserted against the cell, not the section. The
+    section-wide version of this check passed while row 4 said the opposite,
+    because the words it looked for were supplied by a paragraph below the
+    table that nobody had edited.
+    """
+    cell = _detail_row(section, _ROW)[_STATUS_HEADING]
+    live = _HISTORY_NOTE.sub("", cell)
+    defects = []
+
+    for cited in (_SPEC_CITATION, _ADR_CITATION):
+        if cited not in live:
+            defects.append("row %s does not cite %s" % (_ROW, cited))
+
+    if not re.search(r"delivered|written|landed", live, re.I):
+        defects.append(
+            "row %s does not say the spec-and-ADR deliverable is delivered" % _ROW)
+
+    if not re.search(r"not built|nothing (?:is )?built", live, re.I):
+        defects.append(
+            "row %s no longer states that the screening itself is not built, "
+            "which is how correcting the spec's status turns into claiming the "
+            "capability shipped" % _ROW)
+
+    if not re.search(r"\bD11\b", live):
+        defects.append(
+            "row %s does not cite D11, where the unimplemented capability is "
+            "tracked" % _ROW)
+
+    stale = [m.group(0) for m in _SPEC_STILL_OWED.finditer(live)]
+    if stale:
+        defects.append(
+            "row %s still describes the spec as owed: %s"
+            % (_ROW, ", ".join(stale)))
+
+    return defects
 
 
 def test_the_roadmap_does_not_claim_the_spec_is_still_owed():
@@ -553,8 +686,7 @@ def test_the_roadmap_does_not_claim_the_spec_is_still_owed():
     if not SPEC.exists():
         pytest.skip("no spec on disk; the roadmap is entitled to say it is owed")
 
-    live = _live_text(_week9_section())
-    offenders = [m.group(0) for m in _SPEC_STILL_OWED.finditer(live)]
+    offenders = _stale_spec_claims(_week9_section())
 
     assert offenders == [], (
         "specs/0004 is on disk, but the Week 9 roadmap section still describes it "
@@ -564,51 +696,120 @@ def test_the_roadmap_does_not_claim_the_spec_is_still_owed():
         % "\n  ".join(offenders))
 
 
+def test_the_week9_row_says_what_is_delivered_and_what_is_not():
+    """Row 4 itself carries both halves, and points at where the gap is tracked.
+
+    Dropping the stale wording without naming what replaced it would leave a
+    reader knowing the row changed and not what is true; dropping it without
+    repeating "not built" would read as though sanctions screening exists. It
+    does not -- `sanctions_screened` is still hardcoded `False` -- and D11 is
+    still open.
+    """
+    defects = _row_defects(_week9_section())
+
+    assert defects == [], (
+        "the Week 9 detail row %s no longer states its own status:\n  %s"
+        % (_ROW, "\n  ".join(defects)))
+
+
 def test_the_history_note_exemption_is_real_and_narrow():
-    """Guard the guard, both ways.
+    """Guard the guard, in all four directions.
 
     The exemption is what makes the test above compatible with the roadmap's
     convention of recording superseded wording. If the stripping were broken the
     test would fail on its own history note; if it were too broad it would
-    exempt a live claim. Both directions are asserted, because a scope rule that
-    is only checked in one direction is the one that goes quiet.
+    exempt a live claim. Both are asserted, because a scope rule that is only
+    checked in one direction is the one that goes quiet -- and the last two are
+    the ones the `re.S` version got wrong.
     """
-    fenced = "status ok *This cell read `spec this week, not built` until 2026-08-27.*"
+    fenced = "status ok *This cell read `spec this week, not built` until 2026-08-26.*"
     assert _SPEC_STILL_OWED.search(fenced), "fixture does not contain the phrase"
-    assert not _SPEC_STILL_OWED.search(_live_text(fenced)), (
+    assert not _SPEC_STILL_OWED.search(_HISTORY_NOTE.sub("", fenced)), (
         "a historical note was not stripped, so the guard would fire on the very "
         "note that records the fix")
 
     live = "⬜ Open (spec this week, not built)"
-    assert _SPEC_STILL_OWED.search(_live_text(live)), (
+    assert _SPEC_STILL_OWED.search(_HISTORY_NOTE.sub("", live)), (
         "stripping is too broad -- a live claim survived it")
 
+    unclosed = "*This cell read `spec this week, not built` until 2026-08-26."
+    assert _SPEC_STILL_OWED.search(_HISTORY_NOTE.sub("", unclosed)), (
+        "an unclosed note was treated as a note; a malformed marker must leave "
+        "its contents visible rather than exempt them")
 
-def test_the_week9_row_points_at_the_artifacts_that_exist():
-    """The corrected row must cite the documents, not just drop the stale phrase.
+    ran_on = ("*This cell read `x` until 2026-08-26 and it is still "
+              "spec this week, not built *emphasis*")
+    assert _SPEC_STILL_OWED.search(_HISTORY_NOTE.sub("", ran_on)), (
+        "the note ran on to the next emphasis marker and took a live claim "
+        "with it")
 
-    Dropping the wording without naming what replaced it would leave a reader
-    knowing the row changed and not what is true.
+
+def test_an_unclosed_note_cannot_hide_a_stale_row():
+    """The `re.S` failure, as a fixture: it used to pass, and it must not.
+
+    An unclosed note in one cell followed by a live stale row below it was the
+    exact shape that let `.*?` run past a table-row boundary and hand back an
+    empty offender list.
     """
-    section = _week9_section()
+    section = "\n".join([
+        "## Week 9 — fixture",
+        "",
+        "| # | Domain | What needed fixing | Fixed? | Why it mattered |",
+        "|---|---|---|---|---|",
+        "| 3 | KYC | something else | *This cell read `x` until 2026-08-26. | why |",
+        "| 4 | KYC | CIP vs. CDD | ⬜ Open (spec this week, not built) | why |",
+        "",
+        "**This week's real deliverable:** a spec.",
+        "",
+        "## Week 10 — fixture",
+    ])
 
-    for cited in ("specs/0004-kyc-aml-ubo-and-sanctions-screening.md",
-                  "adr/0012-sanctions-screening-integration.md"):
-        assert cited in section, "the Week 9 section does not cite %s" % cited
+    assert _stale_spec_claims(section), (
+        "an unclosed history note in row 3 swallowed row 4's live stale status")
+    assert _row_defects(section), (
+        "row 4 asks for a spec that exists and the row guard did not say so")
 
 
-def test_the_row_still_says_the_screening_is_not_built():
-    """Correcting the spec's status must not imply the capability shipped.
+def test_a_row_claiming_delivery_is_not_rescued_by_prose_below_it():
+    """The section-scope failure, as a fixture.
 
-    This is the failure mode of the fix: a row that stops saying "not built"
-    reads as though sanctions screening exists. It does not -- `sanctions_screened`
-    is still hardcoded `False` -- and D11 is still open.
+    Row 4 claims the screening shipped; the paragraph underneath still says
+    "not built" and still cites D11, exactly as the real section does. The
+    section-wide assertion passed on this. The row-anchored one must not.
     """
-    live = _live_text(_week9_section())
+    section = "\n".join([
+        "## Week 9 — fixture",
+        "",
+        "| # | Domain | What needed fixing | Fixed? | Why it mattered |",
+        "|---|---|---|---|---|",
+        "| 4 | KYC | CIP vs. CDD | ✅ Landed — sanctions screening is delivered "
+        "and running, per `%s` and `%s` | why |" % (_SPEC_CITATION, _ADR_CITATION),
+        "",
+        "The screening itself is not built: `sanctions_screened` is still",
+        "hardcoded `False`, and `docs/DEBT.md` D11 stays open.",
+        "",
+        "## Week 10 — fixture",
+    ])
 
-    assert re.search(r"not built|nothing (?:is )?built", live, re.I), (
-        "the Week 9 section no longer states that the screening itself is not "
-        "built, which is the one thing a reader must not be left guessing about")
-    assert "D11" in live or "d11" in live.lower(), (
-        "the Week 9 section no longer points at D11, which is where the "
-        "unimplemented capability is tracked")
+    assert not _stale_spec_claims(section), (
+        "fixture is meant to fail on the row guard, not the stale-spec guard")
+    defects = _row_defects(section)
+    assert any("not built" in d for d in defects), (
+        "row 4 claims delivery and the guard was satisfied by the prose below "
+        "the table: %s" % defects)
+
+
+def test_the_row_lookup_refuses_to_pass_vacuously():
+    """A renumbered or removed row is a failure, not a skipped assertion."""
+    section = "\n".join([
+        "## Week 9 — fixture",
+        "",
+        "| # | Domain | What needed fixing | Fixed? | Why it mattered |",
+        "|---|---|---|---|---|",
+        "| 1 | KYC | something | ⬜ Open | why |",
+        "",
+        "## Week 10 — fixture",
+    ])
+
+    with pytest.raises(AssertionError, match="no row '4'"):
+        _detail_row(section, _ROW)
