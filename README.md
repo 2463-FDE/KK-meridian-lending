@@ -32,13 +32,17 @@ Halcyon Software Group (now dissolved) as **three** backend services — `gatewa
 
 This is a brownfield monorepo: a **Loan Origination System (LOS)** and a **Loan Servicing
 System (LSS)** bolted together behind a single API gateway, with a Next.js borrower +
-servicing portal. (Lending Ops keeps asking for an "AI underwriting assistant" — that
-work has not been started.)
+servicing portal. (Lending Ops asked for an "AI underwriting assistant"; it now exists as
+`loan-assistant` — a LangChain agent behind a staff-only gateway route, which reaches the
+lending-policy corpus through one bounded read-only tool and refuses to summarise when that
+tool returns no policy evidence. See [ARCHITECTURE.md](ARCHITECTURE.md).)
 
 Since the handoff the in-house team has begun **extracting the LOS monolith into focused
 services**, partly to match the platform's intended target architecture. The platform now
-runs **seven** backend services: the original three plus four extracted ones —
-`kyc-service`, `decision-service`, `disclosure-service`, and `payment-service`.
+runs **eight** backend services: the original three, four extracted ones —
+`kyc-service`, `decision-service`, `disclosure-service`, `payment-service` — and
+`loan-assistant`, which was added rather than extracted. (`reconciliation` in
+`docker-compose.yml` is the servicing image running a scheduled job, not a ninth service.)
 Origination is now an intake + boarding **orchestrator** that calls the new KYC, decision,
 and disclosure services over synchronous HTTP; the old in-process `apr.py` / `fees.py` /
 `offer.py` / `decision.py` / `kyc.py` modules moved out with them. This modernization is
@@ -72,8 +76,10 @@ rather than being fixed.
                       Postgres :5432 (shared)  +   Redis :6379 (sessions)
 ```
 
-All seven services share **one** Postgres database and the same `db/init` schema + seed —
-the data layer is unchanged by the decomposition. The LOS↔LSS **seam** is still thin and
+Seven of the eight share **one** Postgres database and the same `db/init` schema + seed —
+the data layer is unchanged by the decomposition. `loan-assistant` is the exception and
+holds no database connection at all: it reads application data from origination-service over
+HTTP, which is why no applicant row is reachable from the agent's process. The LOS↔LSS **seam** is still thin and
 undocumented — a loan "boards" from origination to servicing by a direct insert into the
 servicing schema. After a charge is captured, `payment-service` calls servicing's
 `apply-payment` to post it. See `docs/architecture.md`.
