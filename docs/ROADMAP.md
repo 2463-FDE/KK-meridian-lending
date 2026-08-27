@@ -206,8 +206,20 @@ retired, so the acceptance criterion — a repeated payment request is recorded
 once and applied once — holds on every path that exists, rather than on the
 canonical one while a second endpoint of the same name double-recorded.
 
-Maker-checker remains Not started because an approved specification is not a
-production implementation.
+Maker-checker is **Done**, and was the last of the three to land. It is not a
+specification: `adjust-balance` and `waive-fee` raise proposals that move nothing
+and return 202, a *different* verified principal resolves them through
+`resolve_pending_movement`, self-approval is refused including for admin, and an
+approval writes exactly one immutable ledger entry naming the approver. See
+`docs/DEBT.md` **D8** (closed) and
+`adr/0011-maker-checker-for-servicing-adjustments.md`.
+
+*This paragraph read "Maker-checker remains Not started because an approved
+specification is not a production implementation" until 2026-08-27. That was true
+when written and stopped being true when the implementation landed; it survived
+because the sentence sat below the count that already said `0 Not started`, so
+nothing forced the two to agree.
+`db/tests/test_public_docs_match_shipped_behaviour.py` now does.*
 
 | Week | Feature/requirement | Acceptance criteria | Status | Code/commit evidence | Test/CI evidence | Remaining gap | Priority | Next action |
 |---|---|---|---|---|---|---|---|---|
