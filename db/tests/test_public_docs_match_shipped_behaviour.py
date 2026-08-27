@@ -6,8 +6,8 @@ a sentence that was true when written, sitting next to a fact that had moved,
 with nothing forcing the two to agree.
 
   * `README.md` said the AI underwriting assistant "has not been started" while
-    `services/loan-assistant/` was a Compose service behind a staff-only gateway
-    route, tested, merged and running.
+    `services/loan-assistant/` was a Compose service behind live gateway routes,
+    tested, merged and running.
   * `docs/ROADMAP.md` said "Maker-checker remains Not started" **eleven lines
     below its own count of `0 Not started`**, and while `docs/DEBT.md` D8 read
     `Fixed`. The flagship money control, described in the flagship document as
