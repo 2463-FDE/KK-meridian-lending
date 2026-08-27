@@ -13,11 +13,13 @@ it.
 **Recorded:** 2026-08-25
 **Author:** Kalab Kebede
 
-Every number and status below was produced from that SHA, on images rebuilt from
-it, in the run described in [§3](#3-the-run-this-document-records). It is not a
-summary of earlier demonstrations, and it does not reuse figures from the two
-existing `docs/presentations/*-three-slides.md` files — those are historical and
-remain so.
+Every number and status in **Sections 1-3** was produced from the first SHA, on
+images rebuilt from it, in the run described in
+[§3](#3-the-run-this-document-records). **[§3a](#3a-mode-b-re-record-at-the-demonstrated-commit--2026-08-27)
+carries its own SHA, its own run and its own committed artifacts**, and none of
+its figures are copied from §3 — the two runs disagree, which is why both are
+here. Neither reuses figures from the two existing
+`docs/presentations/*-three-slides.md` files; those are historical and remain so.
 
 To reproduce the figures, check out the pinned SHA ([§2, Mode A](#mode-a--pinned-replay)).
 To verify a later `main`, use Mode B and re-record the figures rather than quoting
@@ -296,9 +298,26 @@ does with the same payload after ingest are outside this capture and outside thi
 exercise. A reader should not take it as end-to-end equivalence with the
 production tracing path.
 
-20,992 bytes across three payloads. Stage chain observed end to end:
+**20,992 bytes across three payloads, all three committed** — the figure is
+`wc -c` of the files in
+[`docs/evidence/2026-08-27-demo-proof/`](../evidence/2026-08-27-demo-proof/),
+not a note taken at the time:
+
+| File | Bytes | Carries |
+|---|---|---|
+| `trace-01-gateway-root.multipart.bin` | 1,812 | `gateway_entry` — the run opened at the authenticated entry point |
+| `trace-02-gateway-close.multipart.bin` | 1,737 | `gateway_entry` close, with `http_status` |
+| `trace-03-agent-spans.multipart.bin` | 17,443 | `request`, `policy_retrieval`, `model`, `agent_run`, `validation`, `outcome` |
+
+Stage chain, observed end to end across that set:
 
 `gateway_entry → request → policy_retrieval → model → agent_run → validation → outcome`
+
+The first draft committed only the third file while claiming the chain and the
+20,992 total. Review caught it, and the catch is the point of committing
+artifacts at all: the first thing a reader checks disagreed with the document.
+`gateway_entry` lives in the gateway's own payloads, so a claim that the trace
+starts at authentication is only inspectable if those are committed too.
 
 **Fields retained** — categorical and provenance only: `stage`, `service`,
 `status`, `outcome`, `role`, `route_class`, `provider`, `model_family`, `region`,
@@ -405,15 +424,28 @@ is the better evidence.
 
 Artifacts: [`docs/evidence/2026-08-27-demo-proof/`](../evidence/2026-08-27-demo-proof/)
 
-| File | What it is |
-|---|---|
-| `trace-agent-run.multipart.txt` | the 17,443-byte payload the exporter posted for the agent run, verbatim |
-| `pip-freeze-loan-assistant.txt` | resolved packages in the running assistant image |
-| `pip-freeze-gateway.txt` | resolved packages in the running gateway image |
+| File | Bytes | What it is |
+|---|---|---|
+| `trace-01-gateway-root.multipart.bin` | 1,812 | gateway root span, `gateway_entry` |
+| `trace-02-gateway-close.multipart.bin` | 1,737 | gateway root close, `http_status` |
+| `trace-03-agent-spans.multipart.bin` | 17,443 | every assistant-side stage |
+| `pip-freeze-loan-assistant.txt` | — | resolved packages in the running assistant image |
+| `pip-freeze-gateway.txt` | — | resolved packages in the running gateway image |
 
-The trace file is committed **because** it is the artifact the review asked for,
-and it was re-scanned immediately before it entered git — no content-bearing key,
-no SSN or PAN shape, no credential, no application id.
+```bash
+wc -c docs/evidence/2026-08-27-demo-proof/*.bin   # 1812 + 1737 + 17443 = 20992
+```
+
+The payloads are committed **because** they are the artifact the review asked
+for, and re-scanned immediately before entering git — no content-bearing key, no
+SSN or PAN shape, no credential, no application id.
+
+**`.gitattributes` marks them `-text`, and that is load-bearing.** The first
+attempt committed one payload without it: 17,443 bytes on disk became 17,232 in
+the blob, because `core.autocrlf=true` rewrote the line endings. Every byte
+figure in this section would have been wrong for anyone who cloned, and the
+sensitive-field search would have run over different bytes than the ones
+captured. Same rule and same reason as the client governance package.
 
 **Image ↔ tree correspondence** (§3a "SHA discipline"):
 
@@ -427,7 +459,13 @@ python -c "import hashlib,pathlib; \
   h=hashlib.sha256(); [ (h.update(p.name.encode()), h.update(p.read_bytes())) for p in fs ]; \
   print(h.hexdigest()[:24], len(fs))"
 
-docker compose exec -T loan-assistant python -c "...same, over /app/app..."
+# container side, verbatim -- the same walk over /app/app
+docker compose exec -T loan-assistant python -c "import hashlib,pathlib;   fs=sorted(p for p in pathlib.Path('/app/app').rglob('*.py')             if '__pycache__' not in p.parts);   h=hashlib.sha256(); [ (h.update(p.name.encode()), h.update(p.read_bytes())) for p in fs ];   print(h.hexdigest()[:24], len(fs))"
+
+# requirements.txt, both sides
+sha256sum services/loan-assistant/requirements.txt
+docker compose exec -T loan-assistant sha256sum /app/requirements.txt
+
 git diff --name-only 21a8a13 e69d313
 ```
 

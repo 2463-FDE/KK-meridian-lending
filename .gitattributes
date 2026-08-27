@@ -22,3 +22,11 @@
 # db/tests/test_client_package_is_byte_preserved.py verifies the checksums
 # against the working tree, so this rule has a test rather than a promise.
 fixtures/offline_fairness_training/client_package_2026-08-24/** -text
+
+# Captured telemetry payloads are evidence: the byte counts quoted in
+# docs/presentations/ are wc -c of these files, and a reader re-runs the
+# sensitive-field search against them. core.autocrlf=true would rewrite them on
+# checkout and every figure would be wrong -- which is exactly what happened on
+# the first attempt (17,443 bytes on disk, 17,232 stored). Same rule, same
+# reason as the client package above.
+docs/evidence/2026-08-27-demo-proof/*.bin -text
