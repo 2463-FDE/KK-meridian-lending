@@ -1,15 +1,25 @@
 # Agentic underwriting — client handoff
 
-**Recorded at main:** `aa9fc34212bc29c361513d088a2752cb6812ee35` (which was `main`
-on 2026-08-25 — `main` has advanced since, and that is expected)
+**Sections 1-3 recorded at main:** `aa9fc34212bc29c361513d088a2752cb6812ee35`
+(which was `main` on 2026-08-25)
+**Section 3a re-recorded at main:** `21a8a139eb6c04b70d5c5264db25ba545ea3edfb`
+(2026-08-27, the commit demonstrated)
+
+Two SHAs on purpose. The header used to carry one and say "`main` has advanced
+since, and that is expected", which was true and stopped being sufficient once a
+second run existed. Naming the range each section covers is better than picking
+one and leaving the other section sitting under a header that does not describe
+it.
 **Recorded:** 2026-08-25
 **Author:** Kalab Kebede
 
-Every number and status below was produced from that SHA, on images rebuilt from
-it, in the run described in [§3](#3-the-run-this-document-records). It is not a
-summary of earlier demonstrations, and it does not reuse figures from the two
-existing `docs/presentations/*-three-slides.md` files — those are historical and
-remain so.
+Every number and status in **Sections 1-3** was produced from the first SHA, on
+images rebuilt from it, in the run described in
+[§3](#3-the-run-this-document-records). **[§3a](#3a-mode-b-re-record-at-the-demonstrated-commit--2026-08-27)
+carries its own SHA, its own run and its own committed artifacts**, and none of
+its figures are copied from §3 — the two runs disagree, which is why both are
+here. Neither reuses figures from the two existing
+`docs/presentations/*-three-slides.md` files; those are historical and remain so.
 
 To reproduce the figures, check out the pinned SHA ([§2, Mode A](#mode-a--pinned-replay)).
 To verify a later `main`, use Mode B and re-record the figures rather than quoting
@@ -134,6 +144,11 @@ admin header must hold one row at 1366×768.
 One synthetic application, through the authenticated gateway, against real
 Bedrock. Application **7289** (seeded synthetic data — not a real person).
 
+> **Superseded for the demonstrated commit — see [§3a](#3a-mode-b-re-record-at-the-demonstrated-commit--2026-08-27).**
+> The figures below are a correct record of the run at `aa9fc34` and are not
+> edited. They are not the figures for the commit being demonstrated: that run
+> made **3** runtime tool calls where this one made 2.
+
 | Observation | Value |
 |---|---|
 | main SHA | `aa9fc34212bc29c361513d088a2752cb6812ee35` |
@@ -166,6 +181,370 @@ metadata: {'stage': 'gateway_entry', 'service': 'gateway', 'role': 'underwriter'
            'route_class': 'agent_summary', 'tracing_mode': 'privacy_safe_categorical',
            'schema_version': '1'}
 ```
+
+---
+
+## 3a. Mode B re-record at the demonstrated commit — 2026-08-27
+
+Section 3 above records a run at `aa9fc34` and stays exactly as it was. This
+section is a **second, independent run** at the commit that will actually be
+demonstrated. Neither replaces the other, and no number is copied between them.
+
+**Why this section exists.** A direction check on 2026-08-27 made the point that
+the recorded proof was pinned to a commit the branch had moved past. Section 3
+was never dishonest — it names its SHA and offers Mode A/Mode B — but it was
+*under-strength* for the commit being shown. This closes that gap by re-running
+rather than by re-labelling.
+
+### SHA discipline
+
+| | |
+|---|---|
+| **Runtime source SHA** | `21a8a139eb6c04b70d5c5264db25ba545ea3edfb` — the tree the images were built from and the run executed against |
+| **Evidence-packaging commit** | this commit, which adds this section and the artifacts under [`docs/evidence/2026-08-27-demo-proof/`](../evidence/2026-08-27-demo-proof/) |
+
+Those differ, and saying so is the point rather than a caveat.
+
+**What is proven about image ↔ tree correspondence, precisely.** An earlier
+draft of this section claimed the running image *was* the demonstrated tree on
+the strength of one file's hash. Review was right that the conclusion outran the
+evidence: a single module says nothing about the other fourteen, the
+dependency manifest, or the Dockerfile. The proof is widened rather than the
+sentence softened.
+
+| Check | Host | Container | Match |
+|---|---|---|---|
+| `app/` tree hash, all 15 `.py` files, name + bytes | `7e072ba60820d8aa4fdca0a4` | `7e072ba60820d8aa4fdca0a4` | ✅ |
+| `requirements.txt` sha256 | `89c32931e79d8a32f6149c9b` | `89c32931e79d8a32f6149c9b` | ✅ |
+| `app/main.py` sha256 | `230de01efb3b070e` | `230de01efb3b070e` | ✅ |
+
+Running image digests at capture time:
+
+```
+loan-assistant  sha256:bf88658f3bc4c90387683b8611ce23bb932c336fdb0fbfebf772590061175799
+gateway         sha256:c3273950f447ee5a95e76cdb62c27b0d5b54e7a542201f801d4894cf997c03c6
+```
+
+**Every file that changed between the runtime source SHA and the demo head**, annotated:
+
+```
+$ git diff --name-only 21a8a13 e69d313
+README.md                                             outside every build context
+db/tests/test_public_docs_match_shipped_behaviour.py  outside every build context
+docs/ROADMAP.md                                       outside every build context
+```
+
+Build contexts are `./services/*` and `./frontend` (`docker-compose.yml`). None
+of the three changed files is inside one, so no image could differ. That is the
+claim — *the assistant service's source tree and dependency manifest in the
+running image are byte-identical to the runtime source SHA, and nothing between
+that SHA and the demo head could change an image* — and it is the claim the
+table above supports. It is not a claim that every container in the stack was
+rebuilt from the demo head; the two services this section exercises were
+checked, and the others were not.
+
+### Build freshness, checked before recording
+
+A `docker compose up` earlier that day **exited 0 while every image build had
+failed** on a corrupted BuildKit snapshot. A build that fails quietly is how a
+stale image gets demonstrated, so freshness was proven three ways rather than
+inferred from an exit code:
+
+1. visible rebuild of the normal demo stack, zero `failed to solve` lines;
+2. `app/main.py` sha256 in the container matched the host byte-for-byte;
+3. a behavioural check — the route signature carries the `X-Internal-Token`
+   parameter added by #108, which did not exist in the previous images.
+
+### The run
+
+Synthetic seeded application **7354**. Not a real person.
+
+| Observation | Value |
+|---|---|
+| Runtime source SHA | `21a8a13` |
+| Captured | 2026-08-27T15:36:21Z |
+| Route | `POST /assistant/applications/7354/summary`, via gateway, staff session (`underwriter`) |
+| Provider | `bedrock` |
+| Model family | `claude` |
+| Region | `us-east-1` |
+| **Model turns** | **2** |
+| **Runtime tool calls** | **3**, `search_underwriting_policy` |
+| Policy evidence | `hit` |
+| Documents | `fee_schedule.md`, `underwriting_guidelines.md` |
+| Document versions | `sha256:1972040e71e5`, `sha256:ead76c59e419` |
+| Citations | 6 chunk ids, each carrying its document's version hash |
+| Validators run | `dti_claim`, `macro_contradiction`, `risk_classification` |
+| Outcome | `summary_returned`, HTTP 200, 13.21s |
+| Step budget | 12 |
+| Tracing mode | `privacy_safe_categorical` |
+
+**This run made 3 tool calls. The run at `aa9fc34` made 2.** That difference is
+the reason this section exists rather than a note adjusting the old one. The
+durable claim is that model and tool execution are *bounded and runtime-observed*
+— the exact count is a property of a run, not of the system, and quoting a fixed
+number as though it were a guarantee is a claim the next run can falsify.
+
+### Privacy-safe trace artifact, captured from this same run
+
+Captured at a **local ingest sink**: `LANGSMITH_ENDPOINT` was pointed at a
+listener on the Compose network, so the exact bytes the exporter posted could be
+read, and nothing had to leave the machine or be fetched with a credential.
+
+**This is a pre-egress capture, and the claim is bounded to that.** It shows the
+payload the exporter produces and posts — which is what the allowlist governs and
+therefore what the privacy claim is about. It does **not** show hosted delivery:
+credentialed auth, retries, endpoint allowlisting, or what the hosted service
+does with the same payload after ingest are outside this capture and outside this
+exercise. A reader should not take it as end-to-end equivalence with the
+production tracing path.
+
+**20,992 bytes across three payloads, all three committed** — the figure is
+`wc -c` of the files in
+[`docs/evidence/2026-08-27-demo-proof/`](../evidence/2026-08-27-demo-proof/),
+not a note taken at the time:
+
+| File | Bytes | Carries |
+|---|---|---|
+| `trace-01-gateway-root.multipart.bin` | 1,812 | `gateway_entry` — the run opened at the authenticated entry point |
+| `trace-02-gateway-close.multipart.bin` | 1,737 | `gateway_entry` close, with `http_status` |
+| `trace-03-agent-spans.multipart.bin` | 17,443 | `request`, `policy_retrieval`, `model`, `agent_run`, `validation`, `outcome` |
+
+Stage chain, observed end to end across that set:
+
+`gateway_entry → request → policy_retrieval → model → agent_run → validation → outcome`
+
+The first draft committed only the third file while claiming the chain and the
+20,992 total. Review caught it, and the catch is the point of committing
+artifacts at all: the first thing a reader checks disagreed with the document.
+`gateway_entry` lives in the gateway's own payloads, so a claim that the trace
+starts at authentication is only inspectable if those are committed too.
+
+**Fields retained** — categorical and provenance only: `stage`, `service`,
+`status`, `outcome`, `role`, `route_class`, `provider`, `model_family`, `region`,
+`model_turns`, `tool_name`, `tool_calls`, `evidence_status`, `documents`,
+`document_versions`, `citations`, `validators_run`, `refusal_class`,
+`http_status`, `duration_ms`, `step_budget`, `provider_attempt_limit`,
+`tracing_mode`, `schema_version`.
+
+**Inspected for, and not observed in this captured artifact:** the subject's
+name, SSN, DOB, address, email and loan amount (compared against the actual
+database row); the application id; any `inputs` / `outputs` / `messages` /
+`prompt` / `response` / `content` key; SSN- and PAN-shaped strings; bearer
+tokens or API keys; credential environment names; `income` / `dti` keys; raw
+provider or model errors.
+
+**What that supports, and what it does not.** The correct claim is: *this
+captured agent trace contains only the allowlisted categorical and provenance
+fields, and framework content tracing is suppressed on these paths.* It is not
+evidence that all traces everywhere are scrubbed. Trace fidelity here is
+deliberately bounded by the allowlist, not by the framework's default
+full-fidelity capture — the framework would emit far more, and was measured
+doing so before it was turned off.
+
+### Refusal 1 — agent disabled
+
+Exercised in an **isolated container**; the demo stack was not modified.
+
+| | |
+|---|---|
+| Condition | `AGENT_ENABLED=false` |
+| Expected | refusal, and no direct-model fallback |
+| Actual | **HTTP 502** |
+| Body | `AGENT_ENABLED is off -- the underwriting summary runs through the agent runtime and will not fall back to a direct model call.` |
+
+The refusal names the guarantee: the summary path does not degrade to a direct
+call when the agent is unavailable. A second, different variant exists —
+missing agent dependencies or a non-Bedrock provider raise `AgentUnavailable`
+and map to **503** — and the two are not interchangeable.
+
+### Refusal 2 — retrieval miss
+
+| | |
+|---|---|
+| Condition | agent runs; policy corpus present but carrying no matching content |
+| Expected | tool executes, no usable evidence, refusal |
+| Actual | **HTTP 502** |
+| Body | `the agent called search_underwriting_policy but retrieval returned 'miss'; refusing a summary with no policy behind it` |
+| Service log | `policy tool: status=miss hits=0 k=3` |
+| Refusal class | `PolicyEvidenceMissing` |
+
+The log line is the load-bearing part: the tool **ran**. This is a refusal on
+absent evidence, not a refusal to call the tool — a distinction a status code
+alone would not carry.
+
+**Why both refusals are 502 and not two different codes.** Both are upstream
+failures from the gateway's point of view: the summary could not be produced, and
+the reason is not the caller's. They are distinguished by `refusal_class` in the
+trace and by the response body, not by the status —
+`LLMResponseError` for the disabled agent, `PolicyEvidenceMissing` for the
+retrieval miss. A third variant does differ: missing agent dependencies or a
+non-Bedrock provider raise `AgentUnavailable`, which maps to **503**. The mapping
+lives in `services/loan-assistant/app/main.py` and is asserted by
+`services/loan-assistant/tests/test_agent_failures_reach_the_route.py`.
+
+### Also observed in the same run
+
+A borrower session on the staff summary route was refused **403** at the gateway,
+before the request reached the agent.
+
+### Test evidence, run where it actually runs
+
+`services/loan-assistant` — **463 passed, 0 skipped**, executed inside the
+service image with the repository mounted.
+
+Stated because the obvious way to run it is wrong: on a host without
+`langchain`, nine agent and tracing tests **skip silently** and the suite still
+reports green. A green host run is not evidence for this service.
+
+### Resolved dependency set
+
+Captured from the demo images at the runtime source SHA. Recorded as evidence;
+nothing was upgraded for the demo.
+
+| Package | Version |
+|---|---|
+| `langchain` | 1.3.16 |
+| `langchain-core` | 1.6.0 |
+| `langchain-aws` | 1.7.3 |
+| `boto3` / `botocore` | 1.43.81 |
+| `fastapi` | 0.141.1 |
+| `pydantic` | 2.13.4 |
+| `httpx` | 0.28.1 |
+
+58 packages in `loan-assistant`, 40 in `gateway`. The transitive closure is not
+pinned by a lock file; `docs/DEBT.md` **SEC-11** tracks that, and a CI audit
+count is not evidence of a reachable exploit.
+
+### 3a.1 Appendix — artifacts and the commands that produced them
+
+Review's point was that §3a stated numbers a reader cannot check, which is the
+one property an evidence section has to have. The artifacts are committed and
+the commands are here. Where a number below disagrees with a re-run, the re-run
+is the better evidence.
+
+Artifacts: [`docs/evidence/2026-08-27-demo-proof/`](../evidence/2026-08-27-demo-proof/)
+
+| File | Bytes | What it is |
+|---|---|---|
+| `trace-01-gateway-root.multipart.bin` | 1,812 | gateway root span, `gateway_entry` |
+| `trace-02-gateway-close.multipart.bin` | 1,737 | gateway root close, `http_status` |
+| `trace-03-agent-spans.multipart.bin` | 17,443 | every assistant-side stage |
+| `pip-freeze-loan-assistant.txt` | — | resolved packages in the running assistant image |
+| `pip-freeze-gateway.txt` | — | resolved packages in the running gateway image |
+
+```bash
+wc -c docs/evidence/2026-08-27-demo-proof/*.bin   # 1812 + 1737 + 17443 = 20992
+```
+
+The payloads are committed **because** they are the artifact the review asked
+for, and re-scanned immediately before entering git — no content-bearing key, no
+SSN or PAN shape, no credential, no application id.
+
+**`.gitattributes` marks them `-text`, and that is load-bearing.** The first
+attempt committed one payload without it: 17,443 bytes on disk became 17,232 in
+the blob, because `core.autocrlf=true` rewrote the line endings. Every byte
+figure in this section would have been wrong for anyone who cloned, and the
+sensitive-field search would have run over different bytes than the ones
+captured. Same rule and same reason as the client governance package.
+
+**Image ↔ tree correspondence** (§3a "SHA discipline"):
+
+```bash
+docker compose ps -q loan-assistant | xargs docker inspect --format '{{.Image}}'
+
+# tree hash, run once on the host and once in the container
+python -c "import hashlib,pathlib; \
+  fs=sorted(p for p in pathlib.Path('services/loan-assistant/app').rglob('*.py') \
+            if '__pycache__' not in p.parts); \
+  h=hashlib.sha256(); [ (h.update(p.name.encode()), h.update(p.read_bytes())) for p in fs ]; \
+  print(h.hexdigest()[:24], len(fs))"
+
+# container side, verbatim -- the same walk over /app/app
+docker compose exec -T loan-assistant python -c "import hashlib,pathlib;   fs=sorted(p for p in pathlib.Path('/app/app').rglob('*.py')             if '__pycache__' not in p.parts);   h=hashlib.sha256(); [ (h.update(p.name.encode()), h.update(p.read_bytes())) for p in fs ];   print(h.hexdigest()[:24], len(fs))"
+
+# requirements.txt, both sides
+sha256sum services/loan-assistant/requirements.txt
+docker compose exec -T loan-assistant sha256sum /app/requirements.txt
+
+git diff --name-only 21a8a13 e69d313
+```
+
+**The run** — from inside the Compose network, synthetic seeded application:
+
+```bash
+docker compose exec gateway python - <<'EOF'
+import httpx
+tok = httpx.post("http://gateway:8000/auth/login",
+                 json={"username": "underwriter", "password": "password"}).json()["token"]
+r = httpx.post("http://gateway:8000/assistant/applications/7354/summary",
+               headers={"Authorization": f"Bearer {tok}"}, timeout=240)
+print(r.status_code, sorted(r.json()))
+EOF
+```
+
+**Trace capture** — a listener on the Compose network, with
+`LANGSMITH_ENDPOINT` pointed at it for `loan-assistant` and `gateway` only, then
+restored to the shipped default afterwards. Every categorical field quoted in
+§3a is read directly from the committed payload; the stage chain is the set of
+`stage` values it contains.
+
+**The negative search** — run over the captured bytes. The subject's values were
+read from the database row for application 7354 and searched for literally;
+the remaining classes were searched as patterns:
+
+```
+name · ssn · dob · address · email · loan_amount        (literal, from the DB row)
+\b7354\b                                                 (application id)
+"(inputs|outputs|messages|prompt|response|completion|content|text)"\s*:
+\b\d{3}-\d{2}-\d{4}\b                                    (SSN shape)
+\b(?:\d[ -]?){13,19}\b                                   (PAN shape)
+(ABSK|lsv2_|Bearer\s+[A-Za-z0-9._-]{20,})                (credentials)
+(AWS_BEARER|SecretAccessKey|aws_secret)                  (credential env names)
+"(income|dti|debt_to_income|annual_income)"\s*:
+(Traceback|botocore|ClientError|ValidationException)     (raw provider errors)
+```
+
+Fourteen classes, none observed. Re-runnable against the committed file.
+
+**Tests** — inside the service image with the repository mounted, which is the
+part that matters:
+
+```bash
+docker run --rm --network meridian-lending_default \
+  -v "$PWD:/repo:ro" -e ENVIRONMENT=test -e MACRO_ENABLED=0 \
+  -e INTERNAL_SERVICE_TOKEN=test-internal-token \
+  -w /repo/services/loan-assistant meridian-lending-loan-assistant:latest \
+  sh -c "pip install -q pytest pytest-asyncio; python -m pytest tests -q -rs"
+# 463 passed, 0 skipped
+```
+
+On a host without `langchain` the same suite reports green with nine agent and
+tracing tests skipped. Run it on the host and the number is meaningless.
+
+**Refusals** — each in a throwaway container so the demo stack was never
+modified. Both need `POLICIES_DIR` set, which `docker-compose.yml` supplies and
+`--env-file .env` does not:
+
+```bash
+# agent disabled
+docker run --rm -d --name la-off --network meridian-lending_default \
+  --env-file .env -e AGENT_ENABLED=false -e POLICIES_DIR=/app/policies \
+  meridian-lending-loan-assistant:latest
+
+# retrieval miss: allowlisted filenames, content that matches nothing
+docker run --rm -d --name la-miss --network meridian-lending_default \
+  --env-file .env -e POLICIES_DIR=/app/policies \
+  -v "$PWD/.tmp/miss-policies:/app/policies:ro" \
+  meridian-lending-loan-assistant:latest
+```
+
+**Dependency snapshot**:
+
+```bash
+docker compose exec -T loan-assistant python -m pip freeze
+docker compose exec -T gateway python -m pip freeze
+```
+
 
 ---
 

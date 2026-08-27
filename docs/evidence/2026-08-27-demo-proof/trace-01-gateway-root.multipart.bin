@@ -1,0 +1,31 @@
+--610dae5ccea142859eaf4e83e82594dd
+Content-Disposition: form-data; name="post.88659dd8-8c8d-41a0-a1ca-040d2be6bbf0"
+Content-Type: application/json
+Content-Length: 311
+
+{"id":"88659dd8-8c8d-41a0-a1ca-040d2be6bbf0","start_time":"2026-08-27T15:36:24.710587+00:00","tags":[],"dotted_order":"20260827T153624710587Z88659dd8-8c8d-41a0-a1ca-040d2be6bbf0","trace_id":"88659dd8-8c8d-41a0-a1ca-040d2be6bbf0","replicas":[],"session_name":"2463-fde","name":"gateway_entry","run_type":"chain"}
+--610dae5ccea142859eaf4e83e82594dd
+Content-Disposition: form-data; name="post.88659dd8-8c8d-41a0-a1ca-040d2be6bbf0.inputs"
+Content-Type: application/json
+Content-Length: 2
+
+{}
+--610dae5ccea142859eaf4e83e82594dd
+Content-Disposition: form-data; name="post.88659dd8-8c8d-41a0-a1ca-040d2be6bbf0.outputs"
+Content-Type: application/json
+Content-Length: 2
+
+{}
+--610dae5ccea142859eaf4e83e82594dd
+Content-Disposition: form-data; name="post.88659dd8-8c8d-41a0-a1ca-040d2be6bbf0.events"
+Content-Type: application/json
+Content-Length: 2
+
+[]
+--610dae5ccea142859eaf4e83e82594dd
+Content-Disposition: form-data; name="post.88659dd8-8c8d-41a0-a1ca-040d2be6bbf0.extra"
+Content-Type: application/json
+Content-Length: 560
+
+{"metadata":{"stage":"gateway_entry","service":"gateway","role":"underwriter","route_class":"agent_summary","tracing_mode":"privacy_safe_categorical","schema_version":"1","LANGSMITH_PROJECT":"2463-fde","LANGSMITH_ENDPOINT":"http://trace-sink:8899","LANGSMITH_TRACING":"true"},"runtime":{"sdk":"langsmith-py","sdk_version":"0.11.1","library":"langsmith","platform":"Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41","runtime":"python","py_implementation":"CPython","runtime_version":"3.12.13","langchain_version":null,"langchain_core_version":null}}
+--610dae5ccea142859eaf4e83e82594dd--
