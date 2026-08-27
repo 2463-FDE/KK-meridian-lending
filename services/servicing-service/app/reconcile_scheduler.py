@@ -90,9 +90,17 @@ def _retry_wait(consecutive_failures: int) -> int:
     the point: an attempt limit that fell back to `INTERVAL_SECONDS` would hide a
     still-broken control for a day, which is the defect this backoff exists to
     remove rather than reschedule.
+
+    **Never longer than the configured interval.** The ladder is written for the
+    daily default, but `RECONCILE_INTERVAL_SECONDS` is overridable so a demo or
+    an integration test can run the control often. At a 30s interval an unclamped
+    ladder would wait 60s and then 300s after a failure -- retrying a control
+    that did NOT run more slowly than a healthy one is scheduled, which inverts
+    the guarantee this backoff exists to make. Clamping keeps the ladder a retry
+    at every configured cadence rather than only at the default one.
     """
     index = min(consecutive_failures, len(RETRY_BACKOFF_SECONDS) - 1)
-    return RETRY_BACKOFF_SECONDS[index]
+    return min(RETRY_BACKOFF_SECONDS[index], INTERVAL_SECONDS)
 
 
 def main(argv=None) -> int:

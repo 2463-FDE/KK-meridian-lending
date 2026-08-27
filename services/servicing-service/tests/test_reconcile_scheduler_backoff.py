@@ -155,12 +155,37 @@ def test_stopping_before_the_wait_ends_the_loop_without_sleeping(waits, monkeypa
     assert recorded == []
 
 
+def test_no_retry_wait_exceeds_the_configured_interval(monkeypatch):
+    """A failed cycle must never be retried more slowly than a healthy one.
+
+    `RECONCILE_INTERVAL_SECONDS` is overridable so a demo or an integration test
+    can run the control often. The ladder is written for the daily default, so at
+    a short interval its later steps would overshoot: at 30s, an unclamped ladder
+    waits 60s and then 300s after a failure -- scheduling a control that did NOT
+    run less often than one that did, which is the opposite of the guarantee.
+    """
+    monkeypatch.setattr(reconcile_scheduler, "INTERVAL_SECONDS", 30)
+
+    waits = [reconcile_scheduler._retry_wait(n) for n in range(8)]
+
+    assert waits == [10, 30, 30, 30, 30, 30, 30, 30]
+    assert max(waits) <= 30
+
+
+@pytest.mark.parametrize("interval", [5, 30, 120, 3600, 86400])
+def test_the_clamp_holds_at_every_plausible_interval(monkeypatch, interval):
+    monkeypatch.setattr(reconcile_scheduler, "INTERVAL_SECONDS", interval)
+
+    for failures in (0, 1, 2, 3, 25, 10_000):
+        assert reconcile_scheduler._retry_wait(failures) <= interval
+
+
 def test_the_ladder_is_ascending_and_bounded():
     ladder = reconcile_scheduler.RETRY_BACKOFF_SECONDS
     assert list(ladder) == sorted(ladder), "a backoff that goes backwards is not a backoff"
     assert ladder[0] > 0
-    assert max(ladder) < reconcile_scheduler.INTERVAL_SECONDS, (
-        "the cap must stay below the normal interval, or the backoff is not a retry"
+    assert reconcile_scheduler._retry_wait(10_000) <= reconcile_scheduler.INTERVAL_SECONDS, (
+        "the cap must stay at or below the normal interval, or the backoff is not a retry"
     )
 
 
