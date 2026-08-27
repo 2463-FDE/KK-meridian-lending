@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.llm_client import LLMCostGuardError, LLMResponseError, LLMTimeoutError
+from tests.conftest import STAFF_HEADERS
 
 client = TestClient(main.app, raise_server_exceptions=False)
 
@@ -121,7 +122,7 @@ def test_summary_refusal_returns_the_readable_detail_not_the_developer_string(mo
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
 
     resp = client.post("/applications/7577/summary",
-                       headers={"X-User-Role": "underwriter"})
+                       headers=STAFF_HEADERS)
 
     # Unconditional: a wrong status is a failure, not a reason to skip.
     assert resp.status_code == 422, f"expected 422, got {resp.status_code}: {resp.text}"

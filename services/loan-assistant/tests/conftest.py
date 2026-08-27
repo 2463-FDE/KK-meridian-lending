@@ -28,7 +28,28 @@ import pytest
 # late for a module already imported by collection.
 os.environ["MACRO_ENABLED"] = "0"
 
+# Same reason, different constant. `app.config` reads INTERNAL_SERVICE_TOKEN
+# into a module-level name at import, and the staff summary route now fails
+# closed on an empty one -- so a suite that set this later would be testing a
+# service whose token can never match, and every summary test would 403 for a
+# reason unrelated to what it asserts.
+os.environ.setdefault("INTERNAL_SERVICE_TOKEN", "test-internal-token")
+
 from app import config, macro  # noqa: E402
+
+#: What the gateway sends to the staff summary route: the resolved role, and
+#: the token that proves the request came through the gateway. Tests that
+#: exercise the route's WORK want this; tests that exercise its AUTHORISATION
+#: build their own headers on purpose.
+STAFF_HEADERS = {
+    "X-User-Role": "underwriter",
+    "X-Internal-Token": os.environ["INTERNAL_SERVICE_TOKEN"],
+}
+
+
+@pytest.fixture
+def staff_headers():
+    return dict(STAFF_HEADERS)
 
 
 def _no_network(*args, **kwargs):

@@ -50,6 +50,7 @@ pytest.importorskip("langsmith")
 pytest.importorskip("langchain")
 
 from app import agent, config, main, policy_tool, trace  # noqa: E402
+from tests.conftest import STAFF_HEADERS
 
 # --- the gateway's real minting code, loaded by path -----------------------
 #
@@ -271,7 +272,7 @@ def _through_the_gateway(extra_headers=None):
 
 
 def _post(client, headers):
-    sent = {"X-User-Role": "underwriter"}
+    sent = dict(STAFF_HEADERS)
     sent.update(headers)
     return client.post("/applications/{}/summary".format(S_APP_ID), headers=sent)
 

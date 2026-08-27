@@ -29,6 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import agent, config, llm_client, main, policy_tool
+from tests.conftest import STAFF_HEADERS
 
 APP_DATA = {
     "id": 90001, "applicant_name": "Test Applicant 90001", "amount": 18000,
@@ -61,7 +62,7 @@ def _raises(exc):
 
 def _summary(client):
     return client.post("/applications/90001/summary",
-                       headers={"X-User-Role": "underwriter"})
+                       headers=STAFF_HEADERS)
 
 
 # --------------------------------------------------------------------------
