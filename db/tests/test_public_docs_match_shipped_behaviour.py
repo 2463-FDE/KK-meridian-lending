@@ -124,7 +124,7 @@ def test_the_readme_does_not_call_a_shipped_service_unstarted():
             assert not re.search(r"assistant|agent", window, re.I), (
                 f"README says {phrase!r} near a mention of the assistant, but "
                 f"services/loan-assistant/ is a live Compose service behind a "
-                f"staff-only gateway route:\n  ...{window.strip()[:260]}...")
+                f"gateway route:\n  ...{window.strip()[:260]}...")
 
 
 def _services_table_rows(text: str) -> set:
@@ -243,3 +243,74 @@ def test_debt_agrees_that_the_maker_checker_row_is_closed():
         "D8 no longer reads as fixed, which is the evidence the roadmap "
         "correction and this test both rest on: "
         f"{status[:160]}")
+
+
+def _handler_body(source: str, decorator: str) -> str:
+    """Everything from a route decorator to the next one.
+
+    String slicing rather than a regex: these handlers carry long comment blocks
+    containing braces and quotes, and every regex attempt either stopped at the
+    first `#` or failed to anchor. The boundary is simple, so the code is too.
+    """
+    start = source.find(decorator)
+    if start < 0:
+        return ""
+    nxt = source.find("\n@app.", start + len(decorator))
+    return source[start:nxt if nxt > 0 else len(source)]
+
+
+def _gateway_source() -> str:
+    return (REPO / "services" / "gateway" / "app" / "main.py").read_text(encoding="utf-8")
+
+
+def test_the_readme_does_not_call_an_open_route_staff_only():
+    """The claim this PR shipped and had to take back.
+
+    Correcting "the assistant has not been started" produced a *new* false
+    sentence in its place: `/assistant` described as a staff-only gateway route.
+    It is two routes with two gates, deliberately.
+
+    `POST /assistant/applications/{id}/summary` returns per-applicant financials
+    and requires a staff session. `POST /assistant/policy-chat` returns generic
+    lending policy, carries no applicant data, and is anonymous-allowed on
+    purpose -- `test_assistant_policy_chat_proxies_anonymously_with_no_session`
+    and `test_assistant_policy_chat_allows_borrower_role` both assert it.
+
+    A truth-keeping change that replaces a stale claim with a false one is worse
+    than what it removed, because it arrives carrying fresh credibility. So the
+    wording is tied to the gateway's own code rather than to anyone's memory.
+    """
+    gateway = _gateway_source()
+
+    summary_body = _handler_body(gateway, '@app.api_route("/assistant/{path:path}"')
+    assert "is_staff" in summary_body, (
+        "the /assistant catch-all no longer applies a staff check; the README "
+        "wording asserted below rests on that check existing")
+
+    chat_body = _handler_body(gateway, '@app.post("/assistant/policy-chat")')
+    assert chat_body, "the /assistant/policy-chat route is gone"
+
+    if "_require_user" in chat_body:
+        pytest.skip("policy-chat now requires a session; README may say staff-only")
+
+    text = README.read_text(encoding="utf-8")
+
+    offenders = []
+    for m in re.finditer(r"staff[- ]only", text, re.I):
+        window = text[max(0, m.start() - 240):m.end() + 240]
+        # A staff-only claim is fine when it is about the summary route. It is
+        # false when it is about the /assistant prefix as a whole.
+        about_summary = "summary" in window.lower()
+        about_prefix = re.search(r"/assistant(?![/\w])", window)
+        if about_prefix and not about_summary:
+            offenders.append(window.strip()[:200])
+
+    assert offenders == [], (
+        "README calls /assistant staff-only, but /assistant/policy-chat is "
+        "anonymous-allowed in the gateway and two gateway tests assert it:\n  "
+        + "\n  ".join(offenders))
+
+    assert re.search(r"policy-chat.{0,160}(anonymous|open to|without an account)",
+                     text, re.I | re.S), (
+        "README does not say /assistant/policy-chat is anonymous-allowed, so a "
+        "reader carries the staff gate across both routes")
