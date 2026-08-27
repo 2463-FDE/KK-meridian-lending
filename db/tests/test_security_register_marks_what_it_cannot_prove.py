@@ -75,14 +75,27 @@ def _sec_rows(section: str) -> dict:
     return rows
 
 
+#: A closed history note inside one status cell. Same narrow shape as the Week 9
+#: guard (PR #107): no `re.S`, cannot cross an emphasis marker or a cell
+#: boundary, and the closing `*` has to actually close something.
+_HISTORY_NOTE = re.compile(r"\*This row read[^*|]*\*(?=\s|$)")
+
+
 def _marked(rows: dict) -> set:
-    """Row ids whose STATUS cell carries the marker.
+    """Row ids whose STATUS cell carries the marker as a LIVE claim.
 
     The status column specifically: the marker means "this row's conclusion is
     not yet runtime-proven", so a mention of the phrase in the What or Evidence
     column is prose about the marker, not the marker itself.
+
+    History notes are stripped first, and that is not a nicety. When SEC-16 was
+    verified and then fixed, its status cell quoted the wording it used to carry
+    -- marker included -- so a plain substring test read the row as still marked
+    and disagreed with a footer that had correctly dropped it. A guard that
+    cannot tell a quotation from a claim reports the fix as the defect.
     """
-    return {rid for rid, cells in rows.items() if _MARKER in cells[2]}
+    return {rid for rid, cells in rows.items()
+            if _MARKER in _HISTORY_NOTE.sub("", cells[2])}
 
 
 def _ids_cited(text: str) -> set:
@@ -140,8 +153,12 @@ def test_the_footer_and_the_table_agree_on_which_rows_are_runtime_bound():
     marked = _marked(rows)
 
     footer = section[section.index("**What NEEDS RUNTIME VERIFICATION means here.**"):]
-    promised, settled = footer.split("The other eight are not marked", 1) \
-        if "The other eight are not marked" in footer else (footer, "")
+    # Split on the sentence, not on the count inside it. The count changes every
+    # time a row is added or a marker comes off, and a split token that goes
+    # stale silently merges the two halves -- comparing the whole footer against
+    # the marked set, which is how this assertion failed on a correct edit.
+    parts = re.split(r"The other \w+ are not marked", footer, maxsplit=1)
+    promised, settled = (parts[0], parts[1]) if len(parts) == 2 else (footer, "")
 
     assert marked, (
         "the footer explains a %s marker that no SEC row's status carries. A "
