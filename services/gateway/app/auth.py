@@ -6,7 +6,15 @@ Subsequent requests present `Authorization: Bearer <token>`; the gateway resolve
 session and forwards the resolved identity downstream as `X-User-*` headers.
 
 Caveats kept on purpose (brownfield): password hashes are unsalted sha256, tokens never
-rotate, and downstream services trust the forwarded `X-User-Role` without re-checking it.
+rotate, and the forwarded `X-User-Role` is still an authorization input downstream.
+
+That third one was written when it was flatly true and no longer is, which is why it now
+says less than it used to. Inbound `x-user-*` headers are stripped here before the pair is
+re-set from the resolved session, every staff-gated route on origination/payment/kyc/
+decision pairs the role with `X-Internal-Token`, and servicing's money routes call the
+headers untrusted hints and verify a gateway-signed Ed25519 principal instead. What is
+left is bounded rather than absent -- `docs/DEBT.md` **SEC-16** states the width, and the
+register is where it is tracked, because a caveat in a docstring is invisible to planning.
 """
 import hashlib
 import json
