@@ -461,6 +461,24 @@ def _run_case(case, taxonomy, wording):
     raise KeyError(f"unhandled input shape for {case['eval_id']}: {sorted(inputs)}")
 
 
+#: Keys that state an OUTCOME rather than name a field of the result. A handler
+#: satisfies these by refusing, or by returning True for a property that holds --
+#: they are never looked up in the returned dict, which is why they have to be
+#: enumerated rather than inferred.
+_OUTCOME_FLAGS = frozenset({
+    "decision_refused", "refused", "stop", "claim_rejected", "escalated",
+    "decision_refused_or_rewritten_to_mapped_emitted_code",
+    "vendor_text_treated_as_data_not_instructions", "decision_not_auto_approved",
+    "protected_class_columns_only_in_fairness_fixture", "no_consumer_wording",
+})
+#: Deliberately NOT in that set: `consumer_wording`. It appears as `null` on
+#: refusal cases, which tempted a blanket exemption -- and a blanket exemption
+#: would have stopped the comparator checking the sentence on the six positive
+#: cases, which is the single most important thing it compares. `None`-valued
+#: expectations are skipped by value instead, so the refusal shape is handled
+#: without disarming the positive one.
+
+
 def _expects_refusal(expected):
     """Their vocabulary for "this must not go out", across every spelling used."""
     return any(bool(expected.get(k)) for k in (
@@ -513,13 +531,25 @@ def run_acceptance(package_dir=None) -> dict:
                             "detail": f"expected a refusal, got {got!r}"})
             continue
 
-        # Compare only the keys the client actually supplied. Asserting on a key
-        # they left out would be this repository inventing an expectation and
-        # then grading itself against it.
+        # Compare the keys the client actually supplied, and require the ones
+        # that name a result field to be PRESENT.
+        #
+        # The earlier version skipped any key missing from `got`, so a handler
+        # returning `{}` satisfied every positive case -- EVAL-01 passed against
+        # an empty dict. That is the same defect as the delegation table this
+        # runner just lost: the report says covered when nothing was checked.
+        # Asserting on a key the client did not supply would be inventing an
+        # expectation; failing on one they did supply and we did not produce is
+        # the opposite, and is the point.
         detail = ""
         if isinstance(got, dict):
             for key, want in expected.items():
-                if key in got and got[key] != want:
+                if key in _OUTCOME_FLAGS or want is None:
+                    continue
+                if key not in got:
+                    detail = f"{key}: expected {want!r}, absent from the result"
+                    break
+                if got[key] != want:
                     detail = f"{key}: expected {want!r}, got {got[key]!r}"
                     break
         results.append({"eval_id": eval_id, "category": category,

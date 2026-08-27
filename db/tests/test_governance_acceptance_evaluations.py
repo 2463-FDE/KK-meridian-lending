@@ -452,3 +452,53 @@ def test_eval_16_the_fairness_overclaim_from_the_case_is_rejected():
     with pytest.raises(gov.ReasonRefused) as exc:
         gov.check_vendor_claim(_case("EVAL-16")["required_inputs"]["claim"])
     assert "production_or_real_world_fairness_claim" in exc.value.refusals
+
+
+def test_a_handler_returning_nothing_does_not_pass(monkeypatch):
+    """MIN-1: the comparator used to skip keys absent from the result.
+
+    A resolver returning `{}` satisfied every positive case, because the loop
+    only compared keys that were already there. EVAL-01 passed against an empty
+    dict. That is the delegation-table defect wearing different clothes -- the
+    report reads covered when nothing was checked -- so it gets the same
+    treatment: a test that fails if the hole reopens.
+    """
+    monkeypatch.setattr(gov, "resolve", lambda *a, **k: {})
+    report = gov.run_acceptance()
+
+    row = next(r for r in report["results"] if r["eval_id"] == "EVAL-01")
+    assert row["status"] == "FAIL", (
+        "a handler that returned no fields was marked pass; the comparator is "
+        "skipping absent keys again")
+    assert "absent from the result" in row["detail"]
+
+
+def test_a_handler_returning_a_wrong_value_still_fails(monkeypatch):
+    """The other half: present but wrong must fail too.
+
+    Asserted separately because a fix for the absent-key case could plausibly
+    be written in a way that only checks presence.
+    """
+    monkeypatch.setattr(gov, "resolve", lambda *a, **k: {
+        "consumer_wording": "Something else entirely.",
+        "approved_wording_id": "W-INC-AMT",
+        "raw_code_retained": "CCUS-INC-AMT"})
+    report = gov.run_acceptance()
+
+    row = next(r for r in report["results"] if r["eval_id"] == "EVAL-01")
+    assert row["status"] == "FAIL"
+    assert "expected" in row["detail"]
+
+
+def test_outcome_flags_are_not_looked_up_as_result_fields():
+    """The exemption must stay narrow.
+
+    `_OUTCOME_FLAGS` is what stops the stricter comparator from demanding
+    `decision_refused` as a dict key on a handler that satisfies it by raising.
+    If something that names a real field is added to that set, the strictness
+    quietly disappears for that field.
+    """
+    field_names = {"consumer_wording", "approved_wording_id", "raw_code_retained"}
+    leaked = (gov._OUTCOME_FLAGS & field_names) - {"consumer_wording"}
+    assert leaked == set(), (
+        f"result fields were exempted from the presence check: {leaked}")
