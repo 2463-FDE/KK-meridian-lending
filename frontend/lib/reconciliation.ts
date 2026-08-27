@@ -17,12 +17,23 @@
  * Three states, because there are three:
  *
  *   - nothing has ever executed;
- *   - runs executed, none matched cleanly;
+ *   - runs executed and recorded breaks;
+ *   - runs executed but recorded no breaks to look at;
  *   - a run matched cleanly.
  *
- * The middle one is where this system actually is, and it is the one the old
- * wording could not say. Note what none of these sentences claims: a break is a
- * disagreement between two records, not a finding about where money went.
+ * The second is where this system actually is, and it is the one the old wording
+ * could not say.
+ *
+ * The third exists because the panel beneath this sentence lists only failures
+ * with `breaks_found > 0` (`page.tsx`'s `brokenRuns`). A run that errored before
+ * it could compare anything has no rows there, so a sentence telling the reader
+ * to "review the transaction-level breaks below" would point at a list the page
+ * renders as "No breaks recorded in the recent runs". Sending someone to an
+ * empty list is the same kind of defect as the wording this file replaced --
+ * confidently describing something that is not there.
+ *
+ * Note what none of these sentences claims: a break is a disagreement between
+ * two records, not a finding about where money went.
  */
 
 export type SuccessfulRun = {
@@ -42,16 +53,20 @@ export type ReconciliationPeek = {
 
 export type ComparisonState =
   | "clean"
-  | "executed_without_a_clean_match"
+  | "executed_with_breaks"
+  | "executed_without_breaks"
   | "never_executed";
 
-/** Which of the three states the peek describes. */
+/** Which of the four states the peek describes. */
 export function comparisonState(peek: ReconciliationPeek): ComparisonState {
   if (peek.last_successful_run) return "clean";
-  if ((peek.recent_failures ?? []).length > 0) {
-    return "executed_without_a_clean_match";
-  }
-  return "never_executed";
+  const failures = peek.recent_failures ?? [];
+  if (failures.length === 0) return "never_executed";
+  // The same predicate `page.tsx` filters the break list with. If it ever stops
+  // agreeing, this sentence starts pointing at rows that are not rendered.
+  return failures.some((r) => r.breaks_found > 0)
+    ? "executed_with_breaks"
+    : "executed_without_breaks";
 }
 
 /**
@@ -70,11 +85,18 @@ export function comparisonStatement(
       const run = peek.last_successful_run as SuccessfulRun;
       return `Last compared ${formatDate(run.at)} across ${run.loans_compared} loans.`;
     }
-    case "executed_without_a_clean_match":
+    case "executed_with_breaks":
       return (
         "No reconciliation run has completed with all records matching. " +
         "The headline totals do not establish agreement; review the " +
         "transaction-level breaks below."
+      );
+    case "executed_without_breaks":
+      // Deliberately does not send the reader below: there is nothing there.
+      return (
+        "No reconciliation run has completed with all records matching, and " +
+        "none recorded any breaks to review. The headline totals do not " +
+        "establish agreement."
       );
     case "never_executed":
       return (

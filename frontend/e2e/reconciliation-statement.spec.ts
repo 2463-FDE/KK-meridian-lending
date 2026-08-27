@@ -44,7 +44,7 @@ test("runs executed and found breaks -- completed, but never matched cleanly", (
     ],
   };
 
-  expect(comparisonState(peek)).toBe("executed_without_a_clean_match");
+  expect(comparisonState(peek)).toBe("executed_with_breaks");
   const text = comparisonStatement(peek, asIs);
   expect(text).toContain("No reconciliation run has completed with all records matching");
   expect(text).toContain("review the transaction-level breaks below");
@@ -85,11 +85,47 @@ test("a missing recent_failures list is treated as nothing having run", () => {
 });
 
 test("an errored run counts as executed, not as never run", () => {
-  // A run that errored did execute. It did not match cleanly either, so it
-  // belongs in the middle state rather than the first.
+  // A run that errored did execute, and it did not match cleanly -- so it is
+  // neither of the outer two states.
   const peek = {
     last_successful_run: null,
     recent_failures: [{ outcome: "error", breaks_found: 0 }],
   };
-  expect(comparisonState(peek)).toBe("executed_without_a_clean_match");
+  expect(comparisonState(peek)).toBe("executed_without_breaks");
+});
+
+test("a run with no breaks recorded does not send the reader to an empty list", () => {
+  // `page.tsx` lists only failures with `breaks_found > 0`. A run that errored
+  // before it could compare anything therefore renders "No breaks recorded in
+  // the recent runs" -- so the sentence above it must not say to review breaks
+  // below. Pointing at an empty list is the same class of defect as the wording
+  // this file replaced.
+  const peek = {
+    last_successful_run: null,
+    recent_failures: [{ outcome: "error", breaks_found: 0 }],
+  };
+
+  expect(comparisonState(peek)).toBe("executed_without_breaks");
+  const text = comparisonStatement(peek, asIs);
+  expect(text).toContain("No reconciliation run has completed with all records matching");
+  expect(text).toContain("none recorded any breaks to review");
+  expect(text).toContain("do not establish agreement");
+  // The regression this case exists for.
+  expect(text).not.toContain("below");
+});
+
+test("one run with breaks among several errored runs still points at the list", () => {
+  // The predicate is "any failure carries breaks", matching what `page.tsx`
+  // filters on -- not "the most recent one does".
+  const peek = {
+    last_successful_run: null,
+    recent_failures: [
+      { outcome: "error", breaks_found: 0 },
+      { outcome: "breach", breaks_found: 12 },
+    ],
+  };
+  expect(comparisonState(peek)).toBe("executed_with_breaks");
+  expect(comparisonStatement(peek, asIs)).toContain(
+    "review the transaction-level breaks below",
+  );
 });
