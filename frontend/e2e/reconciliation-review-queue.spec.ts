@@ -200,11 +200,15 @@ test("breaks and review candidates are separate sections with separate headings"
     expect(candidatesBox && breaksBox).toBeTruthy();
     expect(candidatesBox!.y).toBeLessThan(breaksBox!.y);
 
-    // The break section states whether the comparison has actually run. Two
-    // equal totals with no run behind them is the D7 defect, and the queue must
-    // not re-introduce it by showing the numbers alone.
+    // The break section states what the comparison has actually established.
+    // Two equal totals with nothing behind them is the D7 defect, and the queue
+    // must not re-introduce it by showing the numbers alone. The sentence has
+    // three forms -- a clean match, runs that executed without one, and nothing
+    // having run -- and any of them satisfies this: what is asserted here is
+    // that the panel says something, not which state it is in. The wording of
+    // each is pinned in `reconciliation-statement.spec.ts`.
     await expect(
-      page.getByText(/Last compared|has never completed/i).first(),
+      page.getByText(/Last compared|No reconciliation run has/i).first(),
     ).toBeVisible();
   } finally {
     await cleanUp(seeded);
