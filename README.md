@@ -56,7 +56,7 @@ rather than being fixed.
   Next.js portal  ───────►│   gateway (BFF)      │  :8000
   (apply + servicing)     │   session auth/roles │
                           └─────────┬────────────┘
-                                    │  /auth · /los · /lss · /kyc
+                                    │  /auth · /los · /lss · /kyc · /assistant
                                     │  /decision · /disclosure · /payments
         ┌───────────────────────────┼───────────────────────────┐
         ▼                                                       ▼
@@ -74,6 +74,11 @@ rather than being fixed.
         └──────────────┴──────────────┴───────────┬───────────────┘
                                                    ▼
                       Postgres :5432 (shared)  +   Redis :6379 (sessions)
+
+  loan-assistant :8007   ◄── /assistant  (staff only, gateway-authenticated)
+    LangChain agent · one bounded read-only policy tool over the policy corpus
+    reads applications from origination-service over HTTP
+    NO line to Postgres above, deliberately: it holds no database connection
 ```
 
 Seven of the eight share **one** Postgres database and the same `db/init` schema + seed —
@@ -116,7 +121,8 @@ and a borrower login `maria`.
 | `services/decision-service/` | FastAPI | 8004 | async credit pull + AI scorecard; **compute-only — persists nothing** (origination writes `decisions` and `decision_events`) |
 | `services/disclosure-service/` | FastAPI | 8005 | TILA/Reg-Z offer + APR + amortization |
 | `services/payment-service/` | FastAPI | 8006 | card/ACH charge; posts to servicing via `apply-payment` |
-| `db/` | Postgres init + seed | 5432 | schema, migrations, seed data (shared by all services) |
+| `services/loan-assistant/` | FastAPI + LangChain agent | 8007 | staff-only underwriting summary and policy Q&A; one bounded read-only policy tool; **holds no database connection** — reads applications from origination over HTTP |
+| `db/` | Postgres init + seed | 5432 | schema, migrations, seed data (shared by the seven services that use it) |
 
 ## Compliance
 

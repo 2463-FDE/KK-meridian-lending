@@ -73,13 +73,22 @@ def test_the_service_inventory_is_what_the_readme_says():
     # delivered three backend services, which is true and must keep being
     # sayable -- a test that forced every number in the file to equal today's
     # count would delete the history to satisfy itself.
-    _PAST = re.compile(r"originally|delivered|was |used to|Halcyon|handed over",
+    # Scoped to the SENTENCE, not a character window. A fixed 160-character
+    # lookback let "The platform was decomposed and now runs **seven** backend
+    # services" evade the check, because `was` appeared earlier in a sentence
+    # whose claim is present-tense. Sentence boundaries are what "this clause is
+    # about the past" actually means.
+    _PAST = re.compile(r"\b(originally|delivered|used to|Halcyon|handed over)\b",
                        re.I)
+    _PRESENT = re.compile(r"\b(now runs|currently|today|the platform runs)\b", re.I)
     claims = []
     for word, n in words.items():
         for m in re.finditer(r"\*\*%s\*\* backend services" % word, text):
-            before = text[max(0, m.start() - 160):m.start()]
-            if not _PAST.search(before):
+            start = max(text.rfind(". ", 0, m.start()),
+                        text.rfind("\n\n", 0, m.start())) + 1
+            sentence = text[start:m.end()]
+            historical = _PAST.search(sentence) and not _PRESENT.search(sentence)
+            if not historical:
                 claims.append((word, n))
 
     assert claims, (
@@ -118,15 +127,65 @@ def test_the_readme_does_not_call_a_shipped_service_unstarted():
                 f"staff-only gateway route:\n  ...{window.strip()[:260]}...")
 
 
-def test_the_readme_names_the_assistant_service():
-    """Naming it is what makes the count checkable by a human reader too."""
-    if "loan-assistant" not in backend_services():
-        pytest.skip("loan-assistant is not a service")
+def _services_table_rows(text: str) -> set:
+    """The `services/<name>/` paths listed in README's Services table."""
+    return set(re.findall(r"\|\s*`services/([a-z0-9-]+)/`\s*\|", text))
 
+
+def _architecture_diagram(text: str) -> str:
+    """The fenced block under `## Architecture`."""
+    m = re.search(r"^## Architecture\s*\n+```(.*?)```", text, re.S | re.M)
+    return m.group(1) if m else ""
+
+
+def test_the_services_table_lists_every_service():
+    """The count in prose is not where a reader looks. The table is.
+
+    This is the finding that came back on the first version of this PR: the
+    prose was corrected to eight and the Services table still listed seven,
+    with no `loan-assistant` row. The drift moved rather than closing, and the
+    guard did not catch it because it only asked whether the name appeared
+    *anywhere* -- and it now appeared, in the sentence I had just written.
+
+    Asserting on the table is what makes the number checkable by a human, who
+    counts rows rather than trusting an adjective.
+    """
     text = README.read_text(encoding="utf-8")
-    assert "loan-assistant" in text, (
-        "README does not mention loan-assistant anywhere, so a reader counting "
-        "the services it lists cannot reach the number it claims")
+    listed, actual = _services_table_rows(text), backend_services()
+
+    assert listed == actual, (
+        f"README's Services table lists {sorted(listed)}; the repository has "
+        f"{sorted(actual)}. Missing from the table: {sorted(actual - listed)}. "
+        f"Listed but absent: {sorted(listed - actual)}.")
+
+
+def test_the_architecture_diagram_shows_every_service():
+    """The other place a reader looks, and the one a client screenshots."""
+    diagram = _architecture_diagram(README.read_text(encoding="utf-8"))
+    assert diagram, "README no longer has a fenced Architecture diagram"
+
+    missing = sorted(s for s in backend_services() if s not in diagram)
+    assert missing == [], (
+        f"the architecture diagram omits {missing}. A diagram that denies a "
+        f"service ships is the version of this claim a client actually reads.")
+
+
+def test_the_gateway_routes_in_the_diagram_match_the_gateway():
+    """The diagram's route list is a claim about the gateway, so check it.
+
+    Without this, a service can be drawn in the diagram while the prefix that
+    reaches it is missing from the line above -- which is what happened to
+    `/assistant`.
+    """
+    diagram = _architecture_diagram(README.read_text(encoding="utf-8"))
+    gateway = (REPO / "services" / "gateway" / "app" / "main.py").read_text(encoding="utf-8")
+
+    prefixes = set(re.findall(r'@app\.api_route\("/([a-z-]+)/\{path:path\}"', gateway))
+    missing = sorted(p for p in prefixes if f"/{p}" not in diagram)
+
+    assert missing == [], (
+        f"the gateway proxies {missing} but the diagram's route list does not "
+        f"show them")
 
 
 def test_the_roadmap_does_not_call_maker_checker_unstarted():
@@ -151,6 +210,12 @@ def test_the_roadmap_count_and_its_prose_agree():
 
     The general form of the specific bug: a status total and a sentence about
     the same status, neither aware of the other.
+
+    Known limit, tracked rather than hidden: this only fires when the total is
+    `0`. A roadmap counting `3 Not started` with five items named in prose would
+    pass. Generalising needs a way to tie prose items to matrix rows, which is a
+    bigger change than this PR should carry -- but `0` is the case that actually
+    broke, and the case a finished project ends in.
     """
     live = _live(ROADMAP.read_text(encoding="utf-8"))
     match = re.search(r"(\d+)\s+Not started", live)
