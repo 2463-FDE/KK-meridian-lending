@@ -1032,8 +1032,13 @@ than unblocking one:
 fairness evidence. `db/tests/test_no_runtime_protected_class_proxy.py` fails if
 the screen, the route, or a substitute proxy reappears — including a renamed one,
 because it checks the shape as well as the name. The client's synthetic package
-has not been supplied: `fixtures/offline_fairness_training/` holds the rules and
-the labels it must carry, and nothing else, tracked as `docs/DEBT.md` **D24**.
+arrived on 2026-08-24 and is ingested byte-for-byte at
+`fixtures/offline_fairness_training/client_package_2026-08-24/`, all 34 checksums
+verifying; the offline evaluation it authorises now runs as a CLI and reports
+aggregate counts with **no fairness verdict**, which is what the package permits
+and no more. See `docs/DEBT.md` **D24**. *This paragraph read "The client's
+synthetic package has not been supplied" until 2026-08-27, which was true when
+written.*
 
 What did **not** change: §1's denial-reason contract, the mapping seam, the
 fail-closed unmapped-code behaviour, and the per-`model_version` reason

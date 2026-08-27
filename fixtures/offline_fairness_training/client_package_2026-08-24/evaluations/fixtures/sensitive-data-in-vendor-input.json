@@ -1,0 +1,9 @@
+{
+  "status": "never_approved_input",
+  "fields": [
+    "PAN",
+    "CVV",
+    "SSN",
+    "applicant_name"
+  ]
+}

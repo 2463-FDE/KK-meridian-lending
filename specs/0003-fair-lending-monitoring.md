@@ -53,9 +53,12 @@ per-`model_version` reason distribution. None of them touches a protected class
 or a proxy; the reason distribution groups by model version.
 
 **The client's confirmation request, answered in the repository:** protected-class
-labels are confined to `fixtures/offline_fairness_training/` (not yet supplied —
-`docs/DEBT.md` **D24**), and real, currently approved vendor material must
-replace the synthetic package before any non-training use.
+labels are confined to `fixtures/offline_fairness_training/` — supplied
+2026-08-24 and ingested under `client_package_2026-08-24/`, `docs/DEBT.md`
+**D24** — and real, currently approved vendor material must replace the synthetic
+package before any non-training use. Arrival changes where the labels live, not
+what may be claimed from them: the package is the lowest tier in the client's own
+precedence policy, and no vendor-issued approved document is identified.
 
 ## Context — what exists on `main` today
 

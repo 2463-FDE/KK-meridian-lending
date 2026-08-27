@@ -1,0 +1,122 @@
+[
+  {
+    "approved_wording_id": "W-INC-AMT",
+    "reason_code": "CCUS-INC-AMT",
+    "plain_language_wording": "Income is insufficient for the amount of credit requested.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-INC-OBL",
+    "reason_code": "CCUS-INC-OBL",
+    "plain_language_wording": "Existing credit obligations are excessive in relation to documented income.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-EMP-LEN",
+    "reason_code": "CCUS-EMP-LEN",
+    "plain_language_wording": "Length of current employment is insufficient relative to the requested term.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-EMP-IRR",
+    "reason_code": "CCUS-EMP-IRR",
+    "plain_language_wording": "Employment is temporary or irregular relative to repayment of the requested credit.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-BUR-DLQ",
+    "reason_code": "CCUS-BUR-DLQ",
+    "plain_language_wording": "Delinquent past or present credit obligations with other creditors.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-BUR-THIN",
+    "reason_code": "CCUS-BUR-THIN",
+    "plain_language_wording": "Limited credit experience.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-BUR-NONE",
+    "reason_code": "CCUS-BUR-NONE",
+    "plain_language_wording": "No credit file.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-BUR-INQ",
+    "reason_code": "CCUS-BUR-INQ",
+    "plain_language_wording": "Number of recent inquiries on the credit bureau report.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-BUR-COLL",
+    "reason_code": "CCUS-BUR-COLL",
+    "plain_language_wording": "Collection action or judgment.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-BUR-BNK",
+    "reason_code": "CCUS-BUR-BNK",
+    "plain_language_wording": "Bankruptcy.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-AMT-MAX",
+    "reason_code": "CCUS-AMT-MAX",
+    "plain_language_wording": "Requested amount exceeds the product maximum supported by documented income.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  },
+  {
+    "approved_wording_id": "W-TERM-UNS",
+    "reason_code": "CCUS-TERM-UNS",
+    "plain_language_wording": "Requested term is inconsistent with the product stated term criteria.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "discriminatory_or_proxy_wording": "none",
+    "unsupported_legal_conclusion": "none",
+    "human_review_required": "yes"
+  }
+]

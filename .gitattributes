@@ -8,3 +8,17 @@
 # run by an operator after a deploy, so that failure would land exactly where
 # the script is meant to help.
 *.sh text eol=lf
+
+# The client governance package is provenance, and its SHA256SUMS.txt is only
+# meaningful if the bytes on disk are the bytes the client sent.
+#
+# `core.autocrlf=true` is the Windows default and rewrites LF to CRLF on
+# checkout. These files are LF, so without this rule every checksum in
+# SHA256SUMS.txt would fail in a Windows working tree -- and it would fail
+# quietly, because nothing else in the repository reads them byte-for-byte.
+# `-text` disables all end-of-line conversion in both directions. Diffs stay
+# readable; only the rewriting stops.
+#
+# db/tests/test_client_package_is_byte_preserved.py verifies the checksums
+# against the working tree, so this rule has a test rather than a promise.
+fixtures/offline_fairness_training/client_package_2026-08-24/** -text

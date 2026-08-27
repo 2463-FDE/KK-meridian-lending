@@ -322,11 +322,18 @@ def test_no_source_or_migration_says_zip_exists_for_fairness():
 
 
 def test_the_offline_fixture_location_is_isolated_and_labelled():
-    """The client's package is not in the repository yet.
+    """The client's package arrived on 2026-08-24 and lives here.
 
-    Until it is, the location exists with its rules written down and nothing
-    else -- no invented labels, no invented taxonomy, no evaluator reading a
-    file that does not exist. `docs/DEBT.md` carries the dependency.
+    This test used to assert the opposite -- that the location held its rules
+    and nothing else -- because the package had not been supplied. It has been,
+    so the assertion moves from "nothing is here" to "what is here is labelled",
+    which is the change the previous version of this file asked for by name.
+
+    The labels are not decoration. The client's own README says the packet is
+    not vendor-issued and not production evidence, and their EVAL-15 and EVAL-16
+    refuse a vendor claiming production validation or fairness. A wrapper that
+    dropped those words would be this repository quietly upgrading the package's
+    standing.
     """
     readme = OFFLINE_FIXTURE_DIR / "README.md"
     assert readme.is_file(), (
@@ -340,8 +347,23 @@ def test_the_offline_fixture_location_is_isolated_and_labelled():
             f"the fixture location's README does not carry the {required!r} "
             f"label the client required")
 
-    assert "CLIENT-PROVIDED-FIXTURE-NOT-PRESENT" in text, (
-        "the README does not record that the package has not been supplied")
+    # Asserted on the STATUS line, not on the whole file. The roadmap's house
+    # style keeps superseded wording as a dated history note, and this README
+    # does exactly that -- so a document-wide ban on the old token would fire on
+    # the note recording its own replacement. That is the trap the Week 9 guard
+    # fell into (PR #107); the fix there and here is to scope the assertion to
+    # the claim rather than to the vocabulary.
+    status = next((line for line in text.splitlines()
+                   if line.startswith("**Status:")), "")
+    assert "CLIENT-PACKAGE-RECEIVED-2026-08-24" in status, (
+        f"the README's status line does not record the supplied package: "
+        f"{status!r}. It arrived on 2026-08-24 -- a status that outlives its "
+        f"truth is the defect this file exists to catch")
+    assert "CLIENT-PROVIDED-FIXTURE-NOT-PRESENT" not in status, (
+        "the status line still says the package has not been supplied")
+
+    assert "client_package_2026-08-24" in text, (
+        "the README does not say where the supplied package actually is")
 
 
 def test_no_runtime_code_reads_the_offline_fixture_location():
@@ -361,19 +383,35 @@ def test_no_runtime_code_reads_the_offline_fixture_location():
 def test_the_offline_location_holds_no_fabricated_data():
     """The client supplies the package. This repository must not invent it --
     a fabricated fixture would be exactly the "synthetic package masquerading
-    as vendor material" the client warned against, one step earlier."""
+    as vendor material" the client warned against, one step earlier.
+
+    Now that the package is here, the rule is narrower and stronger: exactly one
+    supplied package directory, plus this repository's own README beside it. A
+    second directory would mean a second version with no precedence rule applied
+    -- the client's `vendor-document-precedence-and-versioning.md` says a later
+    packet replaces this one entirely rather than sitting alongside it.
+
+    Whether the package's *contents* are still the client's bytes is a different
+    question, answered by
+    `db/tests/test_client_package_is_byte_preserved.py`.
+    """
     if not OFFLINE_FIXTURE_DIR.is_dir():
         pytest.skip("the fixture location does not exist yet")
 
+    allowed = {"README.md", "client_package_2026-08-24"}
     unexpected = [p.name for p in OFFLINE_FIXTURE_DIR.iterdir()
-                  if p.name not in {"README.md"}]
-    if unexpected:
-        # Once the client's package lands this test's job changes: it should then
-        # assert the package's own labelling. Failing loudly is the right
-        # behaviour in between.
-        pytest.fail(
-            "files appeared in the offline fixture location: "
-            f"{unexpected}. If this is the client's supplied package, update "
-            "this test to assert its labelling and update docs/DEBT.md's "
-            "CLIENT-PROVIDED-FIXTURE-NOT-PRESENT entry; if it was generated "
-            "here, delete it -- this repository does not author the fixture")
+                  if p.name not in allowed]
+
+    assert unexpected == [], (
+        f"unexpected entries in the offline fixture location: {unexpected}. "
+        "Only the client's supplied package and this repository's README belong "
+        "here. If a newer client packet has arrived, it replaces the existing "
+        "one under its own dated directory and the precedence policy is applied "
+        "-- two packages side by side is the version conflict their EVAL-13 "
+        "refuses. If it was generated here, delete it: this repository does not "
+        "author the fixture.")
+
+    package = OFFLINE_FIXTURE_DIR / "client_package_2026-08-24"
+    assert (package / "SHA256SUMS.txt").is_file(), (
+        "the supplied package has no checksum manifest, so nothing can prove it "
+        "is still what the client sent")
