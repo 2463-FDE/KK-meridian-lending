@@ -5,6 +5,7 @@ import Link from "next/link";
 import RequireRole from "../../components/RequireRole";
 import { apiGet, apiPost } from "../../lib/api";
 import { shortDate } from "../../lib/format";
+import { comparisonStatement } from "../../lib/reconciliation";
 
 /**
  * The in-app reconciliation queue: the ONLY destination for a payment flagged
@@ -417,15 +418,17 @@ function ReconciliationQueue() {
               <span>Settlement total</span>
               <span className="num">${peek.settlement_total}</span>
             </div>
-            <p className="muted">
+            <p className="muted" data-testid="comparison-statement">
               {/* Two equal numbers are not a reconciliation. D7: the totals alone
                   could not distinguish "these agree" from "nothing has checked
-                  since March", so the run is stated beside them. */}
-              {peek.last_successful_run
-                ? `Last compared ${shortDate(peek.last_successful_run.at)} across ${
-                    peek.last_successful_run.loans_compared
-                  } loans.`
-                : "The comparison has never completed, so the two totals above prove nothing."}
+                  since March", so the run is stated beside them.
+
+                  The sentence lives in lib/reconciliation.ts because it has three
+                  branches, not two: `last_successful_run` is null both when
+                  nothing has ever run AND when runs executed and found breaks.
+                  This line used to call the second case "never completed", which
+                  described a working control as one that had never run. */}
+              {comparisonStatement(peek, shortDate)}
             </p>
 
             {brokenRuns.length === 0 ? (
