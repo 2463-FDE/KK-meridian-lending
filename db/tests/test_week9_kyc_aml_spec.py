@@ -495,3 +495,120 @@ def test_the_spec_does_not_claim_regulatory_compliance(spec):
                      r"(?:this|the) (?:spec|design|system) (?:is|ensures) complian",
                      scope, re.I):
             pytest.fail(f"spec 0004 asserts compliance: {scope.strip()[:240]}")
+
+
+# ── the roadmap must not ask for work the spec already delivered ─────────────
+#
+# The guards above check what the spec and ADR SAY. Nothing checked whether the
+# roadmap agrees that they exist -- and it did not: the Week 9 detail table
+# carried `⬜ Open (spec this week, not built)` for three days after
+# `specs/0004` landed, so a reader scanning for open work saw a request for a
+# document that was already on `main`.
+#
+# The awkward part, and the reason this is written the way it is: the roadmap's
+# house style is to record what a cell USED to say (`*This clause read ... *`),
+# and the correction for this row necessarily quotes the stale phrase. A guard
+# that simply banned the phrase would fire on the history note that documents
+# its removal -- the same trap as putting a flagged literal into the comment
+# that explains why it was removed. So the historical quotes are stripped first,
+# exactly as `test_week7_status_is_current.py` and
+# `test_historical_findings_do_not_look_open.py` treat dated findings: preserved
+# as evidence, excluded from live status.
+
+ROADMAP = REPO / "docs" / "ROADMAP.md"
+
+#: The roadmap's marker for "this text used to say something else". Anything
+#: inside one is history, not a live claim.
+_HISTORY_NOTE = re.compile(r"\*This (?:cell|clause|paragraph|row|section) read.*?\*",
+                           re.S)
+
+#: Phrasings that assert the Week 9 spec is still owed.
+_SPEC_STILL_OWED = re.compile(
+    r"spec this week, not built"
+    r"|pending go-ahead to write"
+    r"|spec (?:is )?not (?:yet )?written"
+    r"|no spec (?:exists|yet)",
+    re.I)
+
+
+def _week9_section() -> str:
+    text = ROADMAP.read_text(encoding="utf-8")
+    start = text.index("## Week 9")
+    end = text.index("## Week 10", start)
+    return text[start:end]
+
+
+def _live_text(section: str) -> str:
+    """The section with its historical quotes removed."""
+    return _HISTORY_NOTE.sub("", section)
+
+
+def test_the_roadmap_does_not_claim_the_spec_is_still_owed():
+    """If `specs/0004` exists, no live roadmap text may ask for it.
+
+    Conditional on the spec's existence on purpose: if the spec were ever
+    removed, the roadmap SHOULD go back to saying it is owed, and this test must
+    not stand in the way of that.
+    """
+    if not SPEC.exists():
+        pytest.skip("no spec on disk; the roadmap is entitled to say it is owed")
+
+    live = _live_text(_week9_section())
+    offenders = [m.group(0) for m in _SPEC_STILL_OWED.finditer(live)]
+
+    assert offenders == [], (
+        "specs/0004 is on disk, but the Week 9 roadmap section still describes it "
+        "as unwritten:\n  %s\nA reader scanning for open work is being asked for a "
+        "document that already exists. Historical notes are exempt -- wrap the old "
+        "wording in *This cell read ...* if you are recording what it used to say."
+        % "\n  ".join(offenders))
+
+
+def test_the_history_note_exemption_is_real_and_narrow():
+    """Guard the guard, both ways.
+
+    The exemption is what makes the test above compatible with the roadmap's
+    convention of recording superseded wording. If the stripping were broken the
+    test would fail on its own history note; if it were too broad it would
+    exempt a live claim. Both directions are asserted, because a scope rule that
+    is only checked in one direction is the one that goes quiet.
+    """
+    fenced = "status ok *This cell read `spec this week, not built` until 2026-08-27.*"
+    assert _SPEC_STILL_OWED.search(fenced), "fixture does not contain the phrase"
+    assert not _SPEC_STILL_OWED.search(_live_text(fenced)), (
+        "a historical note was not stripped, so the guard would fire on the very "
+        "note that records the fix")
+
+    live = "⬜ Open (spec this week, not built)"
+    assert _SPEC_STILL_OWED.search(_live_text(live)), (
+        "stripping is too broad -- a live claim survived it")
+
+
+def test_the_week9_row_points_at_the_artifacts_that_exist():
+    """The corrected row must cite the documents, not just drop the stale phrase.
+
+    Dropping the wording without naming what replaced it would leave a reader
+    knowing the row changed and not what is true.
+    """
+    section = _week9_section()
+
+    for cited in ("specs/0004-kyc-aml-ubo-and-sanctions-screening.md",
+                  "adr/0012-sanctions-screening-integration.md"):
+        assert cited in section, "the Week 9 section does not cite %s" % cited
+
+
+def test_the_row_still_says_the_screening_is_not_built():
+    """Correcting the spec's status must not imply the capability shipped.
+
+    This is the failure mode of the fix: a row that stops saying "not built"
+    reads as though sanctions screening exists. It does not -- `sanctions_screened`
+    is still hardcoded `False` -- and D11 is still open.
+    """
+    live = _live_text(_week9_section())
+
+    assert re.search(r"not built|nothing (?:is )?built", live, re.I), (
+        "the Week 9 section no longer states that the screening itself is not "
+        "built, which is the one thing a reader must not be left guessing about")
+    assert "D11" in live or "d11" in live.lower(), (
+        "the Week 9 section no longer points at D11, which is where the "
+        "unimplemented capability is tracked")
