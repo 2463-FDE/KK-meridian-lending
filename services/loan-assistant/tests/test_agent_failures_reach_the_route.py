@@ -663,3 +663,68 @@ def test_f10_construction_and_invocation_stay_distinguishable():
     assert isinstance(from_construct, agent.AgentUnavailable)
     assert isinstance(from_invoke, agent.AgentProviderError)
     assert type(from_construct) is not type(from_invoke)
+
+
+# --------------------------------------------------------------------------
+# The `LLM*Error` half of the same contract, at the same route.
+#
+# The parametrised test above covers the seven `agent.*` refusals. The route
+# also maps four `LLM*Error` classes, and until now this file asserted none of
+# them -- while `docs/presentations/2026-08-25-agentic-client-handoff.md` §3a
+# told a reader that "the mapping ... is asserted by
+# test_agent_failures_reach_the_route.py".
+#
+# Two of the four were asserted elsewhere but against `/policy-chat`
+# (`test_main.py::test_policy_chat_maps_*`), which is a different route with its
+# own handler, and a third was asserted at the summary route only for 422. The
+# one that mattered most was the gap: `LLMResponseError` -> 502 is what a
+# disabled agent returns, and a disabled agent is one of the two refusals the
+# client demonstration shows.
+#
+# The behaviour was correct throughout -- verified against the running route
+# before these were written. What was missing was the assertion, in the file the
+# handoff points at.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("exc, expected", [
+    (llm_client.LLMResponseError("could not parse the model response"), 502),
+    (llm_client.LLMCostGuardError("estimated input tokens exceed the guard"), 400),
+    (llm_client.LLMInsufficientDataError("missing income", detail="No summary."), 422),
+    (llm_client.LLMTimeoutError("the model did not answer in time"), 504),
+])
+def test_an_llm_refusal_renders_as_its_contract(client, monkeypatch, exc, expected):
+    """Same guarantee as the agent refusals, different exception family."""
+    def _raise(app_data):
+        raise exc
+    monkeypatch.setattr(main, "summarize_application", _raise)
+
+    resp = _summary(client)
+
+    assert resp.status_code == expected, (
+        f"{type(exc).__name__} returned {resp.status_code}: {resp.text}")
+    assert resp.json()["detail"] != "internal error", (
+        f"{type(exc).__name__} reached the catch-all")
+
+
+def test_a_disabled_agent_refuses_at_the_route_without_falling_back(client, monkeypatch):
+    """The demonstrated refusal, asserted end to end at the route.
+
+    `test_agent_tool_gate.py` already proves `_summary_text_via_agent` raises
+    when `AGENT_ENABLED` is off. That is the behaviour; this is the contract --
+    what an officer's browser receives, which is what the demonstration shows
+    and what the handoff describes.
+
+    No provider call is possible here: the agent is disabled, which is the point.
+    """
+    monkeypatch.setattr(llm_client.config, "AGENT_ENABLED", False)
+
+    resp = _summary(client)
+
+    assert resp.status_code == 502, (
+        f"a disabled agent returned {resp.status_code}: {resp.text}")
+
+    detail = resp.json()["detail"]
+    assert detail != "internal error", "the disabled agent reached the catch-all"
+    assert "will not fall back" in detail, (
+        "the refusal no longer states the guarantee it exists to make -- that "
+        "the summary path does not degrade to a direct model call")
