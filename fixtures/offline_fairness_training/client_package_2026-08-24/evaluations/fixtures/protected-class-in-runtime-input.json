@@ -1,0 +1,7 @@
+{
+  "status": "never_approved_input",
+  "runtime_payload": {
+    "synthetic_race_ethnicity": "[PROHIBITED_LABEL_REMOVED]"
+  },
+  "note": "Protected-class labels must not appear outside the isolated fairness fixture. The forbidden field is present; the value is a non-class sentinel, not an actual fairness label."
+}

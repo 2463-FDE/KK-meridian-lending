@@ -1,0 +1,134 @@
+[
+  {
+    "reason_code": "CCUS-INC-AMT",
+    "source_data_category": "documented_income",
+    "applicability": "deny_when_income_does_not_support_requested_amount",
+    "approved_wording_id": "W-INC-AMT",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names the income-to-requested-amount factor actually scored."
+  },
+  {
+    "reason_code": "CCUS-INC-OBL",
+    "source_data_category": "existing_obligations",
+    "applicability": "deny_when_existing_obligations_are_excessive_relative_to_income",
+    "approved_wording_id": "W-INC-OBL",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names obligations relative to income, not a generic score."
+  },
+  {
+    "reason_code": "CCUS-EMP-LEN",
+    "source_data_category": "employment_history",
+    "applicability": "deny_when_employment_length_is_insufficient_for_requested_term",
+    "approved_wording_id": "W-EMP-LEN",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names employment length versus requested term."
+  },
+  {
+    "reason_code": "CCUS-EMP-IRR",
+    "source_data_category": "employment_history",
+    "applicability": "deny_when_employment_is_temporary_or_irregular",
+    "approved_wording_id": "W-EMP-IRR",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names employment regularity, not occupancy or a protected basis."
+  },
+  {
+    "reason_code": "CCUS-BUR-DLQ",
+    "source_data_category": "consumer_report",
+    "applicability": "deny_when_report_shows_delinquent_obligations_with_others",
+    "approved_wording_id": "W-BUR-DLQ",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names delinquency on obligations with others."
+  },
+  {
+    "reason_code": "CCUS-BUR-THIN",
+    "source_data_category": "consumer_report",
+    "applicability": "deny_when_credit_experience_is_limited",
+    "approved_wording_id": "W-BUR-THIN",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names limited credit experience as scored from the file."
+  },
+  {
+    "reason_code": "CCUS-BUR-NONE",
+    "source_data_category": "consumer_report",
+    "applicability": "deny_when_no_credit_file_exists",
+    "approved_wording_id": "W-BUR-NONE",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names absence of a credit file."
+  },
+  {
+    "reason_code": "CCUS-BUR-INQ",
+    "source_data_category": "consumer_report",
+    "applicability": "deny_when_recent_inquiry_count_is_a_principal_factor",
+    "approved_wording_id": "W-BUR-INQ",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names recent inquiry count on the report."
+  },
+  {
+    "reason_code": "CCUS-BUR-COLL",
+    "source_data_category": "consumer_report",
+    "applicability": "deny_when_collection_action_or_judgment_is_a_principal_factor",
+    "approved_wording_id": "W-BUR-COLL",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names collection action or judgment."
+  },
+  {
+    "reason_code": "CCUS-BUR-BNK",
+    "source_data_category": "consumer_report",
+    "applicability": "deny_when_bankruptcy_is_a_principal_factor",
+    "approved_wording_id": "W-BUR-BNK",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names bankruptcy as the scored factor."
+  },
+  {
+    "reason_code": "CCUS-AMT-MAX",
+    "source_data_category": "requested_credit",
+    "applicability": "deny_when_requested_amount_exceeds_product_maximum_supported_by_income",
+    "approved_wording_id": "W-AMT-MAX",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names requested amount versus product maximum given income."
+  },
+  {
+    "reason_code": "CCUS-TERM-UNS",
+    "source_data_category": "requested_credit",
+    "applicability": "deny_when_requested_term_is_inconsistent_with_product_criteria",
+    "approved_wording_id": "W-TERM-UNS",
+    "prohibited_generic_wording": "Statements that the action was based on internal standards or policies, that the applicant failed to achieve a qualifying score, or that the model score was too low are insufficient and must be refused.",
+    "version": "CCUS-SYN-2026.08.24",
+    "effective_date": "2026-08-24",
+    "human_review_required": "yes",
+    "specificity_note": "Names requested term versus stated product term criteria."
+  }
+]

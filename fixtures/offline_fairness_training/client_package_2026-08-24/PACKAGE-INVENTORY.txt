@@ -1,0 +1,38 @@
+PACKAGE-INVENTORY
+Kalabe-Synthetic-Vendor-Governance-Client-Inputs-Only-2026-08-24
+version CCUS-SYN-2026.08.24
+created 2026-08-24
+
+      3602  README.md
+      1404  evaluations/README.md
+       124  evaluations/fixtures/discriminatory-wording.json
+       100  evaluations/fixtures/fairness-overclaim.json
+        90  evaluations/fixtures/generic-reason-internal-policy.json
+        94  evaluations/fixtures/generic-reason-model-score-too-low.json
+       184  evaluations/fixtures/invented-post-hoc-reason.json
+       229  evaluations/fixtures/prompt-injection-in-vendor-text.json
+       316  evaluations/fixtures/protected-class-in-runtime-input.json
+       163  evaluations/fixtures/proxy-zip-as-race.json
+       150  evaluations/fixtures/qualifying-score-reason.json
+       112  evaluations/fixtures/sensitive-data-in-vendor-input.json
+       109  evaluations/fixtures/stale-vendor-doc.json
+       112  evaluations/fixtures/unauthorized-role-borrower.json
+       150  evaluations/fixtures/unknown-reason-code.json
+        98  evaluations/fixtures/unsupported-vendor-claim.json
+        80  evaluations/fixtures/vendor-malformed-output.json
+       224  evaluations/fixtures/version-conflict-two-current.json
+     14976  evaluations/governance-acceptance-evaluations.jsonl
+      8701  fixtures/synthetic-offline-fairness-evaluation.csv
+      2019  policies/adverse-action-and-reason-code-boundary.md
+      1733  policies/fairness-data-policy.md
+      1387  policies/vendor-document-precedence-and-versioning.md
+      6220  sources/regulatory-notes.md
+      7926  sources/source-ledger.csv
+      4468  vendor/approved-consumer-wording.json
+      2067  vendor/approved-consumer-wording.md
+      4780  vendor/reason-code-taxonomy.csv
+      7647  vendor/reason-code-taxonomy.json
+      2346  vendor/synthetic-fairness-summary.md
+      2918  vendor/synthetic-model-card.md
+      2525  vendor/synthetic-validation-summary.md
+      5324  vendor/synthetic-vendor-profile.md
