@@ -169,6 +169,174 @@ metadata: {'stage': 'gateway_entry', 'service': 'gateway', 'role': 'underwriter'
 
 ---
 
+## 3a. Mode B re-record at the demonstrated commit — 2026-08-27
+
+Section 3 above records a run at `aa9fc34` and stays exactly as it was. This
+section is a **second, independent run** at the commit that will actually be
+demonstrated. Neither replaces the other, and no number is copied between them.
+
+**Why this section exists.** A direction check on 2026-08-27 made the point that
+the recorded proof was pinned to a commit the branch had moved past. Section 3
+was never dishonest — it names its SHA and offers Mode A/Mode B — but it was
+*under-strength* for the commit being shown. This closes that gap by re-running
+rather than by re-labelling.
+
+### SHA discipline
+
+| | |
+|---|---|
+| **Runtime source SHA** | `21a8a139eb6c04b70d5c5264db25ba545ea3edfb` — the tree the images were built from and the run executed against |
+| **Evidence-packaging commit** | this commit, which adds this section |
+
+Those differ, and saying so is the point. Between them, `main` advanced by
+`e69d313` (#110), which changed `README.md`, `docs/ROADMAP.md` and one test file
+— **no file inside any Docker build context** (`./services/*`, `./frontend`).
+Verified rather than assumed: the running container's `app/main.py` hashes
+`230de01efb3b070e`, byte-identical to the host tree at the demo head. So the
+runtime evidence below holds at the demonstrated commit, and the two SHAs are
+recorded separately instead of being collapsed into one convenient number.
+
+### Build freshness, checked before recording
+
+A `docker compose up` earlier that day **exited 0 while every image build had
+failed** on a corrupted BuildKit snapshot. A build that fails quietly is how a
+stale image gets demonstrated, so freshness was proven three ways rather than
+inferred from an exit code:
+
+1. visible rebuild of the normal demo stack, zero `failed to solve` lines;
+2. `app/main.py` sha256 in the container matched the host byte-for-byte;
+3. a behavioural check — the route signature carries the `X-Internal-Token`
+   parameter added by #108, which did not exist in the previous images.
+
+### The run
+
+Synthetic seeded application **7354**. Not a real person.
+
+| Observation | Value |
+|---|---|
+| Runtime source SHA | `21a8a13` |
+| Captured | 2026-08-27T15:36:21Z |
+| Route | `POST /assistant/applications/7354/summary`, via gateway, staff session (`underwriter`) |
+| Provider | `bedrock` |
+| Model family | `claude` |
+| Region | `us-east-1` |
+| **Model turns** | **2** |
+| **Runtime tool calls** | **3**, `search_underwriting_policy` |
+| Policy evidence | `hit` |
+| Documents | `fee_schedule.md`, `underwriting_guidelines.md` |
+| Document versions | `sha256:1972040e71e5`, `sha256:ead76c59e419` |
+| Citations | 6 chunk ids, each carrying its document's version hash |
+| Validators run | `dti_claim`, `macro_contradiction`, `risk_classification` |
+| Outcome | `summary_returned`, HTTP 200, 13.21s |
+| Step budget | 12 |
+| Tracing mode | `privacy_safe_categorical` |
+
+**This run made 3 tool calls. The run at `aa9fc34` made 2.** That difference is
+the reason this section exists rather than a note adjusting the old one. The
+durable claim is that model and tool execution are *bounded and runtime-observed*
+— the exact count is a property of a run, not of the system, and quoting a fixed
+number as though it were a guarantee is a claim the next run can falsify.
+
+### Privacy-safe trace artifact, captured from this same run
+
+Captured at a **local ingest sink** rather than read back from the hosted
+service, for two reasons: the bytes the service actually posted are what needs
+inspecting, and nothing had to leave the machine or be retrieved with a
+credential. Same code path either way — the exporter posts to whatever
+`LANGSMITH_ENDPOINT` names, through the same allowlist.
+
+20,992 bytes across three payloads. Stage chain observed end to end:
+
+`gateway_entry → request → policy_retrieval → model → agent_run → validation → outcome`
+
+**Fields retained** — categorical and provenance only: `stage`, `service`,
+`status`, `outcome`, `role`, `route_class`, `provider`, `model_family`, `region`,
+`model_turns`, `tool_name`, `tool_calls`, `evidence_status`, `documents`,
+`document_versions`, `citations`, `validators_run`, `refusal_class`,
+`http_status`, `duration_ms`, `step_budget`, `provider_attempt_limit`,
+`tracing_mode`, `schema_version`.
+
+**Inspected for, and not observed in this captured artifact:** the subject's
+name, SSN, DOB, address, email and loan amount (compared against the actual
+database row); the application id; any `inputs` / `outputs` / `messages` /
+`prompt` / `response` / `content` key; SSN- and PAN-shaped strings; bearer
+tokens or API keys; credential environment names; `income` / `dti` keys; raw
+provider or model errors.
+
+**What that supports, and what it does not.** The correct claim is: *this
+captured agent trace contains only the allowlisted categorical and provenance
+fields, and framework content tracing is suppressed on these paths.* It is not
+evidence that all traces everywhere are scrubbed. Trace fidelity here is
+deliberately bounded by the allowlist, not by the framework's default
+full-fidelity capture — the framework would emit far more, and was measured
+doing so before it was turned off.
+
+### Refusal 1 — agent disabled
+
+Exercised in an **isolated container**; the demo stack was not modified.
+
+| | |
+|---|---|
+| Condition | `AGENT_ENABLED=false` |
+| Expected | refusal, and no direct-model fallback |
+| Actual | **HTTP 502** |
+| Body | `AGENT_ENABLED is off -- the underwriting summary runs through the agent runtime and will not fall back to a direct model call.` |
+
+The refusal names the guarantee: the summary path does not degrade to a direct
+call when the agent is unavailable. A second, different variant exists —
+missing agent dependencies or a non-Bedrock provider raise `AgentUnavailable`
+and map to **503** — and the two are not interchangeable.
+
+### Refusal 2 — retrieval miss
+
+| | |
+|---|---|
+| Condition | agent runs; policy corpus present but carrying no matching content |
+| Expected | tool executes, no usable evidence, refusal |
+| Actual | **HTTP 502** |
+| Body | `the agent called search_underwriting_policy but retrieval returned 'miss'; refusing a summary with no policy behind it` |
+| Service log | `policy tool: status=miss hits=0 k=3` |
+| Refusal class | `PolicyEvidenceMissing` |
+
+The log line is the load-bearing part: the tool **ran**. This is a refusal on
+absent evidence, not a refusal to call the tool — a distinction a status code
+alone would not carry.
+
+### Also observed in the same run
+
+A borrower session on the staff summary route was refused **403** at the gateway,
+before the request reached the agent.
+
+### Test evidence, run where it actually runs
+
+`services/loan-assistant` — **463 passed, 0 skipped**, executed inside the
+service image with the repository mounted.
+
+Stated because the obvious way to run it is wrong: on a host without
+`langchain`, nine agent and tracing tests **skip silently** and the suite still
+reports green. A green host run is not evidence for this service.
+
+### Resolved dependency set
+
+Captured from the demo images at the runtime source SHA. Recorded as evidence;
+nothing was upgraded for the demo.
+
+| Package | Version |
+|---|---|
+| `langchain` | 1.3.16 |
+| `langchain-core` | 1.6.0 |
+| `langchain-aws` | 1.7.3 |
+| `boto3` / `botocore` | 1.43.81 |
+| `fastapi` | 0.141.1 |
+| `pydantic` | 2.13.4 |
+| `httpx` | 0.28.1 |
+
+58 packages in `loan-assistant`, 40 in `gateway`. The transitive closure is not
+pinned by a lock file; `docs/DEBT.md` **SEC-11** tracks that, and a CI audit
+count is not evidence of a reachable exploit.
+
+---
+
 ## 4. REAL / FIXTURE / FALLBACK
 
 | Component | Status | What that means here |
