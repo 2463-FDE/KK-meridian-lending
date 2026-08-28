@@ -2,6 +2,7 @@
 import logging
 
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -93,9 +94,33 @@ def _proven_note_rate(loan) -> tuple:
 def list_loans(
     session: Session = Depends(get_session),
     status: str | None = Query(default=None),
+    loan_id: int | None = Query(default=None, ge=1),
+    order: Literal["newest", "oldest"] = Query(default="newest"),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
+    """The serviced portfolio, filtered and ordered by the server.
+
+    **Newest first by default, and `loan_id` filters the whole portfolio.**
+    Both exist because a loan could board correctly and still be unfindable:
+    ids ascend at boarding, the page holds 25, so a freshly boarded loan landed
+    on the last page -- rank 192 of 192 in the case that prompted this -- and the
+    UI's search box filtered only the rows already fetched, so typing the id on
+    page 1 found nothing. The loan was right; the list was the defect.
+
+    Ordering is on `id`, not `opened_at`. `id` is the primary key and is assigned
+    monotonically at boarding, so it is both "most recently boarded" and a total
+    order. `opened_at` is neither: the seeded portfolio holds 10 distinct
+    timestamps across 184 loans, and a non-unique sort key under LIMIT/OFFSET
+    lets rows repeat on one page and vanish from the next.
+
+    `order` is a `Literal`, mapped here to an explicit SQLAlchemy expression --
+    no column or direction ever arrives from the caller as a string.
+
+    Both filters are applied to the count as well as the page, so `total`
+    describes the filtered set the caller is paging through rather than the
+    table.
+    """
     stmt = select(models.Loan, models.Balance).join(
         models.Balance, models.Balance.loan_id == models.Loan.id, isouter=True
     )
@@ -103,8 +128,14 @@ def list_loans(
     if status and status != "all":
         stmt = stmt.where(models.Loan.status == status)
         count_stmt = count_stmt.where(models.Loan.status == status)
+    if loan_id is not None:
+        # An id that does not exist is an empty page, not a 404: this is a list
+        # endpoint answering "which loans match", and none matching is an answer.
+        stmt = stmt.where(models.Loan.id == loan_id)
+        count_stmt = count_stmt.where(models.Loan.id == loan_id)
     total = session.scalar(count_stmt) or 0
-    stmt = stmt.order_by(models.Loan.id).limit(limit).offset(offset)
+    ordering = models.Loan.id.desc() if order == "newest" else models.Loan.id.asc()
+    stmt = stmt.order_by(ordering).limit(limit).offset(offset)
     items = [
         LoanListItem(
             id=loan.id, applicant_name=loan.applicant_name, principal=loan.principal,
