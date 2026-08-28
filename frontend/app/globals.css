@@ -86,6 +86,16 @@ h3 {
   color: var(--muted);
 }
 
+/* Divides one page into named parts -- Approvals uses it to separate what is
+   waiting on you from what has already been decided. Heavier than `.sub` and
+   lighter than `h1`, because it is a boundary inside a page, not a new page. */
+.section-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin: 28px 0 10px;
+}
+
 /* ---- layout shell ------------------------------------------------------- */
 
 .page {
@@ -673,6 +683,15 @@ tbody tr:hover {
   background: #4a2c17;
   color: #f0c9a0;
   font-weight: 700;
+}
+
+/* A resolution that did NOT move money. Deliberately quieter than `.badge`:
+   a rejection is a normal, correct outcome of the control working, and giving
+   it an alarm colour would read as an error the operator has to act on. */
+.badge-muted {
+  background: #2a2f36;
+  color: #9aa4b2;
+  border-color: #3a424c;
 }
 
 .badge-row {

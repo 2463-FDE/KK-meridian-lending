@@ -209,6 +209,50 @@ def queue(limit: int = 50) -> list[dict]:
     ]
 
 
+def resolved(limit: int = 25) -> list[dict]:
+    """Proposals that have been approved or rejected, most recently resolved first.
+
+    The queue above answers "what is waiting on me". This answers the question
+    an operator asked immediately afterwards and could not: "what happened to
+    the one I raised?" A proposal left `queue()` the moment somebody resolved
+    it, and nothing anywhere showed where it went -- so a rejection was
+    indistinguishable from a proposal that had never been saved.
+
+    Every column returned here was already written by `resolve_pending_movement`
+    and has simply never been read by an API. This adds no table and records
+    nothing new; it exposes the evidence the resolution already had to record in
+    order to commit, because `resolution_complete` refuses a partial one.
+
+    `ledger_entry_id` is the load-bearing field. An approval writes a ledger
+    entry and a rejection does not, so the id being present or absent is the
+    account of whether money actually moved -- not a status word that could
+    drift from the ledger. A rejected row carries NULL here, and that is the
+    answer rather than missing data.
+
+    Bounded and ordered by `resolved_at DESC`: this is a recent-history panel,
+    not an audit export. The immutable account of an approved movement is the
+    ledger entry it points at.
+    """
+    rows = db.query(
+        "SELECT id, loan_id, component, amount, entry_type, reason, requested_by, "
+        "       requested_role, requested_at, resolution, resolved_by, resolved_role, "
+        "       resolved_at, ledger_entry_id, resolved_threshold "
+        "  FROM pending_movements WHERE resolution IS NOT NULL "
+        " ORDER BY resolved_at DESC, id DESC LIMIT %s", (limit,),
+    )
+    return [
+        {**row,
+         "amount": float(row["amount"]),
+         # NULL is meaningful on both of these and must survive as null rather
+         # than becoming 0.0: an absent threshold is not a threshold of zero.
+         "resolved_threshold": (None if row["resolved_threshold"] is None
+                                else float(row["resolved_threshold"])),
+         "requested_at": row["requested_at"].isoformat() if row["requested_at"] else None,
+         "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None}
+        for row in rows
+    ]
+
+
 def _authority_for(amount: Decimal, role: str) -> None:
     """May this role resolve a movement of this size? Refuses, or returns."""
     threshold = config.admin_threshold()

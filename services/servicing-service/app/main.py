@@ -433,17 +433,37 @@ def waive_fee(loan_id: int, body: WaiveIn,
 
 
 @app.get("/movements")
-def movement_queue(x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+def movement_queue(state: Literal["pending", "resolved"] = "pending",
+                   x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
                    x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
                    x_principal_assertion: Optional[str] = Header(
                        None, alias="X-Principal-Assertion"),
                    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token")):
-    """The unresolved queue. Visibility is not authority: any staff principal may
-    read it, and reading it approves nothing."""
+    """The maker-checker queue. Visibility is not authority: any staff principal
+    may read it, and reading it approves nothing.
+
+    `state=pending` (the default, and what every existing caller gets) is the
+    unresolved queue. `state=resolved` is the recent history of proposals that
+    have been approved or rejected -- the question an operator has the moment
+    their own proposal leaves the queue and nothing anywhere accounts for it.
+
+    One endpoint with a validated enum rather than a second path. Both answers
+    are the same rows of the same table under different predicates, and they
+    must not drift apart in who may read them: a separate route would be a
+    second place to get the principal check right. The enum is `Literal`, so an
+    unrecognised value is a 422 here and never reaches a WHERE clause.
+
+    Authority is deliberately unchanged. Resolved history is readable by exactly
+    the principals who can already read the pending queue -- it is the same
+    proposals, and hiding what happened to them from the people who could see
+    them waiting would protect nothing.
+    """
     _require_internal(x_internal_token)
     principal.require_staff_principal(
         x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
     )
+    if state == "resolved":
+        return {"movements": maker_checker.resolved()}
     return {"movements": maker_checker.queue()}
 
 

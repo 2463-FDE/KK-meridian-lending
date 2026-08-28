@@ -69,6 +69,7 @@
 | `POST /accounts/{loan_id}/adjust-balance` | Raises an adjustment **proposal**. Returns 202. Moves nothing | Any verified staff principal |
 | `POST /accounts/{loan_id}/waive-fee` | Raises a fee-waiver **proposal**. Returns 202. Moves nothing | Any verified staff principal |
 | `POST /movements/{id}/resolve` | Approves or rejects. An approval writes exactly one ledger entry | A **different** principal: underwriter or admin at or below the configured threshold, admin above it, never a csr |
+| `GET /movements` | Reads the queue. `state=pending` (default) is what is waiting; `state=resolved` is the recent history of decided proposals, each carrying who resolved it, the threshold it was judged against, and the `ledger_entry_id` an approval produced — null on a rejection, which moved no money | Any verified staff principal, csr included: **visibility is not authority**, and reading it resolves nothing |
 
 *What this section said before, because the difference is the work:* it described
 both endpoints as moving money on the say-so of "any caller holding the internal
