@@ -39,6 +39,15 @@ const STATUS_OPTIONS = [
   { value: "paid_off", label: "Paid off" },
 ];
 
+// Newest first by default. A loan boards with the highest id, so oldest-first
+// put a freshly boarded loan on the last page -- and the search box used to
+// filter only the rows already fetched, so typing its id on page 1 found
+// nothing. Both halves are now the server's job.
+const ORDER_OPTIONS = [
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
+];
+
 export default function ServicingPage() {
   return (
     <RequireRole allow={["csr", "underwriter", "admin"]}>
@@ -49,7 +58,13 @@ export default function ServicingPage() {
 
 function ServicingContent() {
   const [status, setStatus] = useState("");
-  const [search, setSearch] = useState("");
+  const [order, setOrder] = useState("newest");
+  // What is typed, and what has actually been searched for. Keeping them apart
+  // is what stops the table changing under the operator as they type -- and it
+  // is what lets the empty state name the id that was looked for rather than
+  // whatever happens to be in the box now.
+  const [loanIdInput, setLoanIdInput] = useState("");
+  const [appliedLoanId, setAppliedLoanId] = useState("");
   const [offset, setOffset] = useState(0);
 
   const [data, setData] = useState<LoansResponse | null>(null);
@@ -63,8 +78,12 @@ function ServicingContent() {
       const params = new URLSearchParams({
         limit: String(PAGE_SIZE),
         offset: String(offset),
+        order,
       });
       if (status) params.set("status", status);
+      // Server-side: an id is looked up across the whole portfolio, not among
+      // the 25 rows this page happens to hold.
+      if (appliedLoanId) params.set("loan_id", appliedLoanId);
       const res = (await apiGet(`/lss/loans?${params.toString()}`)) as LoansResponse;
       setData(res);
     } catch (err) {
@@ -79,7 +98,7 @@ function ServicingContent() {
     } finally {
       setLoading(false);
     }
-  }, [status, offset]);
+  }, [status, offset, order, appliedLoanId]);
 
   useEffect(() => {
     load();
@@ -88,12 +107,25 @@ function ServicingContent() {
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
 
-  // Client-side loan-id search filter on top of the server page.
-  const visible = search.trim()
-    ? items.filter((l) =>
-        String(l.id).toLowerCase().includes(search.trim().toLowerCase())
-      )
-    : items;
+  // No client-side filtering. The loan-id lookup is a server query so it reaches
+  // the whole portfolio; filtering here would only ever search the rows already
+  // fetched, which is the defect this replaced.
+  const visible = items;
+
+  const filtersActive = Boolean(status || appliedLoanId || order !== "newest");
+
+  function runSearch() {
+    setOffset(0);
+    setAppliedLoanId(loanIdInput.trim());
+  }
+
+  function clearFilters() {
+    setOffset(0);
+    setStatus("");
+    setOrder("newest");
+    setLoanIdInput("");
+    setAppliedLoanId("");
+  }
 
   // KPI summary derived from the current page of loans.
   const portfolioBalance = items.reduce((sum, l) => sum + (l.balance || 0), 0);
@@ -158,13 +190,45 @@ function ServicingContent() {
           </select>
         </div>
         <div className="field">
-          <label>Search loan ID</label>
+          <label htmlFor="loan-id-search">Loan ID</label>
           <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            id="loan-id-search"
+            inputMode="numeric"
+            value={loanIdInput}
+            onChange={(e) => setLoanIdInput(e.target.value.replace(/[^0-9]/g, ""))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runSearch();
+            }}
             placeholder="e.g. 4471"
           />
         </div>
+        <div className="field">
+          <label htmlFor="loan-order">Sort</label>
+          <select
+            id="loan-order"
+            value={order}
+            onChange={(e) => {
+              setOffset(0);
+              setOrder(e.target.value);
+            }}
+          >
+            {ORDER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button className="btn-ghost" onClick={runSearch} disabled={loading}>
+          Search
+        </button>
+        <button
+          className="btn-ghost"
+          onClick={clearFilters}
+          disabled={loading || !filtersActive}
+        >
+          Clear
+        </button>
         <button className="btn-ghost" onClick={load} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
         </button>
@@ -203,10 +267,30 @@ function ServicingContent() {
               </tr>
             ) : visible.length === 0 ? (
               <tr>
-                <td colSpan={9} className="empty">
-                  {error
-                    ? "Unable to load loans."
-                    : "No loans match your filters."}
+                <td colSpan={9} className="empty" data-testid="servicing-empty">
+                  {error ? (
+                    "Unable to load loans."
+                  ) : appliedLoanId ? (
+                    <>
+                      {/* Name the id that was searched for. "No loans match your
+                          filters" left an operator unsure whether the loan is
+                          absent or the filters are hiding it. */}
+                      No serviced loan #{appliedLoanId} matches the current
+                      filters.{" "}
+                      <button className="btn-link" onClick={clearFilters}>
+                        Clear filters
+                      </button>
+                    </>
+                  ) : filtersActive ? (
+                    <>
+                      No loans match the current filters.{" "}
+                      <button className="btn-link" onClick={clearFilters}>
+                        Clear filters
+                      </button>
+                    </>
+                  ) : (
+                    "No loans are being serviced yet."
+                  )}
                 </td>
               </tr>
             ) : (
