@@ -44,21 +44,60 @@ LEGACY_DIRECT_WRITERS = frozenset({"apply_payment", "adjust_balance", "waive_fee
 APP_ROOTS = sorted(pathlib.Path(__file__).resolve().parents[3].glob("services/*/app"))
 
 
+def _dotted(node: ast.AST) -> str | None:
+    """`b` -> "b"; `app.balance` -> "app.balance". None for anything else."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        head = _dotted(node.value)
+        return f"{head}.{node.attr}" if head else None
+    return None
+
+
+def _balance_aliases(tree: ast.AST) -> set[str]:
+    """Every name in this module that refers to the balance module.
+
+    Binding it to another name does not make it a different module, so the
+    matcher cannot key on the literal identifier `balance`. Found in review:
+    `from . import balance as b` followed by `b.waive_fee(...)` passed a guard
+    that only looked for `balance.waive_fee`.
+
+    Covers `from . import balance [as b]`, `from app import balance [as b]`, and
+    `import app.balance as b`. Plain `import app.balance` binds `app` and is
+    called as `app.balance.waive_fee`, which the dotted form below admits
+    directly rather than through an alias.
+    """
+    aliases = {"balance"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "balance":
+                    aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "balance" or alias.name.endswith(".balance"):
+                    aliases.add(alias.asname or alias.name)
+    return aliases
+
+
 def _call_sites(path: pathlib.Path) -> list[tuple[int, str]]:
     """Places this module reaches a legacy writer THROUGH the balance module.
 
-    Matched on attribute access (`balance.waive_fee`) and on a direct import
-    (`from .balance import waive_fee`). A bare `def waive_fee(...)` is not a
-    call site, which matters here: `main.py`'s route handlers are named after
+    Matched on attribute access against any name bound to the balance module
+    (`balance.waive_fee`, `b.waive_fee`, `app.balance.waive_fee`) and on a direct
+    import (`from .balance import waive_fee`). A bare `def waive_fee(...)` is not
+    a call site, which matters here: `main.py`'s route handlers are named after
     the operations they expose, so the HTTP handler `def waive_fee` sits a few
     lines from a `maker_checker.propose` call and must not be mistaken for one.
     """
     tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), filename=str(path))
+    aliases = _balance_aliases(tree)
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in LEGACY_DIRECT_WRITERS:
-            if isinstance(node.value, ast.Name) and node.value.id == "balance":
-                found.append((node.lineno, f"balance.{node.attr}"))
+            receiver = _dotted(node.value)
+            if receiver and (receiver in aliases or receiver.endswith(".balance")):
+                found.append((node.lineno, f"{receiver}.{node.attr}"))
         elif isinstance(node, ast.ImportFrom) and (node.module or "").endswith("balance"):
             # `from .balance import waive_fee` keeps its dots in `level`, not in
             # `module`, so the module name alone would render the import as an
@@ -140,6 +179,56 @@ def test_the_guard_would_notice_a_call(tmp_path):
     importer = tmp_path / "importer.py"
     importer.write_text("from .balance import waive_fee\n", encoding="utf-8")
     assert _call_sites(importer) == [(1, "from .balance import waive_fee")]
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        (
+            "from . import balance as b\ndef f(x):\n    return b.waive_fee(x, 1.0)\n",
+            [(3, "b.waive_fee")],
+        ),
+        (
+            "from app import balance as bal\ndef f(x):\n    return bal.adjust_balance(x, 0.0)\n",
+            [(3, "bal.adjust_balance")],
+        ),
+        (
+            "import app.balance as b\ndef f(x):\n    return b.apply_payment(x, 1.0)\n",
+            [(3, "b.apply_payment")],
+        ),
+        (
+            "import app.balance\ndef f(x):\n    return app.balance.waive_fee(x, 1.0)\n",
+            [(3, "app.balance.waive_fee")],
+        ),
+    ],
+)
+def test_an_aliased_balance_module_is_still_the_balance_module(tmp_path, source, expected):
+    """Binding the module to another name does not make it another module.
+
+    Found in review: the matcher keyed on the literal identifier `balance`, so
+    `from . import balance as b` then `b.waive_fee(...)` passed. All four forms
+    below were confirmed to slip through before this case was added.
+    """
+    module = tmp_path / "aliased.py"
+    module.write_text(source, encoding="utf-8")
+    assert _call_sites(module) == expected
+
+
+def test_an_unrelated_module_with_the_same_method_name_is_not_flagged(tmp_path):
+    """`ledger.waive_fee(...)` is not the balance module.
+
+    Widening the matcher to aliases must not widen it to every object that
+    happens to expose one of these names -- that would make the guard fire on
+    code it has no business failing.
+    """
+    module = tmp_path / "unrelated.py"
+    module.write_text(
+        "from . import ledger\n"
+        "def f(x):\n"
+        "    return ledger.waive_fee(x, 1.0)\n",
+        encoding="utf-8",
+    )
+    assert _call_sites(module) == []
 
 
 def test_a_route_handler_named_after_the_operation_is_not_a_call_site(tmp_path):
