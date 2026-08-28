@@ -4,8 +4,25 @@ export default function Home() {
   return (
     <main className="wrap">
       <section className="hero">
+        {/* Inherited from the Halcyon baseline (frontend/app/page.tsx, 2023-11).
+            These three strings are the platform over-claiming its compliance
+            posture -- kept because that over-claim is the artifact, and labelled
+            because an unlabelled one reads as Meridian's own current assertion.
+
+            README.md: "Treat any prior claim of PCI-DSS compliance for this
+            codebase as false", and SOX/ECOA process claims beyond the decision
+            audit trail are unverified. ARCHITECTURE.md: nothing here asserts
+            regulatory compliance. docs/presentations/2026-08-25-agentic-client-
+            handoff.md lists 'PCI compliant' under "Claims we must NOT make".
+
+            The invariant, pinned by frontend/e2e/inherited-compliance-claims.spec.ts:
+            if the claims are shown, the qualifier is shown with them. Removing
+            the claims entirely is a valid future remediation and the test allows
+            it -- what it forbids is showing them bare. See docs/DEBT.md D25. */}
         <div className="badge-row" style={{ marginBottom: 16 }}>
-          {/* Texture: the platform over-claims its compliance posture. */}
+          <span className="badge badge-inherited" data-testid="inherited-claims-qualifier">
+            Inherited vendor claims &mdash; not verified by Meridian
+          </span>
           <span className="badge">SOX-controlled</span>
           <span className="badge">PCI compliant</span>
           <span className="badge">ECOA / Reg B</span>

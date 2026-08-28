@@ -648,6 +648,16 @@ tbody tr:hover {
   color: #9cc2ff;
   border: 1px solid #2b4d78;
 }
+/* The qualifier that has to travel with the inherited compliance claims beside
+   it. Deliberately not styled to blend in: it is doing the opposite job to the
+   badges it sits next to, and a reader who takes in only one of the four should
+   take in this one. */
+.badge-inherited {
+  background: #4a2c17;
+  color: #f0c9a0;
+  font-weight: 700;
+}
+
 .badge-row {
   display: flex;
   flex-wrap: wrap;
