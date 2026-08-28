@@ -26,25 +26,45 @@ repeatable. These tests are.
   error if this is unset (see `fixtures.ts::dbClient`).
 
   This paragraph used to say the connection was "used read-only ... never
-  written to by these tests". That was false for seven spec files, and the
+  written to by these tests". That was false for **nine** spec files, and the
   correction matters because a reader who trusts it draws the wrong conclusion
-  when the suite behaves as though state carried over -- which it does. What
-  writes, and what it writes:
+  when the suite behaves as though state carried over -- which it does.
+
+  Rather than trust this list, re-derive it:
+
+  ```
+  grep -rnoE '(INSERT INTO|UPDATE|DELETE FROM) [a-z_]+' frontend/e2e/*.ts
+  ```
+
+  As of this commit that is:
 
   | Spec | Writes |
   |---|---|
   | `fee-waiver-clarity` | `INSERT ledger_entries` (a `fee_assessed` entry) |
+  | `servicing-raises-a-proposal` | `INSERT ledger_entries` |
   | `approval-queue-self-approval` | `INSERT pending_movements` |
-  | `payment-allocation` | `INSERT`/`DELETE payments` |
-  | `reconciliation-review-queue` | `INSERT`/`DELETE payments`, `reconciliation_review_items` |
+  | `payment-allocation` | `INSERT` / `DELETE payments` |
+  | `reconciliation-review-queue` | `INSERT` / `DELETE payments`, `reconciliation_review_items` |
   | `amount-financed-breakdown` | `UPDATE offers` |
   | `offer-disclosure-ui` | `UPDATE offers` |
+  | `regeneration-reprices-the-offer` | `UPDATE offers` |
   | `reconstructed-schedule-warning` | `UPDATE loans` |
 
-  Most of that is set up and torn down within a test. The ledger entry is not:
-  `ledger_entries` is append-only, so `fee-waiver-clarity` consumes a loan per
-  test from a reserved band and cannot give it back. Repeated local runs against
-  one database eventually exhaust the band and the spec says
+  (The grep also matches `UPDATE balances` in `fee-waiver-clarity` -- that one is
+  prose in its docstring describing what the fixture used to do, not code. PR
+  #113 removed the direct write to the projection.)
+
+  A first version of this table said "seven" and omitted
+  `servicing-raises-a-proposal` and `regeneration-reprices-the-offer`, because
+  the command it came from was truncated with `head`. An inventory presented as
+  complete and quietly missing entries is the same wrong-model failure this
+  section exists to remove, which is why the command is given above.
+
+  **Two of those writes are append-only and cannot be undone**, both
+  `ledger_entries` inserts. Everything else is set up and torn down within a
+  test. That is why `fee-waiver-clarity` consumes a loan per test from a
+  reserved band rather than restoring one: repeated local runs against a single
+  database eventually exhaust the band and the spec says
   `no untouched serviced loan left in the reserved band -- reseed the database`.
   Reseed with `docker compose down -v` and start the stack again. Tracked as
   **RF-27** in [`docs/DEBT.md`](../../docs/DEBT.md); CI is unaffected because
