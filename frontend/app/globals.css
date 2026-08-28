@@ -227,21 +227,7 @@ h3 {
 
 /* "Log out" is one action. It was rendering as "Log / out". Secondary by weight
    -- it stays a ghost button rather than becoming a primary action. */
-.appbar-auth /* An inline action inside prose -- used by the servicing empty state, where
-   "Clear filters" has to read as part of the sentence rather than as a control
-   competing with the toolbar above it. */
-.btn-link {
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  color: var(--accent);
-  text-decoration: underline;
-  cursor: pointer;
-}
-.btn-link:hover { filter: brightness(1.2); }
-
-.btn-ghost {
+.appbar-auth .btn-ghost {
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -537,6 +523,23 @@ button:disabled {
   background: var(--panel);
   border-color: var(--accent);
 }
+/* An inline action inside prose -- used by the servicing empty state, where
+   "Clear filters" has to read as part of the sentence rather than as a control
+   competing with the toolbar above it. Top-level on purpose: an earlier version
+   of this rule was inserted between `.appbar-auth` and `.btn-ghost`, which both
+   scoped it to the header AND destroyed the header's own ghost-button rule by
+   splitting that selector in two. */
+.btn-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.btn-link:hover { filter: brightness(1.2); }
+
 .btn-danger {
   background: var(--red);
 }
