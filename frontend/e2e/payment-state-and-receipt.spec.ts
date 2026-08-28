@@ -214,6 +214,16 @@ test("a pending payment claims nothing, and keeps the same idempotency key", asy
   await expect(pending).toBeVisible({ timeout: 30_000 });
   await expect(pending).toContainText(/not yet confirmed/i);
   await expect(pending).toContainText(/will not charge you twice/i);
+  // The heading has to say WHICH half is outstanding. Two things can be
+  // unresolved after a card is presented -- the charge, and its application to
+  // the loan -- and only the second is. A reader who took "pending" to mean the
+  // card had not gone through would try again on a new key and authorise a
+  // second charge.
+  await expect(pending).toContainText(/captured/i);
+  await expect(pending).toContainText(/allocation pending/i);
+  // No estimated split may appear while the allocation is unknown: null is not
+  // zero, and three zeros here would be a guess wearing the shape of a receipt.
+  await expect(page.getByTestId("payment-receipt-split")).toHaveCount(0);
 
   // No receipt, no posted claim, no split.
   await expect(page.getByTestId("payment-posted")).toHaveCount(0);

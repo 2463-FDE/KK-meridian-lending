@@ -66,9 +66,19 @@ export default function PaymentOutcome({
   if (result.status === "pending") {
     return (
       <div className="alert" data-testid="payment-pending">
-        <strong>Payment pending.</strong> The payment processor has confirmed the
-        transaction, but Meridian has not yet confirmed that it has been applied
-        to this loan. The balance below has not changed yet.{" "}
+        {/* "Captured", not "pending", is the first word on purpose. Two
+            different things can be outstanding after a card is presented: the
+            CHARGE, and the APPLICATION of that charge to the loan. Only the
+            second is unresolved here, and "Payment pending" left a reader to
+            guess which -- someone reading it as "the card has not gone through"
+            would reasonably try again on a new key and authorise a second
+            charge. The heading now says which half is settled. */}
+        <strong>Captured — allocation pending.</strong> The payment processor has
+        confirmed the transaction, but Meridian has not yet confirmed that it has
+        been applied to this loan, so no allocation is shown — an allocation is
+        read from ledger evidence that does not exist yet, and estimating one
+        here would be a guess presented as a receipt. The balance below has not
+        changed yet.{" "}
         <strong>
           Use &ldquo;Pay with card on file&rdquo; again to check on this same
           payment
