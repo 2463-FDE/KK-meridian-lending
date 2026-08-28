@@ -19,10 +19,36 @@ repeatable. These tests are.
 ## Required environment variables
 
 - `DATABASE_URL` -- required. Same Postgres the backend services use.
-  Used read-only, only to assert test invariants ("exactly one
-  application/decision/offer/loan") -- never written to by these tests.
-  No default is committed; the suite fails fast with a clear error if this
-  is unset (see `fixtures.ts::dbClient`).
+  Mostly used to assert test invariants ("exactly one
+  application/decision/offer/loan"), but **the suite also writes fixture
+  state** through this connection. Point it at a database you are willing to
+  have modified. No default is committed; the suite fails fast with a clear
+  error if this is unset (see `fixtures.ts::dbClient`).
+
+  This paragraph used to say the connection was "used read-only ... never
+  written to by these tests". That was false for seven spec files, and the
+  correction matters because a reader who trusts it draws the wrong conclusion
+  when the suite behaves as though state carried over -- which it does. What
+  writes, and what it writes:
+
+  | Spec | Writes |
+  |---|---|
+  | `fee-waiver-clarity` | `INSERT ledger_entries` (a `fee_assessed` entry) |
+  | `approval-queue-self-approval` | `INSERT pending_movements` |
+  | `payment-allocation` | `INSERT`/`DELETE payments` |
+  | `reconciliation-review-queue` | `INSERT`/`DELETE payments`, `reconciliation_review_items` |
+  | `amount-financed-breakdown` | `UPDATE offers` |
+  | `offer-disclosure-ui` | `UPDATE offers` |
+  | `reconstructed-schedule-warning` | `UPDATE loans` |
+
+  Most of that is set up and torn down within a test. The ledger entry is not:
+  `ledger_entries` is append-only, so `fee-waiver-clarity` consumes a loan per
+  test from a reserved band and cannot give it back. Repeated local runs against
+  one database eventually exhaust the band and the spec says
+  `no untouched serviced loan left in the reserved band -- reseed the database`.
+  Reseed with `docker compose down -v` and start the stack again. Tracked as
+  **RF-27** in [`docs/DEBT.md`](../../docs/DEBT.md); CI is unaffected because
+  every run starts from a fresh volume.
 - `E2E_BASE_URL` -- optional, defaults to `http://localhost:3000`
   (the frontend's own dev/prod server).
 
