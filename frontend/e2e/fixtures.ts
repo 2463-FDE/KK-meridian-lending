@@ -144,9 +144,17 @@ export async function getDecision(page: Page): Promise<void> {
   await expect(page.getByText("Underwriting decision")).toBeVisible({ timeout: 15_000 });
 }
 
-/** Postgres, read-only, used only to verify test invariants (never used by
- * application runtime code). Connects using the same DATABASE_URL the
- * backend services use -- required, not defaulted to a real credential. */
+/** Postgres, used to verify test invariants AND to write fixture state (never
+ * used by application runtime code). Connects using the same DATABASE_URL the
+ * backend services use -- required, not defaulted to a real credential.
+ *
+ * This said "read-only, used only to verify test invariants" and was wrong:
+ * nine spec files write through this client. It mattered more than the wording
+ * suggests, because README.md points a reader here for the DATABASE_URL
+ * contract -- so the one sentence that reasserted the false claim was the last
+ * hop of the trail. See e2e/README.md for what writes what, and RF-27 in
+ * docs/DEBT.md for the append-only consequence: a `ledger_entries` insert
+ * cannot be undone, so `fee-waiver-clarity` consumes a loan per test. */
 export function dbClient(): Client {
   const url = process.env.DATABASE_URL;
   if (!url) {

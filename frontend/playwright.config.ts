@@ -10,7 +10,12 @@ import { defineConfig, devices } from "@playwright/test";
  *   E2E_BASE_URL   - the running frontend, default http://localhost:3000
  *   DATABASE_URL   - same Postgres the backend uses, for the DB-state
  *                    assertions ("exactly one application/decision/offer/
- *                    loan") -- e2e/db.ts reads this directly, read-only.
+ *                    loan") AND for fixture setup, which WRITES. This said
+ *                    "read-only" and was wrong for seven spec files; see
+ *                    e2e/README.md for what writes what. Point it at a
+ *                    database you are willing to have modified.
+ *                    `fee-waiver-clarity` writes an append-only ledger entry
+ *                    it cannot undo, so it consumes a loan per test -- RF-27.
  *
  * Local command: `npm run test:e2e` (frontend, gateway, and the full
  * backend stack + Postgres must already be running -- see
