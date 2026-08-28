@@ -38,6 +38,11 @@ import { test, expect } from "@playwright/test";
  *      matched leaf text exactly, so `<p>Our payment flows are PCI
  *      compliant.</p>` still passed. Found in review as ML-CLAIMS-02, twice.
  *
+ * Matching is case- and spacing-insensitive. A claim does not stop being the
+ * claim when it is typed differently: "pci compliant" and "ECOA/Reg B" assert
+ * exactly what the badges do, and a case-sensitive guard let both back onto the
+ * page with the suite green (ML-CLAIMS-02 residual, round 3).
+ *
  * Note what property 2 costs: prose that MENTIONS a claim in order to deny it
  * needs the qualifier in its container too. That is deliberate. A reader
  * scanning the page sees the claim either way, and the alternative -- guessing
@@ -73,17 +78,27 @@ async function auditClaims(page: import("@playwright/test").Page): Promise<Claim
     ({ claims, qualifierSelector }) => {
       const root = document.querySelector("main") ?? document.body;
       const qualifier = root.querySelector(qualifierSelector);
-      const normalise = (s: string | null) => (s ?? "").replace(/\s+/g, " ").trim();
+      // Case- and spacing-insensitive, because a claim does not stop being the
+      // claim when it is typed differently. "pci compliant" and "ECOA/Reg B"
+      // are the same assertions as the badge text, and a case-sensitive guard
+      // let both back onto the page with the suite green.
+      const normalise = (s: string | null) =>
+        (s ?? "")
+          .toLowerCase()
+          .replace(/\s*\/\s*/g, "/")
+          .replace(/\s+/g, " ")
+          .trim();
       const found: string[] = [];
       const unqualified: string[] = [];
 
       for (const claim of claims) {
         for (const el of Array.from(root.querySelectorAll("*"))) {
-          if (!normalise(el.textContent).includes(claim)) continue;
+          const needle = normalise(claim);
+          if (!normalise(el.textContent).includes(needle)) continue;
           // Smallest element containing it: if a child also contains the claim,
           // this one is a wrapper and the child is the real occurrence.
           const childHasIt = Array.from(el.children).some((c) =>
-            normalise(c.textContent).includes(claim),
+            normalise(c.textContent).includes(needle),
           );
           if (childHasIt) continue;
 
