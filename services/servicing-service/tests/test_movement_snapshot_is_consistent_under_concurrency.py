@@ -44,6 +44,7 @@ sessions have different backend pids: two connections, as two HTTP requests
 would be, not two threads sharing one.
 """
 import os
+import pathlib
 import threading
 
 import psycopg2
@@ -57,19 +58,40 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against"
 )
 
+#: This file builds its OWN schema and does not touch whatever else is in the
+#: database. CI sets DATABASE_URL for the servicing job but never loads the
+#: application schema into it, so the first version -- which read the seeded
+#: `users` and `loans` -- passed locally against a compose stack and failed in
+#: CI with `relation "users" does not exist`. A DATABASE_URL is a database, not
+#: a seeded one, and the guard above cannot tell the difference.
+SCHEMA = "servicing_snapshot_test"
+
+#: The real DDL, loaded verbatim. `resolve_pending_movement` is the transition
+#: under test and it depends on the ledger tables, the projection trigger, the
+#: retention trigger and the `no_self_approval` / `resolution_complete`
+#: constraints. Hand-copying that subset would be a second, quietly diverging
+#: copy of the schema -- the failure mode this repository keeps correcting --
+#: so the file itself is loaded into a dedicated schema instead. It carries no
+#: `CREATE SCHEMA`, no `public.` qualification and no extensions, which is what
+#: makes that possible.
+SCHEMA_SQL = (
+    pathlib.Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+)
+
 #: The bar a resolution is judged against. Passed explicitly; this file states no
 #: figure of its own beyond what it needs to drive the function.
 THRESHOLD = "500.00"
 PERMITTED = ["current"]
 
-#: Case 3 repeats -- one pass could be a scheduling accident. Kept small
-#: because each round leaves a retained proposal behind (see `raised`).
-ROUNDS = 5
+RAISER_ID, RESOLVER_ID = 1, 2
+LOAN_ID = 1
 
 
 def _connect():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
     return conn
 
 
@@ -79,32 +101,65 @@ def _one(conn, sql, params=None):
         return cur.fetchone() if cur.description else None
 
 
+@pytest.fixture(scope="module")
+def schema():
+    """A dedicated schema holding the real objects, dropped afterwards."""
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+        cur.execute(f"CREATE SCHEMA {SCHEMA}")
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
+        # A raiser and a DIFFERENT resolver: `no_self_approval` applies here as
+        # it does anywhere else, and a fixture that ignored it would be
+        # modelling a database that cannot exist.
+        cur.execute(
+            "INSERT INTO users (id, username, password_hash, role) VALUES "
+            "(%s, 'underwriter-test', 'x', 'underwriter'), "
+            "(%s, 'admin-test', 'x', 'admin')",
+            (RAISER_ID, RESOLVER_ID),
+        )
+        cur.execute(
+            "INSERT INTO loans (id, principal, note_rate_pct, term_months, status) "
+            "VALUES (%s, 15000.00, 7.99, 36, 'current')", (LOAN_ID,),
+        )
+        cur.execute(
+            "INSERT INTO balances (loan_id, balance, past_due) VALUES (%s, 15000.00, 0)",
+            (LOAN_ID,),
+        )
+    yield conn
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+    conn.close()
+
+
 @pytest.fixture
-def conn():
+def conn(schema):
     c = _connect()
     yield c
     c.close()
 
 
 @pytest.fixture
-def actors(conn):
-    """A raiser and a DIFFERENT resolver: `no_self_approval` applies here too."""
-    raiser = _one(conn, "SELECT id FROM users WHERE username = 'underwriter'")
-    resolver = _one(conn, "SELECT id FROM users WHERE username = 'admin'")
-    assert raiser and resolver, "seeded underwriter and admin users must exist"
-    return int(raiser["id"]), int(resolver["id"])
+def reader(schema, monkeypatch):
+    """Points servicing's own shared connection at this schema.
+
+    `snapshot()` reads through `maker_checker.db`, so the read under test has to
+    resolve names here rather than wherever the shared connection was pointing.
+    Restored afterwards so no other test in the session inherits it.
+    """
+    shared = maker_checker.db.get_conn()
+    with shared.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+    yield
+    with shared.cursor() as cur:
+        cur.execute("SET search_path TO public")
 
 
 @pytest.fixture
-def loan_id(conn):
-    row = _one(conn, "SELECT id FROM loans WHERE status = 'current' ORDER BY id LIMIT 1")
-    assert row, "a loan with status 'current' must exist"
-    return int(row["id"])
-
-
-@pytest.fixture
-def raised(conn, actors, loan_id):
-    """Proposals created by this file. They are NOT cleaned up, by instruction.
+def raised(conn, reader):
+    """Proposals created by this file. They are NOT deleted, by instruction.
 
     The first version deleted them in teardown. The database refused:
 
@@ -113,24 +168,16 @@ def raised(conn, actors, loan_id):
 
     -- `pending_movements_are_retained()`. That is the right answer and the
     trigger is not this file's to route around: a record of what somebody asked
-    for is exactly what a maker-checker table is. The rows stay.
-
-    What that costs is bounded. Each is REJECTED, so none writes a ledger entry
-    or moves a balance, and each carries a reason naming this file so a reader
-    who meets one knows what it is. `approval-queue-self-approval.spec.ts`
-    already leaves resolved proposals behind for the same reason, and any
-    environment that wants them gone reseeds.
+    for is the point of the table. The rows go when the schema does.
     """
-    raiser, _ = actors
-
     def _raise(note: str) -> int:
         row = _one(
             conn,
             "INSERT INTO pending_movements "
             "  (loan_id, component, amount, entry_type, reason, requested_by, requested_role) "
             "VALUES (%s, 'fees', %s, 'adjustment', %s, %s, 'underwriter') RETURNING id",
-            (loan_id, "5.00",
-             f"automated snapshot-consistency check ({note}); not a real request", raiser),
+            (LOAN_ID, "5.00",
+             f"automated snapshot-consistency check ({note}); not a real request", RAISER_ID),
         )
         return int(row["id"])
 
@@ -165,18 +212,17 @@ def _two_reads(movement_id: int, resolver_conn, resolver: int) -> tuple[bool, bo
     resolved_first = any(
         m["id"] == movement_id for m in maker_checker.resolved(limit=500)
     )
-    _reject(resolver_conn, movement_id, resolver)
+    _reject(resolver_conn, movement_id, RESOLVER_ID)
     pending_after = any(m["id"] == movement_id for m in maker_checker.queue(limit=500))
     return pending_after, resolved_first
 
 
-def test_the_two_read_shape_really_does_lose_a_movement(conn, actors, raised):
+def test_the_two_read_shape_really_does_lose_a_movement(conn, reader, raised):
     """The defect, reproduced. Without this the cases below prove nothing about
     a race that might never have been possible."""
-    _, resolver = actors
     movement_id = raised("two-read shape")
 
-    in_pending, in_resolved = _two_reads(movement_id, conn, resolver)
+    in_pending, in_resolved = _two_reads(movement_id, conn, RESOLVER_ID)
 
     assert (in_pending, in_resolved) == (False, False), (
         "expected the movement to fall between two separate reads -- if it did "
@@ -185,22 +231,20 @@ def test_the_two_read_shape_really_does_lose_a_movement(conn, actors, raised):
     )
 
 
-def test_one_snapshot_holds_the_movement_before_the_resolution(conn, actors, raised):
-    _, resolver = actors
+def test_one_snapshot_holds_the_movement_before_the_resolution(conn, reader, raised):
     movement_id = raised("before")
 
     assert _halves(movement_id) == (True, False)
 
 
-def test_one_snapshot_holds_the_movement_after_the_resolution(conn, actors, raised):
-    _, resolver = actors
+def test_one_snapshot_holds_the_movement_after_the_resolution(conn, reader, raised):
     movement_id = raised("after")
-    _reject(conn, movement_id, resolver)
+    _reject(conn, movement_id, RESOLVER_ID)
 
     assert _halves(movement_id) == (False, True)
 
 
-def test_a_commit_cannot_land_between_the_halves_of_one_snapshot(conn, actors, raised):
+def test_a_commit_cannot_land_between_the_halves_of_one_snapshot(conn, reader, raised):
     """The property, forced rather than raced.
 
     An earlier version of this test started a resolver thread on a barrier and
@@ -227,7 +271,6 @@ def test_a_commit_cannot_land_between_the_halves_of_one_snapshot(conn, actors, r
     Verified by mutation in both directions: reverting `snapshot()` to two reads
     fails this test, and restoring it passes.
     """
-    _, resolver = actors
     movement_id = raised("seam")
 
     original = maker_checker.db.query
@@ -244,7 +287,7 @@ def test_a_commit_cannot_land_between_the_halves_of_one_snapshot(conn, actors, r
             state["resolved_at_seam"] = True
             other = _connect()
             try:
-                _reject(other, movement_id, resolver)
+                _reject(other, movement_id, RESOLVER_ID)
             finally:
                 other.close()
         return rows
@@ -270,7 +313,7 @@ def test_a_commit_cannot_land_between_the_halves_of_one_snapshot(conn, actors, r
     assert _halves(movement_id) == (False, True)
 
 
-def test_the_snapshot_issues_exactly_one_read(conn, actors, raised):
+def test_the_snapshot_issues_exactly_one_read(conn, reader, raised):
     """Said plainly, against the real database rather than a fake: the guarantee
     above is a property of there being one statement, so that is asserted here
     too and not only in the unit tests."""
