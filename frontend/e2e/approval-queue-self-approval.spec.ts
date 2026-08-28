@@ -85,7 +85,9 @@ test("the approvals queue refuses self-approval in the browser, and the row stay
     await signInAsStaff(page, "underwriter");
     await page.goto("/approvals");
 
-    const card = page.locator("section.card", { hasText: `Movement ${movementId}` });
+    const card = page.locator('[data-testid="approvals-pending"] section.card', {
+      hasText: `Movement ${movementId}`,
+    });
     await expect(card).toBeVisible({ timeout: 15_000 });
     await expect(card.getByText("Raised by you (underwriter)")).toBeVisible();
     await expect(card.getByText("You raised this")).toBeVisible();
@@ -102,7 +104,9 @@ test("the approvals queue refuses self-approval in the browser, and the row stay
     await signInAsStaff(page, "admin");
     await page.goto("/approvals");
 
-    const adminCard = page.locator("section.card", { hasText: `Movement ${movementId}` });
+    const adminCard = page.locator('[data-testid="approvals-pending"] section.card', {
+      hasText: `Movement ${movementId}`,
+    });
     await expect(adminCard).toBeVisible({ timeout: 15_000 });
     await expect(adminCard.getByText(`Raised by user ${underwriterId} (underwriter)`)).toBeVisible();
     await expect(adminCard.getByRole("button", { name: "Approve" })).toBeEnabled();
@@ -116,7 +120,15 @@ test("the approvals queue refuses self-approval in the browser, and the row stay
     expect(row.ledger_entry_id, "a rejection moves no money").toBeNull();
 
     // Resolved proposals leave the queue -- the queue is work outstanding.
-    await expect(page.locator("section.card", { hasText: `Movement ${movementId}` })).toHaveCount(0);
+    // Scoped to the PENDING list: the movement is still on this page, under
+    // "Recently resolved", which is the point of that section. Before it
+    // existed an unscoped count of 0 meant "left the queue"; now it would mean
+    // "vanished from the product", which is the behaviour that was wrong.
+    await expect(
+      page.locator('[data-testid="approvals-pending"] section.card', {
+        hasText: `Movement ${movementId}`,
+      }),
+    ).toHaveCount(0);
   } finally {
     await client.end();
   }
@@ -159,7 +171,9 @@ test("a tampered cached role does not hand a CSR the resolve controls", async ({
 
     await page.goto("/approvals");
 
-    const card = page.locator("section.card", { hasText: `Movement ${movementId}` });
+    const card = page.locator('[data-testid="approvals-pending"] section.card', {
+      hasText: `Movement ${movementId}`,
+    });
     await expect(card).toBeVisible({ timeout: 15_000 });
     // Verified role is still csr, so still no controls -- the tampered cache
     // changed nothing.
@@ -193,7 +207,9 @@ test("a CSR can read the approvals queue and is offered no way to resolve it", a
     await signInAsStaff(page, "csr");
     await page.goto("/approvals");
 
-    const card = page.locator("section.card", { hasText: `Movement ${movementId}` });
+    const card = page.locator('[data-testid="approvals-pending"] section.card', {
+      hasText: `Movement ${movementId}`,
+    });
     await expect(card).toBeVisible({ timeout: 15_000 });
     // Visibility is not authority: the CSR sees the queue, and neither control
     // is rendered at all -- an enabled button here would promise an authority

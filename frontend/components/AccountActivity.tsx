@@ -122,7 +122,14 @@ export default function AccountActivity({
   }, [load, reloadKey]);
 
   return (
-    <section className="card" style={{ marginTop: 20 }} data-testid="account-activity">
+    // `id` as well as the test id: Approvals links a resolved movement to the
+    // evidence it produced, and a fragment needs a real anchor to land on.
+    <section
+      id="account-activity"
+      className="card"
+      style={{ marginTop: 20 }}
+      data-testid="account-activity"
+    >
       <div className="card-title" style={{ marginBottom: 6 }}>
         {heading}
       </div>
