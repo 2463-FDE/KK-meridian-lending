@@ -193,6 +193,103 @@ def propose(loan_id: int, *, component: str, amount, entry_type: str, reason: st
     }
 
 
+#: Every column of a proposal, resolved half included. Named once because the
+#: snapshot read below UNIONs two branches and they must agree exactly.
+_COLUMNS = (
+    "id, loan_id, component, amount, entry_type, reason, requested_by, "
+    "requested_role, requested_at, resolution, resolved_by, resolved_role, "
+    "resolved_at, ledger_entry_id, resolved_threshold"
+)
+
+
+def _shape(row: dict, *, resolved_half: bool) -> dict:
+    """One row as the API returns it.
+
+    `Decimal` and `datetime` do not survive JSON, and NULL is meaningful on
+    `resolved_threshold` and `ledger_entry_id` -- an absent threshold is not a
+    threshold of zero, and a missing entry is the account of a rejection having
+    moved no money. Both stay null rather than being filled in.
+
+    A PENDING row drops the resolved columns entirely rather than reporting them
+    as null. They are not "not yet known" for a pending proposal, they do not
+    apply, and the queue's response shape is one existing callers already have.
+    """
+    out = {
+        "id": row["id"], "loan_id": row["loan_id"], "component": row["component"],
+        "amount": float(row["amount"]), "entry_type": row["entry_type"],
+        "reason": row["reason"], "requested_by": row["requested_by"],
+        "requested_role": row["requested_role"],
+        "requested_at": row["requested_at"].isoformat() if row["requested_at"] else None,
+    }
+    if not resolved_half:
+        return out
+    out.update({
+        "resolution": row["resolution"],
+        "resolved_by": row["resolved_by"],
+        "resolved_role": row["resolved_role"],
+        "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+        "ledger_entry_id": row["ledger_entry_id"],
+        "resolved_threshold": (None if row["resolved_threshold"] is None
+                               else float(row["resolved_threshold"])),
+    })
+    return out
+
+
+def snapshot(pending_limit: int = 50, resolved_limit: int = 25) -> dict:
+    """Both halves of the queue, read at ONE instant.
+
+    The approvals page shows what is waiting and what was recently decided. Read
+    as two requests those are two database snapshots, and a movement resolved by
+    somebody else in between falls through the gap: read resolved-then-pending
+    around a commit and the row is in NEITHER list; read them the other way and
+    it is in BOTH. A movement vanishing from the screen is the exact defect the
+    history panel was added to fix, so reproducing it here would be worse than
+    not having the panel.
+
+    Found in review (MC-RACE-01). The first version issued two requests inside
+    one `Promise.all` and a comment claimed that made them simultaneous. It did
+    not: `db.query` runs on an autocommit connection, so every call is its own
+    snapshot, and two HTTP requests are two reads however they were started.
+
+    ONE statement is the fix, and it is what makes the guarantee real rather
+    than argued: a single `execute` sees a single snapshot, and
+    `resolution IS NULL` / `IS NOT NULL` partition the table, so a proposal is
+    in exactly one branch -- never both, never neither, whatever commits while
+    the page is loading.
+
+    Ordering is applied here rather than in SQL because a UNION has no defined
+    order without an outer ORDER BY, and the two halves are ordered by different
+    columns in different directions. Sorting the bounded result in Python is
+    plainer than a CASE expression that has to reproduce both.
+    """
+    rows = db.query(
+        f"(SELECT {_COLUMNS}, 0 AS bucket FROM pending_movements "
+        "   WHERE resolution IS NULL ORDER BY requested_at ASC LIMIT %s) "
+        "UNION ALL "
+        f"(SELECT {_COLUMNS}, 1 AS bucket FROM pending_movements "
+        "   WHERE resolution IS NOT NULL ORDER BY resolved_at DESC, id DESC LIMIT %s)",
+        (pending_limit, resolved_limit),
+    )
+    pending = [r for r in rows if r["bucket"] == 0]
+    done = [r for r in rows if r["bucket"] == 1]
+    # Neither key can be NULL, so neither sort can raise on a None comparison:
+    # `requested_at` is NOT NULL DEFAULT now(), and `resolution_complete` ties
+    # `resolved_at` to `resolution` -- a row in the resolved half has one by
+    # construction. Sorting on them directly says that, where a `is None` guard
+    # would have implied the opposite while still failing on two null keys.
+    #
+    # Oldest first: the queue is work outstanding, and what has waited longest
+    # is most overdue a decision.
+    pending.sort(key=lambda r: (r["requested_at"], r["id"]))
+    # Most recently resolved first: a recent-decisions panel whose newest row is
+    # at the bottom is not one.
+    done.sort(key=lambda r: (r["resolved_at"], r["id"]), reverse=True)
+    return {
+        "movements": [_shape(r, resolved_half=False) for r in pending],
+        "resolved": [_shape(r, resolved_half=True) for r in done],
+    }
+
+
 def queue(limit: int = 50) -> list[dict]:
     """Unresolved proposals, oldest first. Visibility is not authority -- any
     staff role may read this, and none of them may approve from it alone."""
@@ -202,11 +299,7 @@ def queue(limit: int = 50) -> list[dict]:
         "  FROM pending_movements WHERE resolution IS NULL "
         " ORDER BY requested_at ASC LIMIT %s", (limit,),
     )
-    return [
-        {**row, "amount": float(row["amount"]),
-         "requested_at": row["requested_at"].isoformat() if row["requested_at"] else None}
-        for row in rows
-    ]
+    return [_shape(row, resolved_half=False) for row in rows]
 
 
 def resolved(limit: int = 25) -> list[dict]:
@@ -240,17 +333,7 @@ def resolved(limit: int = 25) -> list[dict]:
         "  FROM pending_movements WHERE resolution IS NOT NULL "
         " ORDER BY resolved_at DESC, id DESC LIMIT %s", (limit,),
     )
-    return [
-        {**row,
-         "amount": float(row["amount"]),
-         # NULL is meaningful on both of these and must survive as null rather
-         # than becoming 0.0: an absent threshold is not a threshold of zero.
-         "resolved_threshold": (None if row["resolved_threshold"] is None
-                                else float(row["resolved_threshold"])),
-         "requested_at": row["requested_at"].isoformat() if row["requested_at"] else None,
-         "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None}
-        for row in rows
-    ]
+    return [_shape(row, resolved_half=True) for row in rows]
 
 
 def _authority_for(amount: Decimal, role: str) -> None:

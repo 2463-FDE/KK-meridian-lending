@@ -49,7 +49,7 @@ interface Movement {
   requested_by: number;
   requested_role: string;
   requested_at: string | null;
-  // Present only on `state=resolved` rows. Optional rather than nullable: a
+  // Present only on resolved rows. Optional rather than nullable: a
   // pending movement does not have these fields at all, and modelling that as
   // "null" would invite rendering an empty resolution block above the buttons.
   resolution?: "approved" | "rejected";
@@ -97,19 +97,28 @@ function ApprovalsQueue() {
     setLoading(true);
     setError(null);
     try {
-      const [who, res, done] = await Promise.all([
+      // ONE request for both panels. `state=all` answers from a single
+      // database read, which is what makes "these two lists agree" true rather
+      // than merely likely.
+      //
+      // This was two requests inside this same `Promise.all`, with a comment
+      // claiming that made them simultaneous. It did not. Starting two HTTP
+      // requests together does not give them one snapshot -- each is its own
+      // read -- so a movement another approver resolved while the page loaded
+      // could land in NEITHER list (resolved read before the commit, pending
+      // read after) or in BOTH (the other order). A movement disappearing off
+      // the screen is precisely the defect this section was added to fix.
+      // Found in review as MC-RACE-01.
+      const [who, res] = await Promise.all([
         apiGet("/auth/me") as Promise<{ id: string | number; role: string }>,
-        apiGet("/lss/movements") as Promise<{ movements?: Movement[] }>,
-        // Recent history, from the same endpoint under the same principal
-        // check. Requested together with the queue so the two panels are
-        // always read at one instant: fetching them in sequence lets a
-        // movement be resolved in between and appear in neither, which is the
-        // exact disappearance this section exists to stop.
-        apiGet("/lss/movements?state=resolved") as Promise<{ movements?: Movement[] }>,
+        apiGet("/lss/movements?state=all") as Promise<{
+          movements?: Movement[];
+          resolved?: Movement[];
+        }>,
       ]);
       setMe(who);
       setMovements(res.movements ?? []);
-      setHistory(done.movements ?? []);
+      setHistory(res.resolved ?? []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "The queue could not be loaded.");
     } finally {

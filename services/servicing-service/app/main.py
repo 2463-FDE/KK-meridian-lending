@@ -433,7 +433,7 @@ def waive_fee(loan_id: int, body: WaiveIn,
 
 
 @app.get("/movements")
-def movement_queue(state: Literal["pending", "resolved"] = "pending",
+def movement_queue(state: Literal["pending", "resolved", "all"] = "pending",
                    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
                    x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
                    x_principal_assertion: Optional[str] = Header(
@@ -446,6 +446,15 @@ def movement_queue(state: Literal["pending", "resolved"] = "pending",
     unresolved queue. `state=resolved` is the recent history of proposals that
     have been approved or rejected -- the question an operator has the moment
     their own proposal leaves the queue and nothing anywhere accounts for it.
+    `state=all` returns both halves read at one instant, and is what the
+    approvals page asks for.
+
+    `all` exists because asking for the two halves separately is two database
+    snapshots: a movement another approver resolves between the reads lands in
+    neither list, or in both, depending on which order they happened to run.
+    A movement vanishing from the screen is the defect the history panel was
+    added to fix, so the page must not be able to reproduce it. Found in review
+    as MC-RACE-01.
 
     One endpoint with a validated enum rather than a second path. Both answers
     are the same rows of the same table under different predicates, and they
@@ -462,6 +471,8 @@ def movement_queue(state: Literal["pending", "resolved"] = "pending",
     principal.require_staff_principal(
         x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
     )
+    if state == "all":
+        return maker_checker.snapshot()
     if state == "resolved":
         return {"movements": maker_checker.resolved()}
     return {"movements": maker_checker.queue()}

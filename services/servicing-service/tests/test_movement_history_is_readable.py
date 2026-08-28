@@ -165,7 +165,10 @@ def test_the_history_is_bounded(keys, fake_db, history):  # noqa: F811
     assert history["params"] == (25,)
 
 
-@pytest.mark.parametrize("bad", ["all", "PENDING", "", "1"])
+# `all` is NOT in this list: it became a real state when the two halves had to
+# be read together (MC-RACE-01). Leaving it here would have asserted a 422 for a
+# value the route now answers.
+@pytest.mark.parametrize("bad", ["everything", "PENDING", "", "1"])
 def test_an_unrecognised_state_is_refused(keys, fake_db, history, bad):  # noqa: F811
     """A validated enum, so no caller-supplied value ever reaches a predicate."""
     assert _get(keys, "?state=" + bad).status_code == 422
@@ -198,3 +201,114 @@ def test_a_csr_may_read_the_history_just_as_it_may_read_the_queue(keys, fake_db,
     """Visibility is not authority. A CSR sees both and resolves neither -- and
     the outcome of a proposal it watched wait is not a secret from it."""
     assert _get(keys, "?state=resolved", role="csr").status_code == 200
+
+
+# --- one read, so a movement is never in neither list nor in both -------------
+#
+# MC-RACE-01. The page asked for the two halves separately, and a comment
+# claimed `Promise.all` made them simultaneous. It did not: `db.query` runs on
+# an autocommit connection, so every call is its own snapshot, and two HTTP
+# requests are two reads however they were started. A movement another approver
+# resolved in between fell through the gap -- in NEITHER list if resolved was
+# read first, in BOTH if pending was.
+#
+# `state=all` answers from ONE statement. That is what makes the guarantee real:
+# a single execute sees a single snapshot, and `resolution IS NULL` /
+# `IS NOT NULL` partition the table, so a proposal is in exactly one half.
+
+
+@pytest.fixture
+def both(fake_db, monkeypatch):  # noqa: F811
+    """Answers the union read, and counts how many statements were issued."""
+    inner = maker_checker.db.query
+    seen = {"statements": [], "params": None}
+
+    def _query(sql, params=None):
+        flat = " ".join(sql.split())
+        if "UNION ALL" in flat and "pending_movements" in flat:
+            seen["statements"].append(flat)
+            seen["params"] = params
+            pending = {"id": 42, "loan_id": 7301, "component": "principal",
+                       "amount": Decimal("-10.00"), "entry_type": "adjustment",
+                       "reason": "still waiting", "requested_by": 1,
+                       "requested_role": "csr",
+                       "requested_at": _rows()[0]["requested_at"],
+                       "resolution": None, "resolved_by": None, "resolved_role": None,
+                       "resolved_at": None, "ledger_entry_id": None,
+                       "resolved_threshold": None, "bucket": 0}
+            return [pending] + [dict(r, bucket=1) for r in _rows()]
+        return inner(sql, params)
+
+    monkeypatch.setattr(maker_checker.db, "query", _query)
+    return seen
+
+
+def test_all_returns_both_halves(keys, fake_db, both):  # noqa: F811
+    body = _get(keys, "?state=all").json()
+
+    assert [m["id"] for m in body["movements"]] == [42]
+    assert [m["id"] for m in body["resolved"]] == [41, 40]
+
+
+def test_all_is_a_single_database_read(keys, fake_db, both):  # noqa: F811
+    """The whole point. Two reads are two snapshots however they are started,
+    and a movement resolved between them lands in neither list or in both."""
+    _get(keys, "?state=all")
+
+    assert len(both["statements"]) == 1, (
+        "the two halves were read separately, which is the race this replaced"
+    )
+
+
+def test_the_two_halves_are_disjoint_by_construction(keys, fake_db, both):  # noqa: F811
+    """`resolution IS NULL` and `IS NOT NULL` partition the table, so no row can
+    appear twice and none can be missed -- whatever commits mid-page-load."""
+    _get(keys, "?state=all")
+    statement = both["statements"][0]
+
+    assert "WHERE resolution IS NULL" in statement
+    assert "WHERE resolution IS NOT NULL" in statement
+
+    body = _get(keys, "?state=all").json()
+    pending_ids = {m["id"] for m in body["movements"]}
+    resolved_ids = {m["id"] for m in body["resolved"]}
+    assert pending_ids & resolved_ids == set()
+
+
+def test_a_pending_row_from_the_union_carries_no_resolution_fields(keys, fake_db, both):  # noqa: F811
+    """They do not apply to a proposal nobody has decided, and reporting them as
+    null would put an empty resolution block above the Approve button."""
+    pending = _get(keys, "?state=all").json()["movements"][0]
+
+    for absent in ("resolution", "resolved_by", "resolved_role", "resolved_at",
+                   "ledger_entry_id", "resolved_threshold"):
+        assert absent not in pending, absent
+
+
+def test_a_resolved_row_from_the_union_carries_its_evidence(keys, fake_db, both):  # noqa: F811
+    approved = _get(keys, "?state=all").json()["resolved"][0]
+
+    assert approved["resolution"] == "approved"
+    assert approved["ledger_entry_id"] == 991
+    assert approved["resolved_threshold"] == 500.00
+
+
+def test_all_orders_each_half_the_way_its_own_panel_needs(keys, fake_db, both):  # noqa: F811
+    """Oldest-waiting first in the queue, most-recently-decided first in the
+    history. A UNION has no defined order without an outer ORDER BY, so this is
+    applied after the read rather than assumed from it."""
+    body = _get(keys, "?state=all").json()
+
+    assert [m["id"] for m in body["resolved"]] == [41, 40]
+
+
+def test_all_bounds_both_halves(keys, fake_db, both):  # noqa: F811
+    _get(keys, "?state=all")
+
+    assert both["params"] == (50, 25)
+
+
+def test_all_still_requires_a_verified_staff_principal(keys, fake_db, both):  # noqa: F811
+    response = _client().get("/movements?state=all", headers={"X-Internal-Token": TOKEN})
+
+    assert response.status_code in (401, 403), response.text
