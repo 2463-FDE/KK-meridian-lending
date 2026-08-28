@@ -17,6 +17,7 @@ caught it for two months. ARCHITECTURE.md recorded it and named PR #8 as its
 owner; PR #8 shipped tokenization instead. Both halves are closed here: the host
 port is gone, and this check is the defense in depth behind it.
 """
+import secrets
 from fastapi import APIRouter, Header, HTTPException
 
 from .. import config, db, kyc
@@ -87,7 +88,8 @@ def kyc_check(
     # Checked before anything else runs: a rejected caller must not reach
     # run_cip(), the INSERT, or the log line -- an unauthorized request should
     # leave no trace of its payload anywhere.
-    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+    if (not config.INTERNAL_SERVICE_TOKEN or not x_internal_token
+            or not secrets.compare_digest(x_internal_token, config.INTERNAL_SERVICE_TOKEN)):
         raise HTTPException(status_code=401, detail="not authorized")
 
     # Gap C (PR #6 review): this used to log the whole CIP payload -- name, DOB,

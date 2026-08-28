@@ -1,4 +1,5 @@
 """Payment capture API. POST /payments charges a card/ACH and applies it to the balance."""
+import secrets
 from fastapi import APIRouter, Header, HTTPException
 
 from .. import config, payments, reconcile
@@ -13,7 +14,8 @@ def _require_internal_token(x_internal_token: str | None) -> None:
     # docker-compose.yml) is the primary control; this is the fallback in case
     # that boundary is ever mistakenly reopened. An unset config token can
     # never match, so a deploy that forgets to set one fails closed.
-    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+    if (not config.INTERNAL_SERVICE_TOKEN or not x_internal_token
+            or not secrets.compare_digest(x_internal_token, config.INTERNAL_SERVICE_TOKEN)):
         raise HTTPException(status_code=401, detail="not authorized")
 
 
