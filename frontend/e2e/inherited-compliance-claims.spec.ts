@@ -168,7 +168,7 @@ test("the qualifier says inherited and unverified, whatever wording it uses", as
   ).toBe(true);
 });
 
-test("the landing page does not claim a credit-bureau behaviour the code does not have", async ({
+test("no public borrower surface claims a credit-bureau behaviour the code does not have", async ({
   page,
 }) => {
   // "Soft-pull pre-qualification" was on this page with no authority behind it:
@@ -181,14 +181,28 @@ test("the landing page does not claim a credit-bureau behaviour the code does no
   // stub can substantiate. This is a separate class from the inherited
   // compliance badges above -- those are labelled vendor history; this was the
   // page speaking for Meridian.
-  await page.goto("/");
-  await expect(page.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 30_000 });
+  // Every PUBLIC borrower-facing surface, not just the landing page. The first
+  // version of this guard visited "/" only, and the same promise was live on
+  // /apply -- directly above the SSN and date-of-birth fields, which is the
+  // worse placement of the two. Found in review.
+  for (const route of ["/", "/apply"]) {
+    await page.goto(route);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 30_000 });
 
-  const body = ((await page.locator("main").innerText()) ?? "")
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-  for (const phrase of ["soft-pull", "soft pull", "no impact to your credit", "won't affect your credit"]) {
-    expect(body, `the landing page must not claim "${phrase}"`).not.toContain(phrase);
+    const body = ((await page.locator("main").innerText()) ?? "")
+      .toLowerCase()
+      .replace(/[‘’]/g, "'")
+      .replace(/\s+/g, " ");
+    for (const phrase of [
+      "soft-pull",
+      "soft pull",
+      "no impact to your credit",
+      "affect your credit",
+      "impact your credit",
+      "without affecting your credit",
+    ]) {
+      expect(body, `${route} must not claim "${phrase}"`).not.toContain(phrase);
+    }
   }
 });
 
