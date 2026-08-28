@@ -89,7 +89,8 @@ def kyc_check(
     # run_cip(), the INSERT, or the log line -- an unauthorized request should
     # leave no trace of its payload anywhere.
     if (not config.INTERNAL_SERVICE_TOKEN or not x_internal_token
-            or not secrets.compare_digest(x_internal_token, config.INTERNAL_SERVICE_TOKEN)):
+            or not secrets.compare_digest(x_internal_token.encode("utf-8"),
+                                      config.INTERNAL_SERVICE_TOKEN.encode("utf-8"))):
         raise HTTPException(status_code=401, detail="not authorized")
 
     # Gap C (PR #6 review): this used to log the whole CIP payload -- name, DOB,

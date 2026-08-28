@@ -77,8 +77,11 @@ def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> Non
     the thing a caller can match.
     """
     expected = INTERNAL_SERVICE_TOKEN
+    # Compared as bytes: the str overload of compare_digest raises TypeError on a
+    # non-ASCII value, and an HTTP header can carry one -- which would turn a
+    # wrong token into a 500 rather than the 403 below.
     if not expected or not x_internal_token or not secrets.compare_digest(
-            x_internal_token, expected):
+            x_internal_token.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=403, detail="staff only")
     if x_user_role not in _STAFF_ROLES:
         raise HTTPException(status_code=403, detail="staff only")

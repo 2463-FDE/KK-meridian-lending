@@ -45,7 +45,8 @@ async def run_decision(
     # that boundary is ever mistakenly reopened. An unset config token can
     # never match, so a deploy that forgets to set one fails closed.
     if (not config.INTERNAL_SERVICE_TOKEN or not x_internal_token
-            or not secrets.compare_digest(x_internal_token, config.INTERNAL_SERVICE_TOKEN)):
+            or not secrets.compare_digest(x_internal_token.encode("utf-8"),
+                                      config.INTERNAL_SERVICE_TOKEN.encode("utf-8"))):
         raise HTTPException(status_code=401, detail="not authorized")
 
     # Security fix: name/ssn/requested_amount/term_months/annual_income used to be

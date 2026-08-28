@@ -82,7 +82,8 @@ def _is_staff(x_user_role: str | None, x_internal_token: str | None) -> bool:
         return False
     if not config.INTERNAL_SERVICE_TOKEN or not x_internal_token:
         return False
-    return secrets.compare_digest(x_internal_token, config.INTERNAL_SERVICE_TOKEN)
+    return secrets.compare_digest(x_internal_token.encode("utf-8"),
+                                  config.INTERNAL_SERVICE_TOKEN.encode("utf-8"))
 
 
 def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> None:
