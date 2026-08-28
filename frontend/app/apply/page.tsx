@@ -687,7 +687,16 @@ export default function ApplyPage() {
               headingRef={stepHeadingRef}
               eyebrow="Step 1 of 5"
               title="Personal information"
-              desc="This is used to verify your identity and won't affect your credit."
+              // The credit-impact promise is gone, not hedged. This said "and
+              // won't affect your credit" -- the same unsupported claim removed
+              // from the landing page, and worse placed: it sits directly above
+              // the SSN and date-of-birth fields, so it reads as reassurance
+              // about the thing being collected. That SSN is what
+              // `run_decision` sends to decision-service, and the bureau
+              // boundary documents the real behaviour as a hard pull behind a
+              // stub. What the sentence can truthfully say is what the fields
+              // are for.
+              desc="This is used to verify your identity."
             />
 
             <div className="field-group-title">Identity</div>

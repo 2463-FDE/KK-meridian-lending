@@ -168,6 +168,44 @@ test("the qualifier says inherited and unverified, whatever wording it uses", as
   ).toBe(true);
 });
 
+test("no public borrower surface claims a credit-bureau behaviour the code does not have", async ({
+  page,
+}) => {
+  // "Soft-pull pre-qualification" was on this page with no authority behind it:
+  // nothing in specs/, adr/, docs/, policies/ or the client package approves it,
+  // and `decision-service/app/bureau.py` is a stub whose own comment describes
+  // the real thing as "a second, independently-billed HARD credit pull".
+  //
+  // A soft pull is a specific, consumer-visible promise about what reaches a
+  // credit file. It is not a synonym for "quick", and it is not something a
+  // stub can substantiate. This is a separate class from the inherited
+  // compliance badges above -- those are labelled vendor history; this was the
+  // page speaking for Meridian.
+  // Every PUBLIC borrower-facing surface, not just the landing page. The first
+  // version of this guard visited "/" only, and the same promise was live on
+  // /apply -- directly above the SSN and date-of-birth fields, which is the
+  // worse placement of the two. Found in review.
+  for (const route of ["/", "/apply"]) {
+    await page.goto(route);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 30_000 });
+
+    const body = ((await page.locator("main").innerText()) ?? "")
+      .toLowerCase()
+      .replace(/[‘’]/g, "'")
+      .replace(/\s+/g, " ");
+    for (const phrase of [
+      "soft-pull",
+      "soft pull",
+      "no impact to your credit",
+      "affect your credit",
+      "impact your credit",
+      "without affecting your credit",
+    ]) {
+      expect(body, `${route} must not claim "${phrase}"`).not.toContain(phrase);
+    }
+  }
+});
+
 test("the landing page does not assert compliance in its own voice", async ({ page }) => {
   // The inherited badges are labelled. Nothing ELSE may state a compliance
   // posture as current Meridian fact -- a new sentence would evade the
