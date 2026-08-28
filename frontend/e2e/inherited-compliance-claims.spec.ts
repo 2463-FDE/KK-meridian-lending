@@ -32,9 +32,16 @@ import { test, expect } from "@playwright/test";
  *      the suite red -- pinning the claims on, which is the outcome the change
  *      argues against. Found in review as ML-CLAIMS-01.
  *   2. A claim reappearing ANYWHERE unqualified FAILS -- not just inside the
- *      row the badges happen to live in today. The earlier draft scoped to
- *      `.badge-row` first, so "PCI compliant" added elsewhere on the page passed
- *      every case. Found in review as ML-CLAIMS-02.
+ *      row the badges happen to live in today, and not only as a standalone
+ *      element. An earlier draft scoped to `.badge-row` first, so "PCI
+ *      compliant" added elsewhere passed every case; the draft after that
+ *      matched leaf text exactly, so `<p>Our payment flows are PCI
+ *      compliant.</p>` still passed. Found in review as ML-CLAIMS-02, twice.
+ *
+ * Note what property 2 costs: prose that MENTIONS a claim in order to deny it
+ * needs the qualifier in its container too. That is deliberate. A reader
+ * scanning the page sees the claim either way, and the alternative -- guessing
+ * at negation near the string -- is the kind of cleverness that fails quietly.
  *
  * Colocation is tested as "the claim's own container also holds the qualifier".
  * A shared ancestor is not enough -- `<body>` contains everything, and a
@@ -50,29 +57,50 @@ type ClaimAudit = {
   unqualified: string[];
 };
 
-/** Every rendered occurrence of a claim, and whether each sits with a qualifier. */
+/** Every rendered occurrence of a claim, and whether each sits with a qualifier.
+ *
+ * Occurrences are found by SUBSTRING, on the smallest element that contains the
+ * claim. Exact leaf matching was not enough: it collected
+ * `<span>PCI compliant</span>` and missed `<p>Our payment flows are PCI
+ * compliant.</p>`, so the string the handoff document forbids could return in
+ * ordinary copy with the suite green (review finding ML-CLAIMS-02). Taking the
+ * smallest containing element also survives a claim split across inline tags --
+ * `PCI <b>compliant</b>` has no leaf holding the whole string, but the `<p>`
+ * around it does.
+ */
 async function auditClaims(page: import("@playwright/test").Page): Promise<ClaimAudit> {
   return page.evaluate(
     ({ claims, qualifierSelector }) => {
       const root = document.querySelector("main") ?? document.body;
       const qualifier = root.querySelector(qualifierSelector);
+      const normalise = (s: string | null) => (s ?? "").replace(/\s+/g, " ").trim();
       const found: string[] = [];
       const unqualified: string[] = [];
 
-      for (const el of Array.from(root.querySelectorAll("*"))) {
-        // Leaf elements only, so a wrapper is not counted once per claim it
-        // happens to contain.
-        if (el.children.length > 0) continue;
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        const claim = claims.find((c) => text === c);
-        if (!claim) continue;
+      for (const claim of claims) {
+        for (const el of Array.from(root.querySelectorAll("*"))) {
+          if (!normalise(el.textContent).includes(claim)) continue;
+          // Smallest element containing it: if a child also contains the claim,
+          // this one is a wrapper and the child is the real occurrence.
+          const childHasIt = Array.from(el.children).some((c) =>
+            normalise(c.textContent).includes(claim),
+          );
+          if (childHasIt) continue;
 
-        found.push(claim);
-        // The claim's own container must also hold the qualifier. Walking
-        // further up would eventually reach an ancestor of the whole page.
-        const container = el.parentElement;
-        if (!qualifier || !container || !container.contains(qualifier)) {
-          unqualified.push(claim);
+          found.push(claim);
+          // The claim and the qualifier must be SIBLINGS -- same immediate
+          // container -- or the claim's element must contain the qualifier
+          // outright.
+          //
+          // "An ancestor contains both" is far too loose: a <p> elsewhere in the
+          // same <section> as the badge row passes that test while reading, to
+          // anyone looking at the page, as an unqualified claim. That is how the
+          // embedded-prose case slipped through a first attempt at this fix.
+          // Sibling is what "beside it" actually means.
+          const holdsQualifier =
+            qualifier !== null &&
+            (el.contains(qualifier) || el.parentElement === qualifier.parentElement);
+          if (!holdsQualifier) unqualified.push(claim);
         }
       }
 
