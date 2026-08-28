@@ -54,8 +54,17 @@ export default function Home() {
           </div>
           <h3>Fast decisions</h3>
           <p>
-            Soft-pull pre-qualification and an automated underwriting decision
-            in minutes — approve, refer, or decline with a clear reason.
+            {/* "Soft-pull pre-qualification" was removed rather than reworded
+                around. Nothing in specs/, adr/, docs/, policies/ or the client
+                package approves that claim, and the code contradicts it:
+                `decision-service/app/bureau.py` is a stub, and its own comment
+                describes the real thing as "a second, independently-billed HARD
+                credit pull". A soft pull is a specific, consumer-visible
+                promise about what reaches a credit file -- not a synonym for
+                "quick". What is left is what the system actually does and what
+                `decision.py` is tested on. */}
+            Automated underwriting with clear approve, refer, or decline
+            outcomes — each with a specific reason on record.
           </p>
         </div>
         <div className="feature">
