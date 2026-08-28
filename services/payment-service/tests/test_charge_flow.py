@@ -316,6 +316,29 @@ def test_post_payment_rejects_wrong_internal_token(fake_db):
     assert resp.status_code == 401
 
 
+def test_post_payment_rejects_a_non_ascii_internal_token(fake_db):
+    """A wrong token is a 401, including a wrong token that is not ASCII.
+
+    `secrets.compare_digest` raises TypeError on non-ASCII `str`, so comparing
+    the raw header turned this into a 500 -- letting a caller tell a malformed
+    guess from a merely incorrect one by the status code. Both sides are encoded
+    to bytes now. Found in review of the constant-time change.
+    """
+    # Sent as raw bytes, which is what a non-conforming client puts on the wire.
+    # Starlette decodes header bytes as latin-1, so the handler receives a str
+    # with a non-ASCII character in it -- httpx will not send such a str itself,
+    # which is why the header is given as bytes here rather than text.
+    resp = client.post(
+        "/payments", json=_payload(),
+        headers={"X-Internal-Token": "attacker-guessed-tokén".encode("latin-1")},
+    )
+
+    assert resp.status_code == 401, (
+        f"expected 401, got {resp.status_code} -- a non-ASCII token must be an "
+        "ordinary auth failure, not a server error"
+    )
+
+
 def test_post_payment_rejects_everything_when_config_token_unset(fake_db, monkeypatch):
     """A deploy that forgets to set INTERNAL_SERVICE_TOKEN must fail closed --
     no caller (not even one that sends the empty string) should ever match."""

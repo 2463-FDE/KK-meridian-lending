@@ -24,6 +24,7 @@ before this call is made -- decision-service does nothing with it except
 echo it back on DecisionOut, so origination can reject a response that
 doesn't match the attempt it's currently waiting on.
 """
+import secrets
 from fastapi import APIRouter, Header, HTTPException
 
 from .. import config, db, decision
@@ -43,7 +44,9 @@ async def run_decision(
     # docker-compose.yml) is the primary control; this is the fallback in case
     # that boundary is ever mistakenly reopened. An unset config token can
     # never match, so a deploy that forgets to set one fails closed.
-    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+    if (not config.INTERNAL_SERVICE_TOKEN or not x_internal_token
+            or not secrets.compare_digest(x_internal_token.encode("utf-8"),
+                                      config.INTERNAL_SERVICE_TOKEN.encode("utf-8"))):
         raise HTTPException(status_code=401, detail="not authorized")
 
     # Security fix: name/ssn/requested_amount/term_months/annual_income used to be

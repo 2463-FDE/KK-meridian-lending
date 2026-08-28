@@ -111,9 +111,17 @@ def _require_internal(x_internal_token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="not authorized")
     # Constant-time: `!=` on str short-circuits at the first differing byte, so
     # response timing leaks how much of the secret a guess got right, one byte at
-    # a time. compare_digest does not. The values are ASCII by construction
-    # (an env var and an HTTP header), so the str overload is safe here.
-    if not secrets.compare_digest(x_internal_token, expected):
+    # a time. compare_digest does not.
+    #
+    # Compared as BYTES. This comment used to say the values are "ASCII by
+    # construction (an env var and an HTTP header), so the str overload is safe
+    # here" -- an HTTP header is not ASCII by construction, and the str overload
+    # raises TypeError on a non-ASCII one. That turned a wrong token into a 500
+    # instead of a 401: a caller could tell a malformed guess from a merely
+    # incorrect one by the status code, which is the sort of oracle this
+    # comparison exists to avoid.
+    if not secrets.compare_digest(x_internal_token.encode("utf-8"),
+                                  expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="not authorized")
 
 

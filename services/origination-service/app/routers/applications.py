@@ -1,4 +1,5 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
+import secrets
 import json
 # Decimal, not float, for the one subtraction on this module's money path: the
 # amount-financed breakdown has to foot to the cent on the borrower's screen.
@@ -79,7 +80,10 @@ def _is_staff(x_user_role: str | None, x_internal_token: str | None) -> bool:
     """
     if x_user_role not in _STAFF_ROLES:
         return False
-    return bool(config.INTERNAL_SERVICE_TOKEN) and x_internal_token == config.INTERNAL_SERVICE_TOKEN
+    if not config.INTERNAL_SERVICE_TOKEN or not x_internal_token:
+        return False
+    return secrets.compare_digest(x_internal_token.encode("utf-8"),
+                                  config.INTERNAL_SERVICE_TOKEN.encode("utf-8"))
 
 
 def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> None:

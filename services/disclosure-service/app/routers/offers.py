@@ -10,6 +10,7 @@ where the single conversion happens and the wire format is unchanged; what used
 to happen was a cast to binary float on the way IN, before the Decimal
 arithmetic that was supposed to keep the cents exact.
 """
+import secrets
 from decimal import Decimal
 
 import psycopg2.errors
@@ -302,7 +303,9 @@ def create_offer(
     # docker-compose.yml) is the primary control; this is the fallback in case
     # that boundary is ever mistakenly reopened. An unset config token can
     # never match, so a deploy that forgets to set one fails closed.
-    if not config.INTERNAL_SERVICE_TOKEN or x_internal_token != config.INTERNAL_SERVICE_TOKEN:
+    if (not config.INTERNAL_SERVICE_TOKEN or not x_internal_token
+            or not secrets.compare_digest(x_internal_token.encode("utf-8"),
+                                      config.INTERNAL_SERVICE_TOKEN.encode("utf-8"))):
         raise HTTPException(status_code=401, detail="not authorized")
 
     # Security fix: principal/term_months/annual_rate used to come straight from
