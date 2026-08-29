@@ -155,3 +155,27 @@ def test_the_los_forwards_a_contract_label_unchanged():
     out = _to_offer_out(1, resp)
     assert out.disclosure.schedule_source == "contract"
     assert out.disclosure.schedule_note is None
+
+
+#: Columns the application lifecycle reads directly off an ORM offer row.
+#:
+#: `accepted_at` is the one that caught this out. The lifecycle distinguishes
+#: "offer issued" from "offer accepted" by reading it, the column was not
+#: declared, and the read raised `AttributeError` against real Postgres while
+#: the unit suite stayed green -- fakes carry whatever attribute a test gives
+#: them. Same hazard as the two lists above, third occurrence, so it gets the
+#: same guard rather than a comment.
+LIFECYCLE_READ_FIELDS = ("created_at", "accepted_at")
+
+
+def test_lifecycle_read_fields_are_all_mapped_on_the_offer_model():
+    missing = sorted(set(LIFECYCLE_READ_FIELDS) - _mapped_offer_columns())
+    assert not missing, (
+        "models.Offer does not declare "
+        + ", ".join(missing)
+        + ", but the application lifecycle reads them off an ORM row. An "
+        "undeclared column raises AttributeError on a direct read and reads as "
+        "None through getattr(), and neither shows up in a unit suite whose "
+        "offers are constructed objects. Declare the column(s) in "
+        "services/origination-service/app/models.py."
+    )

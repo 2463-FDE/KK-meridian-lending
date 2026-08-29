@@ -262,6 +262,39 @@ class ApplicationDetail(BaseModel):
     decision_at: Optional[str] = None
 
 
+class LifecycleStage(BaseModel):
+    """One step of an application's life, as the database records it.
+
+    `state` is deliberately three-valued and not a boolean:
+
+      * `complete` -- the fact is recorded and affirmative (KYC verified, offer
+        accepted, loan boarded);
+      * `incomplete` -- something IS recorded and it is not affirmative (a
+        decision of `refer`, an offer created but never accepted). The system
+        knows the answer and the answer is "not yet";
+      * `unknown` -- NOTHING is persisted that answers this step. No KYC row
+        means the check never ran, which is not the same as it having failed.
+
+    Collapsing the last two into one would let "we never checked" render
+    identically to "we checked and it is outstanding", and those carry different
+    obligations for the person reading the screen.
+
+    `detail` is evidence, not decoration: the date something happened, or the
+    reason there is nothing to show.
+    """
+    key: str
+    label: str
+    state: str
+    detail: Optional[str] = None
+    #: Present only on the boarded step, and only when a loan really exists.
+    loan_id: Optional[int] = None
+
+
+class ApplicationLifecycle(BaseModel):
+    app_id: int
+    stages: list[LifecycleStage]
+
+
 # income/employment_years are underwriting inputs, not borrower-facing status data.
 # GET /applications/{id} is reachable anonymously (see gateway /los/* passthrough),
 # so these live on a separate staff-only response instead of ApplicationDetail.

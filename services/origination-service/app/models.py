@@ -121,3 +121,11 @@ class Offer(Base):
     # the application's requested amount (db/migrations/0030).
     principal: Mapped[float | None] = mapped_column(Numeric(14, 2, asdecimal=False), nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the borrower accepted, or NULL if they have not. Declared for the same
+    # reason as the columns above and found the same way: the application
+    # lifecycle reads it to tell "offer issued" from "offer accepted", and with
+    # the column undeclared that read raised `AttributeError: 'Offer' object has
+    # no attribute 'accepted_at'` against real Postgres while the unit suite
+    # stayed green -- its offers are constructed objects that carry whatever
+    # attribute a test gives them.
+    accepted_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
