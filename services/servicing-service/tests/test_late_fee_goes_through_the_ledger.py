@@ -33,10 +33,11 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 INIT_FILES = ("001_schema.sql", "007_ledger_opening_balances.sql")
 SCHEMA = "servicing_late_fee_ledger_test"
 
-#: Arrears the fixture starts with, and the fee the published schedule charges
-#: on them. `policies/fee_schedule.md` is "$35 flat, or 5% of the past-due
-#: amount, whichever is **less**", so on $200 of arrears the fee is $10.00 --
-#: not the $35 this file assumed while only the flat half was implemented.
+#: Arrears the fixture starts with, and the fee the SUPERSEDED ARREARS RULE
+#: charges on them -- "$35 flat, or 5% of the past-due amount, whichever is
+#: less", which `policies/fee_schedule.md` published until 2026-08-29 and which
+#: the code still computes. On $200 of arrears that is $10.00 -- not the $35
+#: this file assumed while only the flat half was implemented.
 #: Chosen below the $700 crossover deliberately: that is the range the flat fee
 #: overcharged, so these tests exercise the corrected half.
 ARREARS = Decimal("200.00")

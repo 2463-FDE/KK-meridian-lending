@@ -1,14 +1,28 @@
-"""The late fee is the SMALLER of $35 and 5% of arrears (published schedule).
+"""The late fee is the SMALLER of $35 and 5% of arrears -- the SUPERSEDED rule.
 
-`policies/fee_schedule.md` has said this since before the code existed:
+**This file was named `test_late_fee_follows_the_published_schedule.py` until
+2026-08-29, and that name stopped being true on the day the schedule changed.**
+`policies/fee_schedule.md` now publishes the decided installment-level rule --
+one fee per missed scheduled installment, priced off that installment's unpaid
+scheduled principal and interest -- and the arrears formula below survives there
+only inside the "Current implementation differs" section. A test file asserting
+the code "follows the published schedule" would now be asserting the opposite of
+the truth, in its filename, where nobody has to open it to be misled.
 
-    Late payment fee | $35 flat, or 5% of the past-due amount, whichever is **less**
+What these cases still pin is real and unchanged: the code computes
 
-Only the flat half was implemented. That is not a rounding nit and it is not
-conservative: the flat fee is the LARGER of the two for any arrears below $700,
-so every borrower under that threshold was charged more than the published
-schedule allows. These cases are written from the overcharge, because that is
-the defect -- a test that only checked large balances would have passed
+    $35 flat, or 5% of the past-due amount, whichever is less
+
+and it is the only rule it computes. That is the older published rule, kept
+deliberately rather than approximated toward the new one, because the decided
+rule needs installment-level facts this schema does not hold (`docs/DEBT.md`
+D23). When it is implemented, these cases are expected to fail loudly.
+
+Only the flat half was implemented for months. That is not a rounding nit and it
+is not conservative: the flat fee is the LARGER of the two for any arrears below
+$700, so every borrower under that threshold was charged more than even the
+arrears rule allowed. These cases are written from the overcharge, because that
+is the defect -- a test that only checked large balances would have passed
 throughout.
 """
 from decimal import Decimal

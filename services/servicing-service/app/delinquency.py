@@ -1,7 +1,9 @@
 """Delinquency + late fees.
 
-The late fee follows its published schedule: the SMALLER of $35 and five per
-cent of the arrears (`late_fee_for`). For months only the flat figure was
+The late fee here is the SMALLER of $35 and five per cent of the ARREARS
+(`late_fee_for`). That was the published schedule until 2026-08-29 and is no
+longer -- see the superseded-rule note below. It is still what this module
+computes. For months only the flat figure was
 implemented, which overcharged every borrower whose arrears were below $700,
 because the flat fee is the larger of the two under that threshold. This
 docstring called that "a policy question, not an arithmetic one" -- it was
@@ -69,20 +71,27 @@ log = get_logger("delinquency")
 
 CENT = Decimal("0.01")
 
-#: `policies/fee_schedule.md`, the published schedule:
-#:     Late payment fee | $35 flat, or 5% of the past-due amount, whichever is **less**
+#: The SUPERSEDED arrears rule, which is what this module still computes:
+#:     $35 flat, or 5% of the past-due amount, whichever is less
+#:
+#: `policies/fee_schedule.md` published exactly that until 2026-08-29. It no
+#: longer does -- the table there now carries the decided installment-level
+#: rule, and the arrears formula survives only in that file's "Current
+#: implementation differs" section. So these two constants are no longer the
+#: published policy; they are the older rule the code has not moved off yet
+#: (`docs/DEBT.md` D23).
 #:
 #: Both halves are here because the rule is a comparison, and for months only
 #: the flat figure was implemented. That is not a rounding nit: the flat fee is
 #: the LARGER of the two whenever the past-due balance is below $700, so every
-#: borrower under that threshold was charged more than the published schedule
-#: allows -- up to $34.99 more on a small arrears balance.
+#: borrower under that threshold was charged more than even that rule allowed
+#: -- up to $34.99 more on a small arrears balance.
 LATE_FEE_FLAT = Decimal("35.00")
 LATE_FEE_PCT_OF_PAST_DUE = Decimal("0.05")
 
 
 class NoFeeIsDue(Exception):
-    """The published rule yields a fee of zero, so there is nothing to post.
+    """The arrears rule yields a fee of zero, so there is nothing to post.
 
     Two ways to get here, and neither is an error in the caller's arithmetic:
 
@@ -98,7 +107,10 @@ class NoFeeIsDue(Exception):
 
 
 def late_fee_for(past_due) -> Decimal:
-    """The published rule, as one comparison.
+    """The superseded arrears rule, as one comparison.
+
+    Not the published policy any more (`policies/fee_schedule.md` now publishes
+    the installment-level rule); this is what the code computes, unchanged.
 
     Returns the SMALLER of the flat fee and five per cent of the arrears, in
     whole cents.
@@ -144,10 +156,11 @@ class LoanHasNoBalances(Exception):
 
 
 def assess_late_fee(loan_id: int) -> float:
-    """Assess the late fee the published schedule allows, and return `past_due`.
+    """Assess the late fee the ARREARS rule allows, and return `past_due`.
 
     The fee is the SMALLER of $35 and five per cent of the arrears
-    (`late_fee_for`), which is what `policies/fee_schedule.md` has always said.
+    (`late_fee_for`). That is the rule `policies/fee_schedule.md` published
+    until 2026-08-29, and it is not what that file publishes now.
     The flat figure alone overcharged every borrower whose arrears were below
     $700.
 

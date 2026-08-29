@@ -357,7 +357,7 @@ def test_late_fee_still_requires_a_human_and_still_works(keys, monkeypatch):
 def test_late_fee_on_a_current_loan_is_a_409_not_a_500(keys, monkeypatch):
     """LF-API-NOFEE. A refusal must reach the caller AS a refusal.
 
-    `late_fee_for` raises `NoFeeIsDue` when the published schedule yields no fee
+    `late_fee_for` raises `NoFeeIsDue` when the arrears rule it computes yields no fee
     -- a loan with no arrears, a credit balance, or arrears so small that five
     per cent is under a cent. The route caught only `LoanHasNoBalances`, so
     `@app.exception_handler(Exception)` turned this into

@@ -699,7 +699,7 @@ Each path below exists at this SHA.
 | Allocation follows fees, then interest, then principal | `frontend/e2e/payment-allocation.spec.ts`, `frontend/e2e/payment-allocation-view.spec.ts` |
 | Payment History reads back each ledger movement once | `frontend/e2e/account-activity.spec.ts`, `services/servicing-service/tests/test_account_activity.py` |
 | Header holds one row at presentation widths | `frontend/e2e/appbar-layout.spec.ts` |
-| Late fee follows the published schedule | `services/servicing-service/tests/test_late_fee_follows_the_published_schedule.py` |
+| Late fee implements the SUPERSEDED arrears rule, and differs from published policy (D23, §8c) | `services/servicing-service/tests/test_late_fee_follows_the_superseded_arrears_rule.py` |
 | Reconciliation is a control, matched at transaction level | `services/servicing-service/tests/test_reconciliation_is_a_control.py`, `services/servicing-service/tests/test_reconciliation_matches_transactions.py` |
 | Review signals move no money | `services/payment-service/tests/test_review_signals_do_not_touch_money.py` |
 | No card data on either schema path | `db/tests/test_no_card_data_on_either_schema_path.py` |
