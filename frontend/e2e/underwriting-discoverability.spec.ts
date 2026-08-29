@@ -161,8 +161,32 @@ test("adjacent pages neither repeat nor skip an application", async ({ page }) =
   }).toPass({ timeout: 15_000 });
 
   const second = await rowIds(page);
+
   const overlap = first.filter((id) => second.includes(id));
   expect(overlap, "an application appeared on two adjacent pages").toEqual([]);
+
+  // Repeats are only half of it, and descent is not the other half.
+  //
+  // A row DROPPED at the boundary leaves no overlap, and it also leaves the two
+  // pages strictly descending -- so `min(first) > max(second)` passes while an
+  // application has gone missing. Verified rather than reasoned: shortening the
+  // page query to `limit - 1` skips exactly one row between pages, and that
+  // mutation PASSES the descent check.
+  //
+  // What actually catches it is contiguity. The two pages together must be the
+  // first N ids of the ordered pipeline, so a gap fails on the values rather
+  // than on their direction.
+  const expected = await withDb(async (c) => {
+    const r = await c.query(
+      "SELECT id::int AS id FROM applications ORDER BY id DESC LIMIT $1",
+      [first.length + second.length],
+    );
+    return r.rows.map((row: { id: number }) => row.id);
+  });
+  expect(
+    [...first, ...second],
+    "an application fell between two adjacent pages",
+  ).toEqual(expected);
 });
 
 test("the status filter still works alongside the id lookup", async ({ page }) => {
@@ -189,5 +213,15 @@ test("the status filter still works alongside the id lookup", async ({ page }) =
   test.skip(!other, "no second status option to contrast with");
 
   await page.getByLabel("Status").selectOption(other!);
-  await expect(page.locator("tbody")).toContainText(String(row.id));
+
+  // The row must DISAPPEAR: it has one status, and a different one was asked
+  // for alongside its id, so the two filters together match nothing.
+  //
+  // The first version of this asserted the tbody still contained the id, which
+  // passed whether the filters composed or not -- the empty-state copy names
+  // the searched id too ("No application #4471 matches..."). An assertion that
+  // holds in both the fixed and the broken case proves nothing, which is the
+  // defect this file exists to catch in the product.
+  await expect(page.locator('tbody tr a[href^="/underwriting/"]')).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /clear filters/i })).toBeVisible();
 });
