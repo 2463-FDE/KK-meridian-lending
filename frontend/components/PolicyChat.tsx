@@ -35,17 +35,26 @@ function friendlySource(chunkId: string): string {
     .join(" ");
 }
 
-//: Questions worth asking first, and each one is answerable from the corpus.
+//: Questions worth asking first, and each one the answerability gate accepts.
 //
-// Chips that produce a refusal would teach the opposite lesson on the first
-// click -- that the assistant does not know things -- when the point of the
-// refusal path is that it declines what it cannot GROUND. There is a test that
-// these are answerable, so a chip cannot quietly rot into a demo of the
-// failure case.
+// A chip that produces a refusal teaches the opposite lesson on the first click
+// -- that the assistant does not know things -- when the point of the refusal
+// path is that it declines what it cannot GROUND.
+//
+// The third one is not phrased the way it first was. "What loan terms are
+// available?" READS fine and RETRIEVES fine, and `classify_answerable()` still
+// rejects it: term coverage came out 1/3 against the 0.6 gate, so the shipped
+// suggestion landed on the refusal path. "Standard" is the word the corpus
+// actually uses ("Standard personal-installment note rates..."), and with it
+// the same question passes.
+//
+// `test_policy_chat_examples_are_answerable.py` reads this list and runs the
+// gate the route itself runs, so a chip cannot rot into a demo of the failure
+// case -- and so a rephrasing that only looks answerable cannot pass.
 const EXAMPLES = [
   "What is the late fee?",
   "What score requires manual review?",
-  "What loan terms are available?",
+  "What are the standard loan terms?",
 ];
 
 export default function PolicyChat() {

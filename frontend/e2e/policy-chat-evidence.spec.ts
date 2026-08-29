@@ -79,10 +79,14 @@ async function openPolicyChat(
   });
 }
 
+//: Mirrors PolicyChat.tsx. The third chip is "standard loan terms" rather than
+// "loan terms are available" because the answerability gate rejects the latter
+// -- see `test_policy_chat_examples_are_answerable.py`, which reads the chips
+// out of the component and runs that gate, so the two cannot drift.
 const CHIPS = [
   "What is the late fee?",
   "What score requires manual review?",
-  "What loan terms are available?",
+  "What are the standard loan terms?",
 ];
 
 test("the example chips are offered before anything has been asked", async ({ page }) => {
