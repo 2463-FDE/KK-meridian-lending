@@ -563,6 +563,21 @@ def test_lss_review_queue_is_staff_only(monkeypatch):
     assert resp.status_code == 403
 
 
+def test_lss_latest_run_is_staff_only(monkeypatch):
+    """A borrower must not reach the last run's evidence.
+
+    It carries loan ids, processor references and the two amounts that disagree
+    -- for loans that are not theirs. Same reasoning as the review queue, which
+    is why it sits beside it rather than beside token-only `peek`.
+    """
+    monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
+
+    resp = client.get("/lss/reconciliation/latest",
+                      headers={"Authorization": "Bearer faketoken123"})
+
+    assert resp.status_code == 403
+
+
 def test_lss_review_disposition_is_staff_only(monkeypatch):
     monkeypatch.setattr(auth, "get_session", lambda token: _BORROWER)
 

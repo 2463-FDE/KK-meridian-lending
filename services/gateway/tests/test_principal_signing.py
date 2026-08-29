@@ -391,6 +391,25 @@ def test_the_review_queue_hop_carries_an_assertion(staff_session):
     assert _decode(assertion, public_pem)["sub"] == "7"
 
 
+def test_the_latest_run_hop_carries_an_assertion(staff_session):
+    """The run evidence hop must carry a signed principal.
+
+    Servicing verifies one before answering, so a hop without it gets a 401
+    there and the panel would simply never load -- the failure would look like a
+    broken page rather than a missing credential, which is the same trap the
+    review-queue hop documents.
+    """
+    _, public_pem = staff_session
+    resp = _client().get("/lss/reconciliation/latest",
+                         headers={"Authorization": "Bearer faketoken123"})
+    assert resp.status_code == 200, resp.text
+
+    forwarded = {k.lower(): v for k, v in (_CapturingClient.last_headers or {}).items()}
+    assertion = forwarded.get("x-principal-assertion")
+    assert assertion, "the latest-run hop carried no principal assertion"
+    assert _decode(assertion, public_pem)["sub"] == "7"
+
+
 def test_the_disposition_hop_carries_an_assertion(staff_session):
     """And the write, whose whole point is the name stored beside the answer."""
     _, public_pem = staff_session

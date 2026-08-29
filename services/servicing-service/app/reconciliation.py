@@ -848,6 +848,34 @@ def last_successful_run():
     return rows[0] if rows else None
 
 
+def latest_run():
+    """The most recent run, whatever its outcome, with the evidence it recorded.
+
+    `last_successful_run` deliberately answers a narrower question -- when did
+    this last AGREE -- and returns nothing when every run found breaks. That is
+    right for the summary line it feeds, and useless for showing an operator what
+    the control actually found: a breach run is exactly the one worth reading.
+
+    Every column here was written by `compare` at the time of the run and has
+    never been readable through an API. Nothing is recomputed: the window, the
+    source, the counts, the threshold and the per-transaction breaks are the
+    evidence as recorded, so what the screen shows is what the job concluded
+    rather than a fresh opinion formed at read time. A recomputation could
+    disagree with the run it claims to display, which is the defect this avoids.
+
+    `breaks` is the transaction-level detail -- one entry per (loan,
+    processor_ref) that did not tie out. It is returned as stored.
+    """
+    rows = db.query(
+        "SELECT id, started_at, finished_at, outcome, loans_compared, "
+        "       references_compared, unreferenced_captures, out_of_scope_captures, "
+        "       breaks_found, break_value, threshold_value, breaks, "
+        "       window_start, window_end, source, error_code "
+        "  FROM reconciliation_runs ORDER BY started_at DESC, id DESC LIMIT 1"
+    )
+    return rows[0] if rows else None
+
+
 def recent_failures(limit: int = 10):
     rows = db.query(
         "SELECT id, started_at, outcome, breaks_found, break_value, error_code "

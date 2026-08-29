@@ -612,6 +612,114 @@ def reconciliation_peek():
     }
 
 
+@app.get("/reconciliation/latest")
+def reconciliation_latest(x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+                          x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+                          x_principal_assertion: Optional[str] = Header(
+                              None, alias="X-Principal-Assertion"),
+                          x_internal_token: Optional[str] = Header(
+                              None, alias="X-Internal-Token")):
+    """The most recent reconciliation run, as it was recorded.
+
+    `peek` answers "do the two totals agree, and has anything checked". This
+    answers "what did the last run actually find" -- the window it covered, the
+    file it read, how fine the comparison was, and which transactions did not
+    tie out.
+
+    **Why this needs a verified staff principal and not just the internal
+    token.** The response carries LOAN-LEVEL and TRANSACTION-LEVEL financial
+    detail: loan ids, processor references, and the two amounts that disagree.
+    `peek` returns aggregates and is gated on the token alone; this is a
+    different kind of data and gets the same treatment as the review queue,
+    which returns payment amounts for real loans. A caller holding the shared
+    service token but with no human behind it is refused here, so the browser
+    hop is defence in depth rather than the boundary.
+
+    **Nothing here is recomputed.** Every figure is read back from the
+    `reconciliation_runs` row the job wrote. Recomputing at read time would let
+    the screen disagree with the run it claims to display, and would also make a
+    page load do the control's work -- which it must not, because a control that
+    runs when somebody opens a tab is not a scheduled control.
+
+    **This route cannot start a run**, and there is deliberately no route that
+    can. The scheduler owns when reconciliation happens (`reconcile_scheduler`);
+    a "run now" button would put an unauthenticated-by-schedule comparison in
+    reach of a page load and make the evidence on screen depend on who was
+    looking.
+
+    A break is not a review candidate. The two are different findings with
+    different answers, and the `note` says so in the payload rather than leaving
+    it to whatever heading a client renders this under.
+
+    The wording is deliberately NOT the review queue's wording. That note says a
+    candidate is "not a duplicate finding"; this one says a break is "not a
+    duplicate payment". Describing two different findings in identical sentences
+    would blur exactly the distinction both notes exist to protect -- and it also
+    made one page carry the same sentence twice, which is how this was noticed.
+    """
+    _require_internal(x_internal_token)
+    principal.require_staff_principal(
+        x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
+    )
+    run = reconciliation.latest_run()
+    if run is None:
+        # Never run is a real state and an honest answer. It is NOT "the books
+        # agree" and must not render as an empty break table under a heading
+        # that implies a clean result.
+        return {
+            "run": None,
+            "note": (
+                "Reconciliation has never run in this database. That is not a "
+                "statement that the ledger and the settlement file agree."
+            ),
+        }
+    return {
+        "run": {
+            "id": run["id"],
+            "outcome": run["outcome"],
+            "started_at": str(run["started_at"]) if run["started_at"] else None,
+            "finished_at": str(run["finished_at"]) if run["finished_at"] else None,
+            "window_start": str(run["window_start"]) if run["window_start"] else None,
+            "window_end": str(run["window_end"]) if run["window_end"] else None,
+            "source": run["source"],
+            "loans_compared": run["loans_compared"],
+            "references_compared": run["references_compared"],
+            "unreferenced_captures": run["unreferenced_captures"],
+            "out_of_scope_captures": run["out_of_scope_captures"],
+            "breaks_found": run["breaks_found"],
+            "break_value": str(run["break_value"]),
+            "threshold_value": str(run["threshold_value"]),
+            "error_code": run["error_code"],
+            # As stored by the run. Each entry is one (loan, processor_ref) that
+            # did not tie out.
+            "breaks": run["breaks"],
+            # How many of `breaks_found` are actually in `breaks`.
+            #
+            # `compare` records at most `MAX_RECORDED_BREAKS` entries
+            # (`reconciliation.py`) while `breaks_found` counts every one it
+            # found, so the two disagree on a large run. A caller that renders
+            # the list under the count would show 50 rows beneath "70 breaks"
+            # with nothing saying which 20 are missing -- and the operator would
+            # conclude they had seen every disagreement.
+            #
+            # This is NOT pagination and must not be presented as it. The
+            # unrecorded breaks were never persisted: they exist as part of a
+            # count and nowhere else, so there is no page to fetch and no query
+            # that would produce them. Saying "showing 50 of 70" is honest;
+            # offering a next page would not be.
+            "breaks_recorded": len(run["breaks"]),
+            "breaks_truncated": len(run["breaks"]) < run["breaks_found"],
+            "max_recorded_breaks": reconciliation.MAX_RECORDED_BREAKS,
+        },
+        "note": (
+            "A reconciliation break is the control's own finding that the ledger "
+            "and the processor's settlement evidence disagree for a transaction. "
+            "It is a transaction-level mismatch requiring investigation -- not a "
+            "duplicate payment, and not proof that money was lost."
+        ),
+    }
+
+
 # --- the in-app reconciliation review queue (D22) -----------------------------
 #
 # The client's decision of 2026-08-24 authorised ONE destination for a payment
