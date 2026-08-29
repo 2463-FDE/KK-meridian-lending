@@ -1,27 +1,35 @@
-"""Compounding is real, and it is a question rather than a defect.
+"""Compounding is real, the question is now ANSWERED, and the behaviour is unchanged.
 
 `docs/DEBT.md` D23. The client asked at the 2026-08-19 demo whether the late fee
 is meant to compound. It does: the fee is the lesser of $35 and five per cent of
 arrears, a posted fee raises arrears, so the next assessment prices off a base
 that already contains the previous fee.
 
-**This file does not say that is wrong.** `policies/fee_schedule.md` publishes
-the comparison and the code implements it exactly; what the schedule does not
-say is whether repetition is intended, and Lending Operations owns that. These
-are characterization tests: they pin what the system does today so the register
-entry cannot quietly go stale, and so that whoever answers the question can see
-precisely what would change.
+**The answer arrived on 2026-08-29, and it replaced the rule rather than
+settling a cadence:** at most one fee per missed scheduled installment, after
+the existing grace period, priced at `min($35, 5% x unpaid scheduled PRINCIPAL +
+INTEREST for THAT installment)`, with previous late fees and all other fees
+excluded from the base.
 
-If the answer arrives and the behaviour changes, these tests are expected to
-fail. That is the point of writing them down -- a decision should break the
-description of the old behaviour, loudly, rather than leave two accounts of the
-fee in the repository.
+**These tests still pass, and that is correct, because the BEHAVIOUR has not
+changed.** The decided rule needs installment-level facts this schema does not
+hold -- nothing records which installment a payment satisfied, or which
+installment a fee belongs to -- so it cannot be implemented without a
+data-model expansion, and it will not be approximated from `past_due`. D23
+carries the traced gate and the missing primitive.
+
+So what these are has shifted, and saying so is the point. They were
+characterization tests of an UNDECIDED rule; they are now characterization tests
+of a SUPERSEDED one. They pin what the system really does so that the register
+entry cannot quietly go stale, and so that whoever implements the decided rule
+can see exactly what changes. When that lands, these tests are expected to fail
+-- loudly -- rather than leaving two accounts of the fee in the repository.
 
 Deliberately arithmetic-only: no database, no ledger. The concurrency half of
 this area is closed and proved elsewhere with a real two-connection race
 (`test_late_fee_goes_through_the_ledger.py`). Mixing the two would blur a closed
-engineering defect with an open product question, which is the confusion D23
-exists to prevent.
+engineering defect with a product rule that is decided but unbuilt, which is the
+confusion D23 exists to prevent.
 """
 import pathlib
 from decimal import Decimal
@@ -34,12 +42,43 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 FEE_SCHEDULE = REPO / "policies" / "fee_schedule.md"
 
 
-def test_the_published_rule_is_still_the_lesser_of_the_two():
-    """The premise. If the schedule is ever rewritten, these tests describe a
-    rule that no longer exists and must be revisited rather than trusted."""
+def test_the_schedule_publishes_the_decided_rule_and_says_the_code_differs():
+    """The premise, and it changed on 2026-08-29 exactly as this file predicted.
+
+    This test used to assert that `policies/fee_schedule.md` still published
+    "$35 flat, or 5% of the past-due amount, whichever is **less**". It does not
+    any more: the client decided the rule, and the published table now states
+    the decided one -- one fee per missed scheduled installment, priced off that
+    installment's unpaid scheduled principal and interest. The old assertion
+    failed the moment the table was updated, which is what it was for.
+
+    That matters beyond bookkeeping. `policies/fee_schedule.md` is on policy
+    chat's allowlist (`loan-assistant/app/policy_tool.py`), so whatever this
+    file publishes is what a client-facing answer can quote as current policy.
+    Leaving the superseded arrears rule under a "source of truth" heading would
+    have had the assistant state an obsolete fee rule as fact.
+
+    So the premise is now two-sided, and BOTH sides have to hold:
+
+      * the schedule publishes the DECIDED rule; and
+      * the schedule says plainly that the implementation differs.
+
+    The second is what keeps the tests below honest. They characterize the
+    OLDER comparison, which is still what the code computes, and a reader who
+    finds them without that sentence would reasonably think the repository had
+    two contradictory accounts of the fee.
+    """
     text = FEE_SCHEDULE.read_text(encoding="utf-8")
 
-    assert "$35 flat, or 5% of the past-due amount, whichever is **less**" in text
+    # The decided rule is what the published table states.
+    assert "one fee per missed scheduled installment" in text.lower()
+    assert "unpaid scheduled principal + interest" in text.lower()
+
+    # And the gap is stated rather than left for a reader to infer.
+    assert "Current implementation differs" in text
+
+    # The constants are unchanged, because the BEHAVIOUR is unchanged: these are
+    # the older published comparison, which is still what runs.
     assert LATE_FEE_FLAT == Decimal("35.00")
     assert LATE_FEE_PCT_OF_PAST_DUE == Decimal("0.05")
 
@@ -60,8 +99,8 @@ def test_a_second_assessment_prices_off_arrears_that_include_the_first_fee():
     assert second == Decimal("10.50")
     assert second > first, (
         "the second fee did not price off the raised arrears -- if this now "
-        "holds, the compounding question in DEBT.md D23 has been answered in "
-        "code and the entry needs updating"
+        "holds, the decided rule in DEBT.md D23 has reached the code, and this "
+        "file describes a fee that no longer exists"
     )
 
 

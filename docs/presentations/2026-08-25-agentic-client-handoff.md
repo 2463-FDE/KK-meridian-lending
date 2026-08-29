@@ -586,7 +586,7 @@ docker compose exec -T gateway python -m pip freeze
    ledger. Pending → claims nothing. Failed → says declined, not pending.
 10. **Reconciliation.** `processor_ref` → transaction-level comparison → break and
     review evidence.
-11. **Open decisions.** Show the late-fee reassessment question as genuinely open.
+11. **Open decisions.** Do NOT present late-fee reassessment as open -- it was answered 2026-08-29 (§8c). Present it as decided and deliberately not implemented, and show the genuinely open items in §8b instead.
     Do not present every box as green.
 
 ---
@@ -605,9 +605,19 @@ the client has not chosen history only, receipt only, both, or something else, a
 we must not claim they did. Neither surface is removed while that is unanswered.
 
 **Is late-fee compounding intended?**
-Still open. The amount formula is fixed: the lesser of $35 or 5% of arrears (5%
-below $700, $35 at or above $700). What is unresolved is repeated reassessment and
-whether previously assessed fees belong in the next base.
+No -- answered 2026-08-29, and the answer replaced the rule rather than settling a
+cadence. At most one fee per missed scheduled installment, after the grace period,
+never reassessed against the same installment, priced at the lesser of $35.00 and
+5% of THAT installment's unpaid scheduled principal and interest, with previous
+late fees and all other fees excluded from the base.
+
+**The code does not do this yet, and saying so is part of the answer.** It still
+computes the superseded arrears rule -- the lesser of $35 or 5% of the past-due
+total -- which can charge more than the decided rule allows, and which nothing
+stops being assessed twice. The decided rule needs installment-level facts this
+system does not persist; `docs/DEBT.md` D23 carries the missing primitive and the
+smallest addition that would close it. It is deliberately not approximated from
+the past-due total.
 
 **Is the card-data path PCI certified?**
 No. Repository-level handling is traced and tested with named boundaries. This is a
@@ -658,13 +668,25 @@ given.
 
 | Item | Status | Owner |
 |---|---|---|
-| **D23** late-fee reassessment / compounding | **OPEN CLIENT DECISION** — may a fee be assessed again, at what cadence, and do previously assessed fees enter the next 5% base | Lending Operations |
-| **Payment-allocation placement** | **ENGINEERING DONE / PRODUCT DECISION OPEN** — both a ledger-backed Payment History and an immediate captured-payment receipt exist and work, each with tests cited in [§9](#9-evidence-references). The client has **not** chosen the final placement: history only, receipt only, both, or something else. Neither surface may be removed without direction | Client / product |
-| **D24** fairness training package | **CLOSED 2026-08-27 — POLICY ANSWERED (8a) AND PACKAGE RECEIVED.** The client's synthetic training package arrived as an email attachment dated 2026-08-24 and is ingested byte-for-byte at `fixtures/offline_fairness_training/client_package_2026-08-24/`, all 34 checksums verifying. It authorises the isolated offline evaluation and nothing else: the evaluator reports aggregate counts and computes **no fairness verdict**. It is not vendor-issued and establishes no real-world fairness; real approved vendor materials must still replace it before any non-training use. *This row read `POLICY ANSWERED / ARTIFACT PENDING — not present in this repository` until 2026-08-27, which was correct when written.* | Closed — no client action outstanding |
-| **RF-25** manual DTI entry | **OPEN CLIENT DECISION** — whether staff may apply DTI manually in a referred review, and what evidence authorises it | Lending Ops / Compliance |
 | **D7** external alert delivery, after the freeze | **OPS-BLOCKED + CLIENT-PROHIBITED** — the current phase is decided and built (8a); a *firing* alert with nobody watching still has no human destination | Operations, then client |
 | **Week 9** KYC/AML/UBO/sanctions | **COMPLIANCE- / VENDOR- / CLIENT- / OPS-BLOCKED** | Multi-party |
 | **Week 10** retention-aware redaction | **PLAN ONLY** — needs a scope separating legally required evidence from identifying data | Pending authorisation |
+
+
+### 8c. Answered since this deck was written — recorded, not silently edited
+
+These sat in 8b when this deck was written, and that was true then. They are
+moved rather than deleted: an item that was open and is now answered is a fact
+about the engagement, and a table that quietly loses rows cannot be audited.
+**Answered is not the same as built** — D23 is decided and deliberately not
+implemented, for reasons stated in its row.
+
+| Item | Status | Owner |
+|---|---|---|
+| **D23** late-fee reassessment / compounding | **ANSWERED 2026-08-29 -- RULE DECIDED, NOT YET IMPLEMENTED.** *This row read "OPEN CLIENT DECISION -- may a fee be assessed again, at what cadence, and do previously assessed fees enter the next 5% base" when this document was written, and that was true then.* The answer replaces the rule rather than setting a cadence: at most one fee per missed scheduled installment, after the existing grace period, never reassessed against the same installment, priced at `min($35, 5% x unpaid scheduled P&I for THAT installment)` with all fees excluded from the base. **The code still does the older published comparison priced off the past-due total**, because the decided rule needs installment-level facts this system does not persist -- nothing records which installment a payment satisfied or which installment a fee belongs to. `docs/DEBT.md` D23 carries the traced gate, the exact missing primitive, the smallest addition that would close it, and why no backfill of existing loans could be truthful. Not approximated from `past_due`, deliberately. | Lending Operations (rule) / engineering (data-model expansion) |
+| **Payment-allocation placement** | **ANSWERED 2026-08-29 -- AND ALREADY BUILT.** *This row read "ENGINEERING DONE / PRODUCT DECISION OPEN -- the client has not chosen the final placement: history only, receipt only, both, or something else", and that was true when this deck was written.* The client chose **both**. Payment History is the durable record and always shows the final actual allocation; the immediate receipt shows the actual allocation once a payment is applied, and reads "Captured -- allocation pending" while it is only captured. **No estimated allocation is ever shown**, on either surface. Delivered in #121, with an end-to-end guard on the captured-only wording. | Client (decided) |
+| **RF-25** manual DTI entry | **RULE ANSWERED 2026-08-29 -- ENGINEERING DISPOSITION IN PROGRESS.** *This row read "OPEN CLIENT DECISION -- whether staff may apply DTI manually in a referred review, and what evidence authorises it", and that was true when this deck was written.* Both halves are now answered: manual DTI is permitted **only** on a REFERRED application, **only** by an underwriter or admin, **only** from approved synthetic source documents, and it is **human-review evidence that must not change the decision**. It must persist gross monthly income, monthly debt obligations, source-document references, the calculation, staff identity, timestamp and reason -- a bare percentage is not sufficient. The engineering question of whether the current data model can hold that evidence truthfully is being dispositioned in the PR that follows this one; **nothing is built yet**, and no row here should be read as saying otherwise. | Client (rule, decided) / engineering (representability) |
+| **D24** fairness training package | **CLOSED 2026-08-27 — POLICY ANSWERED (8a) AND PACKAGE RECEIVED.** The client's synthetic training package arrived as an email attachment dated 2026-08-24 and is ingested byte-for-byte at `fixtures/offline_fairness_training/client_package_2026-08-24/`, all 34 checksums verifying. It authorises the isolated offline evaluation and nothing else: the evaluator reports aggregate counts and computes **no fairness verdict**. It is not vendor-issued and establishes no real-world fairness; real approved vendor materials must still replace it before any non-training use. *This row read `POLICY ANSWERED / ARTIFACT PENDING — not present in this repository` until 2026-08-27, which was correct when written.* | Closed — no client action outstanding |
 
 ---
 
@@ -687,7 +709,7 @@ Each path below exists at this SHA.
 | Allocation follows fees, then interest, then principal | `frontend/e2e/payment-allocation.spec.ts`, `frontend/e2e/payment-allocation-view.spec.ts` |
 | Payment History reads back each ledger movement once | `frontend/e2e/account-activity.spec.ts`, `services/servicing-service/tests/test_account_activity.py` |
 | Header holds one row at presentation widths | `frontend/e2e/appbar-layout.spec.ts` |
-| Late fee follows the published schedule | `services/servicing-service/tests/test_late_fee_follows_the_published_schedule.py` |
+| Late fee implements the SUPERSEDED arrears rule, and differs from published policy (D23, §8c) | `services/servicing-service/tests/test_late_fee_follows_the_superseded_arrears_rule.py` |
 | Reconciliation is a control, matched at transaction level | `services/servicing-service/tests/test_reconciliation_is_a_control.py`, `services/servicing-service/tests/test_reconciliation_matches_transactions.py` |
 | Review signals move no money | `services/payment-service/tests/test_review_signals_do_not_touch_money.py` |
 | No card data on either schema path | `db/tests/test_no_card_data_on_either_schema_path.py` |
@@ -703,7 +725,7 @@ Each path below exists at this SHA.
 - Not "tested against a real credit bureau" or "a real payment processor" — both
   are stubs here.
 - Not "the client chose the payment-allocation placement" — no such decision exists.
-- Not "late-fee compounding is settled" — it is open.
+- Not "late-fee compounding is settled **in the code**". The RULE is settled (2026-08-29, §8c); the implementation still computes the superseded arrears rule and can charge more than the decided rule allows.
 - Not "fairness has been evaluated" — no approved dataset exists (D24).
 - Not "the E2E suite is green in parallel" — it requires `--workers=1`, and the
   browser step additionally requires the `docker-compose.e2e.yml` overlay.

@@ -33,10 +33,11 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 INIT_FILES = ("001_schema.sql", "007_ledger_opening_balances.sql")
 SCHEMA = "servicing_late_fee_ledger_test"
 
-#: Arrears the fixture starts with, and the fee the published schedule charges
-#: on them. `policies/fee_schedule.md` is "$35 flat, or 5% of the past-due
-#: amount, whichever is **less**", so on $200 of arrears the fee is $10.00 --
-#: not the $35 this file assumed while only the flat half was implemented.
+#: Arrears the fixture starts with, and the fee the SUPERSEDED ARREARS RULE
+#: charges on them -- "$35 flat, or 5% of the past-due amount, whichever is
+#: less", which `policies/fee_schedule.md` published until 2026-08-29 and which
+#: the code still computes. On $200 of arrears that is $10.00 -- not the $35
+#: this file assumed while only the flat half was implemented.
 #: Chosen below the $700 crossover deliberately: that is the range the flat fee
 #: overcharged, so these tests exercise the corrected half.
 ARREARS = Decimal("200.00")
@@ -454,10 +455,13 @@ def test_two_concurrent_assessments_agree_with_running_them_one_after_another(
     straight onto it), so a serialised second assessment prices off a higher
     figure than an overlapping one does.
 
-    The property under test is therefore NOT "no double fee" -- whether the
-    schedule permits charging twice is a policy question this repository has not
-    answered, and the test does not invent one. It is that the two ORDERINGS
-    AGREE: run concurrently, the total must match running them back to back.
+    The property under test is therefore NOT "no double fee". That question is
+    now answered -- since 2026-08-29 the rule is one fee per missed scheduled
+    installment (`docs/DEBT.md` D23) -- but it is not implemented, because
+    nothing records which installment a fee belongs to. So this test still
+    pins what the code does rather than what the policy says, deliberately.
+    What it asserts is that the two ORDERINGS AGREE: run concurrently, the total
+    must match running them back to back.
 
     Threads and two real connections, not a mocked lock. `FOR UPDATE` is a
     database behaviour, and a test that fakes it proves nothing about the
