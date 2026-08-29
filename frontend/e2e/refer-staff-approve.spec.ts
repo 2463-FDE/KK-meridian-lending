@@ -62,9 +62,22 @@ test("REFER resolved by staff approval yields one offer, one loan, and an audita
     // drive the accept from the staff screen, which is the supported staff
     // path and exercises the same gated accept endpoint.
     await page.goto(`/underwriting/${appId}`);
+    // Before boarding, the lifecycle strip says so. This flow already exists, so
+    // asserting on it costs no extra fixture application (RF-27).
+    await expect(page.getByTestId("lifecycle-boarded")).toHaveAttribute(
+      "data-state", "incomplete", { timeout: 15_000 },
+    );
+
     const board = page.getByRole("button", { name: /Accept & board|Accept and board|Board/ });
     await expect(board).toBeEnabled({ timeout: 15_000 });
     await board.click();
+
+    // And after boarding it updates WITHOUT a reload. The strip is derived from
+    // the database, so every handler that changes the database has to re-read;
+    // one of them did not, and nothing would have noticed.
+    await expect(page.getByTestId("lifecycle-boarded")).toHaveAttribute(
+      "data-state", "complete", { timeout: 15_000 },
+    );
 
     // --- exactly one loan, one balance -------------------------------------
     await expect.poll(

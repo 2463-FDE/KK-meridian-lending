@@ -249,6 +249,14 @@ function UnderwritingDetailContent() {
       setDecision(res);
       setApp((prev) => (prev ? { ...prev, decision: res.decision } : prev));
       setActionMsg(`Decision recorded: ${res.decision}.`);
+      // Re-read rather than patch. The local patch above updates the decision
+      // panel only, and running a decision moves more than one step: an
+      // approval AUTO-GENERATES an offer, so the Offer step changes too. The
+      // strip is derived from the database, so anything that changes the
+      // database has to be followed by a read -- the other three handlers here
+      // already do this, and this one silently did not.
+      await load();
+      await loadLifecycle();
     } catch (err) {
       setActionErr(errMsg(err, "Could not run a decision."));
     } finally {

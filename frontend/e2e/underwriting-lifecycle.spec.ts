@@ -60,9 +60,15 @@ test("all five steps are shown, in order", async ({ page }) => {
 
   await openApplication(page, boarded!.appId);
 
-  for (const key of ["submitted", "kyc", "decision", "offer", "boarded"]) {
-    await expect(page.getByTestId(`lifecycle-${key}`)).toBeVisible();
-  }
+  // The ORDER, not merely the presence of each step. Asserting five testids are
+  // visible passes on a strip that renders them backwards, and the sequence is
+  // the part that makes the strip readable at a glance.
+  const rendered = await page
+    .locator('[data-testid^="lifecycle-"]')
+    .evaluateAll((els) =>
+      els.map((el) => el.getAttribute("data-testid")?.replace("lifecycle-", "")),
+    );
+  expect(rendered).toEqual(["submitted", "kyc", "decision", "offer", "boarded"]);
 });
 
 test("a boarded application names its loan and links to the account", async ({ page }) => {
