@@ -44,6 +44,64 @@ import { comparisonStatement } from "../../lib/reconciliation";
  * which is the precise thing the client's wording forbids.
  */
 
+/**
+ * One transaction that did not tie out, as the run recorded it.
+ *
+ * Amounts are strings because they are strings in the ledger and in the
+ * settlement file. Parsing them into numbers here would introduce a second
+ * representation of a figure whose exactness is the entire point of the
+ * comparison.
+ */
+interface TransactionBreak {
+  kind: string;
+  loan_id: number;
+  processor_ref: string | null;
+  ledger: string;
+  settlement: string;
+  difference: string;
+}
+
+/** The last run's own evidence. Every field is read back, never recomputed. */
+interface RunEvidence {
+  id: number;
+  outcome: string;
+  started_at: string | null;
+  finished_at: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  source: Record<string, unknown> | null;
+  loans_compared: number;
+  references_compared: number;
+  unreferenced_captures: number;
+  out_of_scope_captures: number;
+  breaks_found: number;
+  break_value: string;
+  threshold_value: string;
+  error_code: string | null;
+  breaks: TransactionBreak[];
+}
+
+interface LatestRun {
+  run: RunEvidence | null;
+  note: string;
+}
+
+/**
+ * What the run read, named in a way an operator can act on.
+ *
+ * `source` is JSONB the job wrote, so its shape is the job's rather than this
+ * page's. A known `file` key is shown as a filename; anything else is shown as
+ * its JSON rather than dropped, because a source this page cannot label is
+ * still evidence and hiding it would make the run look less specified than it
+ * was. An absent source says so plainly.
+ */
+function sourceLabel(source: Record<string, unknown> | null): string {
+  if (!source || Object.keys(source).length === 0) return "not recorded";
+  const file = source.file;
+  if (typeof file === "string" && file) return file;
+  return JSON.stringify(source);
+}
+
 interface QueuePayment {
   id: number;
   amount: string;
@@ -141,6 +199,12 @@ function ReconciliationQueue() {
   // is the whole layout); they are now two different failures too.
   const [queueLoading, setQueueLoading] = useState(true);
   const [queueError, setQueueError] = useState<string | null>(null);
+  const [latest, setLatest] = useState<LatestRun | null>(null);
+  // A third section, so a third pair of loading/error flags. Same reasoning as
+  // the split above: the run evidence failing to load says nothing about the
+  // candidates or the totals, and must not blank either.
+  const [latestLoading, setLatestLoading] = useState(true);
+  const [latestError, setLatestError] = useState<string | null>(null);
   const [peekLoading, setPeekLoading] = useState(true);
   const [peekError, setPeekError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -184,6 +248,24 @@ function ReconciliationQueue() {
       setPeekLoading(false);
     }
   }, []);
+
+  const loadLatest = useCallback(async () => {
+    setLatestLoading(true);
+    setLatestError(null);
+    try {
+      setLatest((await apiGet("/lss/reconciliation/latest")) as LatestRun);
+    } catch (e) {
+      setLatestError(
+        e instanceof Error ? e.message : "The last run could not be read.",
+      );
+    } finally {
+      setLatestLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLatest();
+  }, [loadLatest]);
 
   useEffect(() => {
     loadQueue();
@@ -446,6 +528,169 @@ function ReconciliationQueue() {
               </ul>
             )}
           </section>
+        )}
+
+        {/* The last run's own evidence.
+
+            Everything here was written by the job and read back unchanged --
+            no figure on this panel is computed in the browser, and opening the
+            page starts nothing. A control that ran because somebody looked at
+            it would not be a scheduled control, and there is deliberately no
+            "run now" button anywhere on this screen: the scheduler owns when
+            reconciliation happens.
+
+            Counts are shown even when they are zero, because zero is an
+            answer. "Unreferenced captures: 0" says the run could match every
+            capture it saw; a blank says nothing and reads as reassurance. */}
+        <h3 className="section-title" data-testid="recon-latest-heading">
+          Latest run
+        </h3>
+
+        {latestError ? (
+          <p className="alert alert-error">{latestError}</p>
+        ) : null}
+
+        {latestLoading ? (
+          <div className="card empty">Loading…</div>
+        ) : !latest ? (
+          <div className="card empty">
+            The last run could not be read. That is a gap in this panel, not a
+            statement that the books agree.
+          </div>
+        ) : !latest.run ? (
+          /* Never run is not a clean result, and must not render as an empty
+             break table under a heading that implies one (D7). */
+          <div className="card empty" data-testid="recon-never-run">
+            {latest.note}
+          </div>
+        ) : (
+          <>
+            <section className="card" data-testid="recon-latest-run">
+              <div className="spread">
+                <span>Outcome</span>
+                <span data-testid="recon-outcome">{latest.run.outcome}</span>
+              </div>
+              <div className="spread">
+                <span>Started</span>
+                <span>{shortDate(latest.run.started_at ?? "")}</span>
+              </div>
+              <div className="spread">
+                <span>Finished</span>
+                <span>
+                  {latest.run.finished_at
+                    ? shortDate(latest.run.finished_at)
+                    : "did not finish"}
+                </span>
+              </div>
+              <div className="spread">
+                <span>Window</span>
+                <span>
+                  {latest.run.window_start && latest.run.window_end
+                    ? `${latest.run.window_start} → ${latest.run.window_end}`
+                    : "not recorded"}
+                </span>
+              </div>
+              <div className="spread">
+                <span>Source</span>
+                <span>{sourceLabel(latest.run.source)}</span>
+              </div>
+              <div className="spread">
+                <span>Loans compared</span>
+                <span className="num">{latest.run.loans_compared}</span>
+              </div>
+              <div className="spread">
+                {/* How FINE the comparison was. Many loans and few references
+                    means coarse per-loan totals were compared, which is the
+                    state this control was fixed out of. */}
+                <span>References compared</span>
+                <span className="num">{latest.run.references_compared}</span>
+              </div>
+              <div className="spread">
+                <span>Unreferenced captures</span>
+                <span className="num">{latest.run.unreferenced_captures}</span>
+              </div>
+              <div className="spread">
+                <span>Out-of-scope captures</span>
+                <span className="num">{latest.run.out_of_scope_captures}</span>
+              </div>
+              <div className="spread">
+                <span>Breaks found</span>
+                <span className="num" data-testid="recon-breaks-found">
+                  {latest.run.breaks_found}
+                </span>
+              </div>
+              <div className="spread">
+                <span>Break value</span>
+                <span className="num">${latest.run.break_value}</span>
+              </div>
+              <div className="spread">
+                <span>Threshold</span>
+                <span className="num">${latest.run.threshold_value}</span>
+              </div>
+              {latest.run.error_code ? (
+                <div className="spread">
+                  <span>Error code</span>
+                  <span data-testid="recon-error-code">
+                    {latest.run.error_code}
+                  </span>
+                </div>
+              ) : null}
+            </section>
+
+            <h3 className="section-title" data-testid="recon-breaks-heading">
+              Transaction breaks
+            </h3>
+            <p className="sub">{latest.note}</p>
+
+            {latest.run.breaks.length === 0 ? (
+              <div className="card empty" data-testid="recon-no-breaks">
+                This run recorded no transaction breaks.
+              </div>
+            ) : (
+              /* `table-wrap`, matching the candidate table above and every
+                 other table on the site: a bare table overflows the card on a
+                 narrow screen instead of scrolling inside it. */
+              <div className="table-wrap">
+                <table data-testid="recon-breaks-table">
+                  <thead>
+                    <tr>
+                      <th>Loan</th>
+                      <th>Processor reference</th>
+                      <th>Break type</th>
+                      <th>Ledger</th>
+                      <th>Settlement</th>
+                      <th>Difference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {latest.run.breaks.map((b, i) => (
+                      <tr
+                        key={`${b.loan_id}-${b.processor_ref ?? "none"}-${i}`}
+                        data-testid={`recon-break-${b.loan_id}`}
+                      >
+                        <td>
+                          {/* Straight to the loan the mismatch is about.
+                              Investigating a break starts by reading that
+                              loan's activity. */}
+                          <Link href={`/servicing/${b.loan_id}`}>
+                            Loan {b.loan_id}
+                          </Link>
+                        </td>
+                        {/* The processor's own reference. Not card data and not
+                            derived from any: it is the handle both sides of the
+                            comparison already key on. */}
+                        <td>{b.processor_ref ?? "none recorded"}</td>
+                        <td>{b.kind}</td>
+                        <td className="num">${b.ledger}</td>
+                        <td className="num">${b.settlement}</td>
+                        <td className="num">${b.difference}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
         )}
       </section>
     </div>

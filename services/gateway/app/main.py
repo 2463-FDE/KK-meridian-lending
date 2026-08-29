@@ -397,6 +397,17 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
     # itself, so this check is defence in depth rather than the boundary -- a
     # caller that reaches servicing directly with the shared internal token is
     # refused there for having no verified human behind it.
+    # The latest run's own evidence, including per-transaction breaks. Signed
+    # principal for the same reason the review queue carries one and
+    # `reconciliation/peek` does not: peek returns two aggregates, this returns
+    # loan ids, processor references and the amounts that disagree. Servicing
+    # verifies the assertion itself; this is defence in depth.
+    if path == "reconciliation/latest":
+        if auth.is_staff(user):
+            return await _proxy(SERVICING_URL, f"/{path}", request, user,
+                                extra_headers=_principal_headers(svc, user))
+        raise HTTPException(status_code=403, detail="staff only")
+
     if path == "reconciliation/review-queue" or _REVIEW_DISPOSITION_RE.match(path):
         if auth.is_staff(user):
             return await _proxy(SERVICING_URL, f"/{path}", request, user,
