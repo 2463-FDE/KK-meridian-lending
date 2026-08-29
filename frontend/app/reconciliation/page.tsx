@@ -79,6 +79,11 @@ interface RunEvidence {
   threshold_value: string;
   error_code: string | null;
   breaks: TransactionBreak[];
+  /** How many of `breaks_found` are actually in `breaks`. */
+  breaks_recorded: number;
+  /** True when the run found more breaks than it stored. */
+  breaks_truncated: boolean;
+  max_recorded_breaks: number;
 }
 
 interface LatestRun {
@@ -638,9 +643,34 @@ function ReconciliationQueue() {
             </section>
 
             <h3 className="section-title" data-testid="recon-breaks-heading">
-              Transaction breaks
+              Transaction breaks{" "}
+              {latest.run.breaks_found > 0 ? (
+                <span className="muted" data-testid="recon-breaks-count">
+                  ({latest.run.breaks_recorded} of {latest.run.breaks_found})
+                </span>
+              ) : null}
             </h3>
             <p className="sub">{latest.note}</p>
+
+            {/* A short list reads as a complete one, which is the same
+                misreading a blank count invites. The run stores at most
+                `max_recorded_breaks` entries while `breaks_found` counts every
+                one it found, so on a large run the table is a prefix.
+
+                Deliberately NOT offered as pagination. The unrecorded breaks
+                were never written down -- they exist inside a count and nowhere
+                else -- so there is no page to fetch, and a "next" control would
+                promise rows no query can produce. What an operator can act on
+                is the count, and the fact that the file is where the rest are. */}
+            {latest.run.breaks_truncated ? (
+              <p className="alert alert-warn" data-testid="recon-breaks-truncated">
+                This run found {latest.run.breaks_found} breaks and recorded the
+                first {latest.run.breaks_recorded}. The remaining{" "}
+                {latest.run.breaks_found - latest.run.breaks_recorded} were
+                counted but not stored, so they cannot be listed here — the
+                settlement file and the ledger are where they can be found.
+              </p>
+            ) : null}
 
             {latest.run.breaks.length === 0 ? (
               <div className="card empty" data-testid="recon-no-breaks">

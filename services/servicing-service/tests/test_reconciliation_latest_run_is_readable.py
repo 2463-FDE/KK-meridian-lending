@@ -221,3 +221,57 @@ def test_the_route_does_not_invent_a_figure_the_run_did_not_record(keys, fake_db
     assert run["window_start"] is None
     assert run["error_code"] == "SETTLEMENT_MISSING"
     assert run["outcome"] == "error"
+
+
+def test_a_truncated_break_list_says_so(keys, fake_db, monkeypatch):  # noqa: F811
+    """REV-TRUNCATED-BREAKS. A short list reads as a complete one.
+
+    `compare` stores at most `MAX_RECORDED_BREAKS` entries while `breaks_found`
+    counts every one it found, so a large run produces a table that is a PREFIX
+    of the answer. Rendered under the true count with nothing between them, an
+    operator reads the rows as every disagreement there was -- and the ones that
+    were never stored look investigated.
+
+    This is the same defect the approvals queue had (#125): a bounded list
+    served as though it were the whole set. It is not the same FIX, because the
+    unrecorded breaks were never persisted -- they exist inside a count and
+    nowhere else. There is no page to fetch, so the response says how many are
+    missing rather than offering to produce them.
+    """
+    many = [dict(RUN["breaks"][0], processor_ref=f"PR-{i}") for i in range(50)]
+    monkeypatch.setattr(
+        reconciliation, "latest_run",
+        lambda: dict(RUN, breaks=many, breaks_found=70),
+    )
+
+    run = _get(keys).json()["run"]
+
+    assert run["breaks_found"] == 70
+    assert run["breaks_recorded"] == 50
+    assert run["breaks_truncated"] is True
+    assert len(run["breaks"]) == 50
+
+
+def test_an_untruncated_break_list_is_not_labelled_partial(keys, fake_db, monkeypatch):  # noqa: F811
+    """The other half, so the flag cannot be hard-coded true.
+
+    A guard that says "partial" on a complete list is its own defect: it teaches
+    an operator to ignore the label.
+    """
+    monkeypatch.setattr(reconciliation, "latest_run", lambda: dict(RUN))
+
+    run = _get(keys).json()["run"]
+
+    assert run["breaks_found"] == 2
+    assert run["breaks_recorded"] == 2
+    assert run["breaks_truncated"] is False
+
+
+def test_the_recorded_cap_is_reported_rather_than_assumed(keys, fake_db, monkeypatch):  # noqa: F811
+    """The client is told the cap, not left to infer it from a row count. The
+    figure comes from the module that enforces it, so the two cannot drift."""
+    monkeypatch.setattr(reconciliation, "latest_run", lambda: dict(RUN))
+
+    assert _get(keys).json()["run"]["max_recorded_breaks"] == (
+        reconciliation.MAX_RECORDED_BREAKS
+    )

@@ -693,6 +693,23 @@ def reconciliation_latest(x_user_id: Optional[str] = Header(None, alias="X-User-
             # As stored by the run. Each entry is one (loan, processor_ref) that
             # did not tie out.
             "breaks": run["breaks"],
+            # How many of `breaks_found` are actually in `breaks`.
+            #
+            # `compare` records at most `MAX_RECORDED_BREAKS` entries
+            # (`reconciliation.py`) while `breaks_found` counts every one it
+            # found, so the two disagree on a large run. A caller that renders
+            # the list under the count would show 50 rows beneath "70 breaks"
+            # with nothing saying which 20 are missing -- and the operator would
+            # conclude they had seen every disagreement.
+            #
+            # This is NOT pagination and must not be presented as it. The
+            # unrecorded breaks were never persisted: they exist as part of a
+            # count and nowhere else, so there is no page to fetch and no query
+            # that would produce them. Saying "showing 50 of 70" is honest;
+            # offering a next page would not be.
+            "breaks_recorded": len(run["breaks"]),
+            "breaks_truncated": len(run["breaks"]) < run["breaks_found"],
+            "max_recorded_breaks": reconciliation.MAX_RECORDED_BREAKS,
         },
         "note": (
             "A reconciliation break is the control's own finding that the ledger "

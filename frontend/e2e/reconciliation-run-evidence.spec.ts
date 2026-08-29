@@ -152,3 +152,72 @@ test("there is no way to start a reconciliation run from this page", async ({ pa
     await expect(page.getByRole("button", { name: label })).toHaveCount(0);
   }
 });
+
+test("a break table that is only part of the answer says so", async ({ page }) => {
+  // REV-TRUNCATED-BREAKS. `compare` stores at most 50 break rows while
+  // `breaks_found` counts every one it found, so a large run renders a PREFIX.
+  // Under the true count with nothing between them, an operator reads the rows
+  // as every disagreement there was.
+  //
+  // Asserted against whatever the database currently holds rather than a seeded
+  // large run: the seed's run is small, so the meaningful check is that the
+  // label and the row count agree with the record in BOTH directions.
+  const client = dbClient();
+  await client.connect();
+  let run: { breaks_found: number; recorded: number } | null = null;
+  try {
+    const res = await client.query(
+      `SELECT breaks_found, jsonb_array_length(breaks) AS recorded
+         FROM reconciliation_runs ORDER BY started_at DESC, id DESC LIMIT 1`,
+    );
+    run = res.rows[0] ?? null;
+  } finally {
+    await client.end();
+  }
+
+  test.skip(run === null, "no reconciliation run in this database");
+
+  await signInAsStaff(page, "admin");
+  await page.goto("/reconciliation");
+  await expect(page.getByTestId("recon-breaks-heading")).toBeVisible({
+    timeout: 20_000,
+  });
+
+  const truncated = run!.recorded < run!.breaks_found;
+  const banner = page.getByTestId("recon-breaks-truncated");
+
+  if (truncated) {
+    // It must say how many are missing, not merely that some are.
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText(String(run!.breaks_found));
+    await expect(banner).toContainText(String(run!.recorded));
+  } else {
+    // And it must NOT cry partial on a complete list -- a label that is always
+    // on teaches an operator to ignore it.
+    await expect(banner).toHaveCount(0);
+  }
+
+  // Either way the heading states both figures, so the table is never a bare
+  // list under a bare count.
+  if (run!.breaks_found > 0) {
+    await expect(page.getByTestId("recon-breaks-count")).toHaveText(
+      `(${run!.recorded} of ${run!.breaks_found})`,
+    );
+  }
+});
+
+test("the break table is never offered as a page of a larger set", async ({ page }) => {
+  // Unlike the approvals queue, the unshown breaks were never persisted -- they
+  // exist inside a count and nowhere else. A "next page" control would promise
+  // rows no query can produce, so there must not be one here even though the
+  // list is bounded.
+  await signInAsStaff(page, "admin");
+  await page.goto("/reconciliation");
+  await expect(page.getByTestId("recon-breaks-heading")).toBeVisible({
+    timeout: 20_000,
+  });
+
+  for (const label of [/next/i, /load more/i, /show more/i]) {
+    await expect(page.getByRole("button", { name: label })).toHaveCount(0);
+  }
+});
