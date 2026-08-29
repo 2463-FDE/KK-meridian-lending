@@ -403,10 +403,16 @@ none.
   may collect it, or has an approved proxy is a compliance decision.
 - **Disparity thresholds beyond four-fifths — CLIENT-BLOCKED.**
 
-Related but separately deferred, and not reopened here: `docs/DEBT.md` **RF-25**
-(whether staff may apply DTI manually in a referred review) and
-`adr/0007-underwriting-policy-dti-fraud-gap.md` (G-DTI, why the system computes
-no DTI and therefore cannot offer it as a reason).
+Related, and not reopened here. **RF-25** (whether staff may apply DTI manually
+in a referred review) was *deferred* when this spec was written; the client
+answered it on 2026-08-29 — permitted on a referred application, by an
+underwriter or admin, from approved synthetic source documents, as human-review
+evidence that must not change the decision. **It is decided and not built**: the
+evidence it requires is not representable on the current data model, and
+`docs/DEBT.md` RF-25 carries the traced gate. `adr/0007-underwriting-policy-dti-
+fraud-gap.md` (G-DTI, why the system computes no DTI and therefore cannot offer
+it as a reason) is unaffected — the decision authorises a HUMAN to compute a
+ratio from documents, and changes nothing about what the system computes.
 
 ## Evidence and test strategy
 

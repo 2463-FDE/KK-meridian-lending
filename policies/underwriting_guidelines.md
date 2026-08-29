@@ -48,6 +48,24 @@ notice must be sent stating the **specific principal reason(s)**. Timing:
 
 ## Debt-to-income (DTI) — defined, not currently applied
 
+> **Manual DTI in a referred review — decided 2026-08-29, not built.** Staff may
+> apply DTI manually, but only on a **referred** application, only as an
+> **underwriter or admin**, and only from **approved synthetic source
+> documents**. It is **human-review evidence and must not approve, deny,
+> override or otherwise change the decision**, and it must record gross monthly
+> income, monthly debt obligations, source-document references, the calculation,
+> staff identity, timestamp and reason — a bare percentage is not sufficient.
+>
+> **None of that is implemented.** The evidence cannot be stored truthfully
+> today: there is no place for the figures, no document registry for the
+> references to point at, and the one table that records a staff review
+> (`manual_reviews`) makes an approve/deny outcome mandatory, so writing
+> evidence into it would itself decide the application. `docs/DEBT.md` RF-25
+> states the gate and the smallest addition that would close it. Until then a
+> manual DTI has no supported home, and a free-text reason mentioning DTI is
+> **not** the evidence this section describes.
+
+
 DTI = total monthly debt obligations ÷ gross monthly income. Include the new loan's
 estimated monthly payment.
 

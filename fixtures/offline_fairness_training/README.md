@@ -147,4 +147,15 @@ DTI authority (RF-25), KYC/AML/UBO/sanctions (Week 9), record retention or
 redaction (Week 10), or alert routing (D7). The only `debt_to_income` occurrences
 are the placeholder `high_debt_to_income`, used as an *unknown code to be refused*
 in their negative fixtures — which confirms this repository's existing position
-rather than changing it. Every one of those items stays exactly where it was.
+rather than changing it. Every one of those items stayed exactly where it was
+**as far as this package was concerned**, which is the only claim this paragraph
+makes.
+
+> **Not a current status list (added 2026-08-29).** Three of the items named
+> above have since been decided, by separate client decisions that arrived
+> outside this package: payment-allocation placement (both surfaces, built in
+> #121), late-fee reassessment (`docs/DEBT.md` D23 — decided, not built) and
+> manual DTI authority (RF-25 — decided, not built). The sentence above remains
+> true of the package and is deliberately not rewritten; read it as "the package
+> unblocked none of these", not as "none of these has been answered". The
+> register entries are the current status.
