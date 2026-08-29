@@ -658,13 +658,25 @@ given.
 
 | Item | Status | Owner |
 |---|---|---|
-| **D23** late-fee reassessment / compounding | **ANSWERED 2026-08-29 -- RULE DECIDED, NOT YET IMPLEMENTED.** *This row read "OPEN CLIENT DECISION -- may a fee be assessed again, at what cadence, and do previously assessed fees enter the next 5% base" when this document was written, and that was true then.* The answer replaces the rule rather than setting a cadence: at most one fee per missed scheduled installment, after the existing grace period, never reassessed against the same installment, priced at `min($35, 5% x unpaid scheduled P&I for THAT installment)` with all fees excluded from the base. **The code still does the older published comparison priced off the past-due total**, because the decided rule needs installment-level facts this system does not persist -- nothing records which installment a payment satisfied or which installment a fee belongs to. `docs/DEBT.md` D23 carries the traced gate, the exact missing primitive, the smallest addition that would close it, and why no backfill of existing loans could be truthful. Not approximated from `past_due`, deliberately. | Lending Operations (rule) / engineering (data-model expansion) |
 | **Payment-allocation placement** | **ENGINEERING DONE / PRODUCT DECISION OPEN** — both a ledger-backed Payment History and an immediate captured-payment receipt exist and work, each with tests cited in [§9](#9-evidence-references). The client has **not** chosen the final placement: history only, receipt only, both, or something else. Neither surface may be removed without direction | Client / product |
-| **D24** fairness training package | **CLOSED 2026-08-27 — POLICY ANSWERED (8a) AND PACKAGE RECEIVED.** The client's synthetic training package arrived as an email attachment dated 2026-08-24 and is ingested byte-for-byte at `fixtures/offline_fairness_training/client_package_2026-08-24/`, all 34 checksums verifying. It authorises the isolated offline evaluation and nothing else: the evaluator reports aggregate counts and computes **no fairness verdict**. It is not vendor-issued and establishes no real-world fairness; real approved vendor materials must still replace it before any non-training use. *This row read `POLICY ANSWERED / ARTIFACT PENDING — not present in this repository` until 2026-08-27, which was correct when written.* | Closed — no client action outstanding |
 | **RF-25** manual DTI entry | **OPEN CLIENT DECISION** — whether staff may apply DTI manually in a referred review, and what evidence authorises it | Lending Ops / Compliance |
 | **D7** external alert delivery, after the freeze | **OPS-BLOCKED + CLIENT-PROHIBITED** — the current phase is decided and built (8a); a *firing* alert with nobody watching still has no human destination | Operations, then client |
 | **Week 9** KYC/AML/UBO/sanctions | **COMPLIANCE- / VENDOR- / CLIENT- / OPS-BLOCKED** | Multi-party |
 | **Week 10** retention-aware redaction | **PLAN ONLY** — needs a scope separating legally required evidence from identifying data | Pending authorisation |
+
+
+### 8c. Answered since this deck was written — recorded, not silently edited
+
+These two sat in 8b when this deck was written, and that was true then. They are
+moved rather than deleted: an item that was open and is now answered is a fact
+about the engagement, and a table that quietly loses rows cannot be audited.
+**Answered is not the same as built** — D23 is decided and deliberately not
+implemented, for reasons stated in its row.
+
+| Item | Status | Owner |
+|---|---|---|
+| **D23** late-fee reassessment / compounding | **ANSWERED 2026-08-29 -- RULE DECIDED, NOT YET IMPLEMENTED.** *This row read "OPEN CLIENT DECISION -- may a fee be assessed again, at what cadence, and do previously assessed fees enter the next 5% base" when this document was written, and that was true then.* The answer replaces the rule rather than setting a cadence: at most one fee per missed scheduled installment, after the existing grace period, never reassessed against the same installment, priced at `min($35, 5% x unpaid scheduled P&I for THAT installment)` with all fees excluded from the base. **The code still does the older published comparison priced off the past-due total**, because the decided rule needs installment-level facts this system does not persist -- nothing records which installment a payment satisfied or which installment a fee belongs to. `docs/DEBT.md` D23 carries the traced gate, the exact missing primitive, the smallest addition that would close it, and why no backfill of existing loans could be truthful. Not approximated from `past_due`, deliberately. | Lending Operations (rule) / engineering (data-model expansion) |
+| **D24** fairness training package | **CLOSED 2026-08-27 — POLICY ANSWERED (8a) AND PACKAGE RECEIVED.** The client's synthetic training package arrived as an email attachment dated 2026-08-24 and is ingested byte-for-byte at `fixtures/offline_fairness_training/client_package_2026-08-24/`, all 34 checksums verifying. It authorises the isolated offline evaluation and nothing else: the evaluator reports aggregate counts and computes **no fairness verdict**. It is not vendor-issued and establishes no real-world fairness; real approved vendor materials must still replace it before any non-training use. *This row read `POLICY ANSWERED / ARTIFACT PENDING — not present in this repository` until 2026-08-27, which was correct when written.* | Closed — no client action outstanding |
 
 ---
 

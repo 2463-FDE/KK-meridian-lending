@@ -42,12 +42,43 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 FEE_SCHEDULE = REPO / "policies" / "fee_schedule.md"
 
 
-def test_the_published_rule_is_still_the_lesser_of_the_two():
-    """The premise. If the schedule is ever rewritten, these tests describe a
-    rule that no longer exists and must be revisited rather than trusted."""
+def test_the_schedule_publishes_the_decided_rule_and_says_the_code_differs():
+    """The premise, and it changed on 2026-08-29 exactly as this file predicted.
+
+    This test used to assert that `policies/fee_schedule.md` still published
+    "$35 flat, or 5% of the past-due amount, whichever is **less**". It does not
+    any more: the client decided the rule, and the published table now states
+    the decided one -- one fee per missed scheduled installment, priced off that
+    installment's unpaid scheduled principal and interest. The old assertion
+    failed the moment the table was updated, which is what it was for.
+
+    That matters beyond bookkeeping. `policies/fee_schedule.md` is on policy
+    chat's allowlist (`loan-assistant/app/policy_tool.py`), so whatever this
+    file publishes is what a client-facing answer can quote as current policy.
+    Leaving the superseded arrears rule under a "source of truth" heading would
+    have had the assistant state an obsolete fee rule as fact.
+
+    So the premise is now two-sided, and BOTH sides have to hold:
+
+      * the schedule publishes the DECIDED rule; and
+      * the schedule says plainly that the implementation differs.
+
+    The second is what keeps the tests below honest. They characterize the
+    OLDER comparison, which is still what the code computes, and a reader who
+    finds them without that sentence would reasonably think the repository had
+    two contradictory accounts of the fee.
+    """
     text = FEE_SCHEDULE.read_text(encoding="utf-8")
 
-    assert "$35 flat, or 5% of the past-due amount, whichever is **less**" in text
+    # The decided rule is what the published table states.
+    assert "one fee per missed scheduled installment" in text.lower()
+    assert "unpaid scheduled principal + interest" in text.lower()
+
+    # And the gap is stated rather than left for a reader to infer.
+    assert "Current implementation differs" in text
+
+    # The constants are unchanged, because the BEHAVIOUR is unchanged: these are
+    # the older published comparison, which is still what runs.
     assert LATE_FEE_FLAT == Decimal("35.00")
     assert LATE_FEE_PCT_OF_PAST_DUE == Decimal("0.05")
 

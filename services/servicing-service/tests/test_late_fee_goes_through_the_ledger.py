@@ -454,10 +454,13 @@ def test_two_concurrent_assessments_agree_with_running_them_one_after_another(
     straight onto it), so a serialised second assessment prices off a higher
     figure than an overlapping one does.
 
-    The property under test is therefore NOT "no double fee" -- whether the
-    schedule permits charging twice is a policy question this repository has not
-    answered, and the test does not invent one. It is that the two ORDERINGS
-    AGREE: run concurrently, the total must match running them back to back.
+    The property under test is therefore NOT "no double fee". That question is
+    now answered -- since 2026-08-29 the rule is one fee per missed scheduled
+    installment (`docs/DEBT.md` D23) -- but it is not implemented, because
+    nothing records which installment a fee belongs to. So this test still
+    pins what the code does rather than what the policy says, deliberately.
+    What it asserts is that the two ORDERINGS AGREE: run concurrently, the total
+    must match running them back to back.
 
     Threads and two real connections, not a mocked lock. `FOR UPDATE` is a
     database behaviour, and a test that fakes it proves nothing about the

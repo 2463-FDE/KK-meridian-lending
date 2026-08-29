@@ -9,38 +9,45 @@
 | Fee | Amount |
 |-----|--------|
 | Origination fee | 3.0% of principal |
-| Late payment fee | $35 flat, or 5% of the past-due amount, whichever is **less** |
+| Late payment fee | **Decided 2026-08-29.** At most **one fee per missed scheduled installment**, after the grace period, never reassessed against the same installment: the lesser of **$35.00** and **5% of that installment's unpaid scheduled principal + interest**. Previous late fees and all other fees are excluded from the base. *The code does not yet implement this — see "Current implementation differs" below.* |
 | Returned payment (NSF) | $25 |
 | Payoff statement | $0 |
 
-> **Answered 2026-08-29, and NOT yet implemented — read both halves
-> (`docs/DEBT.md` D23).** The open question this block used to carry was whether
-> repeated assessment compounding was intended. It has been decided, and the
-> answer replaces the rule rather than adjusting it:
->
-> - at most **one** late fee per missed scheduled installment, after the existing
->   grace period, never reassessed against the same installment; a later
->   installment that separately becomes overdue may take one of its own;
-> - the amount is `min($35.00, 5% × unpaid scheduled PRINCIPAL + INTEREST for
->   that installment)`;
-> - **previous late fees and every other fee are excluded from the percentage
->   base.** The base is one installment's scheduled principal and interest — not
->   the past-due total, which mixes principal, interest and fees.
->
-> Worked examples given with the decision: unpaid scheduled P&I of $200 → $10,
-> $500 → $25, $700 → $35 (cap), $1000 → $35 (cap).
->
-> **The Late payment fee row above still describes what the code does**, which is
-> the older published comparison priced off the past-due total. That is deliberate
-> and is why this block says "not yet implemented": the decided rule needs
-> installment-level facts this system does not persist — nothing records which
-> installment a payment satisfied, or which installment a fee belongs to — so
-> implementing it truthfully requires a data-model change rather than an edit to
-> the fee calculation. D23 states the exact missing primitive, the smallest
-> addition that would close it, and why a backfill of existing loans could not be
-> truthful. **The code will not be changed to approximate the decided rule from
-> the past-due total**, because a number that looks like the new rule and is not
-> it is worse than one that is legibly the old one.
+### Current implementation differs — late payment fee
+
+**The row above is the policy. This section is what the code does today, and the
+two are not the same.** Recorded here rather than left for a reader to discover,
+because this file is the source of truth *and* it is served to policy chat: an
+answer quoting the old rule as current policy would be wrong in front of a
+client.
+
+`servicing-service/app/delinquency.py` computes `min($35, 5% of
+balances.past_due)`. `past_due` is one projected total mixing principal,
+interest and every fee already assessed — so the base is wider than the decided
+rule allows, and a posted fee raises it, which is the compounding the client
+asked about at the 2026-08-19 demo. There is also no per-installment cap of any
+kind: nothing records which installment a fee belongs to, so nothing can refuse
+a second one.
+
+Measured against the decided policy, that can charge **more** than is due, in
+those two independent ways. It is bounded and legible rather than silent — $35
+per assessment at most, every fee on the immutable ledger, reversible by waiver
+— and the assessment route has no scheduler behind it, so a repeat requires a
+person to ask for it.
+
+**Why it is not simply corrected.** The decided rule needs installment-level
+facts this system does not persist: nothing records which installment a payment
+satisfied, or which installment a fee belongs to, so "unpaid scheduled principal
+and interest for that installment" is not derivable. `docs/DEBT.md` D23 states
+the exact missing primitive, the smallest data-model addition that would close
+it, and why no backfill of existing loans could be truthful.
+
+**It will not be approximated from the past-due total.** A number that resembles
+the decided rule without being it is worse than one that is legibly the older
+published rule, because only the second is obviously not the new policy.
+
+Worked examples of the decided rule, supplied with the decision: unpaid
+scheduled P&I of $200 → $10, $500 → $25, $700 → $35 (cap), $1000 → $35 (cap).
 
 ## APR / finance charge
 

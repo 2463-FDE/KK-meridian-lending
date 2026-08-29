@@ -166,11 +166,17 @@ def assess_late_fee(loan_id: int) -> float:
     at a future PR. `FOR UPDATE` makes the second assessment wait and re-read,
     which is what makes the two orders agree again.
 
-    What this still does NOT do is decide whether a second assessment should
-    happen at all. Two sequential assessments on one day now each price
-    correctly, and the ledger composes both deltas; whether the schedule permits
-    charging twice is a policy question `policies/fee_schedule.md` does not
-    answer, and this function will not invent an answer to it.
+    What this still does NOT do is limit how often a fee may be assessed. Two
+    sequential assessments on one day each price correctly and the ledger
+    composes both deltas -- but nothing here refuses the second.
+
+    That question is now DECIDED and this function does not implement the
+    answer. Since 2026-08-29 the rule is one fee per missed scheduled
+    installment, priced off that installment's unpaid scheduled principal and
+    interest (`policies/fee_schedule.md`, `docs/DEBT.md` D23). Enforcing it
+    needs a fact this schema does not hold -- which installment a fee belongs to
+    -- so the guard cannot be written here yet, and the older published
+    comparison is what runs. Not invented, not approximated from `past_due`.
     """
     with db.transaction() as cur:
         # FOR UPDATE: see the docstring. Locks this loan's balances row for the
