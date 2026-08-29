@@ -21,31 +21,48 @@ disjoint predicates. They cannot prove the behaviour, because they answer from a
 fake. This file proves it against real Postgres, with a real concurrent
 resolution committing while the read is in flight.
 
-Three cases, deliberately in this order:
+The file runs in this order, deliberately:
 
-  1. the two-read shape genuinely loses a movement -- the defect, reproduced,
-     so the rest is not a test of something that never happened;
-  2. `snapshot()` cannot, at the same interleaving;
-  3. `snapshot()` cannot, under a barrier-forced concurrent commit, repeated.
+  1. the two-read shape loses a movement -- resolved read, commit, pending read,
+     and the movement is in NEITHER half;
+  2. the two-read shape double-counts one -- the opposite interleaving, pending
+     read, commit, resolved read, and the movement is in BOTH halves.
+     Together these are the defect, reproduced in both directions, so what
+     follows is not a test of a race that could never happen;
+  3. `snapshot()` holds the movement in one half before the resolution;
+  4. `snapshot()` holds it in the other half after the resolution;
+  5. `snapshot()` cannot be straddled by a commit fired at the seam -- the
+     property, and the regression this file exists to catch;
+  6. `snapshot()` issues exactly one read, said plainly against real Postgres.
+
+**How the interleaving is forced.** *Not* by timing. An earlier version of this
+file raced a resolver thread against a `threading.Barrier` and hoped its commit
+would land mid-read; with `snapshot()` mutated back to two separate reads -- the
+exact regression it existed to catch -- **it still passed**, because both reads
+finished before the other session committed. That approach is discarded, and
+nothing here sleeps, races or repeats a run hoping for a different interleaving.
+
+What replaced it is the SEAM. Two reads have an instant between them at which
+another transaction can commit; one statement has no such instant. So case 5
+fires the resolution exactly there -- from a second connection, in the gap after
+a query returns and before control comes back -- by wrapping `db.query`. That is
+deterministic: it targets the property rather than the scheduler, and it fails
+on the defect, which is the only thing that made it worth writing.
 
 **The transition is a REJECTION, on purpose.** Rejecting moves a proposal from
 pending to resolved through the same one-way transition an approval uses, and
-writes no ledger entry -- so this file can run repeatedly without moving money
-or leaving permanent adjustments on a seeded loan. What is under test is the
-READ.
+writes no ledger entry -- so this file can run repeatedly without moving money.
+What is under test is the READ.
 
-The proposal ROWS do persist, and that is not a leak: the database refuses to
-delete them (`pending_movements_are_retained()`), because a record of what staff
-asked for is the point of the table. See the `raised` fixture.
-
-**The interleaving is forced, never slept on**, so a pass means the property
-held rather than that the machine was fast. Case 3 additionally asserts the two
-sessions have different backend pids: two connections, as two HTTP requests
-would be, not two threads sharing one.
+**Nothing this file writes reaches the application schema.** It loads the real
+DDL into a dedicated schema of its own and drops that schema when the module
+finishes. Individual proposal rows are NOT deleted -- the database refuses
+(`pending_movements_are_retained()`), and that refusal is correct and not this
+file's to route around -- but the rows go when the schema does, so no fabricated
+approval work survives into `public`. See the `schema` and `raised` fixtures.
 """
 import os
 import pathlib
-import threading
 
 import psycopg2
 import psycopg2.extras
@@ -202,7 +219,9 @@ def _halves(movement_id: int) -> tuple[bool, bool]:
     )
 
 
-def _two_reads(movement_id: int, resolver_conn, resolver: int) -> tuple[bool, bool]:
+def _two_reads_resolved_first(
+    movement_id: int, resolver_conn, resolver: int
+) -> tuple[bool, bool]:
     """The OLD shape: resolved read, a commit, then the pending read.
 
     Written out rather than reusing the page's code because the page no longer
@@ -212,22 +231,64 @@ def _two_reads(movement_id: int, resolver_conn, resolver: int) -> tuple[bool, bo
     resolved_first = any(
         m["id"] == movement_id for m in maker_checker.resolved(limit=500)
     )
-    _reject(resolver_conn, movement_id, RESOLVER_ID)
+    _reject(resolver_conn, movement_id, resolver)
     pending_after = any(m["id"] == movement_id for m in maker_checker.queue(limit=500))
     return pending_after, resolved_first
+
+
+def _two_reads_pending_first(
+    movement_id: int, resolver_conn, resolver: int
+) -> tuple[bool, bool]:
+    """The OLD shape, the other way round: pending read, a commit, resolved read.
+
+    Same two reads, opposite order. The commit lands between them either way;
+    which half of the page is read first decides whether the movement is lost or
+    shown twice.
+    """
+    pending_first = any(m["id"] == movement_id for m in maker_checker.queue(limit=500))
+    _reject(resolver_conn, movement_id, resolver)
+    resolved_after = any(
+        m["id"] == movement_id for m in maker_checker.resolved(limit=500)
+    )
+    return pending_first, resolved_after
 
 
 def test_the_two_read_shape_really_does_lose_a_movement(conn, reader, raised):
     """The defect, reproduced. Without this the cases below prove nothing about
     a race that might never have been possible."""
-    movement_id = raised("two-read shape")
+    movement_id = raised("two-read shape, resolved first")
 
-    in_pending, in_resolved = _two_reads(movement_id, conn, RESOLVER_ID)
+    in_pending, in_resolved = _two_reads_resolved_first(movement_id, conn, RESOLVER_ID)
 
     assert (in_pending, in_resolved) == (False, False), (
         "expected the movement to fall between two separate reads -- if it did "
         "not, this interleaving no longer reproduces MC-RACE-01 and the rest of "
         "this file is testing a race that cannot happen"
+    )
+
+
+def test_the_two_read_shape_really_does_show_a_movement_twice(conn, reader, raised):
+    """The same defect from the other side.
+
+    MC-RACE-01 names two outcomes, and only one of them is a movement going
+    missing. Read the halves in the opposite order around the same commit and
+    the movement is in BOTH -- pending when the first read ran, resolved when the
+    second did. An approver would be shown one request as two, one of them
+    already decided and still offering buttons.
+
+    This is reproduction, not the regression proof: the seam test below is what
+    fails if `snapshot()` ever goes back to two reads. It is here because a file
+    that demonstrates only the NEITHER ordering leaves the BOTH ordering
+    asserted nowhere but in a commit message.
+    """
+    movement_id = raised("two-read shape, pending first")
+
+    in_pending, in_resolved = _two_reads_pending_first(movement_id, conn, RESOLVER_ID)
+
+    assert (in_pending, in_resolved) == (True, True), (
+        "expected the movement in BOTH halves across two separate reads -- if it "
+        "was not, this interleaving no longer reproduces the duplicate half of "
+        "MC-RACE-01"
     )
 
 
