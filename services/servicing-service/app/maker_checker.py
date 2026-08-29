@@ -235,7 +235,8 @@ def _shape(row: dict, *, resolved_half: bool) -> dict:
     return out
 
 
-def snapshot(pending_limit: int = 50, resolved_limit: int = 25) -> dict:
+def snapshot(pending_limit: int = 50, resolved_limit: int = 25,
+             pending_offset: int = 0, resolved_offset: int = 0) -> dict:
     """Both halves of the queue, read at ONE instant.
 
     The approvals page shows what is waiting and what was recently decided. Read
@@ -261,17 +262,57 @@ def snapshot(pending_limit: int = 50, resolved_limit: int = 25) -> dict:
     order without an outer ORDER BY, and the two halves are ordered by different
     columns in different directions. Sorting the bounded result in Python is
     plainer than a CASE expression that has to reproduce both.
+
+    **Each branch's SQL order is nonetheless TOTAL, and the Python sort is not a
+    substitute for that** (review finding MC-PAGE-ORDER-01). `requested_at` is
+    `NOT NULL DEFAULT now()` and nothing makes it unique, so `ORDER BY
+    requested_at` alone leaves tied rows in whatever arrangement the plan
+    happened to produce -- and LIMIT/OFFSET then cuts that arrangement. Two
+    equally valid plans can disagree about which tied rows fall inside the
+    window, so a proposal appears on two pages or on none. The Python sort below
+    runs AFTER the slice and cannot recover a row the slice already dropped.
+    `id` is the tie-break, in the SQL, where the cut is made -- the same defect
+    `routers/loans.py` documents for `opened_at`.
+
+    **The totals ride the same statement, and that is not decoration.** Each half
+    is bounded, and a bounded list rendered with no total is a page claiming to
+    be the whole queue: past 50 pending proposals a real request waiting on a
+    real approver was simply not on the screen, with nothing to say so. Counting
+    in a second query would answer that at a different instant from the items --
+    a total of 63 beside 50 rows read before the 63rd arrived -- which is the
+    same torn read this function exists to prevent, moved from the items to the
+    count.
+
+    So the counts are a subquery of THIS statement, joined `ON TRUE`. The join is
+    a LEFT JOIN from the counts to the items rather than the other way round,
+    because an aggregate with no GROUP BY returns exactly one row even when it
+    counts nothing: the totals therefore survive an empty page. That matters at
+    an offset past the end, where the items are empty and the honest answer is
+    still "63 pending, you are past them" rather than "none, and none exist".
     """
     rows = db.query(
-        f"(SELECT {_COLUMNS}, 0 AS bucket FROM pending_movements "
-        "   WHERE resolution IS NULL ORDER BY requested_at ASC LIMIT %s) "
-        "UNION ALL "
-        f"(SELECT {_COLUMNS}, 1 AS bucket FROM pending_movements "
-        "   WHERE resolution IS NOT NULL ORDER BY resolved_at DESC, id DESC LIMIT %s)",
-        (pending_limit, resolved_limit),
+        "SELECT c.pending_total, c.resolved_total, x.* FROM ("
+        "  SELECT count(*) FILTER (WHERE resolution IS NULL) AS pending_total,"
+        "         count(*) FILTER (WHERE resolution IS NOT NULL) AS resolved_total"
+        "    FROM pending_movements"
+        ") c LEFT JOIN ("
+        f"  (SELECT {_COLUMNS}, 0 AS bucket FROM pending_movements "
+        "     WHERE resolution IS NULL ORDER BY requested_at ASC, id ASC "
+        "     LIMIT %s OFFSET %s) "
+        "  UNION ALL "
+        f"  (SELECT {_COLUMNS}, 1 AS bucket FROM pending_movements "
+        "     WHERE resolution IS NOT NULL ORDER BY resolved_at DESC, id DESC "
+        "     LIMIT %s OFFSET %s)"
+        ") x ON TRUE",
+        (pending_limit, pending_offset, resolved_limit, resolved_offset),
     )
-    pending = [r for r in rows if r["bucket"] == 0]
-    done = [r for r in rows if r["bucket"] == 1]
+    # The counts row is always present; `id IS NULL` marks the placeholder the
+    # LEFT JOIN produces when neither half returned anything.
+    pending_total = int(rows[0]["pending_total"]) if rows else 0
+    resolved_total = int(rows[0]["resolved_total"]) if rows else 0
+    items = [r for r in rows if r["id"] is not None]
+    pending = [r for r in items if r["bucket"] == 0]
+    done = [r for r in items if r["bucket"] == 1]
     # Neither key can be NULL, so neither sort can raise on a None comparison:
     # `requested_at` is NOT NULL DEFAULT now(), and `resolution_complete` ties
     # `resolved_at` to `resolution` -- a row in the resolved half has one by
@@ -287,6 +328,23 @@ def snapshot(pending_limit: int = 50, resolved_limit: int = 25) -> dict:
     return {
         "movements": [_shape(r, resolved_half=False) for r in pending],
         "resolved": [_shape(r, resolved_half=True) for r in done],
+        # Added beside the existing arrays rather than replacing them with a
+        # paged envelope. The arrays are the contract three test files and the
+        # gateway proxy already hold, and the bounds are genuinely ADDITIONAL
+        # information about the same answer -- not a different representation of
+        # it. Reshaping would have been a breaking change bought with nothing.
+        "bounds": {
+            "pending": {
+                "total": pending_total,
+                "limit": pending_limit,
+                "offset": pending_offset,
+            },
+            "resolved": {
+                "total": resolved_total,
+                "limit": resolved_limit,
+                "offset": resolved_offset,
+            },
+        },
     }
 
 
@@ -297,7 +355,7 @@ def queue(limit: int = 50) -> list[dict]:
         "SELECT id, loan_id, component, amount, entry_type, reason, requested_by, "
         "       requested_role, requested_at "
         "  FROM pending_movements WHERE resolution IS NULL "
-        " ORDER BY requested_at ASC LIMIT %s", (limit,),
+        " ORDER BY requested_at ASC, id ASC LIMIT %s", (limit,),
     )
     return [_shape(row, resolved_half=False) for row in rows]
 

@@ -35,7 +35,7 @@ import logging
 import os
 import secrets
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
@@ -434,6 +434,8 @@ def waive_fee(loan_id: int, body: WaiveIn,
 
 @app.get("/movements")
 def movement_queue(state: Literal["pending", "resolved", "all"] = "pending",
+                   pending_offset: int = Query(default=0, ge=0),
+                   resolved_offset: int = Query(default=0, ge=0),
                    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
                    x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
                    x_principal_assertion: Optional[str] = Header(
@@ -448,6 +450,19 @@ def movement_queue(state: Literal["pending", "resolved", "all"] = "pending",
     their own proposal leaves the queue and nothing anywhere accounts for it.
     `state=all` returns both halves read at one instant, and is what the
     approvals page asks for.
+
+    `state=all` also reports BOUNDS -- each half's true total, with the limit and
+    offset it was read at. Both halves are capped, and a capped list served with
+    no total is a page implying it is the whole queue: past 50 pending proposals
+    a real request waiting on a real approver was off the screen with nothing
+    saying so. `pending_offset` and `resolved_offset` page the two halves
+    independently, and both are `ge=0` because a negative OFFSET is an error
+    rather than a wrap-around.
+
+    The totals come from the SAME statement as the items (see
+    `maker_checker.snapshot`). Counting separately would answer at a different
+    instant from the items -- which is the torn read this endpoint already
+    exists to prevent, moved from the rows to the count.
 
     `all` exists because asking for the two halves separately is two database
     snapshots: a movement another approver resolves between the reads lands in
@@ -472,7 +487,9 @@ def movement_queue(state: Literal["pending", "resolved", "all"] = "pending",
         x_principal_assertion, claimed_role=x_user_role, claimed_user=x_user_id,
     )
     if state == "all":
-        return maker_checker.snapshot()
+        return maker_checker.snapshot(
+            pending_offset=pending_offset, resolved_offset=resolved_offset,
+        )
     if state == "resolved":
         return {"movements": maker_checker.resolved()}
     return {"movements": maker_checker.queue()}
