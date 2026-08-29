@@ -17,6 +17,35 @@ interface Kyc {
   ssn_verified?: boolean;
 }
 
+/**
+ * One step of the application's life, as the server read it from the database.
+ *
+ * `state` is three-valued on purpose. `unknown` means NOTHING is persisted that
+ * answers the step -- no KYC row means the check never ran, which is a
+ * different fact from a check that ran and did not pass. Rendering the two
+ * alike would let "we never looked" read as "we looked and it is outstanding".
+ */
+interface LifecycleStage {
+  key: string;
+  label: string;
+  state: "complete" | "incomplete" | "unknown";
+  detail?: string | null;
+  loan_id?: number | null;
+}
+
+interface Lifecycle {
+  app_id: number;
+  stages: LifecycleStage[];
+}
+
+const STAGE_TITLES: Record<string, string> = {
+  submitted: "Submitted",
+  kyc: "KYC",
+  decision: "Decision",
+  offer: "Offer",
+  boarded: "Boarded",
+};
+
 interface Offer {
   // The CONTRACTUAL interest rate the payments are priced at -- NOT the APR.
   // Optional: a pre-0030 offer has no stored note rate, and the summary shows
@@ -135,6 +164,12 @@ function UnderwritingDetailContent() {
   const [boardedLoanId, setBoardedLoanId] = useState<string | number | null>(
     null
   );
+  // Read from the database rather than kept in this component: the boarded loan
+  // id used to live only in `boardedLoanId` above, so a RELOAD lost it and an
+  // already-boarded application showed no id and no link. The id was in
+  // `loans.app_id` the whole time and nothing read it back.
+  const [lifecycle, setLifecycle] = useState<Lifecycle | null>(null);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -165,6 +200,26 @@ function UnderwritingDetailContent() {
       setLoading(false);
     }
   }, [appId]);
+
+  // Its own request and its own error, so a lifecycle that cannot be read does
+  // not blank the application it describes -- the split `/reconciliation`
+  // already uses for the same reason.
+  const loadLifecycle = useCallback(async () => {
+    if (!appId) return;
+    setLifecycleError(null);
+    try {
+      setLifecycle(
+        (await apiGet(`/los/applications/${appId}/lifecycle`)) as Lifecycle,
+      );
+    } catch (err) {
+      setLifecycle(null);
+      setLifecycleError(errMsg(err, "The lifecycle could not be read."));
+    }
+  }, [appId]);
+
+  useEffect(() => {
+    loadLifecycle();
+  }, [loadLifecycle]);
 
   // The configured note rate, read once. This screen used to hold its own copy
   // of it and post that into offer creation.
@@ -220,6 +275,9 @@ function UnderwritingDetailContent() {
       // `offer` (and status) reflect what the server actually did instead of
       // going stale until the next manual page refresh.
       await load();
+      // The lifecycle is read from the database, so it has to be re-read
+      // after an action changes what the database says.
+      await loadLifecycle();
     } catch (err) {
       setReviewErr(errMsg(err, "Could not record this review."));
     } finally {
@@ -248,6 +306,9 @@ function UnderwritingDetailContent() {
       // from "an offer came back" is exactly the conflation offer_ready exists
       // to remove.
       await load();
+      // The lifecycle is read from the database, so it has to be re-read
+      // after an action changes what the database says.
+      await loadLifecycle();
     } catch (err) {
       setActionErr(errMsg(err, "Could not generate an offer."));
     } finally {
@@ -266,6 +327,10 @@ function UnderwritingDetailContent() {
       };
       setBoardedLoanId(res.loan_id);
       setActionMsg(`Boarded to servicing as loan #${String(res.loan_id)}.`);
+      // Re-read the lifecycle so the boarded step reflects the row that now
+      // exists. `boardedLoanId` above is session-local and does not survive a
+      // reload; the strip reads `loans.app_id` and does.
+      await loadLifecycle();
     } catch (err) {
       setActionErr(errMsg(err, "Could not accept and board this application."));
     } finally {
@@ -317,6 +382,51 @@ function UnderwritingDetailContent() {
         </div>
         {app ? <StatusChip status={app.status} /> : null}
       </div>
+
+      {/* Where this application has got to, from the database rather than from
+          this session. Every row is read on its own -- a boarded loan is not
+          taken as proof KYC passed, and an accepted offer is not taken as proof
+          of approval -- so what is shown is the record, not a story consistent
+          with it. That matters exactly when the data is odd, which is when
+          somebody is looking at this screen. */}
+      <section className="lifecycle" data-testid="app-lifecycle">
+        {lifecycleError ? (
+          <p className="alert alert-error" data-testid="app-lifecycle-error">
+            {lifecycleError}
+          </p>
+        ) : !lifecycle ? (
+          <p className="muted">Reading the application lifecycle…</p>
+        ) : (
+          <ol className="lifecycle-steps">
+            {lifecycle.stages.map((stage) => (
+              <li
+                key={stage.key}
+                className={`lifecycle-step lifecycle-${stage.state}`}
+                data-testid={`lifecycle-${stage.key}`}
+                data-state={stage.state}
+              >
+                <span className="lifecycle-title">
+                  {STAGE_TITLES[stage.key] ?? stage.key}
+                </span>
+                <span className="lifecycle-label">
+                  {/* A tick only where the step is genuinely complete. An
+                      `unknown` step must not borrow the look of a finished one. */}
+                  {stage.state === "complete" ? "✓ " : ""}
+                  {stage.label}
+                </span>
+                {stage.loan_id ? (
+                  <Link href={`/servicing/${stage.loan_id}`}>
+                    Open the loan account →
+                  </Link>
+                ) : null}
+                {stage.detail ? (
+                  <span className="muted lifecycle-detail">{stage.detail}</span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
 
       {/* Request summary */}
       <div className="grid grid-3" style={{ margin: "20px 0" }}>

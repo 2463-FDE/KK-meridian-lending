@@ -28,6 +28,7 @@ from ..schemas import (
     KycOut,
     Page,
     ReviewIn,
+    ApplicationLifecycle, LifecycleStage,
 )
 
 log = get_logger("applications")
@@ -860,6 +861,152 @@ def get_application_financials(
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
     return ApplicationFinancials(income=a.income, employment_years=a.employment_years)
+
+
+def _lifecycle_stages(session, a) -> list[LifecycleStage]:
+    """The five steps, each read from what is persisted and nothing else.
+
+    Nothing here infers a step from another step. A boarded loan is not taken as
+    proof that KYC passed, and an accepted offer is not taken as proof of an
+    approval -- the row for each is read on its own, so a screen built from this
+    shows the record rather than a story that is consistent with it. That
+    matters precisely when the data is odd, which is when somebody is looking.
+    """
+    stages: list[LifecycleStage] = []
+
+    # 1. Submitted. The application row exists or this route 404s, so the step
+    #    is complete by construction; only its date can be missing.
+    stages.append(LifecycleStage(
+        key="submitted", label="Submitted", state="complete",
+        detail=a.created_at.isoformat() if a.created_at else "date not recorded",
+    ))
+
+    # 2. KYC. The latest check for this application.
+    kyc = session.scalar(
+        select(models.KycCheck)
+        .where(models.KycCheck.application_id == a.id)
+        .order_by(models.KycCheck.id.desc())
+    )
+    if kyc is None:
+        stages.append(LifecycleStage(
+            key="kyc", label="Not available", state="unknown",
+            detail="no KYC check is recorded for this application",
+        ))
+    else:
+        checks = (kyc.name_verified, kyc.dob_verified,
+                  kyc.address_verified, kyc.ssn_verified)
+        if all(bool(c) for c in checks):
+            stages.append(LifecycleStage(
+                key="kyc", label="Verified", state="complete"))
+        else:
+            # Name what did NOT pass. "Not verified" alone sends the reader to
+            # the KYC panel to find out which of the four it was.
+            failed = [name for name, ok in zip(
+                ("name", "date of birth", "address", "SSN"), checks) if not ok]
+            stages.append(LifecycleStage(
+                key="kyc", label="Not verified", state="incomplete",
+                detail="unverified: " + ", ".join(failed),
+            ))
+
+    # 3. Decision. The model/staff outcome, plus whether a manual review made it
+    #    final. `refer` is a real recorded outcome and is INCOMPLETE, not
+    #    unknown -- the system answered, and the answer was "a human must look".
+    dec = session.get(models.Decision, a.id)
+    if dec is None or not dec.outcome:
+        stages.append(LifecycleStage(
+            key="decision", label="Not available", state="unknown",
+            detail="no decision is recorded for this application",
+        ))
+    else:
+        mr = decision_state.get_manual_review(a.id)
+        final = " (final, by staff review)" if mr else ""
+        outcome = str(dec.outcome)
+        stages.append(LifecycleStage(
+            key="decision", label=outcome.upper(),
+            state="complete" if outcome in ("approve", "deny") else "incomplete",
+            detail=(f"referred for manual review{final}" if outcome == "refer"
+                    else (final.strip() or None)),
+        ))
+
+    # 4. Offer. Created and accepted are two different facts and both are
+    #    stored, so neither is inferred from the other.
+    offer = session.scalar(
+        select(models.Offer).where(models.Offer.app_id == a.id)
+        .order_by(models.Offer.id.desc())
+    )
+    if offer is None:
+        stages.append(LifecycleStage(
+            key="offer", label="Not available", state="unknown",
+            detail="no offer has been created for this application",
+        ))
+    elif offer.accepted_at is not None:
+        stages.append(LifecycleStage(
+            key="offer", label="Accepted", state="complete",
+            detail=offer.accepted_at.isoformat(),
+        ))
+    else:
+        stages.append(LifecycleStage(
+            key="offer", label="Issued, not accepted", state="incomplete",
+            detail=offer.created_at.isoformat() if offer.created_at else None,
+        ))
+
+    # 5. Boarded. `loans.app_id` is UNIQUE, so at most one loan answers this.
+    #
+    #    Origination owns no ORM model for `loans` -- that table belongs to
+    #    servicing -- so this is a raw read of the one column that links them,
+    #    the same shape `decision_state.get_manual_review` already uses for
+    #    `manual_reviews`. It reads an id; it boards nothing.
+    #
+    #    This is also the gap that made the step worth building. The detail
+    #    page kept the boarded loan id in React state, so a RELOAD lost it and
+    #    an already-boarded application rendered "This application has already
+    #    been boarded" with no id and no link -- the id was in the database the
+    #    whole time and nothing read it back.
+    rows = db.query("SELECT id FROM loans WHERE app_id = %s", (a.id,))
+    if rows:
+        loan_id = int(rows[0]["id"])
+        stages.append(LifecycleStage(
+            key="boarded", label=f"Loan #{loan_id}", state="complete",
+            loan_id=loan_id,
+        ))
+    else:
+        stages.append(LifecycleStage(
+            key="boarded", label="Not boarded", state="incomplete",
+            detail="no serviced loan references this application",
+        ))
+
+    return stages
+
+
+@router.get("/{app_id}/lifecycle", response_model=ApplicationLifecycle)
+def get_application_lifecycle(
+    app_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    """Where this application has got to, derived only from persisted facts.
+
+    **Staff only, and that is not decoration.** `GET /applications/{id}` is
+    reachable ANONYMOUSLY -- the gateway proxies `/los/*` with no session when
+    none is present -- which is why income and employment already live on a
+    separate staff-gated response rather than on `ApplicationDetail`. This
+    returns the boarded LOAN ID, so putting it on the detail response would hand
+    a loan id, and the fact of funding, to anyone who guessed an application id.
+    It goes on its own gated route for exactly that reason.
+
+    Nothing here is computed from anything but the rows themselves, and no step
+    is inferred from another. Every step can say `unknown`, because "no KYC
+    check was recorded" and "KYC failed" are different facts and a screen that
+    renders them alike is worse than one that admits the gap.
+
+    This route READS. It runs no decision, creates no offer and boards nothing.
+    """
+    _require_staff(x_user_role, x_internal_token)
+    a = session.get(models.Application, app_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="application not found")
+    return ApplicationLifecycle(app_id=a.id, stages=_lifecycle_stages(session, a))
 
 
 class DecisionIn(BaseModel):
