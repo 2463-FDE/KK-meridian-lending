@@ -49,6 +49,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 SCHEMA = "servicing_bounds_test"
+#: A second, independent schema for the tied-timestamp case. Separate because
+#: both schemas assert exact totals and must not see each other's rows.
+TIED_SCHEMA = "servicing_bounds_tied_test"
 SCHEMA_SQL = (
     pathlib.Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
 )
@@ -66,11 +69,11 @@ PENDING_COUNT = 63
 RESOLVED_COUNT = 30
 
 
-def _connect():
+def _connect(schema: str = SCHEMA):
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(f"SET search_path TO {schema}")
     return conn
 
 
@@ -106,15 +109,20 @@ def _reject(conn, movement_id: int) -> None:
     )
 
 
-@pytest.fixture(scope="module")
-def populated():
-    """A schema holding more proposals than either cap admits."""
+def _build_schema(name: str):
+    """The real DDL in a schema of its own, with a raiser, a resolver and a loan.
+
+    Returned open so the caller can drop the schema afterwards. Two independent
+    schemas are built by this file -- one holding proposals with distinct
+    timestamps, one holding proposals that deliberately share a timestamp -- and
+    they must not see each other's rows, because both assert exact totals.
+    """
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
-        cur.execute(f"CREATE SCHEMA {SCHEMA}")
-        cur.execute(f"SET search_path TO {SCHEMA}")
+        cur.execute(f"DROP SCHEMA IF EXISTS {name} CASCADE")
+        cur.execute(f"CREATE SCHEMA {name}")
+        cur.execute(f"SET search_path TO {name}")
         cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
         cur.execute(
             "INSERT INTO users (id, username, password_hash, role) VALUES "
@@ -130,6 +138,13 @@ def populated():
             "INSERT INTO balances (loan_id, balance, past_due) VALUES (%s, 15000.00, 0)",
             (LOAN_ID,),
         )
+    return conn
+
+
+@pytest.fixture(scope="module")
+def populated():
+    """A schema holding more proposals than either cap admits."""
+    conn = _build_schema(SCHEMA)
 
     worker = _connect()
     resolved_ids = [_raise(worker, f"resolved {i}") for i in range(RESOLVED_COUNT)]
@@ -308,3 +323,153 @@ def test_a_resolution_between_pages_cannot_put_a_movement_in_both_halves(reader)
     # And the totals moved with it, rather than being cached from the earlier read.
     assert after["bounds"]["pending"]["total"] == PENDING_COUNT - 1
     assert after["bounds"]["resolved"]["total"] == RESOLVED_COUNT + 1
+
+#: Proposals sharing ONE `requested_at`, spanning a page boundary.
+#:
+#: `requested_at` is `NOT NULL DEFAULT now()` and nothing makes it unique. The
+#: fixture above never produced a tie by accident -- each INSERT is its own
+#: autocommit transaction, so `now()` differs by microseconds -- which is
+#: exactly why the first version of this file could asserted "pages neither
+#: repeat nor drop a row" and pass without ever testing the case that breaks it.
+TIED_COUNT = 30
+TIED_PAGE = 10
+
+
+@pytest.fixture(scope="module")
+def tied():
+    """A schema whose pending proposals all carry the same `requested_at`."""
+    conn = _build_schema(TIED_SCHEMA)
+    worker = _connect(TIED_SCHEMA)
+    ids = []
+    for i in range(TIED_COUNT):
+        row = _one(
+            worker,
+            "INSERT INTO pending_movements "
+            "  (loan_id, component, amount, entry_type, reason, requested_by, "
+            "   requested_role, requested_at) "
+            "VALUES (%s, 'fees', %s, 'adjustment', %s, %s, 'underwriter', "
+            "        TIMESTAMPTZ '2026-08-01 12:00:00+00') RETURNING id",
+            (LOAN_ID, "5.00",
+             f"automated approvals-bounds check (tied {i}); not a real request",
+             RAISER_ID),
+        )
+        ids.append(int(row["id"]))
+    worker.close()
+
+    yield ids
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {TIED_SCHEMA} CASCADE")
+    conn.close()
+
+
+@pytest.fixture
+def tied_reader(tied):
+    shared = maker_checker.db.get_conn()
+    with shared.cursor() as cur:
+        cur.execute(f"SET search_path TO {TIED_SCHEMA}")
+    yield tied
+    with shared.cursor() as cur:
+        cur.execute("SET search_path TO public")
+
+
+def test_the_tied_fixture_really_does_tie(tied_reader):
+    """Otherwise the two tests below are the vacuous ones they replaced."""
+    body = maker_checker.snapshot(pending_limit=TIED_COUNT)
+    stamps = {m["requested_at"] for m in body["movements"]}
+
+    assert len(body["movements"]) == TIED_COUNT
+    assert len(stamps) == 1, f"expected one shared timestamp, got {len(stamps)}"
+
+
+def test_both_halves_are_ordered_by_a_unique_final_key(tied_reader):
+    """MC-PAGE-ORDER-01, as the assertion that actually fails on the defect.
+
+    `ORDER BY requested_at ASC` is not a total order -- the column is
+    `NOT NULL DEFAULT now()` and nothing makes it unique -- and LIMIT/OFFSET on
+    a non-total order is free to arrange tied rows differently per request. A
+    proposal then appears on two pages, or on none, and the Python sort that
+    runs afterwards cannot recover a row the SQL slice already dropped. This is
+    the defect `routers/loans.py` documents for `opened_at`.
+
+    **Why this is asserted on the SQL rather than on behaviour.** It was tried
+    the other way first. Postgres is FREE to reorder tied rows but does not have
+    to, and for this shape it does not: paging 30 proposals that share one
+    timestamp returns them correctly even with the tie-break removed, so a
+    behavioural test passes on the defect. Two plans CAN be made to disagree --
+    forced by hand, `LIMIT 10 OFFSET 10` returned 14..23 under a sequential scan
+    and 11..20 under an index scan -- but only after an UPDATE that moves tuples
+    in the heap, and `pending_movements_single_transition()` refuses to mutate a
+    pending proposal's substance. That refusal is correct and not this file's to
+    route around.
+
+    So the guarantee is a property of the STATEMENT, and that is what is
+    asserted -- the same reasoning as `test_the_snapshot_issues_exactly_one_read`
+    in the concurrency proof, which pins one statement rather than trying to
+    race one. Removing `id` from either ORDER BY fails this deterministically.
+    """
+    captured: list[str] = []
+    original = maker_checker.db.query
+
+    def _capture(sql, params=None):
+        captured.append(" ".join(sql.split()))
+        return original(sql, params)
+
+    maker_checker.db.query = _capture
+    try:
+        maker_checker.snapshot(pending_limit=TIED_PAGE, pending_offset=TIED_PAGE)
+    finally:
+        maker_checker.db.query = original
+
+    assert len(captured) == 1
+    sql = captured[0]
+
+    assert "ORDER BY requested_at ASC, id ASC LIMIT" in sql, (
+        "the pending half is cut with a non-unique sort key: tied "
+        "`requested_at` values may be arranged differently per request, so a "
+        "proposal can land on two pages or on none"
+    )
+    assert "ORDER BY resolved_at DESC, id DESC LIMIT" in sql, (
+        "the resolved half is cut with a non-unique sort key"
+    )
+
+
+def test_tied_timestamps_do_not_repeat_or_drop_a_row_across_pages(tied_reader):
+    """MC-PAGE-ORDER-01, as a regression test.
+
+    `ORDER BY requested_at ASC` is not a total order when the column is not
+    unique, and LIMIT/OFFSET on a non-total order is free to return the tied
+    rows in a different arrangement per request -- so a proposal can appear on
+    two pages, or on none. Sorting in Python afterwards cannot recover a row the
+    SQL slice already dropped.
+
+    This is the same defect `routers/loans.py` documents for `opened_at`: "a
+    non-unique sort key under LIMIT/OFFSET lets rows repeat on one page and
+    vanish from the next". Every proposal here shares one timestamp, so `id` is
+    the only thing that can break the tie, and it has to do so IN THE SQL.
+    """
+    seen: list[int] = []
+    for offset in range(0, TIED_COUNT, TIED_PAGE):
+        page = maker_checker.snapshot(
+            pending_limit=TIED_PAGE, pending_offset=offset,
+        )["movements"]
+        seen.extend(m["id"] for m in page)
+
+    assert len(seen) == len(set(seen)), (
+        f"a proposal appeared on two pages: {len(seen)} rows, "
+        f"{len(set(seen))} distinct"
+    )
+    assert sorted(seen) == sorted(tied_reader), (
+        "paging tied rows lost a proposal -- it exists, it is pending, and no "
+        "page shows it"
+    )
+
+
+def test_tied_timestamps_page_deterministically(tied_reader):
+    """The same page twice is the same page, even when every key ties."""
+    once = [m["id"] for m in maker_checker.snapshot(
+        pending_limit=TIED_PAGE, pending_offset=TIED_PAGE)["movements"]]
+    twice = [m["id"] for m in maker_checker.snapshot(
+        pending_limit=TIED_PAGE, pending_offset=TIED_PAGE)["movements"]]
+
+    assert once == twice

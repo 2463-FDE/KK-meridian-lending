@@ -263,6 +263,17 @@ def snapshot(pending_limit: int = 50, resolved_limit: int = 25,
     columns in different directions. Sorting the bounded result in Python is
     plainer than a CASE expression that has to reproduce both.
 
+    **Each branch's SQL order is nonetheless TOTAL, and the Python sort is not a
+    substitute for that** (review finding MC-PAGE-ORDER-01). `requested_at` is
+    `NOT NULL DEFAULT now()` and nothing makes it unique, so `ORDER BY
+    requested_at` alone leaves tied rows in whatever arrangement the plan
+    happened to produce -- and LIMIT/OFFSET then cuts that arrangement. Two
+    equally valid plans can disagree about which tied rows fall inside the
+    window, so a proposal appears on two pages or on none. The Python sort below
+    runs AFTER the slice and cannot recover a row the slice already dropped.
+    `id` is the tie-break, in the SQL, where the cut is made -- the same defect
+    `routers/loans.py` documents for `opened_at`.
+
     **The totals ride the same statement, and that is not decoration.** Each half
     is bounded, and a bounded list rendered with no total is a page claiming to
     be the whole queue: past 50 pending proposals a real request waiting on a
@@ -286,7 +297,8 @@ def snapshot(pending_limit: int = 50, resolved_limit: int = 25,
         "    FROM pending_movements"
         ") c LEFT JOIN ("
         f"  (SELECT {_COLUMNS}, 0 AS bucket FROM pending_movements "
-        "     WHERE resolution IS NULL ORDER BY requested_at ASC LIMIT %s OFFSET %s) "
+        "     WHERE resolution IS NULL ORDER BY requested_at ASC, id ASC "
+        "     LIMIT %s OFFSET %s) "
         "  UNION ALL "
         f"  (SELECT {_COLUMNS}, 1 AS bucket FROM pending_movements "
         "     WHERE resolution IS NOT NULL ORDER BY resolved_at DESC, id DESC "
@@ -343,7 +355,7 @@ def queue(limit: int = 50) -> list[dict]:
         "SELECT id, loan_id, component, amount, entry_type, reason, requested_by, "
         "       requested_role, requested_at "
         "  FROM pending_movements WHERE resolution IS NULL "
-        " ORDER BY requested_at ASC LIMIT %s", (limit,),
+        " ORDER BY requested_at ASC, id ASC LIMIT %s", (limit,),
     )
     return [_shape(row, resolved_half=False) for row in rows]
 
