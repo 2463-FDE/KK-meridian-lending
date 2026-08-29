@@ -8,6 +8,30 @@ docstring called that "a policy question, not an arithmetic one" -- it was
 arithmetic against a rule already published, and describing it as undecided is
 what let it sit.
 
+**A NEWER RULE HAS BEEN DECIDED AND IS NOT IMPLEMENTED HERE (`docs/DEBT.md`
+D23).** As of 2026-08-29 the client's rule is at most ONE fee per missed
+scheduled installment, after the existing grace period, priced at
+`min($35, 5% x unpaid scheduled PRINCIPAL + INTEREST for THAT installment)`,
+with previous late fees and all other fees excluded from the base. What this
+module does instead is price off `balances.past_due` -- one projected total
+mixing principal, interest and every fee already assessed -- and it applies no
+per-installment cap at all.
+
+That gap is deliberate and it is not a TODO. The decided rule needs facts this
+schema does not hold: nothing records which installment a payment satisfied
+(`payment_applications` stores one total per payment, `ledger_entries` a delta
+per component, neither with a period), and nothing records which installment a
+fee belongs to. Deriving "unpaid scheduled P&I for installment N" would mean
+inventing an allocation order across installments and writing it down as though
+it had been observed. D23 states the missing primitive, the smallest addition
+that would close it, and why no backfill could be truthful.
+
+So a reader should not take the comparison below for current policy. It is the
+older published rule, still faithfully implemented, and knowingly superseded.
+Approximating the new rule from `past_due` is specifically refused: a number
+that resembles the decided rule without being it is worse than one that is
+legibly the old one.
+
 A payment is applied fees -> accrued interest -> principal by
 `waterfall.allocate` (D14, closed). This docstring named `balance.apply_payment`
 as the payment path, which no route has reached since the idempotent path

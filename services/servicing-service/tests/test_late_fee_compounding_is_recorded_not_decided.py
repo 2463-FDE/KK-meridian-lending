@@ -1,27 +1,35 @@
-"""Compounding is real, and it is a question rather than a defect.
+"""Compounding is real, the question is now ANSWERED, and the behaviour is unchanged.
 
 `docs/DEBT.md` D23. The client asked at the 2026-08-19 demo whether the late fee
 is meant to compound. It does: the fee is the lesser of $35 and five per cent of
 arrears, a posted fee raises arrears, so the next assessment prices off a base
 that already contains the previous fee.
 
-**This file does not say that is wrong.** `policies/fee_schedule.md` publishes
-the comparison and the code implements it exactly; what the schedule does not
-say is whether repetition is intended, and Lending Operations owns that. These
-are characterization tests: they pin what the system does today so the register
-entry cannot quietly go stale, and so that whoever answers the question can see
-precisely what would change.
+**The answer arrived on 2026-08-29, and it replaced the rule rather than
+settling a cadence:** at most one fee per missed scheduled installment, after
+the existing grace period, priced at `min($35, 5% x unpaid scheduled PRINCIPAL +
+INTEREST for THAT installment)`, with previous late fees and all other fees
+excluded from the base.
 
-If the answer arrives and the behaviour changes, these tests are expected to
-fail. That is the point of writing them down -- a decision should break the
-description of the old behaviour, loudly, rather than leave two accounts of the
-fee in the repository.
+**These tests still pass, and that is correct, because the BEHAVIOUR has not
+changed.** The decided rule needs installment-level facts this schema does not
+hold -- nothing records which installment a payment satisfied, or which
+installment a fee belongs to -- so it cannot be implemented without a
+data-model expansion, and it will not be approximated from `past_due`. D23
+carries the traced gate and the missing primitive.
+
+So what these are has shifted, and saying so is the point. They were
+characterization tests of an UNDECIDED rule; they are now characterization tests
+of a SUPERSEDED one. They pin what the system really does so that the register
+entry cannot quietly go stale, and so that whoever implements the decided rule
+can see exactly what changes. When that lands, these tests are expected to fail
+-- loudly -- rather than leaving two accounts of the fee in the repository.
 
 Deliberately arithmetic-only: no database, no ledger. The concurrency half of
 this area is closed and proved elsewhere with a real two-connection race
 (`test_late_fee_goes_through_the_ledger.py`). Mixing the two would blur a closed
-engineering defect with an open product question, which is the confusion D23
-exists to prevent.
+engineering defect with a product rule that is decided but unbuilt, which is the
+confusion D23 exists to prevent.
 """
 import pathlib
 from decimal import Decimal
@@ -60,8 +68,8 @@ def test_a_second_assessment_prices_off_arrears_that_include_the_first_fee():
     assert second == Decimal("10.50")
     assert second > first, (
         "the second fee did not price off the raised arrears -- if this now "
-        "holds, the compounding question in DEBT.md D23 has been answered in "
-        "code and the entry needs updating"
+        "holds, the decided rule in DEBT.md D23 has reached the code, and this "
+        "file describes a fee that no longer exists"
     )
 
 
