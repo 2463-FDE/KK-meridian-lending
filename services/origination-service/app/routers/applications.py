@@ -4,6 +4,7 @@ import json
 # Decimal, not float, for the one subtraction on this module's money path: the
 # amount-financed breakdown has to foot to the cent on the borrower's screen.
 from decimal import Decimal
+from typing import Literal
 
 import httpx
 import psycopg2.errors
@@ -680,11 +681,37 @@ def _require_persisted_kyc(app_id: int) -> None:
 def list_applications(
     session: Session = Depends(get_session),
     status: str | None = Query(default=None),
+    app_id: int | None = Query(default=None, ge=1),
+    order: Literal["newest", "oldest"] = Query(default="newest"),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
 ):
+    """The application pipeline, filtered and ordered BY THE SERVER.
+
+    **`app_id` filters the whole pipeline, not the page.** The underwriting
+    console's search box filtered the rows it had already fetched, so an
+    application outside the current 25 could not be found by typing its id --
+    the same defect the servicing portfolio carried until #120, on the screen
+    where an underwriter starts their day. Ids ascend at submission, so an older
+    application is exactly the one that has fallen off page one, and it is also
+    exactly the one somebody is chasing.
+
+    Ordering is on `id`, not `created_at`. `id` is the primary key and is
+    assigned in submission order, so it is both "most recently submitted" and a
+    TOTAL order. `created_at` is neither: seeded applications share timestamps,
+    and a non-unique sort key under LIMIT/OFFSET lets rows repeat on one page and
+    vanish from the next (`routers/loans.py` documents the same trap, and
+    MC-PAGE-ORDER-01 was that trap found in a second place).
+
+    `order` is a `Literal` mapped here to an explicit expression -- no column or
+    direction ever arrives from the caller as a string.
+
+    Both filters are applied to the COUNT as well as the page, so `total`
+    describes the filtered set the caller is paging through rather than the
+    table. A count that ignored the filter would report 190 beside one row.
+    """
     # Staff only: this returns applicant PII and decision status for every
     # application. Gate before any query so there is no existence oracle.
     _require_staff(x_user_role, x_internal_token)
@@ -695,8 +722,17 @@ def list_applications(
     if status:
         stmt = stmt.where(models.Application.status == status)
         count_stmt = count_stmt.where(models.Application.status == status)
+    if app_id is not None:
+        # An id that does not exist is an EMPTY PAGE, not a 404: this is a list
+        # endpoint answering "which applications match", and none matching is an
+        # answer. A 404 here would also make the route an existence oracle for
+        # anyone who got past the staff gate.
+        stmt = stmt.where(models.Application.id == app_id)
+        count_stmt = count_stmt.where(models.Application.id == app_id)
     total = session.scalar(count_stmt) or 0
-    stmt = stmt.order_by(models.Application.id.desc()).limit(limit).offset(offset)
+    ordering = (models.Application.id.desc() if order == "newest"
+                else models.Application.id.asc())
+    stmt = stmt.order_by(ordering).limit(limit).offset(offset)
     items = [
         ApplicationListItem(
             id=a.id, applicant_name=name, amount=a.amount, term_months=a.term_months,

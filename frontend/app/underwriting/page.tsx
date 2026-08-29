@@ -39,6 +39,14 @@ const STATUS_OPTIONS = [
   { value: "funded", label: "Funded" },
 ];
 
+// Newest first by DEFAULT, because a just-submitted application is the one an
+// underwriter is looking for. Ordering is on the application id server-side --
+// see `routers/applications.py` for why not `created_at`.
+const ORDER_OPTIONS = [
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
+];
+
 function prettyPurpose(p: string): string {
   return (p || "")
     .replace(/_/g, " ")
@@ -55,7 +63,13 @@ export default function UnderwritingPage() {
 
 function UnderwritingContent() {
   const [status, setStatus] = useState("");
-  const [search, setSearch] = useState("");
+  const [order, setOrder] = useState("newest");
+  // What is typed, and what has actually been searched for. Keeping them apart
+  // stops the table changing under the underwriter as they type, and lets the
+  // empty state name the id that was looked for rather than whatever is in the
+  // box now. Same split the servicing portfolio uses.
+  const [appIdInput, setAppIdInput] = useState("");
+  const [appliedAppId, setAppliedAppId] = useState("");
   const [offset, setOffset] = useState(0);
 
   const [data, setData] = useState<AppsResponse | null>(null);
@@ -69,8 +83,14 @@ function UnderwritingContent() {
       const params = new URLSearchParams({
         limit: String(PAGE_SIZE),
         offset: String(offset),
+        order,
       });
       if (status) params.set("status", status);
+      // Server-side: an id is looked up across the WHOLE pipeline, not among
+      // the 25 rows this page happens to hold. That was the defect -- an
+      // application outside the current page could not be found by typing its
+      // id, on the screen an underwriter starts their day on.
+      if (appliedAppId) params.set("app_id", appliedAppId);
       const res = (await apiGet(
         `/los/applications?${params.toString()}`
       )) as AppsResponse;
@@ -87,7 +107,7 @@ function UnderwritingContent() {
     } finally {
       setLoading(false);
     }
-  }, [status, offset]);
+  }, [status, offset, order, appliedAppId]);
 
   useEffect(() => {
     load();
@@ -96,16 +116,30 @@ function UnderwritingContent() {
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
 
-  // Client-side applicant/id search filter on top of the server page.
-  const visible = search.trim()
-    ? items.filter(
-        (a) =>
-          String(a.id).toLowerCase().includes(search.trim().toLowerCase()) ||
-          (a.applicant_name || "")
-            .toLowerCase()
-            .includes(search.trim().toLowerCase())
-      )
-    : items;
+  // No client-side filtering. The application-id lookup is a server query so it
+  // reaches the whole pipeline; filtering here would only ever search the rows
+  // already fetched, which is exactly the defect this replaced.
+  //
+  // The applicant-name half of the old box is gone rather than kept alongside
+  // it. It searched 25 rows and looked like it searched the pipeline, so a
+  // name that was simply on page three read as "no such applicant" -- a more
+  // convincing wrong answer than no search at all.
+  const visible = items;
+
+  const filtersActive = Boolean(status || appliedAppId || order !== "newest");
+
+  function runSearch() {
+    setOffset(0);
+    setAppliedAppId(appIdInput.trim());
+  }
+
+  function clearFilters() {
+    setOffset(0);
+    setStatus("");
+    setOrder("newest");
+    setAppIdInput("");
+    setAppliedAppId("");
+  }
 
   // KPI summary derived from the current page of applications.
   const pendingCount = items.filter((a) =>
@@ -152,10 +186,18 @@ function UnderwritingContent() {
       {/* Filters */}
       <div className="toolbar">
         <div className="field">
-          <label>Status</label>
+          {/* `htmlFor`/`id`, so the label is actually associated with the
+              control. Without it a screen reader announces an unlabelled
+              select, and `getByLabel("Status")` resolves nothing -- which is
+              how the gap was noticed: a test meant to prove the status filter
+              composes with the id lookup silently SKIPPED instead of running. */}
+          <label htmlFor="app-status">Status</label>
           <select
+            id="app-status"
             value={status}
             onChange={(e) => {
+              // Reset to page one: an offset that survives a filter change
+              // points at a row number in a list that no longer exists.
               setOffset(0);
               setStatus(e.target.value);
             }}
@@ -168,13 +210,51 @@ function UnderwritingContent() {
           </select>
         </div>
         <div className="field">
-          <label>Search applicant / ID</label>
+          <label htmlFor="app-id-search">Application ID</label>
+          {/* Digits only, and an exact id. This is a server lookup across the
+              whole pipeline, not a substring match over the current page --
+              which is why the label names the ID rather than promising to
+              search applicants too. */}
           <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="e.g. Maria or 4471"
+            id="app-id-search"
+            inputMode="numeric"
+            value={appIdInput}
+            onChange={(e) => setAppIdInput(e.target.value.replace(/[^0-9]/g, ""))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runSearch();
+            }}
+            placeholder="e.g. 412"
           />
         </div>
+        <div className="field">
+          <label htmlFor="app-order">Sort</label>
+          <select
+            id="app-order"
+            value={order}
+            onChange={(e) => {
+              // Reset to page one: an offset that survives a sort change points
+              // at a row number in a list that no longer exists.
+              setOffset(0);
+              setOrder(e.target.value);
+            }}
+          >
+            {ORDER_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button className="btn-ghost" onClick={runSearch} disabled={loading}>
+          Search
+        </button>
+        <button
+          className="btn-ghost"
+          onClick={clearFilters}
+          disabled={loading || !filtersActive}
+        >
+          Clear
+        </button>
         <button className="btn-ghost" onClick={load} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
         </button>
@@ -205,9 +285,31 @@ function UnderwritingContent() {
             ) : visible.length === 0 ? (
               <tr>
                 <td colSpan={7} className="empty">
-                  {error
-                    ? "Unable to load applications."
-                    : "No applications match your filters."}
+                  {error ? (
+                    "Unable to load applications."
+                  ) : appliedAppId ? (
+                    <>
+                      {/* Name the id that was searched for. "No applications
+                          match your filters" left an underwriter unsure whether
+                          the application is absent or the filters are hiding
+                          it -- and with a client-side search it was usually the
+                          second, which is what made the old box misleading
+                          rather than merely limited. */}
+                      No application #{appliedAppId} matches the current filters.{" "}
+                      <button className="btn-link" onClick={clearFilters}>
+                        Clear filters
+                      </button>
+                    </>
+                  ) : filtersActive ? (
+                    <>
+                      No applications match the current filters.{" "}
+                      <button className="btn-link" onClick={clearFilters}>
+                        Clear filters
+                      </button>
+                    </>
+                  ) : (
+                    "No applications have been submitted yet."
+                  )}
                 </td>
               </tr>
             ) : (

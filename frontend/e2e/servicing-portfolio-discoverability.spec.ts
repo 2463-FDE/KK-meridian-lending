@@ -158,8 +158,23 @@ test("adjacent pages neither repeat nor skip a loan", async ({ page }) => {
   const second = await rowIds(page);
 
   expect(new Set([...first, ...second]).size).toBe(first.length + second.length);
-  // Strictly descending across the boundary: nothing was skipped between pages.
+  // Strictly descending across the boundary.
   expect(Math.min(...first)).toBeGreaterThan(Math.max(...second));
+  // Descent is NOT the same as nothing being skipped, and this comment used to
+  // claim it was. A page returning one row short leaves no duplicate AND leaves
+  // the two pages descending, so both checks above pass while a loan has gone
+  // missing -- confirmed by mutating the page query to `limit - 1`. Contiguity
+  // against the database is what catches it.
+  const expected = await withDb(async (c) => {
+    const r = await c.query(
+      "SELECT id::int AS id FROM loans ORDER BY id DESC LIMIT $1",
+      [first.length + second.length],
+    );
+    return r.rows.map((row: { id: number }) => row.id);
+  });
+  expect([...first, ...second], "a loan fell between two adjacent pages").toEqual(
+    expected,
+  );
 });
 
 test("the status filter still works, in both directions", async ({ page }) => {
