@@ -585,6 +585,15 @@ async def assistant_policy_chat(request: Request, authorization: str | None = He
     # per-applicant financials or risk_tier -- so it doesn't need the staff-only
     # gate that protects /assistant/applications/*/summary; a borrower can ask
     # without an account, same anonymous-allowed pattern as /los/*.
+    #
+    # NOTE, so this comment is not read as a description of the product: the
+    # BROWSER page disagrees. `/policy-chat` wraps itself in `RequireRole`
+    # (csr/underwriter/admin), so a borrower who reaches this route directly is
+    # answered while the same borrower visiting the screen is refused. Nothing
+    # in the specs or the roadmap resolves which audience is intended, so both
+    # halves are deliberately left as they are and the question is recorded in
+    # `docs/DEBT.md` RF-28 rather than settled by an edit here. Do not "fix" the
+    # inconsistency by loosening or tightening one side without that decision.
     # loan-assistant's own cost guard (MAX_INPUT_TOKENS) and this gateway's
     # per-IP rate limiter both already apply regardless of caller identity.
     user = auth.get_session(auth.bearer_token(authorization))
