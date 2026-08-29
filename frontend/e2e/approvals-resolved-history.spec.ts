@@ -134,8 +134,13 @@ test("both sections are named, so a decided proposal has somewhere to be", async
 
   await expect(page.getByTestId("approvals-pending-heading")).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId("approvals-resolved-heading")).toBeVisible();
-  await expect(page.getByTestId("approvals-pending-heading")).toHaveText("Pending");
-  await expect(page.getByTestId("approvals-resolved-heading")).toHaveText("Recently resolved");
+  // `toContainText`, not `toHaveText`: each heading now carries its half's
+  // count beside the name. The name is what this test is about; the count has
+  // its own test below.
+  await expect(page.getByTestId("approvals-pending-heading")).toContainText("Pending");
+  await expect(page.getByTestId("approvals-resolved-heading")).toContainText(
+    "Recently resolved",
+  );
 });
 
 test("a rejected proposal moves out of Pending and into Recently resolved", async ({ page }) => {
@@ -276,4 +281,46 @@ test("a CSR can read the history it can see the queue for, and resolves neither"
   await expect(page.locator(`${PENDING}`).getByRole("button", { name: "Approve" })).toHaveCount(0);
   await expect(page.locator(`${RESOLVED}`).getByRole("button", { name: "Approve" })).toHaveCount(0);
   await expect(page.locator(`${RESOLVED}`).getByRole("button", { name: "Reject" })).toHaveCount(0);
+});
+
+test("each half says how much of it is on the screen", async ({ page }) => {
+  // The truncation defect, at the level a reader meets it. Both panels are
+  // capped server-side (50 pending, 25 resolved), and until this they were
+  // rendered under headings that read as the whole queue -- so past the cap a
+  // real proposal waiting on a real approver was off the screen with nothing
+  // saying more existed.
+  //
+  // This asserts the honest form is present, not a particular number: the
+  // seeded stack holds far fewer proposals than either cap, so the count reads
+  // "(N of N)". That is the point. "(7 of 7)" is a positive statement that
+  // nothing is hidden; a bare "7" leaves the reader to assume it, and the
+  // assumption is what was wrong.
+  await signInAsStaff(page, "admin");
+  await page.goto("/approvals");
+
+  const pendingCount = page.getByTestId("approvals-pending-count");
+  const resolvedCount = page.getByTestId("approvals-resolved-count");
+
+  await expect(page.getByTestId("approvals-resolved-heading")).toBeVisible({
+    timeout: 20_000,
+  });
+
+  // A half with nothing in it renders no count -- there is no queue to be
+  // honest about. Whichever halves DO have rows must carry one.
+  for (const [listId, countId] of [
+    ["approvals-pending", pendingCount],
+    ["approvals-resolved", resolvedCount],
+  ] as const) {
+    const rows = page.getByTestId(listId).locator("section");
+    const shown = await rows.count();
+    if (shown === 0) continue;
+    await expect(countId).toBeVisible();
+    // "(shown of total)", with total never smaller than what is displayed.
+    const text = ((await countId.textContent()) ?? "").trim();
+    const match = text.match(/^\((\d+) of (\d+)\)$/);
+    expect(match, `count read "${text}", which is not "(shown of total)"`).toBeTruthy();
+    const [, displayed, total] = match!;
+    expect(Number(displayed)).toBe(shown);
+    expect(Number(total)).toBeGreaterThanOrEqual(Number(displayed));
+  }
 });

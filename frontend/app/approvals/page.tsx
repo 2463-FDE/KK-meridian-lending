@@ -62,9 +62,104 @@ interface Movement {
   resolved_threshold?: number | null;
 }
 
+/**
+ * How much of each half the server actually sent.
+ *
+ * Both panels are capped server-side. Rendering a capped list under a heading
+ * that reads as the whole queue is what let a real proposal -- raised by real
+ * staff, waiting on a real approver -- sit off the screen with nothing saying
+ * more existed. `total` is what makes the heading able to tell the truth.
+ */
+interface HalfBounds {
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+const EMPTY_BOUNDS: HalfBounds = { total: 0, limit: 0, offset: 0 };
+
+/**
+ * "Pending (50 of 63)" -- the shown count and the real one, never just one.
+ *
+ * `shown of total` rather than a page number because the question this answers
+ * is "is there work I cannot see", and a page number answers it only if the
+ * reader does the arithmetic. When everything fits the count is still shown:
+ * "(7 of 7)" states that nothing is hidden, where a bare "7" leaves the reader
+ * to assume it.
+ */
+function HalfCount({ shown, bounds, testId }: {
+  shown: number;
+  bounds: HalfBounds;
+  testId: string;
+}) {
+  if (bounds.total === 0) return null;
+  return (
+    <span className="muted" data-testid={testId}>
+      ({shown} of {bounds.total})
+    </span>
+  );
+}
+
+/**
+ * Prev / Next for one half.
+ *
+ * Deliberately the same `.pager` shape the servicing portfolio already uses
+ * (`app/servicing/page.tsx`) -- same class, same button treatment, same arrow
+ * labels. A second pagination idiom on a second screen is how two pagers drift
+ * into behaving differently.
+ *
+ * Rendered only when the half does not fit, because a control that can never do
+ * anything is noise. `aria-label` names the half: this page carries two of
+ * these, and "Next" alone does not say which one it moves.
+ */
+function Pager({ bounds, onOffset, label, testId, loading }: {
+  bounds: HalfBounds;
+  onOffset: (offset: number) => void;
+  label: string;
+  testId: string;
+  loading: boolean;
+}) {
+  const { total, limit, offset } = bounds;
+  if (limit <= 0 || total <= limit) return null;
+  const first = offset + 1;
+  const last = Math.min(offset + limit, total);
+  return (
+    <div className="pager" data-testid={testId}>
+      <span data-testid={`${testId}-range`}>
+        Showing {first}–{last} of {total}
+      </span>
+      <div className="row">
+        <button
+          className="btn-ghost btn-sm"
+          disabled={offset === 0 || loading}
+          aria-label={`Previous page of ${label}`}
+          onClick={() => onOffset(Math.max(0, offset - limit))}
+        >
+          ← Prev
+        </button>
+        <button
+          className="btn-ghost btn-sm"
+          disabled={offset + limit >= total || loading}
+          aria-label={`Next page of ${label}`}
+          onClick={() => onOffset(offset + limit)}
+        >
+          Next →
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ApprovalsQueue() {
   const [movements, setMovements] = useState<Movement[]>([]);
   const [history, setHistory] = useState<Movement[]>([]);
+  const [pendingBounds, setPendingBounds] = useState<HalfBounds>(EMPTY_BOUNDS);
+  const [resolvedBounds, setResolvedBounds] = useState<HalfBounds>(EMPTY_BOUNDS);
+  // Requested offsets, kept apart from the bounds the server REPORTS. The two
+  // can differ for one render after a page button is pressed, and the headings
+  // must read from what was served rather than from what was asked for.
+  const [pendingOffset, setPendingOffset] = useState(0);
+  const [resolvedOffset, setResolvedOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -111,24 +206,54 @@ function ApprovalsQueue() {
       // Found in review as MC-RACE-01.
       const [who, res] = await Promise.all([
         apiGet("/auth/me") as Promise<{ id: string | number; role: string }>,
-        apiGet("/lss/movements?state=all") as Promise<{
+        apiGet(
+          `/lss/movements?state=all&pending_offset=${pendingOffset}` +
+            `&resolved_offset=${resolvedOffset}`,
+        ) as Promise<{
           movements?: Movement[];
           resolved?: Movement[];
+          bounds?: { pending?: HalfBounds; resolved?: HalfBounds };
         }>,
       ]);
       setMe(who);
       setMovements(res.movements ?? []);
       setHistory(res.resolved ?? []);
+      // Paging both halves is still ONE request, so the two panels still come
+      // from one database snapshot. Offsets are query parameters on that same
+      // request, not a second fetch per panel -- a "load more" that fetched its
+      // own half independently would put MC-RACE-01 straight back.
+      setPendingBounds(res.bounds?.pending ?? EMPTY_BOUNDS);
+      setResolvedBounds(res.bounds?.resolved ?? EMPTY_BOUNDS);
     } catch (e) {
       setError(e instanceof Error ? e.message : "The queue could not be loaded.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [pendingOffset, resolvedOffset]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Resolving the last proposal on a page strands the reader past the end of
+  // the queue: an empty panel beside a heading that correctly says work
+  // remains. Step back a page when that happens rather than leaving them to
+  // work out that the Prev button is the way back to it.
+  useEffect(() => {
+    if (loading) return;
+    const { total, limit, offset } = pendingBounds;
+    if (limit > 0 && offset > 0 && offset >= total) {
+      setPendingOffset(Math.max(0, Math.ceil(total / limit) * limit - limit));
+    }
+  }, [loading, pendingBounds]);
+
+  useEffect(() => {
+    if (loading) return;
+    const { total, limit, offset } = resolvedBounds;
+    if (limit > 0 && offset > 0 && offset >= total) {
+      setResolvedOffset(Math.max(0, Math.ceil(total / limit) * limit - limit));
+    }
+  }, [loading, resolvedBounds]);
 
   async function resolve(id: number, resolution: "approved" | "rejected") {
     setBusyId(id);
@@ -181,7 +306,12 @@ function ApprovalsQueue() {
       {error ? <p className="alert alert-error">{error}</p> : null}
 
       <h2 className="section-title" data-testid="approvals-pending-heading">
-        Pending
+        Pending{" "}
+        <HalfCount
+          shown={movements.length}
+          bounds={pendingBounds}
+          testId="approvals-pending-count"
+        />
       </h2>
 
       {/* Both lists are wrapped so a caller can say WHICH list it means. The
@@ -255,8 +385,21 @@ function ApprovalsQueue() {
 
       </div>
 
+      <Pager
+        bounds={pendingBounds}
+        onOffset={setPendingOffset}
+        label="pending approvals"
+        testId="approvals-pending-pager"
+        loading={loading}
+      />
+
       <h2 className="section-title" data-testid="approvals-resolved-heading">
-        Recently resolved
+        Recently resolved{" "}
+        <HalfCount
+          shown={history.length}
+          bounds={resolvedBounds}
+          testId="approvals-resolved-count"
+        />
       </h2>
       <p className="sub">
         What happened to proposals that have already been decided. An approval
@@ -346,6 +489,14 @@ function ApprovalsQueue() {
         })
       )}
       </div>
+
+      <Pager
+        bounds={resolvedBounds}
+        onOffset={setResolvedOffset}
+        label="recently resolved proposals"
+        testId="approvals-resolved-pager"
+        loading={loading}
+      />
     </div>
   );
 }

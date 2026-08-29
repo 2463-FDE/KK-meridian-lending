@@ -236,7 +236,15 @@ def both(fake_db, monkeypatch):  # noqa: F811
                        "resolution": None, "resolved_by": None, "resolved_role": None,
                        "resolved_at": None, "ledger_entry_id": None,
                        "resolved_threshold": None, "bucket": 0}
-            return [pending] + [dict(r, bucket=1) for r in _rows()]
+            # The real statement joins a counts subquery ON TRUE, so every row
+            # it returns carries both totals. The fake says the same, otherwise
+            # it would be modelling a response shape the database cannot
+            # produce -- and these tests would pass against a snapshot() that
+            # cannot read its own query.
+            rows = [pending] + [dict(r, bucket=1) for r in _rows()]
+            seen["totals"] = (1, len(_rows()))
+            return [dict(r, pending_total=1, resolved_total=len(_rows()))
+                    for r in rows]
         return inner(sql, params)
 
     monkeypatch.setattr(maker_checker.db, "query", _query)
@@ -305,7 +313,40 @@ def test_all_orders_each_half_the_way_its_own_panel_needs(keys, fake_db, both): 
 def test_all_bounds_both_halves(keys, fake_db, both):  # noqa: F811
     _get(keys, "?state=all")
 
-    assert both["params"] == (50, 25)
+    assert both["params"] == (50, 0, 25, 0)
+
+
+def test_all_pages_each_half_independently(keys, fake_db, both):  # noqa: F811
+    """The offsets reach the statement, and each half moves on its own.
+
+    Two panels with one shared offset would page the resolved history every
+    time an approver stepped through the pending queue.
+    """
+    _get(keys, "?state=all&pending_offset=50&resolved_offset=25")
+
+    assert both["params"] == (50, 50, 25, 25)
+
+
+def test_all_refuses_a_negative_offset(keys, fake_db, both):  # noqa: F811
+    """`ge=0` at the boundary. A negative OFFSET is a database error, not a
+    wrap-around, so it is refused before it reaches SQL."""
+    response = _client().get(
+        "/movements?state=all&pending_offset=-1",
+        headers=_headers(keys),
+    )
+
+    assert response.status_code == 422, response.text
+    assert not both["statements"], "a refused request still reached the database"
+
+
+def test_all_reports_the_true_total_of_each_half(keys, fake_db, both):  # noqa: F811
+    """The bounds are what stop a capped page reading as the whole queue."""
+    body = _get(keys, "?state=all").json()
+
+    assert body["bounds"] == {
+        "pending": {"total": 1, "limit": 50, "offset": 0},
+        "resolved": {"total": 2, "limit": 25, "offset": 0},
+    }
 
 
 def test_all_still_requires_a_verified_staff_principal(keys, fake_db, both):  # noqa: F811
