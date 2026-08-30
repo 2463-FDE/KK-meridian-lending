@@ -724,7 +724,13 @@ Each path below exists at this SHA.
   suppression, categorical emission, and no trace at all.
 - Not "tested against a real credit bureau" or "a real payment processor" — both
   are stubs here.
-- Not "the client chose the payment-allocation placement" — no such decision exists.
+- Not "the payment-allocation placement is still an open client decision" — it
+  was decided (2026-08-29, §8c): BOTH surfaces, history as the durable actual
+  allocation and the receipt showing the actual allocation once applied or
+  "Captured — allocation pending" while only captured, and never an estimate.
+  *This bullet read "Not 'the client chose the payment-allocation placement'
+  — no such decision exists", which was true when written and contradicted
+  §8c once the decision arrived.*
 - Not "late-fee compounding is settled **in the code**". The RULE is settled (2026-08-29, §8c); the implementation still computes the superseded arrears rule and can charge more than the decided rule allows.
 - Not "fairness has been evaluated" — no approved dataset exists (D24).
 - Not "the E2E suite is green in parallel" — it requires `--workers=1`, and the
