@@ -43,7 +43,13 @@ def test_the_live_smoke_script_exists():
 def test_no_workflow_runs_the_live_smoke():
     """The invariant. CI must never call the real provider."""
     offenders = []
-    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+    # Both extensions. Review finding AI-LIVE-MIN-001: globbing `*.yml` alone
+    # would let a future `*.yaml` workflow wire this in unnoticed -- the guard
+    # would pass while the invariant it exists for had been broken.
+    workflows = sorted(
+        list(WORKFLOWS.glob("*.yml")) + list(WORKFLOWS.glob("*.yaml"))
+    )
+    for workflow in workflows:
         body = workflow.read_text(encoding="utf-8")
         if "check_ai_live" in body or "ai-live-smoke" in body:
             offenders.append(workflow.relative_to(REPO).as_posix())

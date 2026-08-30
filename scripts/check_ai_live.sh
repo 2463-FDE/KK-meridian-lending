@@ -181,11 +181,36 @@ fi
 #
 # The staff summary is the other live model path, and it is agent-backed rather
 # than single-call, so it can fail where policy chat succeeds.
+# CHOOSING THE APPLICATION IS PART OF THE CHECK, not a detail.
+#
+# The first version took `?limit=1&offset=0`, which is newest-first, and on a
+# FRESH seed that is application 6014 -- whose `employment_years` is NULL.
+# `summarize_application()` raises `LLMInsufficientDataError` for a missing
+# income or employment figure, so the route answers 422 before the provider is
+# contacted at all, and the smoke announced a provider outage while the provider
+# was perfectly healthy. I did not see it because I only ever ran this against a
+# database the browser suite had already added applications to. Same cry-wolf
+# class as the /tmp defect above, found by review rather than by me.
+#
+# So a candidate is CHECKED for the fields the summary needs, using the
+# staff-only financials route, rather than assumed. No model call is involved in
+# picking one.
 step "AI application summary"
-APPID=$(curl -s --max-time 15 "$GW/los/applications?limit=1&offset=0" \
+APPID=""
+CANDIDATES=$(curl -s --max-time 15 "$GW/los/applications?limit=25&offset=0&order=oldest" \
   -H "Authorization: Bearer $UW" \
-  | jq_ 'import sys,json;items=json.load(sys.stdin).get("items") or [];print(items[0]["id"] if items else "")')
-[ -n "$APPID" ] || cannot "no seeded application to summarise"
+  | jq_ 'import sys,json
+items=json.load(sys.stdin).get("items") or []
+print(" ".join(str(i["id"]) for i in items))')
+for _id in $CANDIDATES; do
+  SUITABLE=$(curl -s --max-time 15 "$GW/los/applications/$_id/financials" \
+    -H "Authorization: Bearer $UW" \
+    | jq_ 'import sys,json
+d=json.load(sys.stdin)
+print("yes" if d.get("income") is not None and d.get("employment_years") is not None else "no")')
+  if [ "$SUITABLE" = "yes" ]; then APPID="$_id"; break; fi
+done
+[ -n "$APPID" ] || cannot "no seeded application carries both income and employment_years, so the summary cannot be exercised"
 
 T0=$(now_ms)
 RESP=$(curl -s -w '\n%{http_code}' --max-time 120 \
@@ -194,7 +219,12 @@ RESP=$(curl -s -w '\n%{http_code}' --max-time 120 \
 MS=$(( $(now_ms) - T0 ))
 CODE=$(status_of "$RESP")
 
-if [ "$CODE" != "200" ]; then
+if [ "$CODE" = "422" ]; then
+  # Insufficient data on the application, which says nothing about the provider.
+  # Reporting it as NOT READY would be the same conflation the refusal probe
+  # made: a check must not answer a question it did not get to ask.
+  echo "  SKIPPED    application $APPID lacks the inputs a summary needs -- not a provider verdict"
+elif [ "$CODE" != "200" ]; then
   bad "summary did not generate (HTTP $CODE) -- provider unreachable or refusing"
 else
   # Length only. The summary describes a synthetic applicant's finances and is
