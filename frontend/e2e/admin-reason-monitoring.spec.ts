@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signInAsStaff, dbClient } from "./fixtures";
+import { signInAsStaff } from "./fixtures";
 
 /**
  * Adverse-action reason monitoring, on the screen an admin actually opens.
@@ -30,29 +30,48 @@ async function openAdmin(page: import("@playwright/test").Page) {
   });
 }
 
-/** What the endpoint would report, read straight from `decision_events`. */
-async function expectedVersions(): Promise<
-  Array<{ model_version: string; missing_reason: number; distinct: number }>
-> {
-  const client = dbClient();
-  await client.connect();
-  try {
-    const r = await client.query(
-      `SELECT COALESCE(model_version,'unknown') AS model_version,
-              count(*) FILTER (
-                WHERE reason_codes IS NULL OR jsonb_array_length(reason_codes) = 0
-              )::int AS missing_reason,
-              count(DISTINCT (reason_codes->>0)) FILTER (
-                WHERE jsonb_array_length(COALESCE(reason_codes,'[]'::jsonb)) > 0
-              )::int AS distinct
-         FROM decision_events
-        WHERE decision = 'deny'
-        GROUP BY 1 ORDER BY 1`,
-    );
-    return r.rows;
-  } finally {
-    await client.end();
-  }
+interface ReasonVersion {
+  model_version: string;
+  distinct_reasons: number;
+  missing_reason: number;
+  reason_frequency: Record<string, number>;
+}
+
+/**
+ * Open `/admin` and capture what the endpoint ACTUALLY answered.
+ *
+ * Review finding R1-MINOR-1: the first version read `decision_events` directly
+ * and re-derived the figures in SQL. That quietly disagreed with the service --
+ * `reason_distribution.py` drops blank strings before choosing the principal
+ * reason, so `["   "]` is a missing reason to it and a distinct reason to a
+ * naive `reason_codes->>0`. A correct panel could have failed the test.
+ *
+ * The deeper problem was the shape: the test reasoned about the DATA when its
+ * subject is whether the panel faithfully renders the ANSWER. That is the same
+ * coupling that made the earlier `test.skip` fragile. So the response is
+ * intercepted and passed straight through, and the UI is compared against it.
+ * Row-level maths stays where it belongs, in
+ * `services/origination-service/tests/test_reason_distribution.py`.
+ */
+async function openAdminCapturing(
+  page: import("@playwright/test").Page,
+): Promise<{ versions: ReasonVersion[]; window: { since: string | null; until: string | null } }> {
+  await signInAsStaff(page, "admin");
+  let payload: { versions: ReasonVersion[]; window: { since: string | null; until: string | null } } | null =
+    null;
+  await page.route("**/fair-lending/reason-distribution", async (route) => {
+    const response = await route.fetch();
+    payload = await response.json();
+    await route.fulfill({ response });
+  });
+  await page.goto("/admin");
+  await expect(page.getByTestId("reason-monitoring-heading")).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect
+    .poll(() => payload !== null, { timeout: 20_000 })
+    .toBe(true);
+  return payload!;
 }
 
 test("the panel is named for what it measures, and carries its qualifier", async ({
@@ -110,16 +129,14 @@ test("the panel agrees with the decision record, whatever it says", async ({
   //
   // So both branches are asserted instead. No decisions is a real state with a
   // real rendering, and checking it is worth more than skipping past it.
-  const versions = await expectedVersions();
+  const answer = await openAdminCapturing(page);
 
-  await openAdmin(page);
-
-  if (versions.length === 0) {
+  if (answer.versions.length === 0) {
     await expect(page.getByTestId("reason-monitoring-empty")).toBeVisible();
     return;
   }
 
-  for (const v of versions) {
+  for (const v of answer.versions) {
     const card = page.getByTestId(`reason-version-${v.model_version}`);
     await expect(card, `model version ${v.model_version} is not shown`).toBeVisible();
 
@@ -131,14 +148,19 @@ test("the panel agrees with the decision record, whatever it says", async ({
 
     await expect(
       page.getByTestId(`reason-distinct-${v.model_version}`),
-    ).toHaveText(String(v.distinct));
+    ).toHaveText(String(v.distinct_reasons));
 
-    // And the reason table matches the distinct count the server derived --
-    // one row per principal reason, or a stated absence.
-    if (v.distinct > 0) {
-      await expect(
-        page.getByTestId(`reason-table-${v.model_version}`).locator("tbody tr"),
-      ).toHaveCount(v.distinct);
+    // One row per reason the server reported, and the codes themselves --
+    // rendered, not re-derived.
+    const reasons = Object.keys(v.reason_frequency);
+    if (reasons.length > 0) {
+      const table = page.getByTestId(`reason-table-${v.model_version}`);
+      await expect(table.locator("tbody tr")).toHaveCount(reasons.length);
+      for (const [reason, count] of Object.entries(v.reason_frequency)) {
+        await expect(
+          table.locator("tbody tr").filter({ hasText: reason }),
+        ).toContainText(String(count));
+      }
     } else {
       await expect(
         page.getByTestId(`reason-table-${v.model_version}`),
