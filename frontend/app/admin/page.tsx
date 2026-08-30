@@ -25,6 +25,30 @@ interface LoanRow {
   past_due: number;
 }
 
+/**
+ * Adverse-action reason monitoring, as `reason_distribution.py` computes it.
+ *
+ * Every figure here is the server's. Nothing is recomputed in the browser --
+ * a second opinion about a regulatory count is a second answer, and the whole
+ * value of this panel is that it reports what the decision record actually
+ * holds.
+ */
+interface ReasonVersion {
+  model_version: string;
+  decisions: number;
+  distinct_reasons: number;
+  /** Denials recorded with NO reason at all. Spec 0003 says this should be 0. */
+  missing_reason: number;
+  /** reason code -> count, already ordered by the server. */
+  reason_frequency: Record<string, number>;
+}
+
+interface ReasonDistribution {
+  window: { since: string | null; until: string | null };
+  outcomes_counted: string[];
+  versions: ReasonVersion[];
+}
+
 interface Paged<T> {
   items: T[];
   total: number;
@@ -55,6 +79,13 @@ function AdminOverviewContent() {
   const [loans, setLoans] = useState<Paged<LoanRow> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Its own request, its own loading flag, its own error. The portfolio load
+  // above already puts two calls under one `catch`; adding a third to it would
+  // mean a governance panel failing to load blanks the applications and loans
+  // beside it. `/reconciliation` was split for exactly this reason (PR #81).
+  const [reasons, setReasons] = useState<ReasonDistribution | null>(null);
+  const [reasonsLoading, setReasonsLoading] = useState(true);
+  const [reasonsError, setReasonsError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,9 +104,32 @@ function AdminOverviewContent() {
     }
   }, []);
 
+  const loadReasons = useCallback(async () => {
+    setReasonsLoading(true);
+    setReasonsError(null);
+    try {
+      setReasons(
+        (await apiGet(
+          "/los/applications/fair-lending/reason-distribution",
+        )) as ReasonDistribution,
+      );
+    } catch (err) {
+      setReasons(null);
+      setReasonsError(
+        errMsg(err, "Adverse-action reason monitoring could not be loaded."),
+      );
+    } finally {
+      setReasonsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    loadReasons();
+  }, [loadReasons]);
 
   const appItems = apps?.items ?? [];
   const loanItems = loans?.items ?? [];
@@ -162,6 +216,147 @@ function AdminOverviewContent() {
           </div>
         )}
       </div>
+
+      {/* Adverse-action reason monitoring (spec 0003 §1.3).
+
+          Named for what it is. It reports which adverse-action reasons the
+          model actually emitted, per model version, over a stated window. It is
+          NOT a protected-class disparity analysis: the client prohibited runtime
+          protected-class data and inferred proxies (ZIP/ZIP3 among them), and
+          the runtime ZIP screen was retired on that instruction. Nothing here
+          reads, infers or renders a protected characteristic.
+
+          No threshold, no verdict, no pass/fail. `reason_distribution.py`
+          deliberately sets none -- "too few distinct reasons" is a compliance
+          judgement this repository has no authority to make -- and a panel that
+          added one in the browser would be inventing exactly that authority. */}
+      <div className="spread" style={{ marginTop: 28 }}>
+        <h2 style={{ margin: 0 }} data-testid="reason-monitoring-heading">
+          Adverse-action reason monitoring
+        </h2>
+        <button
+          className="btn-ghost"
+          onClick={loadReasons}
+          disabled={reasonsLoading}
+        >
+          {reasonsLoading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      <p className="sub" style={{ marginTop: 6 }} data-testid="reason-monitoring-qualifier">
+        This monitors adverse-action reason distribution. It is not a
+        protected-class disparity analysis or a production fairness
+        determination.
+      </p>
+
+      {reasonsError ? (
+        <div className="alert alert-error" data-testid="reason-monitoring-error">
+          {reasonsError}
+        </div>
+      ) : null}
+
+      {reasonsLoading && !reasons ? (
+        <div className="card empty">Loading…</div>
+      ) : !reasons ? (
+        !reasonsError ? (
+          <div className="card empty">
+            Reason monitoring is unavailable. That is a gap in this panel, not a
+            statement about the decisions themselves.
+          </div>
+        ) : null
+      ) : (
+        <>
+          <p className="hint" style={{ marginTop: 0 }} data-testid="reason-monitoring-window">
+            {/* The window is stated even when it is unbounded: "all time" is a
+                window worth saying out loud, and a report that does not state
+                its own cannot be compared with another one. */}
+            Reporting window:{" "}
+            {reasons.window.since ?? "all time"}
+            {" → "}
+            {reasons.window.until ?? "now"}
+            {reasons.outcomes_counted?.length
+              ? ` · outcomes counted: ${reasons.outcomes_counted.join(", ")}`
+              : ""}
+          </p>
+
+          {reasons.versions.length === 0 ? (
+            <div className="card empty" data-testid="reason-monitoring-empty">
+              No decisions carrying an adverse-action outcome were recorded in
+              this window.
+            </div>
+          ) : (
+            reasons.versions.map((v) => (
+              <div
+                className="card"
+                key={v.model_version}
+                data-testid={`reason-version-${v.model_version}`}
+                style={{ marginTop: 12 }}
+              >
+                <div className="spread">
+                  <div className="card-title" style={{ margin: 0 }}>
+                    Model version <strong>{v.model_version}</strong>
+                  </div>
+                  <span className="muted">
+                    {v.decisions} adverse{" "}
+                    {v.decisions === 1 ? "decision" : "decisions"}
+                  </span>
+                </div>
+
+                <div className="row" style={{ gap: 24, margin: "10px 0" }}>
+                  <span>
+                    Distinct reasons{" "}
+                    <strong data-testid={`reason-distinct-${v.model_version}`}>
+                      {v.distinct_reasons}
+                    </strong>
+                  </span>
+                  <span>
+                    {/* Spec 0003 says this should be zero: a denial with no
+                        reason on record is the Reg B defect itself, so it is
+                        shown beside the distribution rather than buried. */}
+                    No-reason decisions{" "}
+                    <strong
+                      className={v.missing_reason > 0 ? "danger-text" : undefined}
+                      data-testid={`reason-missing-${v.model_version}`}
+                    >
+                      {v.missing_reason}
+                    </strong>
+                  </span>
+                </div>
+
+                {Object.keys(v.reason_frequency).length === 0 ? (
+                  <p className="muted" style={{ margin: 0 }}>
+                    No reasons were recorded for this model version.
+                  </p>
+                ) : (
+                  <div className="table-wrap">
+                    <table data-testid={`reason-table-${v.model_version}`}>
+                      <thead>
+                        <tr>
+                          <th>Reason</th>
+                          <th className="num">Count</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {/* Server order preserved -- it is already sorted by
+                            frequency then code, and re-sorting here would be a
+                            second opinion about the same numbers. */}
+                        {Object.entries(v.reason_frequency).map(
+                          ([reason, count]) => (
+                            <tr key={reason}>
+                              <td>{reason}</td>
+                              <td className="num">{count}</td>
+                            </tr>
+                          ),
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </>
+      )}
 
       {/* Recent applications */}
       <div className="spread" style={{ marginTop: 28 }}>
