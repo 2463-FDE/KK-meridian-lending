@@ -1370,3 +1370,30 @@ tbody tr:hover {
 .lifecycle-unknown {
   border-left-color: var(--line);
 }
+
+/* ---- Reconciliation "Latest run" summary --------------------------------- */
+/* Auto-fit rather than fixed breakpoints, so the run summary reflows on its
+   own container width: four across on a desktop, two by two on a medium
+   screen, one column on a phone. No horizontal overflow at any width, and no
+   change to the shared `.grid-4`, which other screens depend on. */
+
+.recon-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+.recon-details {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px 20px;
+}
+.recon-detail-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.recon-detail-value {
+  font-size: 15px;
+  /* Long values -- a JSON source, a wide window -- wrap instead of pushing the
+     page sideways. */
+  overflow-wrap: anywhere;
+}
