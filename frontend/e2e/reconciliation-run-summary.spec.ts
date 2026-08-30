@@ -97,14 +97,30 @@ test("the four figures that judge the run are shown together", async ({ page }) 
   test.skip(latest.run === null, "no reconciliation run in this database");
   const run = latest.run!;
 
-  await expect(page.getByTestId("recon-outcome")).toHaveText(run.outcome);
-  await expect(page.getByTestId("recon-breaks-found")).toHaveText(
+  // SCOPED TO THE KPI ROW, because "shown together" is the claim.
+  //
+  // R1-M1: the first version looked each value up globally, so it would have
+  // passed with the four figures scattered back through the details -- green
+  // while the presentation contract in its own name was broken. The point of
+  // this change is that these four are adjacent, so the test has to assert
+  // adjacency and not merely presence.
+  const kpis = page.locator(".recon-kpis");
+  await expect(kpis.locator(".kpi")).toHaveCount(4);
+  await expect(kpis.locator(".kpi-label")).toHaveText([
+    "Outcome",
+    "Breaks found",
+    "Break value",
+    "Threshold",
+  ]);
+
+  await expect(kpis.getByTestId("recon-outcome")).toHaveText(run.outcome);
+  await expect(kpis.getByTestId("recon-breaks-found")).toHaveText(
     String(run.breaks_found),
   );
-  await expect(page.getByTestId("recon-break-value")).toHaveText(
+  await expect(kpis.getByTestId("recon-break-value")).toHaveText(
     `$${run.break_value}`,
   );
-  await expect(page.getByTestId("recon-threshold")).toHaveText(
+  await expect(kpis.getByTestId("recon-threshold")).toHaveText(
     `$${run.threshold_value}`,
   );
 });
