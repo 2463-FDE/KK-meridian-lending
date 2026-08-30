@@ -1,4 +1,4 @@
-.PHONY: bootstrap up up-e2e down logs build seed ps test fmt
+.PHONY: bootstrap up up-e2e down logs build seed ps test fmt ai-live-smoke
 
 # One-time local setup. docker-compose.yml supplies NO default for
 # INTERNAL_SERVICE_TOKEN or ENVIRONMENT -- a fallback committed to this
@@ -44,6 +44,17 @@ test:
 	cd services/decision-service && python -m pytest -q || true
 	cd services/disclosure-service && python -m pytest -q || true
 	cd services/payment-service && python -m pytest -q || true
+
+# Is the AI provider reachable RIGHT NOW? Deliberately not part of `make test`
+# or CI. The browser suite stubs the model on purpose -- CI has no provider
+# credentials -- so a green suite says nothing about whether a demo's AI
+# features will work. This asks the provider. It costs paid quota, so a person
+# runs it before a demo rather than a machine running it on every push;
+# db/tests/test_ai_live_smoke_is_not_in_ci.py asserts that stays true.
+#
+# Exit 0 ready, 1 not ready (a real finding), 2 could not run (stack down).
+ai-live-smoke:
+	bash scripts/check_ai_live.sh
 
 config:
 	docker compose config -q && echo "compose config OK"
