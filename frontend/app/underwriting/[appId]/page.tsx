@@ -583,14 +583,30 @@ function UnderwritingDetailContent() {
                 {evidence.model_version || "not recorded"}
               </span>
             </div>
+            {/* TWO SCORES, AND THEY ARE NOT THE SAME KIND OF NUMBER.
+                Both stay -- they are different evidence and a reviewer needs
+                both -- but "Model score" beside "Bureau score" invited reading
+                them as two credit scores, one of them adjusted. The
+                underwriting model score is not a credit score, not a FICO
+                score, and not a bureau score of any kind: it is this system's
+                own underwriting output, and it is labelled as such. */}
             <div className="spread">
-              <span>Model score</span>
+              <span>Underwriting model score</span>
               <span data-testid="evidence-model-score">
                 {evidence.model_score ?? "not recorded"}
               </span>
             </div>
+            <p className="hint" style={{ margin: "2px 0 8px" }}
+               data-testid="evidence-model-score-note">
+              Underwriting score — not a bureau credit score.
+              {evidence.model_version?.endsWith("-stub")
+                ? " In this deterministic demo it is derived from the credit" +
+                  " bureau score and stated income."
+                : ""}
+            </p>
             <div className="spread">
-              <span>Bureau score</span>
+              {/* The bureau's own figure, as pulled. */}
+              <span>Credit bureau score</span>
               <span data-testid="evidence-bureau-score">
                 {evidence.bureau_score ?? "not recorded"}
               </span>
@@ -712,8 +728,11 @@ function UnderwritingDetailContent() {
               <span className="muted">No decision yet.</span>
             )}
             {typeof decision?.score === "number" ? (
-              <p className="hint" style={{ marginTop: 10 }}>
-                Model score: {decision.score}
+              <p className="hint" style={{ marginTop: 10 }}
+                 data-testid="decision-model-score">
+                {/* Same relabelling as the evidence panel: one screen must not
+                    call the same number two different things. */}
+                Underwriting model score: {decision.score}
               </p>
             ) : null}
             {decision?.adverse_action_reason ? (
