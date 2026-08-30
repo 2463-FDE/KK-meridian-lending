@@ -68,8 +68,21 @@ def get_loan_history(app_id: int) -> dict | None:
         return None
     application = app_rows[0]
 
+    # TWO OUTCOMES, and they are not the same fact.
+    #
+    # `d.outcome` is the CURRENT outcome and staff can change it: the manual
+    # review route runs `UPDATE decisions SET outcome = ...` and writes no new
+    # `decision_events` row. `e.decision` is what the MODEL decided, in an
+    # append-only table that nothing updates.
+    #
+    # Returning only `d.outcome` beside `e.model_version` and `e.reason_codes`
+    # therefore attributes a staff decision to a model version whenever the two
+    # diverge -- and two applications in the seeded database already do. They
+    # are returned separately so a caller cannot conflate them by accident;
+    # `outcome` keeps its name and meaning for existing callers.
     decision_rows = db.query(
-        "SELECT d.outcome, e.model_score, e.model_version, e.reason_codes, "
+        "SELECT d.outcome, e.decision AS model_decision, "
+        "       e.model_score, e.model_version, e.reason_codes, "
         "       e.bureau_score, e.occurred_at "
         "FROM decisions d LEFT JOIN decision_events e ON e.app_id = d.app_id "
         "WHERE d.app_id = %s ORDER BY e.occurred_at DESC NULLS LAST LIMIT 1",

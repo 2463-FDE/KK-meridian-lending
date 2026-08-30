@@ -46,6 +46,38 @@ const STAGE_TITLES: Record<string, string> = {
   boarded: "Boarded",
 };
 
+/**
+ * What the model recorded when it decided, from `decision_events`.
+ *
+ * NOT a timeline, and the panel is not called one. `GET /applications/{id}/
+ * history` returns a graph -- applicant, application, one decision, offers --
+ * and `decision_events` holds exactly one row per application across the whole
+ * database (42 events, 42 applications). There is no sequence to draw, and
+ * drawing one from a single row would be inventing the very thing a reader
+ * would trust it for.
+ *
+ * What IS here and was on no screen: which model version decided, what it
+ * scored, which reason codes it emitted, and when. That is the evidence an
+ * examiner asks for about ONE application, and it is the per-application
+ * counterpart to the aggregate distribution on /admin.
+ */
+interface DecisionEvidence {
+  /** The CURRENT outcome, from `decisions`. Staff manual review updates it. */
+  outcome?: string | null;
+  /** What the MODEL decided, from append-only `decision_events`. Not the same
+   *  fact as `outcome`, and the fields below explain THIS one. */
+  model_decision?: string | null;
+  model_score?: number | null;
+  model_version?: string | null;
+  bureau_score?: number | null;
+  reason_codes?: string[] | null;
+  occurred_at?: string | null;
+}
+
+interface HistoryResponse {
+  decision?: DecisionEvidence | null;
+}
+
 interface Offer {
   // The CONTRACTUAL interest rate the payments are priced at -- NOT the APR.
   // Optional: a pre-0030 offer has no stored note rate, and the summary shows
@@ -168,6 +200,11 @@ function UnderwritingDetailContent() {
   // id used to live only in `boardedLoanId` above, so a RELOAD lost it and an
   // already-boarded application showed no id and no link. The id was in
   // `loans.app_id` the whole time and nothing read it back.
+  // Its own request and error, like the lifecycle strip beside it: decision
+  // evidence failing to load must not blank the application it describes.
+  const [evidence, setEvidence] = useState<DecisionEvidence | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [evidenceLoaded, setEvidenceLoaded] = useState(false);
   const [lifecycle, setLifecycle] = useState<Lifecycle | null>(null);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
@@ -217,6 +254,26 @@ function UnderwritingDetailContent() {
     }
   }, [appId]);
 
+  const loadEvidence = useCallback(async () => {
+    if (!appId) return;
+    setEvidenceError(null);
+    try {
+      const h = (await apiGet(
+        `/los/applications/${appId}/history`,
+      )) as HistoryResponse;
+      setEvidence(h.decision ?? null);
+    } catch (err) {
+      setEvidence(null);
+      setEvidenceError(errMsg(err, "Decision evidence could not be read."));
+    } finally {
+      setEvidenceLoaded(true);
+    }
+  }, [appId]);
+
+  useEffect(() => {
+    loadEvidence();
+  }, [loadEvidence]);
+
   useEffect(() => {
     loadLifecycle();
   }, [loadLifecycle]);
@@ -257,6 +314,10 @@ function UnderwritingDetailContent() {
       // already do this, and this one silently did not.
       await load();
       await loadLifecycle();
+      // The evidence panel reads the database too, and running a decision
+      // WRITES `decision_events` -- without this it kept saying "no decision
+      // has been recorded" directly beneath "Decision recorded: approve".
+      await loadEvidence();
     } catch (err) {
       setActionErr(errMsg(err, "Could not run a decision."));
     } finally {
@@ -286,6 +347,11 @@ function UnderwritingDetailContent() {
       // The lifecycle is read from the database, so it has to be re-read
       // after an action changes what the database says.
       await loadLifecycle();
+      // And so does the evidence panel -- a manual review changes
+      // `decisions.outcome` and NOT the model event, which is exactly the
+      // divergence the panel now shows. Leaving it stale would hide the case
+      // this round of review existed to expose.
+      await loadEvidence();
     } catch (err) {
       setReviewErr(errMsg(err, "Could not record this review."));
     } finally {
@@ -433,6 +499,122 @@ function UnderwritingDetailContent() {
               </li>
             ))}
           </ol>
+        )}
+      </section>
+
+      {/* What the MODEL recorded when it decided.
+
+          Named "Decision evidence", not "Decision history", because there is no
+          history to show: `decision_events` holds exactly one row per
+          application, so a timeline would be a single point drawn as a line.
+          The staff review that may follow is already rendered in the decision
+          panel below, with its own reason, author and date.
+
+          Every field is persisted and shown as recorded. An absent field says
+          it is absent rather than rendering a zero -- a model score of 0 and "no
+          score was recorded" are different facts about a decision. */}
+      <section style={{ marginTop: 18 }} data-testid="decision-evidence">
+        <h2 style={{ margin: "0 0 6px" }}>Decision evidence</h2>
+
+        {evidenceError ? (
+          <div className="alert alert-error" data-testid="decision-evidence-error">
+            {evidenceError}
+          </div>
+        ) : !evidenceLoaded ? (
+          <p className="muted">Reading the decision record…</p>
+        ) : !evidence || !evidence.outcome ? (
+          <div className="card empty" data-testid="decision-evidence-empty">
+            No decision has been recorded for this application yet.
+          </div>
+        ) : (
+          <div className="card">
+            {/* THE MODEL'S OWN DECISION, and it is deliberately the first line.
+                `decision_events.decision` is append-only and nothing updates
+                it. Everything below -- version, scores, reason codes -- comes
+                from that same row, so this is the outcome those figures
+                actually explain. */}
+            <div className="spread">
+              <span>Model decision</span>
+              <strong data-testid="evidence-model-decision">
+                {evidence.model_decision || "not recorded"}
+              </strong>
+            </div>
+
+            {/* The current outcome is a DIFFERENT fact, and conflating the two
+                was the defect here. Staff manual review runs `UPDATE decisions
+                SET outcome = ...` and writes no new event, so a model `refer`
+                that an underwriter later approved used to render as "Recorded
+                outcome: approve" beside the model version and reason codes that
+                produced `refer` -- a decision the model never made, attributed
+                to a named model version. Two applications in the seeded
+                database are already in that state. */}
+            <div className="spread">
+              <span>Current outcome</span>
+              <strong data-testid="evidence-outcome">{evidence.outcome}</strong>
+            </div>
+            {evidence.model_decision &&
+            evidence.model_decision !== evidence.outcome ? (
+              <p className="muted" data-testid="evidence-outcome-differs">
+                The current outcome differs from the model&rsquo;s. It was
+                changed after the model decided — see the decision panel below
+                for who changed it and why. The evidence here describes the
+                model&rsquo;s decision, not theirs.
+              </p>
+            ) : null}
+            {!evidence.model_decision ? (
+              <p className="muted" data-testid="evidence-no-model-record">
+                No model decision event was recorded for this application, so
+                the model evidence below is empty. The outcome above is the
+                decision on file.
+              </p>
+            ) : null}
+
+            <div className="spread">
+              <span>Decided at</span>
+              <span data-testid="evidence-at">
+                {evidence.occurred_at ? shortDate(evidence.occurred_at) : "not recorded"}
+              </span>
+            </div>
+            <div className="spread">
+              {/* The field that makes the decision attributable to a specific
+                  model, and the one the /admin distribution groups by. */}
+              <span>Model version</span>
+              <span data-testid="evidence-model-version">
+                {evidence.model_version || "not recorded"}
+              </span>
+            </div>
+            <div className="spread">
+              <span>Model score</span>
+              <span data-testid="evidence-model-score">
+                {evidence.model_score ?? "not recorded"}
+              </span>
+            </div>
+            <div className="spread">
+              <span>Bureau score</span>
+              <span data-testid="evidence-bureau-score">
+                {evidence.bureau_score ?? "not recorded"}
+              </span>
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <span>Reason codes</span>{" "}
+              {evidence.reason_codes && evidence.reason_codes.length > 0 ? (
+                <span className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                  {evidence.reason_codes.map((code) => (
+                    <span key={code} className="badge" data-testid={`evidence-reason-${code}`}>
+                      {code}
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                /* An approval carries none, and that is correct rather than a
+                   gap -- only an adverse action needs a reason. A denial with
+                   none is the Reg B defect, and /admin counts those. */
+                <span className="muted" data-testid="evidence-no-reasons">
+                  none recorded
+                </span>
+              )}
+            </div>
+          </div>
         )}
       </section>
 
