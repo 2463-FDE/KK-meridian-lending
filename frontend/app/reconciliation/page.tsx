@@ -570,76 +570,123 @@ function ReconciliationQueue() {
           </div>
         ) : (
           <>
-            <section className="card" data-testid="recon-latest-run">
-              <div className="spread">
-                <span>Outcome</span>
-                <span data-testid="recon-outcome">{latest.run.outcome}</span>
-              </div>
-              <div className="spread">
-                <span>Started</span>
-                <span>{shortDate(latest.run.started_at ?? "")}</span>
-              </div>
-              <div className="spread">
-                <span>Finished</span>
-                <span>
-                  {latest.run.finished_at
-                    ? shortDate(latest.run.finished_at)
-                    : "did not finish"}
-                </span>
-              </div>
-              <div className="spread">
-                <span>Window</span>
-                <span>
-                  {latest.run.window_start && latest.run.window_end
-                    ? `${latest.run.window_start} → ${latest.run.window_end}`
-                    : "not recorded"}
-                </span>
-              </div>
-              <div className="spread">
-                <span>Source</span>
-                <span>{sourceLabel(latest.run.source)}</span>
-              </div>
-              <div className="spread">
-                <span>Loans compared</span>
-                <span className="num">{latest.run.loans_compared}</span>
-              </div>
-              <div className="spread">
-                {/* How FINE the comparison was. Many loans and few references
-                    means coarse per-loan totals were compared, which is the
-                    state this control was fixed out of. */}
-                <span>References compared</span>
-                <span className="num">{latest.run.references_compared}</span>
-              </div>
-              <div className="spread">
-                <span>Unreferenced captures</span>
-                <span className="num">{latest.run.unreferenced_captures}</span>
-              </div>
-              <div className="spread">
-                <span>Out-of-scope captures</span>
-                <span className="num">{latest.run.out_of_scope_captures}</span>
-              </div>
-              <div className="spread">
-                <span>Breaks found</span>
-                <span className="num" data-testid="recon-breaks-found">
-                  {latest.run.breaks_found}
-                </span>
-              </div>
-              <div className="spread">
-                <span>Break value</span>
-                <span className="num">${latest.run.break_value}</span>
-              </div>
-              <div className="spread">
-                <span>Threshold</span>
-                <span className="num">${latest.run.threshold_value}</span>
-              </div>
-              {latest.run.error_code ? (
-                <div className="spread">
-                  <span>Error code</span>
-                  <span data-testid="recon-error-code">
-                    {latest.run.error_code}
-                  </span>
+            {/* A summary a client can read at a glance, not thirteen
+                sequential rows.
+
+                The four figures that answer "did this run find a problem" are
+                KPIs; everything describing HOW the run was performed is a
+                details grid beneath them. Nothing is computed here and nothing
+                is dropped -- the same fields the job wrote are the same fields
+                shown.
+
+                ZEROS STAY VISIBLE. "Unreferenced captures: 0" says the run
+                could match every capture it saw; a blank says nothing and
+                reads as reassurance. Every value below renders its number
+                directly rather than through a falsy test, because `0 && ...`
+                is how a zero disappears. */}
+            <section data-testid="recon-latest-run">
+              <div className="grid recon-kpis">
+                <div className="kpi">
+                  <div className="kpi-label">Outcome</div>
+                  {/* Plain text, deliberately. `StatusChip` carries consumer
+                      lending semantics -- current, delinquent, denied, refer --
+                      and a run outcome is 'ok', 'breach' or 'error'. None of
+                      them are in its tone map, so every outcome would render
+                      the same neutral grey while looking like a status
+                      judgement had been made. Adding them would be inventing
+                      colour semantics for a different domain. */}
+                  <div className="kpi-value" data-testid="recon-outcome">
+                    {latest.run.outcome}
+                  </div>
                 </div>
-              ) : null}
+                <div className="kpi">
+                  <div className="kpi-label">Breaks found</div>
+                  <div className="kpi-value num" data-testid="recon-breaks-found">
+                    {latest.run.breaks_found}
+                  </div>
+                </div>
+                <div className="kpi">
+                  <div className="kpi-label">Break value</div>
+                  <div className="kpi-value num" data-testid="recon-break-value">
+                    ${latest.run.break_value}
+                  </div>
+                </div>
+                <div className="kpi">
+                  <div className="kpi-label">Threshold</div>
+                  <div className="kpi-value num" data-testid="recon-threshold">
+                    ${latest.run.threshold_value}
+                  </div>
+                </div>
+              </div>
+
+              <div className="card" style={{ marginTop: 14 }}>
+                <div className="grid recon-details" data-testid="recon-run-details">
+                  <div>
+                    <div className="recon-detail-label">Started</div>
+                    <div className="recon-detail-value" data-testid="recon-started">
+                      {shortDate(latest.run.started_at ?? "")}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="recon-detail-label">Finished</div>
+                    <div className="recon-detail-value" data-testid="recon-finished">
+                      {latest.run.finished_at
+                        ? shortDate(latest.run.finished_at)
+                        : "did not finish"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="recon-detail-label">Loans compared</div>
+                    <div className="recon-detail-value num" data-testid="recon-loans-compared">
+                      {latest.run.loans_compared}
+                    </div>
+                  </div>
+                  <div>
+                    {/* How FINE the comparison was. Many loans and few
+                        references means coarse per-loan totals were compared,
+                        which is the state this control was fixed out of. */}
+                    <div className="recon-detail-label">References compared</div>
+                    <div className="recon-detail-value num" data-testid="recon-references-compared">
+                      {latest.run.references_compared}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="recon-detail-label">Window</div>
+                    <div className="recon-detail-value" data-testid="recon-window">
+                      {latest.run.window_start && latest.run.window_end
+                        ? `${latest.run.window_start} → ${latest.run.window_end}`
+                        : "not recorded"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="recon-detail-label">Source</div>
+                    <div className="recon-detail-value" data-testid="recon-source">
+                      {sourceLabel(latest.run.source)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="recon-detail-label">Unreferenced captures</div>
+                    <div className="recon-detail-value num" data-testid="recon-unreferenced">
+                      {latest.run.unreferenced_captures}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="recon-detail-label">Out-of-scope captures</div>
+                    <div className="recon-detail-value num" data-testid="recon-out-of-scope">
+                      {latest.run.out_of_scope_captures}
+                    </div>
+                  </div>
+                </div>
+
+                {latest.run.error_code ? (
+                  <p className="alert alert-warn" style={{ marginBottom: 0 }}>
+                    <strong>Error code:</strong>{" "}
+                    <span data-testid="recon-error-code">
+                      {latest.run.error_code}
+                    </span>
+                  </p>
+                ) : null}
+              </div>
             </section>
 
             <h3 className="section-title" data-testid="recon-breaks-heading">
