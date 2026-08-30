@@ -259,6 +259,16 @@ test("the active destination is marked, and navigation is a named landmark", asy
   // cannot pass on a different link being active.
   await expect(policyChat(page)).toHaveClass(/nav-link-active/);
 
+  // And announced, not only styled. Until this was added the current
+  // destination was conveyed by colour and background alone, which does not
+  // reach a reader who cannot see it -- on the one control whose job is to say
+  // where you are.
+  await expect(policyChat(page)).toHaveAttribute("aria-current", "page");
+
+  // Exactly one item claims to be the current page. Two would be worse than
+  // none: a reader would be told they are in two places.
+  await expect(page.locator('.appbar [aria-current="page"]')).toHaveCount(1);
+
   // Semantics: a header, one named nav landmark, real link text and a real
   // button. `aria-label` because a page can carry more than one nav.
   await expect(page.getByRole("banner")).toBeVisible();
@@ -341,4 +351,42 @@ test("keyboard focus on a header control is visibly marked", async ({ page }) =>
   // mutation-detecting guard rather than a restatement of the browser default.
   expect(focus.outlineStyle).not.toBe("none");
   expect(focus.outlineWidth).toBeGreaterThan(0);
+});
+
+test("the current destination does not look identical to a hovered one", async ({
+  page,
+}) => {
+  // Before this, `.nav-link-active` and `.nav-link:hover` were both exactly
+  // `color: var(--ink); background: var(--panel)`. Pointing at any other
+  // destination made it indistinguishable from the one you were on -- the bar
+  // could show where the mouse was, but not where you were.
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await signInAsStaff(page, "admin");
+  await page.goto("/policy-chat");
+
+  const active = policyChat(page);
+  const other = page.getByRole("link", { name: "Servicing", exact: true });
+
+  await other.hover();
+
+  const styles = async (l: import("@playwright/test").Locator) =>
+    l.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        borderBottomColor: cs.borderBottomColor,
+        fontWeight: cs.fontWeight,
+      };
+    });
+
+  const activeStyles = await styles(active);
+  const hoveredStyles = await styles(other);
+
+  expect(
+    activeStyles,
+    "the current destination renders the same as a hovered one",
+  ).not.toEqual(hoveredStyles);
+  // The accent underline is the distinguishing mark, and it is a real colour
+  // rather than the transparent placeholder every link carries.
+  expect(activeStyles.borderBottomColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(hoveredStyles.borderBottomColor).toBe("rgba(0, 0, 0, 0)");
 });

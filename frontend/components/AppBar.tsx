@@ -26,7 +26,15 @@ export default function AppBar() {
   const navLink = (href: string, label: string) => {
     const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
     return (
-      <Link href={href} className={`nav-link${active ? " nav-link-active" : ""}`}>
+      <Link
+        href={href}
+        className={`nav-link${active ? " nav-link-active" : ""}`}
+        // `aria-current="page"` is how a screen reader announces WHICH
+        // destination you are on. Without it the current item was conveyed by
+        // colour and background alone -- information that does not reach a
+        // reader who cannot see it, on the one control that says where you are.
+        aria-current={active ? "page" : undefined}
+      >
         {label}
       </Link>
     );
