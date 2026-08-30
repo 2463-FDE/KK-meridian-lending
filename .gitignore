@@ -51,6 +51,12 @@ services/*/logs/
 # for why); report/results are still local output either way.
 frontend/playwright-report/
 frontend/test-results/
+# Playwright writes `test-results/` beside wherever it was invoked from, and it
+# is easy to invoke it from the wrong directory -- a stray run inside a service
+# folder put `services/loan-assistant/test-results/.last-run.json` into a commit
+# before this line existed. Ignore the directory anywhere rather than at the one
+# path it is supposed to appear.
+**/test-results/
 frontend/blob-report/
 
 # Developer-local editor/agent wiring. `.mcp.json` points at a loopback port on
