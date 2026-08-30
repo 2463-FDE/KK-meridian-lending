@@ -194,9 +194,24 @@ h3 {
   background: var(--panel);
   text-decoration: none;
 }
+/* The current destination, and it has to be distinguishable from a hover.
+   Both used to be exactly `color: var(--ink); background: var(--panel)`, so
+   pointing at any other item made it look identical to the one you were on --
+   the bar could tell you where the mouse was but not where you were. The
+   accent underline is what separates them, and it is drawn with a
+   transparent border on the inactive state so applying it adds no height and
+   cannot shift the row (the one-line layout is asserted at measured
+   breakpoints in e2e/appbar-layout.spec.ts). */
+.nav-link {
+  border-bottom: 2px solid transparent;
+}
 .nav-link-active {
   color: var(--ink);
   background: var(--panel);
+  border-bottom-color: var(--accent);
+  /* Not colour alone: the current item is also the heavier one, so the
+     distinction survives a display that renders the accent faintly. */
+  font-weight: 700;
 }
 .appbar-auth {
   margin-left: auto;
