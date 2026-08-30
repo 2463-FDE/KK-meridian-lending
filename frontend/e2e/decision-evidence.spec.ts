@@ -127,6 +127,92 @@ test("an application with no decision says so rather than showing blanks", async
   await expect(page.getByTestId("evidence-outcome")).toHaveCount(0);
 });
 
+test("the two scores are labelled so neither can be read as the other", async ({
+  page,
+}) => {
+  // Both scores stay -- they are different evidence and a reviewer needs both.
+  // What changed is the labelling: "Model score" beside "Bureau score" invited
+  // reading them as two credit scores, one of them adjusted. The underwriting
+  // model score is this system's own output and is not a credit score of any
+  // kind, so the panel says which is which and says the difference out loud.
+  await signInAsStaff(page, "underwriter");
+  await page.route("**/applications/*/history", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        decision: {
+          outcome: "approve", model_decision: "approve",
+          model_score: 712, model_version: "v2.1.0-stub",
+          bureau_score: 690, reason_codes: [], occurred_at: null,
+        },
+      }),
+    }),
+  );
+  await page.goto("/underwriting/4471");
+
+  const panel = page.getByTestId("decision-evidence");
+  await expect(panel).toContainText("Underwriting model score", { timeout: 60_000 });
+  await expect(panel).toContainText("Credit bureau score");
+  await expect(page.getByTestId("evidence-model-score")).toHaveText("712");
+  await expect(page.getByTestId("evidence-bureau-score")).toHaveText("690");
+
+  await expect(page.getByTestId("evidence-model-score-note")).toContainText(
+    "not a bureau credit score",
+  );
+
+  // The claims that must never attach to the model score. Asserted as text
+  // rather than trusted to review, because this is exactly the wording that
+  // drifts back in when someone edits a label for brevity.
+  const text = (await panel.innerText()).toLowerCase();
+  for (const claim of ["fico", "adjusted credit", "enhanced credit"]) {
+    expect(text, `"${claim}" must not describe the underwriting model score`)
+      .not.toContain(claim);
+  }
+});
+
+test("the demo stub's derivation is stated, and only for the stub", async ({
+  page,
+}) => {
+  // The deterministic demo stub really is computed from the bureau score and
+  // stated income (`_stub_model_score` in decision-service), so saying so is
+  // accurate AND useful -- it is the answer to "why is that number near the
+  // bureau score". A licensed scorer's output is the provider model's own, and
+  // this copy must not claim that formula for it. The stub is identifiable
+  // because its `model_version` carries the `-stub` suffix, which is the
+  // contract RF-1 established.
+  await signInAsStaff(page, "underwriter");
+
+  const withVersion = (version: string) =>
+    page.route("**/applications/*/history", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          decision: {
+            outcome: "approve", model_decision: "approve",
+            model_score: 712, model_version: version,
+            bureau_score: 690, reason_codes: [], occurred_at: null,
+          },
+        }),
+      }),
+    );
+
+  await withVersion("v2.1.0-stub");
+  await page.goto("/underwriting/4471");
+  await expect(page.getByTestId("evidence-model-score-note")).toContainText(
+    "derived from the credit bureau score and stated income",
+    { timeout: 60_000 },
+  );
+
+  await page.unrouteAll({ behavior: "ignoreErrors" });
+  await withVersion("v2.1.0");
+  await page.goto("/underwriting/4471");
+  const note = page.getByTestId("evidence-model-score-note");
+  await expect(note).toContainText("not a bureau credit score");
+  await expect(note).not.toContainText("derived from");
+});
+
 test("a missing figure reads as not recorded, never as zero", async ({ page }) => {
   // A model score of 0 and "no score was recorded" are different facts about a
   // decision, and rendering the second as the first would be inventing one.
@@ -152,6 +238,10 @@ test("a missing figure reads as not recorded, never as zero", async ({ page }) =
 
   await expect(page.getByTestId("evidence-model-score")).toHaveText("not recorded");
   await expect(page.getByTestId("evidence-bureau-score")).toHaveText("not recorded");
+  // And nothing explains a score that is not there. The note says what the
+  // underwriting score IS; with no score recorded it had no referent, which is
+  // the majority case in this database rather than an edge one.
+  await expect(page.getByTestId("evidence-model-score-note")).toHaveCount(0);
   await expect(page.getByTestId("evidence-model-version")).toHaveText("not recorded");
   await expect(page.getByTestId("evidence-at")).toHaveText("not recorded");
   await expect(page.getByTestId("evidence-no-reasons")).toBeVisible();
