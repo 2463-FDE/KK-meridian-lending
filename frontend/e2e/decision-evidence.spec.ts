@@ -238,6 +238,10 @@ test("a missing figure reads as not recorded, never as zero", async ({ page }) =
 
   await expect(page.getByTestId("evidence-model-score")).toHaveText("not recorded");
   await expect(page.getByTestId("evidence-bureau-score")).toHaveText("not recorded");
+  // And nothing explains a score that is not there. The note says what the
+  // underwriting score IS; with no score recorded it had no referent, which is
+  // the majority case in this database rather than an edge one.
+  await expect(page.getByTestId("evidence-model-score-note")).toHaveCount(0);
   await expect(page.getByTestId("evidence-model-version")).toHaveText("not recorded");
   await expect(page.getByTestId("evidence-at")).toHaveText("not recorded");
   await expect(page.getByTestId("evidence-no-reasons")).toBeVisible();

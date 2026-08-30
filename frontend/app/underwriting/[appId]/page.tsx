@@ -596,14 +596,21 @@ function UnderwritingDetailContent() {
                 {evidence.model_score ?? "not recorded"}
               </span>
             </div>
-            <p className="hint" style={{ margin: "2px 0 8px" }}
-               data-testid="evidence-model-score-note">
-              Underwriting score — not a bureau credit score.
-              {evidence.model_version?.endsWith("-stub")
-                ? " In this deterministic demo it is derived from the credit" +
-                  " bureau score and stated income."
-                : ""}
-            </p>
+            {/* Only when there IS a score. R1-MINOR: the note explains what a
+                number is, and 306 of the 328 decisions in this database carry
+                no model event at all -- so it was rendering "Underwriting model
+                score: not recorded" followed by an explanation of a score that
+                is not there. */}
+            {evidence.model_score !== null && evidence.model_score !== undefined ? (
+              <p className="hint" style={{ margin: "2px 0 8px" }}
+                 data-testid="evidence-model-score-note">
+                Underwriting score — not a bureau credit score.
+                {evidence.model_version?.endsWith("-stub")
+                  ? " In this deterministic demo it is derived from the credit" +
+                    " bureau score and stated income."
+                  : ""}
+              </p>
+            ) : null}
             <div className="spread">
               {/* The bureau's own figure, as pulled. */}
               <span>Credit bureau score</span>
