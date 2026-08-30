@@ -62,7 +62,11 @@ const STAGE_TITLES: Record<string, string> = {
  * counterpart to the aggregate distribution on /admin.
  */
 interface DecisionEvidence {
+  /** The CURRENT outcome, from `decisions`. Staff manual review updates it. */
   outcome?: string | null;
+  /** What the MODEL decided, from append-only `decision_events`. Not the same
+   *  fact as `outcome`, and the fields below explain THIS one. */
+  model_decision?: string | null;
   model_score?: number | null;
   model_version?: string | null;
   bureau_score?: number | null;
@@ -310,6 +314,10 @@ function UnderwritingDetailContent() {
       // already do this, and this one silently did not.
       await load();
       await loadLifecycle();
+      // The evidence panel reads the database too, and running a decision
+      // WRITES `decision_events` -- without this it kept saying "no decision
+      // has been recorded" directly beneath "Decision recorded: approve".
+      await loadEvidence();
     } catch (err) {
       setActionErr(errMsg(err, "Could not run a decision."));
     } finally {
@@ -339,6 +347,11 @@ function UnderwritingDetailContent() {
       // The lifecycle is read from the database, so it has to be re-read
       // after an action changes what the database says.
       await loadLifecycle();
+      // And so does the evidence panel -- a manual review changes
+      // `decisions.outcome` and NOT the model event, which is exactly the
+      // divergence the panel now shows. Leaving it stale would hide the case
+      // this round of review existed to expose.
+      await loadEvidence();
     } catch (err) {
       setReviewErr(errMsg(err, "Could not record this review."));
     } finally {
@@ -515,10 +528,47 @@ function UnderwritingDetailContent() {
           </div>
         ) : (
           <div className="card">
+            {/* THE MODEL'S OWN DECISION, and it is deliberately the first line.
+                `decision_events.decision` is append-only and nothing updates
+                it. Everything below -- version, scores, reason codes -- comes
+                from that same row, so this is the outcome those figures
+                actually explain. */}
             <div className="spread">
-              <span>Recorded outcome</span>
+              <span>Model decision</span>
+              <strong data-testid="evidence-model-decision">
+                {evidence.model_decision || "not recorded"}
+              </strong>
+            </div>
+
+            {/* The current outcome is a DIFFERENT fact, and conflating the two
+                was the defect here. Staff manual review runs `UPDATE decisions
+                SET outcome = ...` and writes no new event, so a model `refer`
+                that an underwriter later approved used to render as "Recorded
+                outcome: approve" beside the model version and reason codes that
+                produced `refer` -- a decision the model never made, attributed
+                to a named model version. Two applications in the seeded
+                database are already in that state. */}
+            <div className="spread">
+              <span>Current outcome</span>
               <strong data-testid="evidence-outcome">{evidence.outcome}</strong>
             </div>
+            {evidence.model_decision &&
+            evidence.model_decision !== evidence.outcome ? (
+              <p className="muted" data-testid="evidence-outcome-differs">
+                The current outcome differs from the model&rsquo;s. It was
+                changed after the model decided — see the decision panel below
+                for who changed it and why. The evidence here describes the
+                model&rsquo;s decision, not theirs.
+              </p>
+            ) : null}
+            {!evidence.model_decision ? (
+              <p className="muted" data-testid="evidence-no-model-record">
+                No model decision event was recorded for this application, so
+                the model evidence below is empty. The outcome above is the
+                decision on file.
+              </p>
+            ) : null}
+
             <div className="spread">
               <span>Decided at</span>
               <span data-testid="evidence-at">

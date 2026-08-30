@@ -1,5 +1,9 @@
 import { test, expect } from "@playwright/test";
-import { signInAsStaff, dbClient } from "./fixtures";
+import {
+  signInAsStaff, signInAsBorrower, dbClient, fictionalApplicant,
+  submitApplication, currentAppId, getDecision, resolveReferAsStaff,
+  REFER_BAND_INCOME,
+} from "./fixtures";
 
 /**
  * What the model recorded when it decided this application.
@@ -134,6 +138,7 @@ test("a missing figure reads as not recorded, never as zero", async ({ page }) =
       body: JSON.stringify({
         decision: {
           outcome: "deny",
+          model_decision: "deny",
           model_score: null,
           model_version: null,
           bureau_score: null,
@@ -171,10 +176,108 @@ test("a borrower cannot read decision evidence", async ({ page }) => {
   // The endpoint is staff-only because it carries model score, bureau score and
   // reason codes. This change renders it on a page staff already reach; it
   // widens nothing, and the gateway hop is asserted here rather than assumed.
-  const res = await page.request.get(
+  //
+  // Both callers, because they fail for different reasons and only one of them
+  // was checked before. R1-MINOR: the first version sent no credentials at all,
+  // so it proved the route rejects an ANONYMOUS caller -- which says nothing
+  // about a signed-in borrower, the case the staff gate actually exists for.
+  const anonymous = await page.request.get(
     "http://localhost:8000/los/applications/4471/history",
   );
+  expect(anonymous.status()).toBeGreaterThanOrEqual(400);
+  expect(anonymous.status()).toBeLessThan(500);
 
-  expect(res.status()).toBeGreaterThanOrEqual(400);
-  expect(res.status()).toBeLessThan(500);
+  await signInAsBorrower(page);
+  // `meridian.token`, mirroring TOKEN_KEY in `frontend/lib/api.ts`. The
+  // assertion below is what keeps that mirror honest: if the key is ever
+  // renamed this test fails loudly on a missing token rather than quietly
+  // sending `Bearer null` and passing on a 401 it did not earn.
+  const token = await page.evaluate(() => localStorage.getItem("meridian.token"));
+  expect(token, "borrower session token").toBeTruthy();
+
+  const asBorrower = await page.request.get(
+    "http://localhost:8000/los/applications/4471/history",
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  expect(asBorrower.status()).toBeGreaterThanOrEqual(400);
+  expect(asBorrower.status()).toBeLessThan(500);
+});
+
+test("the model's decision and the current outcome are shown separately when they differ", async ({
+  page,
+}) => {
+  // R1-BLOCKER. `decisions.outcome` is staff-mutable -- the manual review route
+  // runs `UPDATE decisions SET outcome = ...` and writes NO new
+  // `decision_events` row -- while model version, model score and reason codes
+  // come from that untouched event. Rendering one "Recorded outcome" from
+  // `decisions` beside those fields therefore attributed a STAFF decision to a
+  // named model version. Two applications in the seeded database are already in
+  // that state, so this was live, not hypothetical.
+  //
+  // Built rather than found: this drives a real refer to a real staff approval,
+  // so the divergence is created by the product's own path and the assertion
+  // does not depend on which rows a seed happens to carry.
+  const applicant = fictionalApplicant("Devi", false, REFER_BAND_INCOME);
+  await submitApplication(page, applicant);
+  const appId = await currentAppId(page);
+  await getDecision(page);
+
+  await signInAsStaff(page);
+  await resolveReferAsStaff(
+    page, appId, "approve", "Reviewed updated documentation; band reconsidered",
+  );
+
+  // NO RELOAD between the approval and these assertions, deliberately.
+  //
+  // `resolveReferAsStaff` leaves the browser on this page, so this also holds
+  // R1-MAJOR: the panel used to load once on mount, and the handlers that
+  // CHANGE a decision refreshed the application and the lifecycle strip but not
+  // the evidence. A reader saw "Decision finalized" above a panel still
+  // reporting the pre-review state. Navigating first would have hidden that,
+  // and would have tested a page load rather than the handler.
+  await expect(page.getByTestId("evidence-model-decision")).toHaveText("refer", {
+    timeout: 20_000,
+  });
+  await expect(page.getByTestId("evidence-outcome")).toHaveText("approve");
+  await expect(page.getByTestId("evidence-outcome-differs")).toBeVisible();
+
+  // And it survives the reload, so the refresh above reflected the database
+  // rather than local state the handler happened to hold.
+  await openApplication(page, Number(appId));
+  await expect(page.getByTestId("evidence-model-decision")).toHaveText("refer");
+  await expect(page.getByTestId("evidence-outcome")).toHaveText("approve");
+});
+
+test("an application with no model event does not attribute its outcome to a model", async ({
+  page,
+}) => {
+  // The COMMON case in this database, not an edge one: 306 of 328 decisions
+  // carry no `decision_events` row at all. Before this round those rendered the
+  // outcome under a "Recorded outcome" heading in a panel of model evidence,
+  // with every model field blank -- which reads as a model decision whose
+  // details went missing, rather than as no model event.
+  await signInAsStaff(page, "underwriter");
+  await page.route("**/applications/*/history", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        decision: {
+          outcome: "approve",
+          model_decision: null,
+          model_score: null,
+          model_version: null,
+          bureau_score: null,
+          reason_codes: [],
+          occurred_at: null,
+        },
+      }),
+    }),
+  );
+  await page.goto("/underwriting/4471");
+
+  await expect(page.getByTestId("evidence-model-decision")).toHaveText("not recorded");
+  await expect(page.getByTestId("evidence-outcome")).toHaveText("approve");
+  await expect(page.getByTestId("evidence-no-model-record")).toBeVisible();
+  await expect(page.getByTestId("evidence-outcome-differs")).toHaveCount(0);
 });
