@@ -140,6 +140,81 @@ def late_fee_for(past_due) -> Decimal:
     return fee
 
 
+#: The DECIDED rule's percentage, applied to ONE installment's unpaid scheduled
+#: principal and interest (`policies/fee_schedule.md`, client decision
+#: 2026-08-29). Numerically equal to `LATE_FEE_PCT_OF_PAST_DUE` above and
+#: deliberately a separate constant: the two rules differ in their BASE, not their
+#: rate, and sharing one name would hide that. `db/tests` reads both out of this
+#: module to check the published text against the code, so collapsing them would
+#: also collapse the check.
+LATE_FEE_PCT_OF_INSTALLMENT_PI = Decimal("0.05")
+
+
+def late_fee_for_installment(unpaid_scheduled_pi) -> Decimal:
+    """The DECIDED rule: `min($35, 5% x unpaid scheduled P&I for THAT installment)`.
+
+    The client's rule of 2026-08-29 (`policies/fee_schedule.md`, `docs/DEBT.md`
+    D23), as one comparison over one installment's own scheduled principal and
+    interest.
+
+    **This is not yet wired to the assessment route**, and that is the honest
+    state of D23 rather than an oversight. Two facts the rule needs are still
+    missing and neither can be invented here: the grace period it says a fee comes
+    "after" does not exist anywhere in this repository, and the unpaid figure this
+    function takes as input is only derivable while nothing has been paid
+    (`installments.unpaid_scheduled_pi`, which refuses instead of guessing). The
+    arithmetic lands now, with the client's own worked examples as tests, so that
+    when those two decisions arrive the remaining change is wiring rather than
+    arithmetic nobody has checked.
+
+    **Fees are excluded from the base WHEN THE BASE COMES FROM THE SCHEDULE**, and
+    that qualifier is doing real work rather than hedging. This function takes a
+    `Decimal`; it cannot tell where the number came from, so the exclusion is a
+    property of the CALLER, not of the arithmetic. Sourced from
+    `installments.Installment.scheduled_pi` -- an amortization row's principal plus
+    interest -- there is no fee in the input to exclude, so "previous late fees and
+    all other fees are excluded" needs no filtering step. Handed
+    `balances.past_due` instead, it would price the superseded rule and look
+    identical while doing so.
+
+    The claim used to read "by construction" without naming the source, which was
+    stronger than the signature supports. `tests/test_late_fee_installment_rule.py`
+    now walks the real chain -- stored contract, `installments_for`, one
+    installment, `scheduled_pi`, this function -- so the exclusion is asserted end
+    to end rather than asserted about a parameter.
+
+    Contrast `late_fee_for` above, whose base IS `balances.past_due` and therefore
+    includes every fee ever assessed.
+
+    Rounding is ROUND_DOWN for the same reason as the superseded rule: "the lesser
+    of" means the fee may exceed neither bound, and half-up rounding breaks that
+    at the cap -- five per cent of $699.99 is $34.9995, which half-up bills as
+    $35.00, half a cent above the percentage bound.
+
+    The client's worked examples, supplied with the decision and asserted in
+    `tests/test_late_fee_installment_rule.py`:
+
+        $200 -> $10      (5% binds)
+        $500 -> $25      (5% binds)
+        $700 -> $35      (the two bounds meet exactly)
+        $1000 -> $35     ($35 cap binds)
+    """
+    base = (unpaid_scheduled_pi if isinstance(unpaid_scheduled_pi, Decimal)
+            else Decimal(str(unpaid_scheduled_pi)))
+    if base <= 0:
+        raise NoFeeIsDue(
+            f"unpaid scheduled P&I is {base}; the schedule charges nothing")
+    pct = (base * LATE_FEE_PCT_OF_INSTALLMENT_PI).quantize(CENT, rounding=ROUND_DOWN)
+    fee = min(LATE_FEE_FLAT, pct)
+    if fee <= 0:
+        # Under $0.20 of unpaid scheduled P&I: five per cent is below a cent once
+        # rounded down. `ledger_entries` refuses a zero amount by CHECK, so this
+        # could not be written even if it meant something.
+        raise NoFeeIsDue(
+            f"unpaid scheduled P&I is {base}; five per cent of it rounds to {pct}")
+    return fee
+
+
 class LoanHasNoBalances(Exception):
     """The loan has no `balances` row, so a fee cannot be assessed against it.
 

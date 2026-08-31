@@ -487,6 +487,24 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
                     'fee_assessed','fee_waived','adjustment')),
     reason       TEXT,
 
+    -- Which scheduled installment this entry belongs to (db/migrations/0046,
+    -- backported here so a fresh volume carries it too).
+    --
+    -- Nullable, and NULL means "never captured" rather than "unknown but
+    -- guessable". The client's late-fee rule of 2026-08-29 is one fee per missed
+    -- scheduled installment, and nothing in the ledger could express which
+    -- installment a fee was for. This is that fact.
+    --
+    -- Only `fee_assessed` may carry one today, because it is the only writer
+    -- that knows one. PAYMENT attribution to installments is deliberately NOT
+    -- here: it needs an allocation order across installments that no spec or
+    -- policy in this repository publishes, and D23 rules out inventing it.
+    installment_no INTEGER
+                   CONSTRAINT ledger_installment_no_positive
+                       CHECK (installment_no IS NULL OR installment_no >= 1)
+                   CONSTRAINT ledger_installment_only_on_fee_assessed
+                       CHECK (installment_no IS NULL OR entry_type = 'fee_assessed'),
+
     -- Who moved it.
     actor_id     INTEGER,
     actor_role   TEXT,
@@ -557,6 +575,175 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_payment_component
     ON ledger_entries (payment_id, component) WHERE payment_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
+
+-- ONE late fee per installment (db/migrations/0046), enforced by the database
+-- rather than by an application check -- which is what makes a concurrent
+-- assessor and a retry safe by construction instead of by a lock somebody has to
+-- remember to take. Partial on `installment_no IS NOT NULL` so a fee that is not
+-- installment-scoped (an NSF charge, priced per returned payment) writes NULL and
+-- does not participate.
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_late_fee_per_installment
+    ON ledger_entries (loan_id, installment_no)
+    WHERE entry_type = 'fee_assessed' AND installment_no IS NOT NULL;
+
+-- The installment cited must EXIST on that loan (db/migrations/0046).
+--
+-- A CHECK cannot read another table, so this is a trigger. Without it a 36-month
+-- loan accepted `installment_no = 999`, and the unique index above then
+-- guaranteed "one fee per installment NUMBER" rather than one fee per real
+-- missed installment -- a fee could claim an identity that was false while
+-- satisfying every constraint.
+CREATE OR REPLACE FUNCTION ledger_installment_is_in_the_loan_schedule()
+RETURNS TRIGGER AS $$
+DECLARE
+    loan RECORD;
+    term INTEGER;
+BEGIN
+    IF NEW.installment_no IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    -- LOCKED while validating. Without this the read is time-of-check/
+    -- time-of-use: a concurrent transaction could shorten the term or clear the
+    -- schedule between this check and the ledger insert committing, leaving a fee
+    -- citing an installment that no longer exists.
+    --
+    -- FOR SHARE, not FOR UPDATE: the requirement is that the contract must not
+    -- CHANGE while this commits, not that this transaction owns the loan. Two
+    -- fees on different installments of the same loan can validate together.
+    SELECT term_months, schedule_version, regular_payment,
+           regular_payment_count, final_payment
+      INTO loan
+      FROM loans WHERE id = NEW.loan_id FOR SHARE;
+
+    -- The CONTRACT must exist before a fee may cite one of its periods.
+    --
+    -- Codex review of PR #143 (SCHEDULELESS-INSTALLMENT-002): checking
+    -- `term_months` alone was not enough. `loans_schedule_all_or_nothing` permits
+    -- a loan with a term and NO stored schedule -- the four schedule columns are
+    -- all-or-nothing, and all-NULL is a legal state for a legacy loan boarded
+    -- before db/migrations/0030. The database would then accept
+    -- `fee_assessed + installment_no = 1` for a loan whose servicing layer
+    -- REFUSES to derive any installment at all (`installments.ScheduleNotAvailable`),
+    -- producing a ledger row whose claimed identity nothing can resolve.
+    --
+    -- The columns checked here are exactly `installments._CONTRACT_FIELDS` plus
+    -- `schedule_version`, which is what `installments_for()` requires before it
+    -- will expand a contract. The two must agree: if the database accepts a
+    -- period the application cannot derive, the fee is a false identity, and if
+    -- the application derives one the database rejects, the fee cannot be written.
+    --
+    -- No schedule is invented. The fee is refused.
+    IF loan.schedule_version IS NULL
+       OR loan.regular_payment IS NULL
+       OR loan.regular_payment_count IS NULL
+       OR loan.final_payment IS NULL THEN
+        RAISE EXCEPTION
+            'loan % has no stored contractual schedule, so installment % cannot '
+            'be cited by a fee', NEW.loan_id, NEW.installment_no;
+    END IF;
+
+    term := loan.term_months;
+
+    IF term IS NULL THEN
+        RAISE EXCEPTION
+            'loan % has no term, so installment % cannot be validated',
+            NEW.loan_id, NEW.installment_no;
+    END IF;
+
+    IF NEW.installment_no > term THEN
+        RAISE EXCEPTION
+            'installment % is past the end of loan %''s %-month term',
+            NEW.installment_no, NEW.loan_id, term;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_installment_in_schedule ON ledger_entries;
+CREATE TRIGGER ledger_entries_installment_in_schedule
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_installment_is_in_the_loan_schedule();
+
+-- ---------------------------------------------------------------------------
+-- The contract cannot change underneath a fee that cites one of its installments.
+-- ---------------------------------------------------------------------------
+--
+-- The trigger above proves installment N is real AT INSERT TIME. That is only
+-- half the guarantee: `loans` has no immutability trigger of any kind, and the
+-- schedule-defining columns are plain updatable columns. A fee written against
+-- installment 36 of a 36-month loan stays on an append-only ledger forever, so if
+-- the term were later changed to 24 the ledger would hold an installment identity
+-- that is no longer valid against the contract -- and nothing would have noticed.
+--
+-- Locking the row during the insert closes the concurrent case and does nothing
+-- about the later one, so both are needed.
+--
+-- SCOPED TO LOANS THAT ACTUALLY CARRY AN INSTALLMENT-SCOPED FEE, deliberately.
+-- This does NOT make boarded contracts immutable in general: `db/init/003_seed_bulk.sql`
+-- legitimately back-fills these columns from the accepted offer, and correcting a
+-- contract on a loan nothing has cited is a different question that this change has
+-- no authority to answer. What is protected is exactly the invariant the ledger
+-- relies on -- no more, and stated rather than assumed.
+--
+-- `note_rate_pct` and `opened_at` are included because installment identity is
+-- derived from them too: `installments.py` anchors due dates on `opened_at` and
+-- splits interest at the note rate, so changing either silently redefines which
+-- period a fee refers to.
+CREATE OR REPLACE FUNCTION loans_contract_is_frozen_once_cited() RETURNS trigger AS $$
+DECLARE
+    cited INTEGER;
+    before_row JSONB := to_jsonb(OLD);
+    after_row  JSONB := to_jsonb(NEW);
+    col TEXT;
+    changed BOOLEAN := FALSE;
+BEGIN
+    -- Compared through `to_jsonb` rather than as `NEW.column`, and that is a fix
+    -- rather than a flourish. `NEW.note_rate_pct` RAISES on a loans table that
+    -- predates `db/migrations/0038` -- the migration that adds the column -- so
+    -- naming the fields directly made this trigger explode inside 0038's own
+    -- expand test, which builds exactly that older shape. A missing key reads as
+    -- NULL on both sides here, so a column that does not exist yet simply cannot
+    -- have changed.
+    FOREACH col IN ARRAY ARRAY['term_months', 'schedule_version', 'regular_payment',
+                               'regular_payment_count', 'final_payment',
+                               'note_rate_pct', 'opened_at'] LOOP
+        IF (before_row -> col) IS DISTINCT FROM (after_row -> col) THEN
+            changed := TRUE;
+            EXIT;
+        END IF;
+    END LOOP;
+
+    IF NOT changed THEN
+        RETURN NEW;                       -- nothing that defines an installment moved
+    END IF;
+
+    -- Same reasoning one level up: a schema with `loans` but no `ledger_entries`
+    -- is a legitimate intermediate state for a migration test, and nothing can
+    -- have cited an installment there.
+    IF to_regclass('ledger_entries') IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT count(*) INTO cited
+      FROM ledger_entries
+     WHERE loan_id = OLD.id AND installment_no IS NOT NULL;
+
+    IF cited > 0 THEN
+        RAISE EXCEPTION
+            'loan % has % ledger entr(y/ies) citing an installment; its '
+            'contractual schedule cannot change underneath them',
+            OLD.id, cited;
+    END IF;
+
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS loans_contract_frozen_once_cited ON loans;
+CREATE TRIGGER loans_contract_frozen_once_cited
+    BEFORE UPDATE ON loans
+    FOR EACH ROW EXECUTE FUNCTION loans_contract_is_frozen_once_cited();
 
 -- Searchable by the id an operator reads off a log line (db/migrations/0043).
 -- Partial: NULL for every pre-trace row and every entry with no payment behind

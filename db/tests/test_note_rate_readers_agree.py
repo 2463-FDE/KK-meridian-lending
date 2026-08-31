@@ -377,6 +377,19 @@ def test_a_new_reader_cannot_appear_unnoticed():
         # disagree with.
         "services/servicing-service/app/waterfall.py",
         "services/servicing-service/app/balance.py",
+        # `installments.py` (D23) expands the same stored contract the waterfall
+        # does, to name the scheduled principal and interest of each period so a
+        # late fee can cite one. Checked against this file's rule before being
+        # listed, on the same three points as the two readers above: it withholds
+        # no rate; it does not branch on `schedule_version` to decide WHICH figure
+        # the column holds -- it branches on its PRESENCE to decide whether a
+        # contractual schedule exists at all, and refuses when it does not; and it
+        # reads the same NOT NULL `loans.note_rate_pct` for arithmetic rather than
+        # reporting a rate to a borrower. It shares the derivation with
+        # `waterfall.scheduled_interest_due` and a test asserts the two agree on
+        # the interest billed by a date, so there is no second answer available to
+        # disagree with.
+        "services/servicing-service/app/installments.py",
         # These name `offers.note_rate_pct`, which has existed since 0030 and is
         # a different column from the one on loans. Listed rather than filtered
         # out by a path rule, because "it is probably the offer one" is the kind
