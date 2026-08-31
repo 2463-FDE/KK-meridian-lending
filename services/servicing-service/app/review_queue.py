@@ -19,9 +19,30 @@ accident of layout.
 **What this module may not become.** The flag is not a duplicate conclusion and
 not permission to move money. Nothing here touches `ledger_entries`, `balances`,
 the payment waterfall, capture state or `payments.applied_at` -- the only table
-it writes is its own. A reviewer who concludes `confirmed_duplicate` still has
-to go through the maker-checker to reverse anything, with the second person that
-requires. This module records what the reviewer decided; it does not act on it.
+it writes is its own. This module records what the reviewer decided; it does not
+act on it.
+
+**And what happens next is a balance adjustment, not a reversal.** This paragraph
+used to finish by sending the reviewer through maker-checker to undo the payment
+-- described in a way that read as though maker-checker could perform a card
+reversal. The old sentence is deliberately paraphrased rather than quoted:
+`db/tests/test_no_surface_promises_a_reversal.py` scans this file, and a verbatim
+quotation would trip the very guard that exists to keep the claim out.
+Maker-checker cannot do it: `maker_checker.ENTRY_TYPES` is
+`{adjustment, fee_waived}`, and no service in this repository exposes a refund,
+void, reversal or chargeback route. Reconciliation PARSES refund lines out of the
+processor's settlement file, which is reading one somebody else performed rather
+than performing one.
+
+So a reviewer who concludes `confirmed_duplicate` has one supported route: a
+balance ADJUSTMENT raised on the loan's account page and approved by a different
+authorised person in `/approvals`. That corrects the loan balance; it does not
+return money to the card, and nothing here does.
+
+The same false claim was on `/reconciliation` in two places and was removed with
+this docstring. `db/tests/test_no_surface_promises_a_reversal.py` now covers this
+file as well as the page, because a defect that survives one file behind the
+screen is one the next reader learns from the backend instead.
 """
 import logging
 

@@ -61,6 +61,26 @@ def _frontend_surfaces():
             yield path
 
 
+#: The backend modules that DOCUMENT the duplicate-review workflow.
+#:
+#: Codex review of this PR (REV-COPY-01) caught the reason this list exists: the
+#: page copy was corrected while `review_queue.py` still told the next reader that
+#: a `confirmed_duplicate` "has to go through the maker-checker to reverse
+#: anything". The screen and the service behind it then disagreed, and the guard
+#: as first written could not see it -- so the defect survived one file behind the
+#: thing it was written to fix.
+#:
+#: Scoped to the modules that describe what a reviewer does next, rather than to
+#: all of `services/`, because `reconciliation.py` legitimately discusses refund
+#: LINES in the processor's settlement file at length. Reading a refund somebody
+#: else performed is not claiming this system performs one, and the phrase
+#: patterns below are written so that distinction survives.
+_REVIEW_WORKFLOW_MODULES = (
+    SERVICES / "servicing-service" / "app" / "review_queue.py",
+    SERVICES / "servicing-service" / "app" / "maker_checker.py",
+)
+
+
 def test_no_service_exposes_a_reversal_route():
     """The premise the copy rests on, established rather than assumed.
 
@@ -113,6 +133,10 @@ def test_no_surface_promises_a_reversal_that_does_not_exist():
                    re.IGNORECASE),
         re.compile(r"(?:reversal|refund)\s+(?:is|are)\s+(?:available|supported)",
                    re.IGNORECASE),
+        # The shape the backend docstring used: maker-checker presented as the
+        # thing that performs a reversal.
+        re.compile(r"maker-checker\s+to\s+reverse", re.IGNORECASE),
+        re.compile(r"to\s+reverse\s+anything", re.IGNORECASE),
     ]
     offenders = []
     for path in _frontend_surfaces():
@@ -129,6 +153,54 @@ def test_no_surface_promises_a_reversal_that_does_not_exist():
         "a live surface offers a reversal, and no service implements one: "
         f"{offenders}"
     )
+
+
+def test_no_review_workflow_module_documents_a_reversal_either():
+    """The same rule, one layer down.
+
+    Codex review of this PR (REV-COPY-01): the page copy was corrected while
+    `review_queue.py` still told the next reader that a `confirmed_duplicate`
+    "has to go through the maker-checker to reverse anything". The screen and the
+    service behind it disagreed, and the first version of this guard scanned only
+    `.tsx` surfaces, so it could not see it.
+
+    A docstring is not a screen, and the distinction is worth keeping: this is not
+    checking what a borrower is shown, it is checking that the module explaining
+    the workflow does not teach the false one. That is how the defect would have
+    come back -- not through the page, but through the next person implementing
+    against the page's own backend.
+
+    Comments are NOT stripped here, unlike the frontend scan, because in a Python
+    module the docstring IS the documentation under test.
+    """
+    offenders = []
+    for path in _REVIEW_WORKFLOW_MODULES:
+        assert path.exists(), f"{path} moved; this guard is now scanning nothing"
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for pattern in (
+            re.compile(r"maker-checker\s+to\s+reverse", re.IGNORECASE),
+            re.compile(r"to\s+reverse\s+anything", re.IGNORECASE),
+            re.compile(r"reversal\s+is\s+a\s+separate", re.IGNORECASE),
+            re.compile(r"reversal\s+(?:goes|go)\s+through", re.IGNORECASE),
+        ):
+            if pattern.search(text):
+                offenders.append(
+                    f"{path.relative_to(REPO).as_posix()}: {pattern.pattern}")
+    assert not offenders, (
+        "a module documenting the review workflow still describes a reversal, "
+        f"and no service implements one: {offenders}"
+    )
+
+
+def test_the_review_queue_module_names_the_supported_route_instead():
+    """Having removed the false direction from the backend, it must give a true one."""
+    text = (SERVICES / "servicing-service" / "app" / "review_queue.py").read_text(
+        encoding="utf-8")
+    assert re.search(r"balance ADJUSTMENT|balance adjustment", text), (
+        "review_queue.py no longer names the operation that IS supported")
+    assert re.search(r"ENTRY_TYPES` is\s*\n?`?\{adjustment, fee_waived\}|"
+                     r"\{adjustment, fee_waived\}", text), (
+        "review_queue.py no longer cites the two entry types that bound it")
 
 
 def test_the_reconciliation_page_says_what_a_correction_actually_is():
