@@ -586,6 +586,45 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_late_fee_per_installment
     ON ledger_entries (loan_id, installment_no)
     WHERE entry_type = 'fee_assessed' AND installment_no IS NOT NULL;
 
+-- The installment cited must EXIST on that loan (db/migrations/0046).
+--
+-- A CHECK cannot read another table, so this is a trigger. Without it a 36-month
+-- loan accepted `installment_no = 999`, and the unique index above then
+-- guaranteed "one fee per installment NUMBER" rather than one fee per real
+-- missed installment -- a fee could claim an identity that was false while
+-- satisfying every constraint.
+CREATE OR REPLACE FUNCTION ledger_installment_is_in_the_loan_schedule()
+RETURNS TRIGGER AS $$
+DECLARE
+    term INTEGER;
+BEGIN
+    IF NEW.installment_no IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT term_months INTO term FROM loans WHERE id = NEW.loan_id;
+
+    IF term IS NULL THEN
+        RAISE EXCEPTION
+            'loan % has no term, so installment % cannot be validated',
+            NEW.loan_id, NEW.installment_no;
+    END IF;
+
+    IF NEW.installment_no > term THEN
+        RAISE EXCEPTION
+            'installment % is past the end of loan %''s %-month term',
+            NEW.installment_no, NEW.loan_id, term;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ledger_entries_installment_in_schedule ON ledger_entries;
+CREATE TRIGGER ledger_entries_installment_in_schedule
+    BEFORE INSERT ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION ledger_installment_is_in_the_loan_schedule();
+
 -- Searchable by the id an operator reads off a log line (db/migrations/0043).
 -- Partial: NULL for every pre-trace row and every entry with no payment behind
 -- it, and indexing those buys nothing.

@@ -14,6 +14,7 @@ re-runnable rather than only correct once.
 """
 import os
 import pathlib
+import threading
 
 import psycopg2
 import psycopg2.extras
@@ -202,6 +203,60 @@ def test_installment_numbers_are_one_based(cur):
         cur.execute("ROLLBACK TO SAVEPOINT s")
 
 
+@pytest.mark.parametrize("beyond", [37, 48, 999])
+def test_an_installment_past_the_end_of_the_term_is_refused(cur, beyond):
+    """Codex review FEE-INSTALLMENT-BOUNDS-001.
+
+    With only `installment_no >= 1`, a 36-month loan accepted `installment_no =
+    37` or 999, and the unique index then guaranteed "one fee per installment
+    NUMBER" rather than one fee per real missed installment. A fee could claim an
+    identity that was false while satisfying every constraint.
+
+    The fixture loan has `term_months = 36`, so each of these is past the end of
+    its schedule. Enforced by a trigger because a CHECK may not read `loans`.
+    """
+    loan_id = _a_loan(cur)
+    cur.execute("SAVEPOINT b")
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        _assess(cur, loan_id, beyond)
+    cur.execute("ROLLBACK TO SAVEPOINT b")
+    assert "past the end" in str(exc.value)
+    assert "36-month term" in str(exc.value), (
+        "the refusal should name the term it was measured against")
+
+
+def test_the_last_installment_of_the_term_is_allowed(cur):
+    """The boundary is inclusive: installment 36 of a 36-month loan is real.
+
+    Asserted separately from the refusals above because an off-by-one in the
+    trigger would reject the final installment -- the one most likely to carry a
+    fee on a loan that ran to term -- and every out-of-range case would still pass.
+    """
+    loan_id = _a_loan(cur)
+    _assess(cur, loan_id, 36)
+    cur.execute(
+        "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = %s "
+        "AND installment_no = 36", (loan_id,))
+    assert cur.fetchone()["n"] == 1
+
+
+def test_a_null_installment_is_not_validated_against_the_term(cur):
+    """The trigger must not turn every other ledger writer into a schedule check.
+
+    A payment, an adjustment, an opening balance: none carries an installment, and
+    the trigger returns early for them. Without this case a trigger that raised on
+    NULL would break the entire money path and only be caught elsewhere.
+    """
+    loan_id = _a_loan(cur)
+    cur.execute(
+        "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason) "
+        "VALUES (%s, 'fees', 25.00, 'fee_assessed', 'NSF, no period')", (loan_id,))
+    cur.execute(
+        "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = %s "
+        "AND installment_no IS NULL", (loan_id,))
+    assert cur.fetchone()["n"] >= 1
+
+
 def test_only_a_fee_assessment_may_name_an_installment(cur):
     """A `payment` row must not carry one, because payment attribution does not exist.
 
@@ -281,35 +336,76 @@ def test_fees_with_no_installment_do_not_collide(cur):
 # --------------------------------------------------------------------------
 
 def test_two_concurrent_assessors_cannot_both_write_one_installment(db):
-    """Two sessions, no application lock, one fee.
+    """Two sessions genuinely overlapping, one fee.
 
-    The second INSERT blocks on the unique index until the first commits, then
-    fails. This is the case an application-level "have we already?" check gets
-    wrong: both sessions read "no fee yet" before either writes.
+    Codex review TEST-CONC-001: the first version of this case committed session A
+    *before* session B inserted, which made it a sequential unique-violation test
+    wearing a concurrency name. It would have passed against an application-level
+    "have we already?" check -- the exact defect the index exists to rule out --
+    because B's read would have happened after A's commit.
 
-    Opens its own two connections -- one connection cannot demonstrate two
-    sessions -- and cleans up after itself, because work that commits is outside
-    the rolling-back `cur` fixture.
+    So B now inserts while A is still UNCOMMITTED, from a worker thread. Postgres
+    makes B's insert block on the uncommitted unique-index entry rather than fail;
+    the test asserts that it is still blocked (the thread has not finished) before
+    A commits, and only then does B resolve into a `UniqueViolation`. That ordering
+    is what distinguishes "the database serialised two overlapping writers" from
+    "the second writer looked after the first had finished".
+
+    Opens its own two connections -- one cannot demonstrate two sessions -- and
+    cleans up after itself, because work that commits is outside the rolling-back
+    `cur` fixture.
     """
     a = _connect()
     b = _connect()
     loan_id = None
+    outcome: dict = {}
+
+    def _b_inserts():
+        """Runs in a worker thread; blocks inside the INSERT until A commits."""
+        try:
+            with b.cursor() as cb:
+                cb.execute(f"SET search_path TO {SCHEMA}")
+                # Generous: this MUST block until A commits, and a short timeout
+                # would turn the property under test into a flaky failure.
+                cb.execute("SET LOCAL lock_timeout = '30s'")
+                _assess(cb, loan_id, 7)
+            outcome["result"] = "inserted"
+        except psycopg2.errors.UniqueViolation:
+            outcome["result"] = "unique_violation"
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            outcome["result"] = f"unexpected: {type(exc).__name__}: {exc}"
+
     try:
         with a.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as ca:
             ca.execute(f"SET search_path TO {SCHEMA}")
             loan_id = _a_loan(ca)
         a.commit()
 
+        # A writes and does NOT commit.
         with a.cursor() as ca:
             ca.execute(f"SET search_path TO {SCHEMA}")
             _assess(ca, loan_id, 7)
-        a.commit()  # a wins
 
-        with b.cursor() as cb:
-            cb.execute(f"SET search_path TO {SCHEMA}")
-            cb.execute("SET LOCAL lock_timeout = '5s'")
-            with pytest.raises(psycopg2.errors.UniqueViolation):
-                _assess(cb, loan_id, 7)
+        worker = threading.Thread(target=_b_inserts, daemon=True)
+        worker.start()
+
+        # B must still be inside its INSERT, waiting on A's uncommitted index
+        # entry. If it has already finished here, the two writers did not overlap
+        # and this case is not testing what it claims.
+        worker.join(timeout=3.0)
+        assert worker.is_alive(), (
+            "session B finished before A committed, so the two writers never "
+            "overlapped -- this case would pass against an application-level "
+            "check and is not testing the index"
+        )
+
+        a.commit()  # A wins; B's wait now resolves
+
+        worker.join(timeout=30.0)
+        assert not worker.is_alive(), "session B never resolved after A committed"
+        assert outcome["result"] == "unique_violation", (
+            f"expected B to lose on the unique index; got {outcome['result']!r}")
+
         b.rollback()
 
         with a.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as ca:
