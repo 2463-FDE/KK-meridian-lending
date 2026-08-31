@@ -9,12 +9,18 @@ reason all required, and a bare percentage explicitly insufficient.
 And the rule that governs the design: **a manual DTI is human-review EVIDENCE and
 must not approve, deny, override, mutate a decision or trigger model output.**
 
-This file covers the half of that which belongs in the schema. Authorization and
-application STATE (referred-only, underwriter/admin-only) are route concerns and
-are tested with the API; what the database can guarantee on its own is here:
-identity is a real reference, the ratio is reproducible from its own inputs, the
-evidence is append-only, and a document that is not approved and synthetic cannot
-be cited.
+What the database guarantees on its own -- which after Codex round 2 is more than
+this file first claimed. Referred-only and underwriter/admin-only were described
+here as route concerns tested with the API; both are now enforced by
+`manual_dti_permitted` and covered below (MDTI-M01). The schema holds: the
+application is currently REFERRED, the assessor is the active user the row names
+and holds the role it records, the ratio is reproducible from its own inputs, the
+evidence is append-only, a document that is not approved and synthetic cannot be
+cited, and a cited document cannot change underneath the evidence citing it.
+
+The API enforces these again at its own layer -- a route that let a caller supply
+an identity would be wrong even with the database refusing the row -- but the
+guarantees here do not depend on it.
 
 Against real PostgreSQL in a throwaway schema built from `db/init` and migrated
 with 0047 -- so these are migration-path tests as well as constraint tests, and
@@ -22,6 +28,7 @@ with 0047 -- so these are migration-path tests as well as constraint tests, and
 """
 import os
 import pathlib
+import threading
 from decimal import Decimal
 
 import psycopg2
@@ -586,3 +593,239 @@ def test_recording_dti_evidence_changes_no_decision_surface(cur, db):
                 (app_id,))
     assert cur.fetchone()["n"] == 1
     db.rollback()
+
+
+# --------------------------------------------------------------------------
+# MDTI-01: the checks must HOLD the rows they rely on.
+#
+# Codex round 2. Each trigger read committed state and held no lock, so under
+# READ COMMITTED a concurrent writer could invalidate the premise between the
+# check and the commit. Three sites, three races -- and each needs TWO
+# connections that genuinely overlap. A sequential "write, commit, write" proves
+# nothing about a lock, because the second writer looks after the first finished.
+#
+# The shape of every case below:
+#   T1 begins, reaches the protected state, does NOT commit
+#   T2 attempts the conflicting change from another connection, in a thread
+#   assert T2 is STILL BLOCKED (thread alive)   <- the overlap proof
+#   T1 commits
+#   assert T2's outcome and the final database truth
+# --------------------------------------------------------------------------
+
+def _conn():
+    c = psycopg2.connect(DATABASE_URL)
+    c.autocommit = False
+    with c.cursor() as cur:
+        cur.execute("SET search_path TO " + SCHEMA)
+    c.commit()
+    return c
+
+
+def _blocked_writer(sql, params):
+    """A conflicting write on its own connection, in a thread."""
+    outcome = {}
+
+    def _run():
+        c = _conn()
+        try:
+            with c.cursor() as cur:
+                cur.execute("SET search_path TO " + SCHEMA)
+                cur.execute("SET LOCAL lock_timeout = '30s'")
+                cur.execute(sql, params)
+            c.commit()
+            outcome["state"] = "committed"
+        except Exception as exc:                      # noqa: BLE001 - reported
+            outcome["state"] = type(exc).__name__
+            c.rollback()
+        finally:
+            c.close()
+
+    return threading.Thread(target=_run, daemon=True), outcome
+
+
+def _committed_fixture():
+    """A referred application, staff user and document, all COMMITTED.
+
+    These races are about a second CONNECTION seeing this transaction's state, so
+    the setup has to be visible outside the transaction under test.
+    """
+    c = _conn()
+    with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SET search_path TO " + SCHEMA)
+        app_id = _a_referred_application(cur)
+        staff = _a_staff_user(cur)
+        cur.execute("SELECT id FROM manual_dti_source_documents "
+                    " WHERE doc_ref = 'SYN-PAYSTUB-001'")
+        doc = cur.fetchone()["id"]
+    c.commit()
+    return c, app_id, staff, doc
+
+
+def test_a_decision_cannot_change_under_an_in_flight_assessment(db):
+    """MDTI-01 site A: T2 approves the application while T1 is recording DTI."""
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set -- no Postgres to test against")
+    setup, app_id, staff, doc = _committed_fixture()
+    t1 = _conn()
+    try:
+        with t1.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c1:
+            c1.execute("SET search_path TO " + SCHEMA)
+            aid = _assess(c1, app_id, staff)
+            _attach(c1, aid, doc)
+
+        worker, outcome = _blocked_writer(
+            "UPDATE decisions SET outcome = 'approve' WHERE app_id = %s", (app_id,))
+        worker.start()
+        worker.join(timeout=3.0)
+        assert worker.is_alive(), (
+            "the decision update completed while the assessment was still open, "
+            "so the trigger is not holding the decisions row and evidence can "
+            "land against an application that is no longer referred")
+
+        t1.commit()
+        worker.join(timeout=30.0)
+        assert outcome.get("state") == "committed", outcome
+
+        with t1.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c1:
+            c1.execute("SET search_path TO " + SCHEMA)
+            c1.execute("SELECT count(*) AS n FROM manual_dti_assessments "
+                       " WHERE app_id = %s", (app_id,))
+            assert c1.fetchone()["n"] == 1
+    finally:
+        t1.rollback()
+        t1.close()
+        setup.close()
+
+
+def test_authority_cannot_be_revoked_under_an_in_flight_assessment(db):
+    """MDTI-01 site B: T2 demotes and deactivates the assessor mid-assessment."""
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set -- no Postgres to test against")
+    setup, app_id, staff, doc = _committed_fixture()
+    t1 = _conn()
+    try:
+        with t1.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c1:
+            c1.execute("SET search_path TO " + SCHEMA)
+            aid = _assess(c1, app_id, staff)
+            _attach(c1, aid, doc)
+
+        worker, outcome = _blocked_writer(
+            "UPDATE users SET role = 'csr', is_active = FALSE WHERE id = %s",
+            (staff,))
+        worker.start()
+        worker.join(timeout=3.0)
+        assert worker.is_alive(), (
+            "the user was demoted while the assessment was still open, so the "
+            "trigger is not holding the users row and evidence can be signed "
+            "with authority its author no longer holds")
+
+        t1.commit()
+        worker.join(timeout=30.0)
+        assert outcome.get("state") == "committed", outcome
+    finally:
+        t1.rollback()
+        t1.close()
+        setup.close()
+
+
+def test_a_cited_document_cannot_be_rewritten_under_an_in_flight_citation(db):
+    """MDTI-01 site C, and the subtlest of the three.
+
+    The freeze trigger counts COMMITTED citations. With no lock, T2 updating the
+    registry row while T1's citation is uncommitted counts zero, concludes the
+    document is uncited, and rewrites it underneath evidence about to cite it.
+    """
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set -- no Postgres to test against")
+    setup, app_id, staff, doc = _committed_fixture()
+    t1 = _conn()
+    try:
+        with t1.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c1:
+            c1.execute("SET search_path TO " + SCHEMA)
+            aid = _assess(c1, app_id, staff)
+            _attach(c1, aid, doc)          # citation NOT yet committed
+
+        worker, outcome = _blocked_writer(
+            "UPDATE manual_dti_source_documents SET approved = FALSE WHERE id = %s",
+            (doc,))
+        worker.start()
+        worker.join(timeout=3.0)
+        assert worker.is_alive(), (
+            "the registry row was rewritten while the citation was uncommitted -- "
+            "the freeze trigger counted zero citations because the citing "
+            "transaction held no lock on the document")
+
+        t1.commit()
+        worker.join(timeout=30.0)
+        assert outcome.get("state") == "RaiseException", (
+            "expected the registry update to be refused once the citation "
+            "committed; got " + repr(outcome.get("state")))
+
+        with t1.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c1:
+            c1.execute("SET search_path TO " + SCHEMA)
+            c1.execute("SELECT approved FROM manual_dti_source_documents "
+                       " WHERE id = %s", (doc,))
+            assert c1.fetchone()["approved"] is True, (
+                "the cited document was un-approved after all")
+    finally:
+        t1.rollback()
+        t1.close()
+        setup.close()
+
+
+def test_two_assessments_on_one_application_do_not_block_each_other(db):
+    """FOR SHARE, not FOR UPDATE -- and this is what that choice buys.
+
+    The requirement is "this row must not CHANGE while I commit", not "I own this
+    row". A shared lock blocks the writers (proved by the three cases above) while
+    letting two legitimate assessments on the same application and the same
+    assessor proceed together. FOR UPDATE would have serialised them for no
+    reason, and nothing in the client's rule asks for that.
+
+    Also the deadlock check: both transactions acquire applications -> decisions
+    -> users -> document in the same order, so no cycle is possible between them.
+    """
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set -- no Postgres to test against")
+    setup, app_id, staff, doc = _committed_fixture()
+    a = _conn()
+    b = _conn()
+    try:
+        with a.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as ca:
+            ca.execute("SET search_path TO " + SCHEMA)
+            aid = _assess(ca, app_id, staff)
+            _attach(ca, aid, doc)
+
+        # B does the same thing while A is still open. If the lock were exclusive
+        # this would block and the join below would time out.
+        done = {}
+
+        def _second():
+            try:
+                with b.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cb:
+                    cb.execute("SET search_path TO " + SCHEMA)
+                    cb.execute("SET LOCAL lock_timeout = '10s'")
+                    bid = _assess(cb, app_id, staff, debt="1200.00", dti_bp=2000)
+                    _attach(cb, bid, doc)
+                b.commit()
+                done["state"] = "committed"
+            except Exception as exc:                  # noqa: BLE001 - reported
+                done["state"] = type(exc).__name__
+                b.rollback()
+
+        t = threading.Thread(target=_second, daemon=True)
+        t.start()
+        t.join(timeout=15.0)
+        assert not t.is_alive(), (
+            "a second assessment blocked behind the first -- the lock is stronger "
+            "than the invariant needs")
+        assert done.get("state") == "committed", done
+
+        a.commit()
+        with a.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as ca:
+            ca.execute("SET search_path TO " + SCHEMA)
+            ca.execute("SELECT count(*) AS n FROM manual_dti_assessments "
+                       " WHERE app_id = %s", (app_id,))
+            assert ca.fetchone()["n"] == 2
+    finally:
+        a.rollback(); a.close(); b.close(); setup.close()

@@ -181,8 +181,19 @@ CREATE OR REPLACE FUNCTION manual_dti_document_is_approved() RETURNS trigger AS 
 DECLARE
     doc RECORD;
 BEGIN
+    -- Locked, for the third instance of the same defect (MDTI-01 site C). The
+    -- citation is inserted here while uncommitted; a concurrent transaction
+    -- updating the registry row would count zero committed citations, conclude the
+    -- document is uncited, and be allowed through by
+    -- `manual_dti_cited_documents_are_frozen` -- rewriting `approved`, `doc_ref` or
+    -- `label` underneath evidence that is about to cite it.
+    --
+    -- FOR SHARE here and an exclusive row lock taken by the UPDATE on the other
+    -- side means the two serialise: the registry update waits for this citation to
+    -- commit, then sees it and is refused. Acquired last, and the freeze path takes
+    -- only this row, so no cycle is possible.
     SELECT doc_ref, approved, is_synthetic INTO doc
-      FROM manual_dti_source_documents WHERE id = NEW.document_id;
+      FROM manual_dti_source_documents WHERE id = NEW.document_id FOR SHARE;
 
     IF doc IS NULL THEN
         RAISE EXCEPTION 'source document % is not in the registry', NEW.document_id;
@@ -238,8 +249,37 @@ DECLARE
     actual_role TEXT;
     active BOOLEAN;
 BEGIN
+    -- LOCK BEFORE CHECKING. Codex review of PR #146, MDTI-01.
+    --
+    -- The first version of this trigger read `decisions` and `users` with plain
+    -- SELECTs. Under READ COMMITTED that reads committed state and holds nothing,
+    -- so a concurrent transaction could invalidate the premise between the check
+    -- and this transaction's commit: evidence landing against an application that
+    -- is no longer referred, or signed with authority the person no longer had.
+    --
+    -- WHICH ROW TO LOCK, established rather than assumed. Codex suggested locking
+    -- `applications`, because that is what the staff review path locks first
+    -- (`routers/applications.py`, `SELECT status FROM applications ... FOR
+    -- UPDATE`). That alone is NOT sufficient: `run_decision` writes
+    -- `INSERT INTO decisions ... ON CONFLICT (app_id) DO UPDATE SET outcome`
+    -- WITHOUT taking that lock, so an approve/deny can replace a `refer` while the
+    -- applications row sits untouched. The row whose value is being relied on is
+    -- the `decisions` row, so that is the row this pins.
+    --
+    -- ORDER: applications, then decisions. That is the order the staff review path
+    -- already acquires them in (it locks applications, then UPDATEs decisions), so
+    -- taking them the same way here cannot form a cycle with it. Acquiring
+    -- decisions first would invert against that path and risk a deadlock.
+    --
+    -- MODE: FOR SHARE, not FOR UPDATE. What is needed is "this must not change
+    -- while I commit", not exclusive ownership. FOR SHARE blocks the UPDATE and
+    -- the ON CONFLICT DO UPDATE, which is the whole requirement, while letting two
+    -- concurrent assessments on the same application proceed instead of
+    -- serialising them for no reason.
+    PERFORM 1 FROM applications WHERE id = NEW.app_id FOR SHARE;
+
     SELECT d.outcome INTO outcome
-      FROM decisions d WHERE d.app_id = NEW.app_id;
+      FROM decisions d WHERE d.app_id = NEW.app_id FOR SHARE;
 
     IF outcome IS NULL THEN
         RAISE EXCEPTION
@@ -252,8 +292,13 @@ BEGIN
             'on a referred application only', NEW.app_id, outcome;
     END IF;
 
+    -- Same reasoning for the authority. Without the lock a concurrent
+    -- transaction could demote or deactivate this user after the check and before
+    -- this row commits, leaving evidence signed with authority its author no
+    -- longer held. Taken after the application rows, so every writer here acquires
+    -- in one order.
     SELECT u.role, u.is_active INTO actual_role, active
-      FROM users u WHERE u.id = NEW.assessed_by;
+      FROM users u WHERE u.id = NEW.assessed_by FOR SHARE;
 
     -- Unreachable while the foreign key holds. Asserted anyway: "the FK makes
     -- this impossible" is how an unenforced rule survives a later migration.
