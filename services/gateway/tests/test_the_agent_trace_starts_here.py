@@ -544,7 +544,9 @@ def test_the_forwarded_context_contains_no_request_identifiers(
     # would be forbidding the categorical field this design chose to send, which
     # is a test asserting against its own contract rather than a leak check.
     for forbidden in ("4242", str(USER_ID), "Bearer", "applications/"):
-        assert forbidden not in _scannable(blob),             forbidden + " rides on the trace context"
+        assert forbidden not in _scannable(blob), (
+            forbidden + " rides on the trace context"
+        )
 
 
 # ------------------------------------------------- the root always closes
