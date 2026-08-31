@@ -37,11 +37,25 @@ import { comparisonStatement } from "../../lib/reconciliation";
  * invented.
  *
  * **What this page cannot do.** There is no reverse, refund or adjust control
- * anywhere on it, deliberately. `confirmed_duplicate` is a classification; a
+ * anywhere on it, deliberately. `confirmed_duplicate` is a classification, not a
+ * money movement. Putting a reverse button beside a disposition would make a flag
+ * one click from moving money, which is the precise thing the client's wording
+ * forbids.
+ *
+ * **And what NOTHING in this system can do.** This docstring used to finish "a
  * reversal is a money movement, and money movements go through the maker-checker
- * queue with the second person that requires (`/approvals`). Putting a reverse
- * button beside a disposition would make a flag one click from moving money,
- * which is the precise thing the client's wording forbids.
+ * queue" -- which reads as though a reversal were available one queue over. It is
+ * not. `maker_checker.ENTRY_TYPES` is `{adjustment, fee_waived}`, and no service
+ * exposes a refund, void, reversal or chargeback route; reconciliation PARSES
+ * refund lines out of the processor's settlement file, which is reading one
+ * somebody else performed rather than performing one.
+ *
+ * So the correction available after a confirmed duplicate is a balance
+ * ADJUSTMENT, raised on the loan's account page and approved by a different
+ * person in `/approvals`. Money does not come back off the card. The copy on this
+ * page says so, and `db/tests/test_no_surface_promises_a_reversal.py` holds the
+ * two in step: if a real reversal is ever built, that guard fails and sends the
+ * author here.
  */
 
 /**
@@ -291,7 +305,8 @@ function ReconciliationQueue() {
       });
       setNotice(
         `Review item ${itemId} recorded as “${DISPOSITION_LABEL[choice] ?? choice}”. ` +
-          `No money moved — a reversal goes through Approvals.`
+          `No money moved. A correction is a balance adjustment approved by a ` +
+          `different person in Approvals; there is no card reversal.`
       );
       // Only the queue is reloaded: recording a disposition cannot change the
       // ledger-versus-settlement comparison, so re-reading the break summary
@@ -463,9 +478,26 @@ function ReconciliationQueue() {
                       </button>
                     ))}
                   </div>
+                  {/* The second sentence used to read "A reversal is a separate,
+                      two-person decision in Approvals", and it sent an operator
+                      to a control that does not exist. Maker-checker accepts two
+                      entry types -- `adjustment` and `fee_waived`
+                      (`maker_checker.ENTRY_TYPES`) -- and there is no refund,
+                      void, reversal or chargeback route in any service. A
+                      reviewer who confirmed a duplicate and followed that
+                      sentence arrived at Approvals with nothing that did what
+                      they had been told to do.
+
+                      What replaces it names the workflow that IS supported and
+                      says plainly what is not, because "no money moved" is only
+                      reassuring if the reader also knows money is not coming
+                      back off the card either. */}
                   <p className="muted">
-                    Recording an answer moves no money. A reversal is a separate,
-                    two-person decision in <Link href="/approvals">Approvals</Link>.
+                    Recording an answer moves no money. A correction is a separate
+                    two-person decision: a balance adjustment raised on the loan&rsquo;s
+                    account page and approved by a different person in{" "}
+                    <Link href="/approvals">Approvals</Link>. There is no card refund
+                    or reversal in this system &mdash; nothing here returns money to a card.
                   </p>
                 </>
               )}

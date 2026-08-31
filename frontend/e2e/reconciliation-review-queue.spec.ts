@@ -299,6 +299,19 @@ test("a reviewer records one of three answers, it sticks, and no money moves", a
 
     await expect(page.getByText(/No money moved/i)).toBeVisible({ timeout: 15_000 });
 
+    // And it must not send the reviewer to a reversal, because there is none.
+    //
+    // This notice read "No money moved -- a reversal goes through Approvals" and
+    // the paragraph under the buttons said the same thing. Maker-checker accepts
+    // `adjustment` and `fee_waived` only, and no service exposes a refund, void,
+    // reversal or chargeback route -- so a reviewer who confirmed a duplicate and
+    // followed that sentence arrived at Approvals with nothing that did what they
+    // had been told to do. Asserted in the browser as well as statically
+    // (`db/tests/test_no_surface_promises_a_reversal.py`) because the static guard
+    // reads the source and this reads what a person is actually shown.
+    await expect(page.getByText(/a reversal goes through Approvals/i)).toHaveCount(0);
+    await expect(page.getByText(/there is no card reversal/i)).toBeVisible();
+
     // Recorded, with the reviewer named, and stored as the client's own value.
     const stored = await withDb(
       async (c) =>
