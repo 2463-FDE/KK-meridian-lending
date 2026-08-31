@@ -7,8 +7,20 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-meridian}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-meridian}
+    # Bound to LOOPBACK, not to every interface.
+    #
+    # `"5432:5432"` binds 0.0.0.0, so on any shared network -- conference wifi, a
+    # client site, a hotel -- this database was reachable from other machines. The
+    # publication itself is deliberate and stays (SEC-07): `db/tests` and the
+    # browser suite both connect from the host, and CI's e2e job uses
+    # `postgresql://...@localhost:5432/meridian` against this very stack. What was
+    # never needed was reachability from ANOTHER host, and 127.0.0.1 keeps every
+    # one of those callers working while removing it.
+    #
+    # This is local-topology hygiene, not production security. TLS, secret
+    # management and network policy are separate and are not claimed here.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -20,8 +32,30 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # NOT PUBLISHED TO THE HOST AT ALL, and that is the whole fix rather than a
+    # tightening of it.
+    #
+    # Nothing outside the compose network connects to Redis: a repository-wide
+    # search for `localhost:6379` / `127.0.0.1:6379` returns nothing, and every
+    # service reaches it as `redis:6379` over the compose network. So the
+    # publication bought nothing and cost the following --
+    #
+    # Redis has no authentication here (SEC-09: `requirepass` is empty and it
+    # answers PING to anyone), and it is the SESSION STORE: the gateway writes
+    # `session:<uuid4>` keys and resolves a caller's identity and role from them.
+    # Published on 0.0.0.0 with no password, anyone who could reach port 6379
+    # could read or mint the sessions the gateway trusts. On a laptop behind a
+    # firewall that is genuinely fine, which is why SEC-09 accepted it; on any
+    # shared network it is not.
+    #
+    # Removing the line is better than binding it to 127.0.0.1: an unauthenticated
+    # session store should not be reachable from the host either when nothing
+    # needs it. `docker compose exec redis redis-cli` still works for debugging,
+    # because that runs inside the container.
+    #
+    # SEC-09 stays OPEN. Requiring a password is a separate change with its own
+    # configuration story, and this does not close it -- it removes the exposure
+    # that made it reachable.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
