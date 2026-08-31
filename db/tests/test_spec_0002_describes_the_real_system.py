@@ -101,15 +101,37 @@ def test_servicing_now_verifies_the_principal_it_used_to_ignore():
     )
 
 
+#: Where origination-service defines the roles that can act. It used to be a
+#: literal inside `routers/applications.py`; RF-25's API needed a NARROWER set
+#: for manual DTI, so the definitions moved to one module rather than being
+#: copied. This guard follows them there, and reads EVERY role set it declares --
+#: the point is that no role can act without appearing in spec 0002's matrix, so
+#: a second set added beside the first must be covered too.
+ORIGINATION_ROLES = (REPO / "services" / "origination-service" / "app"
+                     / "staff_auth.py")
+
+
+def _declared_roles() -> set:
+    src = ORIGINATION_ROLES.read_text(encoding="utf-8")
+    matches = re.findall(r"^[A-Z_]*ROLES\s*=\s*frozenset\(\{([^}]*)\}\)",
+                         src, re.MULTILINE)
+    assert matches, (
+        f"no role set found in {ORIGINATION_ROLES.name}. If the definitions moved "
+        "again, this guard must follow them -- a matrix checked against a file "
+        "that no longer declares roles passes by finding nothing")
+    roles = set()
+    for body in matches:
+        roles |= {r.strip().strip("\"'") for r in body.split(",") if r.strip()}
+    return roles
+
+
 def test_the_roles_the_spec_matrixes_are_the_roles_that_exist():
     """The matrix must use real roles. An invented hierarchy is how a control
     spec becomes unimplementable."""
     spec = SPEC.read_text(encoding="utf-8")
-    src = ORIGINATION_ROUTER.read_text(encoding="utf-8")
-    m = re.search(r"_STAFF_ROLES\s*=\s*\{([^}]*)\}", src)
-    assert m, "could not find _STAFF_ROLES in origination-service"
-    roles = {r.strip().strip("\"'") for r in m.group(1).split(",") if r.strip()}
+    roles = _declared_roles()
     assert roles, "no roles parsed"
+    assert "csr" in roles and "underwriter" in roles and "admin" in roles, roles
     for role in roles:
         assert role in spec, (
             f"the role {role!r} exists in the system but not in spec 0002's role "
