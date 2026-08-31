@@ -1,5 +1,4 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
-import secrets
 import json
 # Decimal, not float, for the one subtraction on this module's money path: the
 # amount-financed breakdown has to foot to the cent on the borrower's screen.
@@ -13,7 +12,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, config, db, decision_state, disclosure_graph, intake, kg, models, reason_distribution
+from .. import (clients, config, db, decision_state, disclosure_graph, intake, kg,
+                 models, reason_distribution, staff_auth)
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -36,7 +36,7 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 
 # Roles allowed to see underwriting-sensitive fields (income, employment_years).
 # Mirrors the staff role set the gateway already enforces for /assistant/*.
-_STAFF_ROLES = {"csr", "underwriter", "admin"}
+_STAFF_ROLES = staff_auth.STAFF_ROLES
 
 #: Explicit, durable state for an application whose identity verification could
 #: not be completed because kyc-service rejected our credentials. Terminal until
@@ -80,12 +80,10 @@ def _is_staff(x_user_role: str | None, x_internal_token: str | None) -> bool:
     on every /los/* proxy; a direct caller doesn't know that secret, so it can
     claim any role it wants but still never pass this check.
     """
-    if x_user_role not in _STAFF_ROLES:
-        return False
-    if not config.INTERNAL_SERVICE_TOKEN or not x_internal_token:
-        return False
-    return secrets.compare_digest(x_internal_token.encode("utf-8"),
-                                  config.INTERNAL_SERVICE_TOKEN.encode("utf-8"))
+    # The comparison itself now lives in `app/staff_auth.py`, unchanged, because
+    # RF-25 adds routes with a narrower role set and two inline copies of one
+    # shared-secret check is how two answers to one question start to differ.
+    return staff_auth.has_role(x_user_role, x_internal_token, _STAFF_ROLES)
 
 
 def _require_staff(x_user_role: str | None, x_internal_token: str | None) -> None:
