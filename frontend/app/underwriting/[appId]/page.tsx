@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import LoanSummaryCard from "../../../components/LoanSummaryCard";
+import ManualDtiPanel from "./ManualDtiPanel";
 import RequireRole from "../../../components/RequireRole";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
@@ -913,6 +914,15 @@ function UnderwritingDetailContent() {
           )}
         </div>
       ) : null}
+
+      {/* Manual DTI evidence (RF-25).
+          Placed immediately AFTER the decision control and before the offer,
+          because that is the order the work happens in: a reviewer gathers
+          evidence, then decides. It renders for underwriters and admins only,
+          and the panel's own copy says plainly that recording evidence decides
+          nothing -- sitting this close to an approve/deny control, silence on
+          that point would be an invitation to misread it. */}
+      <ManualDtiPanel appId={String(appId)} isReferred={currentDecision === "refer"} />
 
       {/* Offer */}
       <h2>Offer</h2>
