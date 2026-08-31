@@ -95,13 +95,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_late_fee_per_installment
 CREATE OR REPLACE FUNCTION ledger_installment_is_in_the_loan_schedule()
 RETURNS TRIGGER AS $$
 DECLARE
+    loan RECORD;
     term INTEGER;
 BEGIN
     IF NEW.installment_no IS NULL THEN
         RETURN NEW;
     END IF;
 
-    SELECT term_months INTO term FROM loans WHERE id = NEW.loan_id;
+    SELECT term_months, schedule_version, regular_payment,
+           regular_payment_count, final_payment
+      INTO loan
+      FROM loans WHERE id = NEW.loan_id;
+
+    -- The CONTRACT must exist before a fee may cite one of its periods.
+    --
+    -- Codex review of PR #143 (SCHEDULELESS-INSTALLMENT-002): checking
+    -- `term_months` alone was not enough. `loans_schedule_all_or_nothing` permits
+    -- a loan with a term and NO stored schedule -- the four schedule columns are
+    -- all-or-nothing, and all-NULL is a legal state for a legacy loan boarded
+    -- before db/migrations/0030. The database would then accept
+    -- `fee_assessed + installment_no = 1` for a loan whose servicing layer
+    -- REFUSES to derive any installment at all (`installments.ScheduleNotAvailable`),
+    -- producing a ledger row whose claimed identity nothing can resolve.
+    --
+    -- The columns checked here are exactly `installments._CONTRACT_FIELDS` plus
+    -- `schedule_version`, which is what `installments_for()` requires before it
+    -- will expand a contract. The two must agree: if the database accepts a
+    -- period the application cannot derive, the fee is a false identity, and if
+    -- the application derives one the database rejects, the fee cannot be written.
+    --
+    -- No schedule is invented. The fee is refused.
+    IF loan.schedule_version IS NULL
+       OR loan.regular_payment IS NULL
+       OR loan.regular_payment_count IS NULL
+       OR loan.final_payment IS NULL THEN
+        RAISE EXCEPTION
+            'loan % has no stored contractual schedule, so installment % cannot '
+            'be cited by a fee', NEW.loan_id, NEW.installment_no;
+    END IF;
+
+    term := loan.term_months;
 
     -- Defensive: `ledger_entries_loan_id_fkey` makes a missing loan
     -- unreachable, and `loans.term_months` is NOT NULL. Refusing rather than

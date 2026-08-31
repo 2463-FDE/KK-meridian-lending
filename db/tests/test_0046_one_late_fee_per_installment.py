@@ -203,6 +203,113 @@ def test_installment_numbers_are_one_based(cur):
         cur.execute("ROLLBACK TO SAVEPOINT s")
 
 
+def _a_scheduleless_loan(c):
+    """A legacy loan: a term, and NO stored contractual schedule.
+
+    `loans_schedule_all_or_nothing` permits this -- the four schedule columns are
+    all-or-nothing and all-NULL is legal, which is what a loan boarded before
+    `db/migrations/0030` looks like. `installments_for()` refuses to expand it.
+    """
+    c.execute(
+        "INSERT INTO loans (applicant_name, principal, note_rate_pct, term_months, "
+        "                   status) "
+        "VALUES ('Scheduleless Legacy', 5000.00, 7.99, 24, 'current') RETURNING id")
+    loan_id = c.fetchone()["id"]
+    c.execute(
+        "INSERT INTO balances (loan_id, balance, past_due) VALUES (%s, 5000.00, 0.00)",
+        (loan_id,))
+    return loan_id
+
+
+@pytest.mark.parametrize("n", [1, 12, 24])
+def test_a_loan_with_no_stored_schedule_cannot_have_an_installment_fee(cur, n):
+    """Codex review SCHEDULELESS-INSTALLMENT-002.
+
+    Checking `term_months` alone was not enough. A legacy loan can carry a term
+    and no schedule, so the database would have accepted
+    `fee_assessed + installment_no = 1` for a loan whose servicing layer refuses
+    to derive any installment at all -- a ledger row whose claimed identity
+    nothing can resolve.
+
+    Every value here is inside the 24-month term, so the term check would pass.
+    What refuses them is the absence of the contract.
+    """
+    loan_id = _a_scheduleless_loan(cur)
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        _assess(cur, loan_id, n)
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+    assert "no stored contractual schedule" in str(exc.value)
+
+
+def test_a_scheduleless_loan_may_still_take_a_fee_with_no_installment(cur):
+    """The refusal is about the CITATION, not about the loan.
+
+    A legacy loan can still be charged a fee -- that is what the superseded
+    arrears rule does today. What it cannot do is claim a period it has no
+    schedule for. Without this case, a trigger that refused every fee on a
+    scheduleless loan would look correct.
+    """
+    loan_id = _a_scheduleless_loan(cur)
+    cur.execute(
+        "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason) "
+        "VALUES (%s, 'fees', 35.00, 'fee_assessed', 'arrears rule, no period')",
+        (loan_id,))
+    # Scoped to the fee. Inserting the `balances` row fires
+    # `balances_capture_legacy_delta`, which writes its own NULL-installment
+    # `legacy_direct_write` entry -- counting every NULL row here would have been
+    # counting that too.
+    cur.execute(
+        "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = %s "
+        "AND entry_type = 'fee_assessed' AND installment_no IS NULL", (loan_id,))
+    assert cur.fetchone()["n"] == 1
+
+
+def test_the_database_and_the_servicing_layer_agree_on_derivability(cur):
+    """The invariant the two halves of this PR share.
+
+    `installments_for()` raises `ScheduleNotAvailable` exactly when the four
+    schedule columns are absent; the trigger refuses an installment citation in
+    exactly the same case. If the database accepted a period the application
+    cannot derive, the fee would be a false identity; if the application derived
+    one the database rejects, the fee could not be written at all.
+
+    Asserted by exercising both sides against the same two rows rather than by
+    reading either implementation.
+    """
+    scheduled = _a_loan(cur)
+    scheduleless = _a_scheduleless_loan(cur)
+
+    # Database side.
+    _assess(cur, scheduled, 5)
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _assess(cur, scheduleless, 5)
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+
+    # Application side, on rows shaped like the ones just written.
+    import sys
+    sys.path.insert(0, str(REPO / "services" / "servicing-service"))
+    try:
+        from app import installments as inst
+    except Exception:  # pragma: no cover - servicing deps absent on this runner
+        pytest.skip("servicing-service app not importable from db/tests")
+    finally:
+        sys.path.pop(0)
+
+    cur.execute(
+        "SELECT principal, note_rate_pct, term_months, regular_payment, "
+        "       final_payment, schedule_version, opened_at "
+        "  FROM loans WHERE id IN (%s, %s) ORDER BY id", (scheduled, scheduleless))
+    rows = cur.fetchall()
+    ok, legacy = (dict(rows[0]), dict(rows[1])) if rows[0]["schedule_version"] \
+        else (dict(rows[1]), dict(rows[0]))
+
+    assert inst.installments_for(ok), "a scheduled loan must expand"
+    with pytest.raises(inst.ScheduleNotAvailable):
+        inst.installments_for(legacy)
+
+
 @pytest.mark.parametrize("beyond", [37, 48, 999])
 def test_an_installment_past_the_end_of_the_term_is_refused(cur, beyond):
     """Codex review FEE-INSTALLMENT-BOUNDS-001.
