@@ -115,7 +115,15 @@ def test_every_excerpt_is_size_bounded():
     result = policy_tool.search_underwriting_policy("underwriting")
 
     for excerpt in result["excerpts"]:
-        assert len(excerpt["excerpt"]) <= policy_tool.MAX_EXCERPT_CHARS
+        # The sum of two budgets, not one enlarged one: `MAX_EXCERPT_CHARS`
+        # still bounds the retrieved chunk, and `MAX_STATUS_CHARS` bounds the
+        # implementation-status section appended to a chunk that says its own
+        # policy is unimplemented (PR #150, Codex M2). An excerpt that carries no
+        # caveat is still bounded by the first number alone -- asserted below.
+        assert len(excerpt["excerpt"]) <= (policy_tool.MAX_EXCERPT_CHARS
+                                           + policy_tool.MAX_STATUS_CHARS)
+        if "Current implementation differs" not in excerpt["excerpt"]:
+            assert len(excerpt["excerpt"]) <= policy_tool.MAX_EXCERPT_CHARS
 
 
 def test_a_very_long_query_is_truncated_rather_than_refused():
@@ -185,7 +193,15 @@ def test_a_hostile_query_returns_only_policy_text_or_a_miss(hostile):
     assert result["status"] in ("hit", "miss")
     for excerpt in result["excerpts"]:
         assert excerpt["document"] in policy_tool.ALLOWED_DOCUMENTS
-        assert len(excerpt["excerpt"]) <= policy_tool.MAX_EXCERPT_CHARS
+        # The sum of two budgets, not one enlarged one: `MAX_EXCERPT_CHARS`
+        # still bounds the retrieved chunk, and `MAX_STATUS_CHARS` bounds the
+        # implementation-status section appended to a chunk that says its own
+        # policy is unimplemented (PR #150, Codex M2). An excerpt that carries no
+        # caveat is still bounded by the first number alone -- asserted below.
+        assert len(excerpt["excerpt"]) <= (policy_tool.MAX_EXCERPT_CHARS
+                                           + policy_tool.MAX_STATUS_CHARS)
+        if "Current implementation differs" not in excerpt["excerpt"]:
+            assert len(excerpt["excerpt"]) <= policy_tool.MAX_EXCERPT_CHARS
 
 
 def test_the_tool_returns_the_same_thing_for_a_hostile_and_a_plain_query():

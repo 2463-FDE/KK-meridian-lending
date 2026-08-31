@@ -19,7 +19,7 @@ import logging
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import llm_client
+from . import corpus, llm_client
 from .corpus import load_policy_corpus
 from .embeddings import LocalTfidfEmbedder, build_idf
 from .prompt_injection import contains_injection_attempt
@@ -46,6 +46,12 @@ official lending policy documents and a question from a loan officer.
 
 Rules:
 - Answer using ONLY the provided excerpt. Do not use outside knowledge.
+- If the excerpt says the code, system or runtime does NOT yet implement the
+  policy it states, your answer MUST say so as well. State the policy, then state
+  plainly that Meridian's system does not currently apply it. Never present the
+  policy as describing what the system does today. This is not optional and it is
+  not a caveat to compress away: an answer that states the rule without it tells a
+  reader the borrower is charged that way, which would be false.
 - If the excerpt does not actually contain the answer, say so plainly instead
   of guessing -- respond with answerable=false in that case.
 - Keep the answer to 1-3 sentences.
@@ -120,6 +126,80 @@ def _build_prompt(question: str, context_text: str) -> str:
     )
 
 
+#: How much implementation-status text may ride along with the policy excerpt.
+#:
+#: `fee_schedule.md`'s section is several chunks; this keeps the useful head of
+#: it -- the mismatch, and what the code does instead -- without pushing the
+#: prompt toward `llm_client.MAX_INPUT_TOKENS`, which `answer_policy_question`
+#: still checks afterwards either way.
+_STATUS_CONTEXT_CHARS = 1400
+
+#: Text in a policy chunk that points at a runtime-versus-policy section.
+#:
+#: `policies/fee_schedule.md` writes the pointer as "The code does not yet
+#: implement this -- see 'Current implementation differs' below." Matching the
+#: CLAIM rather than the cross-reference wording, so re-phrasing the pointer does
+#: not silently switch the behaviour off.
+
+
+def _context_for(top_hit: dict, hits: list[dict], chunks: list[dict]) -> str:
+    """The grounding excerpt, plus the implementation-status section it refers to.
+
+    THE DEFECT THIS EXISTS FOR. `fee_schedule.md` publishes the client's decided
+    late-fee rule and, in a section of its own, records that the code does not
+    implement it and what it charges instead. Chunking splits those into
+    `fee_schedule.md#2.0` and `#3.0`. Only `hits[0]` was ever put in the prompt, so
+    the model received a policy row ending "see 'Current implementation differs'
+    below" and no such section -- a pointer to text it did not have. Asked "What is
+    the late fee?" it answered with the decided rule and no caveat, which reads as
+    a statement about what Meridian charges today. It is not: the runtime still
+    applies the superseded arrears rule (`docs/DEBT.md` D23).
+
+    So when the grounding excerpt CLAIMS its policy is unimplemented, the section
+    that says what the code actually does is appended to the same context. Both
+    halves are retrieved corpus text -- nothing is synthesised, and the answer stays
+    as grounded as it was before.
+
+    DELIBERATELY NARROW. This adds nothing when the top hit carries no such claim,
+    so an eligibility or APR answer is untouched. It is not a disclaimer bolted
+    onto every response; it is the evidence the corpus already contains, reaching
+    the model that is supposed to read it.
+    """
+    text = top_hit["text"]
+    if not corpus.points_to_implementation_status(text):
+        return text
+
+    doc_id = top_hit.get("doc_id")
+    # The status section of the SAME document, in DOCUMENT order.
+    #
+    # Order matters and ranking does not. This is a section written to be read top
+    # to bottom: it opens by saying the policy and the code differ, and only then
+    # names what the code actually charges. Taking the best-ranked fragment took
+    # the opening paragraph alone, which supports "not implemented" but not "and
+    # this is what it does instead" -- so an answer could say the rule is
+    # unimplemented without being able to say what a borrower is actually charged.
+    #
+    # Bounded by characters rather than by chunk count, so a re-chunk of the
+    # policy file cannot quietly change how much is sent.
+    section = [c["text"] for c in chunks
+               if c.get("implementation_status") and c.get("doc_id") == doc_id]
+    if not section:
+        return text
+
+    budget = _STATUS_CONTEXT_CHARS
+    kept: list[str] = []
+    for piece in section:
+        if piece in text:
+            continue
+        if len(piece) > budget:
+            break
+        kept.append(piece)
+        budget -= len(piece)
+    if not kept:
+        return text
+    return text + "\n\n" + "\n\n".join(kept)
+
+
 def answer_policy_question(question: str) -> PolicyAnswer:
     """Answer a loan-policy question, grounded strictly in the retrieved
     policy excerpt, or say plainly that it isn't recorded. Never calls the LLM
@@ -158,7 +238,8 @@ def answer_policy_question(question: str) -> PolicyAnswer:
         return PolicyAnswer(answerable=False, answer=_NOT_RECORDED_ANSWER, source_chunk_id=None)
 
     top_hit = hits[0]
-    prompt = _build_prompt(safe_question, top_hit["text"])
+    context_text = _context_for(top_hit, hits, chunks)
+    prompt = _build_prompt(safe_question, context_text)
 
     # Same cost guard summarize_application() runs -- an arbitrary-length question
     # (up to PolicyChatIn's 4000-char schema cap) was reaching the LLM unchecked,
@@ -193,8 +274,13 @@ def answer_policy_question(question: str) -> PolicyAnswer:
         answerable=is_answerable,
         answer=parsed.answer,
         source_chunk_id=top_hit["chunk_id"] if is_answerable else None,
-        # The real retrieved excerpt, not just its id -- lets a reader verify
-        # the answer against the actual policy text instead of trusting it on
-        # faith (same "prove it" principle as rag_eval's own findings).
-        source_text=top_hit["text"] if is_answerable else None,
+        # THE SAME TEXT THE MODEL WAS GIVEN, which is not the same thing as the
+        # top hit. Codex review M1: this returned `top_hit["text"]` while the
+        # prompt carried `context_text`, so for the late-fee question the answer
+        # could say the code charges against `balances.past_due` while "Show
+        # evidence" displayed only the policy row -- which does not contain that
+        # phrase. A reader checking the evidence could not verify the runtime
+        # half of the answer, and the runtime half is the entire point of this
+        # change. Nothing is synthesised: both halves are retrieved corpus text.
+        source_text=context_text if is_answerable else None,
     )

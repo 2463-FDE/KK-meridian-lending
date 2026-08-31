@@ -33,6 +33,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from . import corpus
 from .corpus import load_policy_corpus
 from .embeddings import LocalTfidfEmbedder, build_idf
 from .rag_eval import retrieve
@@ -51,6 +52,22 @@ ALLOWED_DOCUMENTS = frozenset({
 MAX_TOP_K = 3
 DEFAULT_TOP_K = 3
 MAX_EXCERPT_CHARS = 600
+
+#: Extra room for an implementation-status section appended to an excerpt that
+#: points at one. Codex review of PR #150, M2.
+#:
+#: This is a SEPARATE budget rather than a larger `MAX_EXCERPT_CHARS` because the
+#: two bound different things: 600 is how much of a retrieved chunk the model
+#: gets, and this is how much of the caveat travels with it. Raising the first to
+#: cover the second would quietly widen every excerpt in the corpus.
+#:
+#: 900 is not a round guess. `fee_schedule.md`'s status section opens by saying
+#: policy and code differ (377 chars) and then, in the NEXT paragraph, names what
+#: the code actually charges -- `min($35, 5% of balances.past_due)` -- in 467
+#: more. A budget under 844 truncates before the second one, and an excerpt that
+#: says a rule is unimplemented without saying what IS implemented is half the
+#: caveat: measured at 700, `past_due` never reached the agent.
+MAX_STATUS_CHARS = 900
 MAX_QUERY_CHARS = 300
 
 TOOL_NAME = "search_underwriting_policy"
@@ -62,7 +79,16 @@ class PolicyExcerpt(BaseModel):
     document: str
     version: str
     chunk_id: str
-    excerpt: str = Field(max_length=MAX_EXCERPT_CHARS)
+    #: The retrieved chunk, plus -- only when the chunk says its own policy is
+    #: unimplemented -- that document's implementation-status section.
+    #:
+    #: The ceiling is the SUM of two separate budgets rather than one enlarged
+    #: number, and that is deliberate. `MAX_EXCERPT_CHARS` still bounds how much
+    #: of a retrieved chunk the model sees; `MAX_STATUS_CHARS` bounds how much of
+    #: the caveat travels with it. Folding them into a single 1300 would have
+    #: widened every excerpt in the corpus to buy a caveat that only one document
+    #: has -- a bound relaxed for one case and paid for by all of them.
+    excerpt: str = Field(max_length=MAX_EXCERPT_CHARS + MAX_STATUS_CHARS)
     citation: str
 
 
@@ -125,6 +151,52 @@ def reset_cache() -> None:
     _cache.clear()
 
 
+#: A chunk that says its own policy is not implemented, and points elsewhere for
+#: what is. Same expression `policy_chat` uses; defined once in `corpus` so the
+#: agent path and the chat path cannot end up recognising different things.
+def _with_status(text: str, doc_id: str, chunks: list[dict]) -> str:
+    """`text`, plus the same document's implementation-status section.
+
+    CODEX REVIEW OF PR #150, M2. The chat path was fixed and this one was not, so
+    the agent could still be handed `fee_schedule.md#2.0` -- a policy row ending
+    "see 'Current implementation differs' below" -- with no such section in any
+    of its excerpts. Measured before the fix: 14 of 30 query/`top_k` combinations
+    did exactly that, including at the default `top_k=3` for "grace period",
+    "missed installment" and "fee schedule". The agent could then state the
+    client's decided late-fee rule as current practice, which is the same false
+    claim the chat path was fixed for.
+
+    APPENDED TO THE EXCERPT rather than added as an extra hit, because
+    `hit_count <= MAX_TOP_K` is a bound this tool promises and a separately
+    tested one. Substituting the lowest-ranked hit would have kept the count but
+    thrown away evidence the query actually matched -- and at `top_k=1` it would
+    have thrown away the policy row itself, answering the question with only the
+    caveat. Growing one excerpt costs nothing that anything else depends on.
+    """
+    if not corpus.points_to_implementation_status(text):
+        return text
+    section = [c["text"] for c in chunks
+               if c.get("implementation_status") and c.get("doc_id") == doc_id]
+    budget = MAX_STATUS_CHARS
+    kept: list[str] = []
+    # DOCUMENT ORDER, and `break` rather than `continue` for the same reason the
+    # chat path uses it: this section is written to be read top to bottom. A
+    # `continue` lets a later, smaller paragraph jump the queue when an earlier
+    # one does not fit -- measured, that produced the opening paragraph followed
+    # by an unrelated tail, with the paragraph naming the actual charge skipped.
+    for piece in section:
+        if piece in text:
+            continue
+        if len(piece) > budget:
+            break
+        kept.append(piece)
+        budget -= len(piece)
+    if not kept:
+        return text
+    joiner = "\n\n"
+    return text + joiner + joiner.join(kept)
+
+
 def search_underwriting_policy(query: str, top_k: int = DEFAULT_TOP_K) -> dict:
     """Search the client's underwriting policy documents. Read-only.
 
@@ -159,7 +231,8 @@ def search_underwriting_policy(query: str, top_k: int = DEFAULT_TOP_K) -> dict:
             document=h["doc_id"],
             version=versions[h["doc_id"]],
             chunk_id=h["chunk_id"],
-            excerpt=h["text"][:MAX_EXCERPT_CHARS],
+            excerpt=_with_status(h["text"][:MAX_EXCERPT_CHARS],
+                                 h["doc_id"], chunks),
             # chunk_id already carries the document name ("doc.md#3.0"), so the
             # citation uses it directly -- the first real run produced
             # "underwriting_guidelines.md#underwriting_guidelines.md#7.0".
