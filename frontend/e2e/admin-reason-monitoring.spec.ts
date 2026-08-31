@@ -164,13 +164,28 @@ test("the panel agrees with the decision record, whatever it says", async ({
   const answer = await openAdminCapturing(page);
 
   if (answer.versions.length === 0) {
-    await expect(page.getByTestId("reason-monitoring-empty")).toBeVisible();
+    const empty = page.getByTestId("reason-monitoring-empty");
+    await expect(empty).toBeVisible();
+    // The empty state must not claim no adverse action occurred. The query is
+    // deny-only over `decision_events`, so an empty result means no model DENIAL
+    // EVENT -- in this database 66 denials sit on `decisions` against 2 model
+    // deny events, so the older wording was the emptiest screen making the
+    // broadest claim.
+    await expect(empty).not.toHaveText(/No decisions carrying an adverse-action/i);
+    await expect(empty).toContainText(/model decision events recorded as denials/i);
     return;
   }
 
   for (const v of answer.versions) {
     const card = page.getByTestId(`reason-version-${v.model_version}`);
     await expect(card, `model version ${v.model_version} is not shown`).toBeVisible();
+
+    // The count names what it counts. "N adverse decisions" read as every
+    // adverse action this version produced; the figure is model denial events.
+    await expect(page.getByTestId(`reason-count-${v.model_version}`)).toContainText(
+      /model denial event/i,
+    );
+    await expect(card).not.toHaveText(/adverse decisions?/i);
 
     // The no-reason count: spec 0003 says it should be zero, and it is the one
     // figure that is a defect rather than a statistic.

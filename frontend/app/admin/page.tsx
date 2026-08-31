@@ -307,8 +307,17 @@ function AdminOverviewContent() {
 
           {reasons.versions.length === 0 ? (
             <div className="card empty" data-testid="reason-monitoring-empty">
-              No decisions carrying an adverse-action outcome were recorded in
-              this window.
+              {/* "No decisions carrying an adverse-action outcome were recorded"
+                  claimed more than the query answers. `reason_distribution.py`
+                  filters `decision_events.decision = 'deny'`, so an empty result
+                  means no MODEL DENIAL EVENT was recorded -- not that no
+                  applicant received an adverse action. In this database those
+                  two differ by a factor of thirty-three (66 denials on file
+                  against 2 model deny events), so the loose wording was the
+                  emptiest possible screen making the broadest possible claim. */}
+              No automated model decision events recorded as denials were found
+              in this window. Adverse actions reached another way are outside
+              this deny-only distribution and are not counted here.
             </div>
           ) : (
             reasons.versions.map((v) => (
@@ -322,9 +331,12 @@ function AdminOverviewContent() {
                   <div className="card-title" style={{ margin: 0 }}>
                     Model version <strong>{v.model_version}</strong>
                   </div>
-                  <span className="muted">
-                    {v.decisions} adverse{" "}
-                    {v.decisions === 1 ? "decision" : "decisions"}
+                  {/* "N adverse decisions" read as every adverse action this
+                      model version produced. The figure is the count of model
+                      DENIAL EVENTS, so it is named that way. */}
+                  <span className="muted" data-testid={`reason-count-${v.model_version}`}>
+                    {v.decisions} model denial{" "}
+                    {v.decisions === 1 ? "event" : "events"}
                   </span>
                 </div>
 
@@ -338,8 +350,13 @@ function AdminOverviewContent() {
                   <span>
                     {/* Spec 0003 says this should be zero: a denial with no
                         reason on record is the Reg B defect itself, so it is
-                        shown beside the distribution rather than buried. */}
-                    No-reason decisions{" "}
+                        shown beside the distribution rather than buried.
+
+                        Named "denial events" for the same reason as the count
+                        above -- these are model decision events, and calling
+                        them "decisions" invited reading the figure as covering
+                        every denial an applicant received. */}
+                    Denial events with no reason{" "}
                     <strong
                       className={v.missing_reason > 0 ? "danger-text" : undefined}
                       data-testid={`reason-missing-${v.model_version}`}
