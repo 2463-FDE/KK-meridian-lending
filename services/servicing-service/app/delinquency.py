@@ -167,11 +167,24 @@ def late_fee_for_installment(unpaid_scheduled_pi) -> Decimal:
     when those two decisions arrive the remaining change is wiring rather than
     arithmetic nobody has checked.
 
-    **Fees are excluded from the base by construction.** The input is an
-    amortization row's principal plus interest; there is no fee in it to exclude.
-    That is why "previous late fees and all other fees are excluded" needs no
-    filtering step here -- contrast `late_fee_for` above, whose base is
-    `balances.past_due` and therefore includes every fee ever assessed.
+    **Fees are excluded from the base WHEN THE BASE COMES FROM THE SCHEDULE**, and
+    that qualifier is doing real work rather than hedging. This function takes a
+    `Decimal`; it cannot tell where the number came from, so the exclusion is a
+    property of the CALLER, not of the arithmetic. Sourced from
+    `installments.Installment.scheduled_pi` -- an amortization row's principal plus
+    interest -- there is no fee in the input to exclude, so "previous late fees and
+    all other fees are excluded" needs no filtering step. Handed
+    `balances.past_due` instead, it would price the superseded rule and look
+    identical while doing so.
+
+    The claim used to read "by construction" without naming the source, which was
+    stronger than the signature supports. `tests/test_late_fee_installment_rule.py`
+    now walks the real chain -- stored contract, `installments_for`, one
+    installment, `scheduled_pi`, this function -- so the exclusion is asserted end
+    to end rather than asserted about a parameter.
+
+    Contrast `late_fee_for` above, whose base IS `balances.past_due` and therefore
+    includes every fee ever assessed.
 
     Rounding is ROUND_DOWN for the same reason as the superseded rule: "the lesser
     of" means the fee may exceed neither bound, and half-up rounding breaks that

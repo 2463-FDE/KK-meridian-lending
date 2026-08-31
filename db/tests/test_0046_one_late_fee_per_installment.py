@@ -551,3 +551,160 @@ def test_a_retry_of_the_same_assessment_is_refused_every_time(cur):
         "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = %s "
         "AND entry_type = 'fee_assessed' AND installment_no = 12", (loan_id,))
     assert cur.fetchone()["n"] == 1
+
+
+# --------------------------------------------------------------------------
+# CONTRACT INTEGRITY.
+#
+# The schedule trigger proves installment N is real AT INSERT TIME. `loans` has
+# no immutability trigger of its own and the schedule columns are plain updatable
+# columns, so that is only half a guarantee:
+#
+#   A. TOCTOU        -- the contract changes between the check and the commit;
+#   B. after the fact -- the contract changes after the fee is on the ledger,
+#                        which is append-only, so the entry cannot be corrected.
+#
+# Invariant: once an installment-scoped ledger fee cites installment N, the stored
+# contractual facts that make N a real installment cannot silently change
+# underneath that immutable entry.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("column,value", [
+    ("term_months", "24"),
+    ("schedule_version", "NULL"),
+    ("regular_payment", "500.00"),
+    ("regular_payment_count", "23"),
+    ("final_payment", "501.00"),
+    ("note_rate_pct", "9.990"),
+    ("opened_at", "now() - interval '400 days'"),
+])
+def test_a_cited_contract_cannot_be_changed(cur, column, value):
+    """Every field installment identity is derived from.
+
+    `note_rate_pct` and `opened_at` are in the list because `installments.py`
+    anchors due dates on `opened_at` and splits interest at the note rate -- change
+    either and the period a fee refers to quietly becomes a different one, even
+    though the term is untouched.
+    """
+    loan_id = _a_loan(cur)
+    _assess(cur, loan_id, 5)
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        cur.execute(f"UPDATE loans SET {column} = {value} WHERE id = %s", (loan_id,))
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+    assert "citing an installment" in str(exc.value)
+
+
+def test_an_uncited_contract_may_still_be_corrected(cur):
+    """Scoped to CITED loans, and this is what that scoping protects.
+
+    `db/init/003_seed_bulk.sql` back-fills exactly these columns from the accepted
+    offer, and correcting a contract on a loan nothing has cited is a different
+    question this change has no authority to answer. Freezing the whole table would
+    have broken seeding and decided a policy nobody asked for.
+    """
+    loan_id = _a_loan(cur)
+    cur.execute("UPDATE loans SET term_months = 24, regular_payment_count = 23 "
+                " WHERE id = %s", (loan_id,))
+    cur.execute("SELECT term_months FROM loans WHERE id = %s", (loan_id,))
+    assert cur.fetchone()["term_months"] == 24
+
+
+def test_a_change_that_does_not_touch_the_schedule_is_unaffected(cur):
+    """The guard must not freeze the whole row.
+
+    `status` moves through the servicing lifecycle on loans that certainly do carry
+    fees. A guard that blocked every UPDATE would break delinquency handling while
+    looking like it only protected the schedule.
+    """
+    loan_id = _a_loan(cur)
+    _assess(cur, loan_id, 6)
+    cur.execute("UPDATE loans SET status = 'delinquent' WHERE id = %s", (loan_id,))
+    cur.execute("SELECT status FROM loans WHERE id = %s", (loan_id,))
+    assert cur.fetchone()["status"] == "delinquent"
+
+
+def test_a_fee_with_no_installment_does_not_freeze_the_contract(cur):
+    """Only an installment-scoped citation creates the dependency.
+
+    A legacy loan charged under the superseded arrears rule writes
+    `installment_no = NULL`, which asserts nothing about the schedule -- so it must
+    not freeze it.
+    """
+    loan_id = _a_loan(cur)
+    cur.execute(
+        "INSERT INTO ledger_entries (loan_id, component, amount, entry_type, reason) "
+        "VALUES (%s, 'fees', 35.00, 'fee_assessed', 'arrears rule, no period')",
+        (loan_id,))
+    cur.execute("UPDATE loans SET term_months = 24, regular_payment_count = 23 "
+                " WHERE id = %s", (loan_id,))
+    cur.execute("SELECT term_months FROM loans WHERE id = %s", (loan_id,))
+    assert cur.fetchone()["term_months"] == 24
+
+
+def test_the_contract_cannot_change_under_an_in_flight_fee(db):
+    """The TOCTOU half, with two genuinely overlapping sessions.
+
+    T1 writes the fee and does NOT commit. T2 tries to shorten the term. It must
+    BLOCK on the loan row T1 holds -- asserted by the thread still being alive --
+    rather than slipping in before the ledger entry lands. Once T1 commits, the
+    freeze trigger sees the citation and refuses T2 outright.
+
+    Without the `FOR SHARE`, T2 would read a loan nothing had cited yet, pass the
+    freeze check, and commit a shorter term while T1's fee for installment 30 was
+    still in flight.
+    """
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set -- no Postgres to test against")
+    setup = _connect()
+    with setup.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+        c.execute("SET search_path TO " + SCHEMA)
+        loan_id = _a_loan(c)
+    setup.commit()
+
+    t1 = _connect()
+    outcome = {}
+
+    def _shorten():
+        c2 = _connect()
+        try:
+            with c2.cursor() as cur2:
+                cur2.execute("SET search_path TO " + SCHEMA)
+                cur2.execute("SET LOCAL lock_timeout = '30s'")
+                cur2.execute("UPDATE loans SET term_months = 24, "
+                             "regular_payment_count = 23 WHERE id = %s", (loan_id,))
+            c2.commit()
+            outcome["state"] = "committed"
+        except Exception as exc:                       # noqa: BLE001 - reported
+            outcome["state"] = type(exc).__name__
+            c2.rollback()
+        finally:
+            c2.close()
+
+    try:
+        with t1.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c1:
+            c1.execute("SET search_path TO " + SCHEMA)
+            _assess(c1, loan_id, 30)          # installment 30 of 36; NOT committed
+
+        worker = threading.Thread(target=_shorten, daemon=True)
+        worker.start()
+        worker.join(timeout=3.0)
+        assert worker.is_alive(), (
+            "the term was shortened while the fee was still in flight -- the "
+            "installment trigger is not holding the loan row, so a fee can be "
+            "written for a period the contract no longer has")
+
+        t1.commit()
+        worker.join(timeout=30.0)
+        assert outcome.get("state") == "RaiseException", (
+            f"expected the contract change to be refused once the fee committed; "
+            f"got {outcome.get('state')!r}")
+
+        with t1.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c1:
+            c1.execute("SET search_path TO " + SCHEMA)
+            c1.execute("SELECT term_months FROM loans WHERE id = %s", (loan_id,))
+            assert c1.fetchone()["term_months"] == 36, "the term changed after all"
+    finally:
+        t1.rollback()
+        t1.close()
+        setup.close()

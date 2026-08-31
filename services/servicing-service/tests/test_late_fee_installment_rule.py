@@ -136,3 +136,98 @@ def test_fees_cannot_enter_the_base_because_the_base_has_no_fee_in_it():
     same_plus_a_prior_fee = installment_pi + Decimal("35.00")
     assert (delinquency.late_fee_for_installment(installment_pi)
             < delinquency.late_fee_for_installment(same_plus_a_prior_fee))
+
+
+# --------------------------------------------------------------------------
+# The whole chain, end to end.
+#
+# Everything above hands `late_fee_for_installment` a literal. That proves the
+# arithmetic and says nothing about where a real base comes from -- and the
+# exclusion of fees is a property of the SOURCE, not of the arithmetic. These walk
+# the actual path: stored contract -> installments_for -> one installment ->
+# scheduled_pi -> the fee.
+# --------------------------------------------------------------------------
+
+def _boarded_loan(**over):
+    """The contract shape every seeded loan in this repository carries."""
+    import datetime
+    loan = {
+        "principal": Decimal("15000.00"),
+        "note_rate_pct": Decimal("7.99"),
+        "term_months": 36,
+        "regular_payment": Decimal("469.98"),
+        "final_payment": Decimal("469.87"),
+        "schedule_version": "B1",
+        "opened_at": datetime.datetime(2026, 1, 15, 12, 0, 0),
+    }
+    loan.update(over)
+    return loan
+
+
+def test_the_base_taken_from_a_real_installment_carries_no_fee():
+    """The exclusion, asserted over the real source rather than over a parameter.
+
+    An amortization row has exactly two money components. If a third ever appeared
+    -- a fee folded into the schedule -- this fails, which is the point: the claim
+    is about what `scheduled_pi` is made of.
+    """
+    from app import installments
+
+    for row in installments.installments_for(_boarded_loan()):
+        assert row.scheduled_pi == row.scheduled_principal + row.scheduled_interest
+        fee = delinquency.late_fee_for_installment(row.scheduled_pi)
+        assert fee <= delinquency.LATE_FEE_FLAT
+        assert fee <= (row.scheduled_principal + row.scheduled_interest) \
+            * delinquency.LATE_FEE_PCT_OF_INSTALLMENT_PI
+
+
+def test_the_fee_on_a_real_installment_of_a_seeded_contract():
+    """A concrete figure, so the chain is not just internally consistent.
+
+    $15,000 at 7.99% over 36 months bills $469.98 a period, all of it principal and
+    interest. Five per cent of that is $23.49, which is below the $35 cap, so the
+    percentage binds -- and the fee for any regular installment of this loan is the
+    same figure.
+    """
+    from app import installments
+
+    third = installments.installment(_boarded_loan(), 3)
+    assert third.scheduled_pi == Decimal("469.98")
+    assert delinquency.late_fee_for_installment(third.scheduled_pi) == Decimal("23.49")
+
+
+def test_the_four_client_examples_through_the_real_entry_point():
+    """The supplied examples, reached the way the runtime would reach them.
+
+    The parametrised cases at the top of this file pass literals. These build a
+    contract whose installment P&I IS the example figure, so the number the client
+    gave is produced by the same call the assessment path would make.
+    """
+    from app import installments
+
+    for pi, expected in (("200.00", "10.00"), ("500.00", "25.00"),
+                         ("700.00", "35.00"), ("1000.00", "35.00")):
+        # A one-period contract whose single installment is exactly `pi`: principal
+        # plus its first month of interest at 0% is the payment itself.
+        loan = _boarded_loan(principal=Decimal(pi), note_rate_pct=Decimal("0.000"),
+                             term_months=1, regular_payment=Decimal(pi),
+                             final_payment=Decimal(pi))
+        only = installments.installment(loan, 1)
+        assert only.scheduled_pi == Decimal(pi), only
+        assert delinquency.late_fee_for_installment(only.scheduled_pi) == Decimal(expected)
+
+
+def test_arrears_would_price_differently_which_is_why_the_source_matters():
+    """The two rules diverge on the same loan, and that divergence is D23.
+
+    Installment 3's scheduled P&I is $469.98. A borrower three payments behind with
+    a prior fee has arrears well above that, so the superseded rule prices higher.
+    Asserting the gap keeps the docstring's qualifier honest: handing this function
+    `balances.past_due` produces a different, larger number while looking identical.
+    """
+    from app import installments
+
+    scheduled = installments.installment(_boarded_loan(), 3).scheduled_pi
+    arrears = scheduled * 3 + Decimal("35.00")
+    assert delinquency.late_fee_for_installment(scheduled) \
+        < delinquency.late_fee_for(arrears)

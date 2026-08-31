@@ -102,10 +102,18 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    -- LOCKED while validating. Without this the read is time-of-check/
+    -- time-of-use: a concurrent transaction could shorten the term or clear the
+    -- schedule between this check and the ledger insert committing, leaving a fee
+    -- citing an installment that no longer exists.
+    --
+    -- FOR SHARE, not FOR UPDATE: the requirement is that the contract must not
+    -- CHANGE while this commits, not that this transaction owns the loan. Two
+    -- fees on different installments of the same loan can validate together.
     SELECT term_months, schedule_version, regular_payment,
            regular_payment_count, final_payment
       INTO loan
-      FROM loans WHERE id = NEW.loan_id;
+      FROM loans WHERE id = NEW.loan_id FOR SHARE;
 
     -- The CONTRACT must exist before a fee may cite one of its periods.
     --
@@ -160,5 +168,84 @@ DROP TRIGGER IF EXISTS ledger_entries_installment_in_schedule ON ledger_entries;
 CREATE TRIGGER ledger_entries_installment_in_schedule
     BEFORE INSERT ON ledger_entries
     FOR EACH ROW EXECUTE FUNCTION ledger_installment_is_in_the_loan_schedule();
+
+-- ---------------------------------------------------------------------------
+-- The contract cannot change underneath a fee that cites one of its installments.
+-- ---------------------------------------------------------------------------
+--
+-- The trigger above proves installment N is real AT INSERT TIME. That is only
+-- half the guarantee: `loans` has no immutability trigger of any kind, and the
+-- schedule-defining columns are plain updatable columns. A fee written against
+-- installment 36 of a 36-month loan stays on an append-only ledger forever, so if
+-- the term were later changed to 24 the ledger would hold an installment identity
+-- that is no longer valid against the contract -- and nothing would have noticed.
+--
+-- Locking the row during the insert closes the concurrent case and does nothing
+-- about the later one, so both are needed.
+--
+-- SCOPED TO LOANS THAT ACTUALLY CARRY AN INSTALLMENT-SCOPED FEE, deliberately.
+-- This does NOT make boarded contracts immutable in general: `db/init/003_seed_bulk.sql`
+-- legitimately back-fills these columns from the accepted offer, and correcting a
+-- contract on a loan nothing has cited is a different question that this change has
+-- no authority to answer. What is protected is exactly the invariant the ledger
+-- relies on -- no more, and stated rather than assumed.
+--
+-- `note_rate_pct` and `opened_at` are included because installment identity is
+-- derived from them too: `installments.py` anchors due dates on `opened_at` and
+-- splits interest at the note rate, so changing either silently redefines which
+-- period a fee refers to.
+CREATE OR REPLACE FUNCTION loans_contract_is_frozen_once_cited() RETURNS trigger AS $$
+DECLARE
+    cited INTEGER;
+    before_row JSONB := to_jsonb(OLD);
+    after_row  JSONB := to_jsonb(NEW);
+    col TEXT;
+    changed BOOLEAN := FALSE;
+BEGIN
+    -- Compared through `to_jsonb` rather than as `NEW.column`, and that is a fix
+    -- rather than a flourish. `NEW.note_rate_pct` RAISES on a loans table that
+    -- predates `db/migrations/0038` -- the migration that adds the column -- so
+    -- naming the fields directly made this trigger explode inside 0038's own
+    -- expand test, which builds exactly that older shape. A missing key reads as
+    -- NULL on both sides here, so a column that does not exist yet simply cannot
+    -- have changed.
+    FOREACH col IN ARRAY ARRAY['term_months', 'schedule_version', 'regular_payment',
+                               'regular_payment_count', 'final_payment',
+                               'note_rate_pct', 'opened_at'] LOOP
+        IF (before_row -> col) IS DISTINCT FROM (after_row -> col) THEN
+            changed := TRUE;
+            EXIT;
+        END IF;
+    END LOOP;
+
+    IF NOT changed THEN
+        RETURN NEW;                       -- nothing that defines an installment moved
+    END IF;
+
+    -- Same reasoning one level up: a schema with `loans` but no `ledger_entries`
+    -- is a legitimate intermediate state for a migration test, and nothing can
+    -- have cited an installment there.
+    IF to_regclass('ledger_entries') IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT count(*) INTO cited
+      FROM ledger_entries
+     WHERE loan_id = OLD.id AND installment_no IS NOT NULL;
+
+    IF cited > 0 THEN
+        RAISE EXCEPTION
+            'loan % has % ledger entr(y/ies) citing an installment; its '
+            'contractual schedule cannot change underneath them',
+            OLD.id, cited;
+    END IF;
+
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS loans_contract_frozen_once_cited ON loans;
+CREATE TRIGGER loans_contract_frozen_once_cited
+    BEFORE UPDATE ON loans
+    FOR EACH ROW EXECUTE FUNCTION loans_contract_is_frozen_once_cited();
 
 COMMIT;
