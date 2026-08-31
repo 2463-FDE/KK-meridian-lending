@@ -235,6 +235,21 @@ class ApplicationDetail(BaseModel):
     term_months: int
     purpose: Optional[str] = None
     status: Optional[str] = None
+    # When the application was received. `applications.created_at` has been
+    # populated since the table existed and the ORM has always mapped it -- this
+    # response simply never declared it, so the staff console's "Received" tile
+    # read from `app.created_at`, got `undefined`, and rendered an em dash on
+    # every application in the system.
+    #
+    # Serialized as ISO 8601, the same way `decision_at` is, so the browser
+    # formats a string the server produced rather than reconstructing a date. The
+    # alternative the UI was one step away from -- inferring a received date from
+    # the id, or from the first decision event -- would have put a second answer
+    # on the screen for a fact the row already holds.
+    #
+    # Optional because the column is nullable: a row that genuinely has no
+    # timestamp reports none rather than a fabricated one.
+    created_at: Optional[str] = None
     employer: Optional[str] = None
     job_title: Optional[str] = None
     kyc: Optional[KycOut] = None
