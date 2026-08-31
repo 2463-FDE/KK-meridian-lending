@@ -763,8 +763,15 @@ function UnderwritingDetailContent() {
                     the layout. */}
                 <p className="hint" style={{ marginTop: 8 }}
                    data-testid="decision-same-outcome">
-                  The final application outcome, as shown under Decision
-                  evidence above.
+                  {/* R1-MINOR: "as shown above" pointed at a card that is not
+                      there when the evidence request failed -- the panel above
+                      is an error in that state. The sentence exists to stop a
+                      reader counting two determinations, and it has to do that
+                      whether or not the evidence loaded, so it names its source
+                      instead of a place on the page. */}
+                  {evidenceError
+                    ? "The final application outcome, from the application record."
+                    : "The final application outcome, as shown under Decision evidence above."}
                 </p>
               </>
             ) : (

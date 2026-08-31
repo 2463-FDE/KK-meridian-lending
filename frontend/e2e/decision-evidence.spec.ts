@@ -471,7 +471,10 @@ test("the lower decision panel names the same outcome rather than a second one",
   );
   // ...so the decision panel does not repeat it.
   await expect(page.getByTestId("decision-model-score")).toHaveCount(0);
-  await expect(page.getByTestId("decision-same-outcome")).toBeVisible();
+  // With the evidence panel loaded, the sentence does point at it.
+  await expect(page.getByTestId("decision-same-outcome")).toContainText(
+    "as shown under Decision evidence above",
+  );
   // The action itself is untouched.
   await expect(page.getByRole("button", { name: /Run decision/ })).toBeVisible();
 });
@@ -502,6 +505,13 @@ test("the score survives when the evidence panel cannot be read", async ({ page 
     "could not be read",
     { timeout: 30_000 },
   );
+
+  // And nothing points at a card that is not on the page. R1-MINOR: the "as
+  // shown under Decision evidence above" wording sent the reader to a panel
+  // that is an error message in this state.
+  const sameOutcome = page.getByTestId("decision-same-outcome");
+  await expect(sameOutcome).toContainText("from the application record");
+  await expect(sameOutcome).not.toContainText("above");
 });
 
 test("an application with no model event does not attribute its outcome to a model", async ({
