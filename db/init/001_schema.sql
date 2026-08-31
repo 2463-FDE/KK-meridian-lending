@@ -487,6 +487,24 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
                     'fee_assessed','fee_waived','adjustment')),
     reason       TEXT,
 
+    -- Which scheduled installment this entry belongs to (db/migrations/0046,
+    -- backported here so a fresh volume carries it too).
+    --
+    -- Nullable, and NULL means "never captured" rather than "unknown but
+    -- guessable". The client's late-fee rule of 2026-08-29 is one fee per missed
+    -- scheduled installment, and nothing in the ledger could express which
+    -- installment a fee was for. This is that fact.
+    --
+    -- Only `fee_assessed` may carry one today, because it is the only writer
+    -- that knows one. PAYMENT attribution to installments is deliberately NOT
+    -- here: it needs an allocation order across installments that no spec or
+    -- policy in this repository publishes, and D23 rules out inventing it.
+    installment_no INTEGER
+                   CONSTRAINT ledger_installment_no_positive
+                       CHECK (installment_no IS NULL OR installment_no >= 1)
+                   CONSTRAINT ledger_installment_only_on_fee_assessed
+                       CHECK (installment_no IS NULL OR entry_type = 'fee_assessed'),
+
     -- Who moved it.
     actor_id     INTEGER,
     actor_role   TEXT,
@@ -557,6 +575,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_entries_payment_component
     ON ledger_entries (payment_id, component) WHERE payment_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ledger_entries_loan ON ledger_entries (loan_id, occurred_at);
+
+-- ONE late fee per installment (db/migrations/0046), enforced by the database
+-- rather than by an application check -- which is what makes a concurrent
+-- assessor and a retry safe by construction instead of by a lock somebody has to
+-- remember to take. Partial on `installment_no IS NOT NULL` so a fee that is not
+-- installment-scoped (an NSF charge, priced per returned payment) writes NULL and
+-- does not participate.
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_late_fee_per_installment
+    ON ledger_entries (loan_id, installment_no)
+    WHERE entry_type = 'fee_assessed' AND installment_no IS NOT NULL;
 
 -- Searchable by the id an operator reads off a log line (db/migrations/0043).
 -- Partial: NULL for every pre-trace row and every entry with no payment behind
