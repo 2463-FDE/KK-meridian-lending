@@ -31,6 +31,32 @@ class CorpusHygieneError(Exception):
     """Raised when a document intended for the corpus contains PII the redactor caught."""
 
 
+#: A section that documents how the RUNTIME differs from the policy above it.
+#:
+#: `policies/fee_schedule.md` publishes the client's decided late-fee rule and
+#: then, in a section of its own, states that the code does not implement it and
+#: what it does instead. That section exists because the file is served to Policy
+#: Chat -- it says so in its own words -- and an answer quoting a rule the runtime
+#: does not apply would be wrong in front of a client.
+#:
+#: Chunking split the two apart. The policy row ends "see 'Current implementation
+#: differs' below", and that section became a SEPARATE chunk, so an answer built
+#: from the policy row alone was handed a pointer to text it did not have. This
+#: marks such a section so the answer path can keep the two together.
+#:
+#: Recognised by HEADING rather than by scanning prose for phrases like "not
+#: implemented": a heading is a deliberate authoring act by whoever maintains the
+#: policy file, where a phrase match would fire on any paragraph that happened to
+#: discuss implementation. `policies/README` documents the convention.
+_IMPLEMENTATION_STATUS_HEADING = re.compile(
+    r"^#{1,6}\s*Current implementation differs\b", re.IGNORECASE | re.MULTILINE)
+
+
+def _is_implementation_status(paragraph: str) -> bool:
+    """True when this paragraph is a runtime-versus-policy section."""
+    return bool(_IMPLEMENTATION_STATUS_HEADING.search(paragraph))
+
+
 def _chunk(text: str, doc_id: str, max_chars: int = 500) -> list[dict]:
     """Split on blank-line paragraph boundaries, then hard-wrap long paragraphs.
 
@@ -66,12 +92,41 @@ def _chunk(text: str, doc_id: str, max_chars: int = 500) -> list[dict]:
         # them rather than silently dropping them.
         paragraphs.append("\n".join(pending_headers))
 
+    # A status SECTION is its heading paragraph and everything under it until the
+    # next heading of the same or higher level. Marking only the heading paragraph
+    # was not enough: `fee_schedule.md`'s section opens by saying policy and code
+    # differ and then, in the NEXT paragraph, names what the code actually charges
+    # (`min($35, 5% of balances.past_due)`). An answer that gets the first without
+    # the second can say "not implemented" but not what IS implemented.
+    status_flags: list[bool] = []
+    in_status = False
+    status_level = 0
+    for para in paragraphs:
+        first_line = para.split(chr(10), 1)[0]
+        heading = _HEADER_RE.match(first_line)
+        if _is_implementation_status(para):
+            in_status = True
+            status_level = len(first_line) - len(first_line.lstrip("#"))
+        elif heading and in_status:
+            level = len(first_line) - len(first_line.lstrip("#"))
+            if level <= status_level:
+                in_status = False
+        status_flags.append(in_status)
+
     chunks = []
     for i, para in enumerate(paragraphs):
+        status = status_flags[i]
         for j in range(0, len(para), max_chars):
             piece = para[j : j + max_chars]
             chunks.append(
-                {"doc_id": doc_id, "chunk_id": f"{doc_id}#{i}.{j // max_chars}", "text": piece}
+                {
+                    "doc_id": doc_id,
+                    "chunk_id": f"{doc_id}#{i}.{j // max_chars}",
+                    "text": piece,
+                    # Does this chunk describe what the CODE does, as distinct
+                    # from what the policy says? See `_is_implementation_status`.
+                    "implementation_status": status,
+                }
             )
     return chunks
 
