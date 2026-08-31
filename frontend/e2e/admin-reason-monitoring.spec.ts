@@ -89,6 +89,38 @@ test("the panel is named for what it measures, and carries its qualifier", async
     "not a protected-class disparity analysis",
   );
   await expect(qualifier).toContainText("production fairness determination");
+
+  // WHAT IS COUNTED. The distribution reads `decision_events` and filters on
+  // that table's own `decision`, so a denial with no model event -- one issued
+  // on manual review, for instance -- is not in these figures. That is right
+  // for model governance and wrong only if a reader takes the heading to mean
+  // every adverse action a person received. The page says which it is.
+  //
+  // Asserted as ONE contiguous claim, not three scattered phrases. A first
+  // version checked "recorded by the model", "manual review" and "not counted
+  // here" separately, and a mutation that reversed the meaning of the sentence
+  // -- while leaving those fragments in place -- passed. Substring checks over
+  // a sentence do not test what the sentence says.
+  const scope = page.getByTestId("reason-monitoring-scope");
+  await expect(scope).toContainText(
+    "These counts cover model decision events recorded as a denial, per model version.",
+  );
+  // The boundary is DENY events versus REFER events, not the presence of an
+  // event. R1-MAJOR: the first version of this sentence said a manual-review
+  // denial "carries no model reason codes", which is false -- such a denial
+  // resolves a prior model `refer`, and every refer event in this database
+  // carries reason codes. A disclosure that is wrong about the case it names is
+  // worse than no disclosure, so the exact claim is asserted here.
+  await expect(scope).toContainText(
+    "a denial recorded on manual review after the model referred",
+  );
+  await expect(scope).toContainText("outside this deny-only distribution");
+  await expect(scope).toContainText(
+    "even where the model event carries reason codes of its own",
+  );
+  // Neither the reversed claim nor the retracted one may reappear.
+  await expect(scope).not.toContainText("is counted here");
+  await expect(scope).not.toContainText("carries no model reason codes");
 });
 
 test("no fairness verdict, protected class or proxy is rendered", async ({ page }) => {
