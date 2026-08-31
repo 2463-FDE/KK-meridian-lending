@@ -250,23 +250,29 @@ function AdminOverviewContent() {
       </p>
 
       {/* WHAT IS COUNTED, said on the page rather than left to be assumed.
-          `reason_distribution.py` reads `decision_events` and filters on that
-          table's own `decision` column, so a denial that carries no model
-          event is not in these figures at all -- and a manual review changes
-          `decisions.outcome` without writing an event. In this database 64
-          denials are on file and 2 are model decision events.
+          `reason_distribution.py` filters `decision_events.decision = 'deny'`,
+          so the distribution is over model DENIALS, not over adverse actions.
 
-          That is CORRECT for model governance, which is what spec 0003 §1.3
-          asks for: these counts describe a model's output, per version. It is
-          wrong only if a reader takes "adverse-action reasons" to mean every
-          adverse action a person received, which the heading alone invites.
-          Saying so costs one sentence and removes the misreading; adding a
-          second count would be inventing a control nobody asked for. */}
+          The distinction is `deny` events versus `refer` events, and NOT the
+          presence of an event, which is what an earlier version of this
+          sentence said. Review caught it: a denial recorded on manual review
+          normally DOES have a model event -- the review resolves a prior
+          `refer` -- and that refer event carries its own reason codes. All six
+          refer events in this database do. Saying such a denial "carries no
+          model reason codes" was false about the exact case it named, which is
+          the worst way for a disclosure to be wrong.
+
+          The counts are right for what spec 0003 §1.3 asks: reason
+          distribution per `model_version`, a statement about a model's output.
+          What was missing is the boundary, and one sentence removes the
+          misreading. A second count would be inventing a control nobody asked
+          for. */}
       <p className="sub" style={{ marginTop: 4 }} data-testid="reason-monitoring-scope">
-        These counts describe decisions recorded by the model, per model
-        version. An adverse action taken without a model decision event — a
-        denial issued on manual review, for example — is not counted here and
-        carries no model reason codes.
+        These counts cover model decision events recorded as a denial, per model
+        version. An adverse action reached another way — a denial recorded on
+        manual review after the model referred, or one with no model decision
+        event at all — is outside this deny-only distribution, even where the
+        model event carries reason codes of its own.
       </p>
 
       {reasonsError ? (

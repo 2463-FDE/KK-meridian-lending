@@ -103,13 +103,24 @@ test("the panel is named for what it measures, and carries its qualifier", async
   // a sentence do not test what the sentence says.
   const scope = page.getByTestId("reason-monitoring-scope");
   await expect(scope).toContainText(
-    "These counts describe decisions recorded by the model, per model version.",
+    "These counts cover model decision events recorded as a denial, per model version.",
   );
+  // The boundary is DENY events versus REFER events, not the presence of an
+  // event. R1-MAJOR: the first version of this sentence said a manual-review
+  // denial "carries no model reason codes", which is false -- such a denial
+  // resolves a prior model `refer`, and every refer event in this database
+  // carries reason codes. A disclosure that is wrong about the case it names is
+  // worse than no disclosure, so the exact claim is asserted here.
   await expect(scope).toContainText(
-    "is not counted here and carries no model reason codes",
+    "a denial recorded on manual review after the model referred",
   );
-  // And the reverse claim is not on the page under any wording.
+  await expect(scope).toContainText("outside this deny-only distribution");
+  await expect(scope).toContainText(
+    "even where the model event carries reason codes of its own",
+  );
+  // Neither the reversed claim nor the retracted one may reappear.
   await expect(scope).not.toContainText("is counted here");
+  await expect(scope).not.toContainText("carries no model reason codes");
 });
 
 test("no fairness verdict, protected class or proxy is rendered", async ({ page }) => {
