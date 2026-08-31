@@ -71,6 +71,29 @@ test("all five steps are shown, in order", async ({ page }) => {
   expect(rendered).toEqual(["submitted", "kyc", "decision", "offer", "boarded"]);
 });
 
+test("the Received tile shows when the application arrived, not an em dash", async ({
+  page,
+}) => {
+  // `applications.created_at` has always held this and `models.Application` has
+  // always mapped it -- `ApplicationDetail` simply never declared the field, so
+  // the tile read `undefined` and rendered an em dash on every application.
+  //
+  // The giveaway was on this very screen: the lifecycle strip showed the
+  // submitted timestamp while the tile beside it was blank, because the two read
+  // different endpoints and only one of them sent the date.
+  const boarded = await aBoardedApplication();
+  test.skip(boarded === null, "no boarded application in this database");
+
+  await openApplication(page, boarded!.appId);
+
+  const received = page.getByTestId("app-received");
+  await expect(received).toBeVisible();
+  await expect(received).not.toHaveText("—");
+  // A real formatted date, not a raw ISO string leaked to the screen and not a
+  // placeholder. `shortDate` renders e.g. "Aug 30, 2026".
+  await expect(received).toHaveText(/[A-Z][a-z]{2} \d{1,2}, \d{4}/);
+});
+
 test("a boarded application names its loan and links to the account", async ({ page }) => {
   const boarded = await aBoardedApplication();
   test.skip(boarded === null, "no boarded application in this database");

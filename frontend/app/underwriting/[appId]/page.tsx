@@ -678,7 +678,7 @@ function UnderwritingDetailContent() {
         </div>
         <div className="kpi">
           <div className="kpi-label">Received</div>
-          <div className="kpi-value" style={{ fontSize: 20 }}>
+          <div className="kpi-value" style={{ fontSize: 20 }} data-testid="app-received">
             {shortDate(app?.created_at)}
           </div>
         </div>

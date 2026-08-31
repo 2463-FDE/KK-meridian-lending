@@ -820,6 +820,12 @@ def get_application(
             phone=applicant.phone, address=applicant.address, is_entity=applicant.is_entity,
         ) if applicant else None,
         amount=a.amount, term_months=a.term_months, purpose=a.purpose, status=a.status,
+        # Read from the row, not reconstructed. `hasattr` rather than an isinstance
+        # check for the same reason `decision_at` below uses one: this value
+        # arrives as a datetime from the ORM and as a string from a fake session in
+        # the unit tests, and a str has no `.isoformat`.
+        created_at=(a.created_at.isoformat()
+                    if hasattr(a.created_at, "isoformat") else a.created_at),
         employer=a.employer, job_title=a.job_title,
         kyc=KycOut(
             name_verified=bool(kyc_row.name_verified), dob_verified=bool(kyc_row.dob_verified),
