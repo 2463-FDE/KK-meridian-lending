@@ -57,6 +57,27 @@ def _is_implementation_status(paragraph: str) -> bool:
     return bool(_IMPLEMENTATION_STATUS_HEADING.search(paragraph))
 
 
+#: A chunk that CLAIMS its own policy is unimplemented and points at the section
+#: saying what happens instead. Distinct from `_is_implementation_status`, which
+#: recognises the section itself by its heading.
+#:
+#: Defined here, once, because two answer paths need it -- `policy_chat` for the
+#: chat prompt and `policy_tool` for the agent's excerpts. Two copies of this
+#: expression would be two definitions of "does this policy admit it is not
+#: implemented", and the day they disagreed one surface would go back to stating
+#: an unimplemented rule as current practice.
+_CAVEAT_POINTER = re.compile(
+    r"(?:code|system|runtime)\s+does\s+not\s+(?:yet\s+)?implement"
+    r"|current implementation differs"
+    r"|not (?:yet )?implemented",
+    re.IGNORECASE,
+)
+
+
+def points_to_implementation_status(text: str) -> bool:
+    return bool(_CAVEAT_POINTER.search(text))
+
+
 def _chunk(text: str, doc_id: str, max_chars: int = 500) -> list[dict]:
     """Split on blank-line paragraph boundaries, then hard-wrap long paragraphs.
 

@@ -20,7 +20,7 @@ import logging
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import llm_client
+from . import corpus, llm_client
 from .corpus import load_policy_corpus
 from .embeddings import LocalTfidfEmbedder, build_idf
 from .prompt_injection import contains_injection_attempt
@@ -141,12 +141,6 @@ _STATUS_CONTEXT_CHARS = 1400
 #: implement this -- see 'Current implementation differs' below." Matching the
 #: CLAIM rather than the cross-reference wording, so re-phrasing the pointer does
 #: not silently switch the behaviour off.
-_CAVEAT_POINTER = re.compile(
-    r"(?:code|system|runtime)\s+does\s+not\s+(?:yet\s+)?implement"
-    r"|current implementation differs"
-    r"|not (?:yet )?implemented",
-    re.IGNORECASE,
-)
 
 
 def _context_for(top_hit: dict, hits: list[dict], chunks: list[dict]) -> str:
@@ -173,7 +167,7 @@ def _context_for(top_hit: dict, hits: list[dict], chunks: list[dict]) -> str:
     the model that is supposed to read it.
     """
     text = top_hit["text"]
-    if not _CAVEAT_POINTER.search(text):
+    if not corpus.points_to_implementation_status(text):
         return text
 
     doc_id = top_hit.get("doc_id")
@@ -281,8 +275,13 @@ def answer_policy_question(question: str) -> PolicyAnswer:
         answerable=is_answerable,
         answer=parsed.answer,
         source_chunk_id=top_hit["chunk_id"] if is_answerable else None,
-        # The real retrieved excerpt, not just its id -- lets a reader verify
-        # the answer against the actual policy text instead of trusting it on
-        # faith (same "prove it" principle as rag_eval's own findings).
-        source_text=top_hit["text"] if is_answerable else None,
+        # THE SAME TEXT THE MODEL WAS GIVEN, which is not the same thing as the
+        # top hit. Codex review M1: this returned `top_hit["text"]` while the
+        # prompt carried `context_text`, so for the late-fee question the answer
+        # could say the code charges against `balances.past_due` while "Show
+        # evidence" displayed only the policy row -- which does not contain that
+        # phrase. A reader checking the evidence could not verify the runtime
+        # half of the answer, and the runtime half is the entire point of this
+        # change. Nothing is synthesised: both halves are retrieved corpus text.
+        source_text=context_text if is_answerable else None,
     )

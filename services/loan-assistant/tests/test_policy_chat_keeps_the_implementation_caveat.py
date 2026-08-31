@@ -33,6 +33,7 @@ import json
 
 import pytest
 
+from app import corpus as pt
 from app import policy_chat as pc
 
 
@@ -266,3 +267,145 @@ def test_a_pointer_with_no_status_section_anywhere_changes_nothing():
     """
     top = _chunk("a.md#1.0", "a.md", _POINTER_TEXT)
     assert pc._context_for(top, [top], [top]) == top["text"]
+
+
+# --------------------------------------------------------------------------
+# Codex review M1: the EVIDENCE panel must show what the answer was grounded in.
+#
+# The prompt carried the appended status section while `PolicyAnswer.source_text`
+# still returned `hits[0]["text"]`. So the answer could say the code charges
+# against `past_due` while "Show evidence" displayed only the policy row, which
+# does not contain that phrase -- a reader could not check the runtime half of
+# the answer, and the runtime half is the entire point of the change.
+# --------------------------------------------------------------------------
+
+def test_the_evidence_shown_is_the_evidence_the_model_was_given(monkeypatch):
+    capture = {}
+    _stub_provider(monkeypatch, capture)
+
+    answer = pc.answer_policy_question("What is the late fee?")
+
+    assert answer.source_text is not None
+    assert "past_due" in answer.source_text, (
+        "the evidence panel shows only the policy row while the answer speaks "
+        "about the runtime; a reader cannot verify the half of the answer this "
+        "change exists to add")
+    assert answer.source_text in capture["prompt"], (
+        "the evidence shown is not the text the model was given")
+    # The citation still names the policy chunk -- the caveat is context, not a
+    # second source that would change what the answer is attributed to.
+    assert answer.source_chunk_id == "fee_schedule.md#2.0"
+
+
+def test_an_unrelated_answer_shows_only_its_own_excerpt(monkeypatch):
+    capture = {}
+    _stub_provider(monkeypatch, capture)
+    answer = pc.answer_policy_question("What score requires manual review?")
+    assert "Current implementation differs" not in (answer.source_text or "")
+
+
+# --------------------------------------------------------------------------
+# Codex review M2: the agent's bounded tool is the second surface, and it was
+# serving the pointer without the section on 14 of 30 query/top_k combinations.
+# --------------------------------------------------------------------------
+
+_FEE_QUERIES = ["late fee", "late payment fee", "fee for missing a payment",
+                "what happens if I pay late", "grace period", "missed installment",
+                "fee schedule"]
+
+
+@pytest.mark.parametrize("query", _FEE_QUERIES)
+@pytest.mark.parametrize("k", [1, 2, 3])
+def test_the_agent_tool_never_serves_the_pointer_without_the_section(query, k):
+    """Every combination that used to fail, and the ones that did not.
+
+    `top_k=1` is the case that made a substitution strategy unworkable: replacing
+    the lowest-ranked hit would have replaced the policy row itself, answering a
+    fee question with only the caveat.
+    """
+    from app.policy_tool import search_underwriting_policy
+
+    result = search_underwriting_policy(query, top_k=k)
+    texts = [e["excerpt"] for e in result["excerpts"]]
+    if not any(pt.points_to_implementation_status(t) for t in texts):
+        return
+    assert any("Current implementation differs" in t for t in texts), (
+        f"{query!r} at top_k={k} hands the agent a policy row that says the code "
+        "does not implement it, with no section saying what the code does")
+    assert any("past_due" in t for t in texts), (
+        "the caveat arrived without the paragraph naming the actual charge; "
+        "half a caveat lets an answer say a rule is unimplemented without being "
+        "able to say what a borrower is charged instead")
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 10, 500])
+def test_the_tools_own_bounds_still_hold(k):
+    """The fix had to fit INSIDE the bounds, not renegotiate them silently.
+
+    `hit_count <= MAX_TOP_K` is unchanged, which is why the section is appended
+    to an excerpt rather than added as an extra hit. The per-excerpt ceiling did
+    move -- deliberately, as the sum of two separate budgets -- and an excerpt
+    carrying no caveat is still bounded by the original number alone.
+    """
+    from app import policy_tool
+
+    result = policy_tool.search_underwriting_policy("late fee", top_k=k)
+    assert result["hit_count"] <= policy_tool.MAX_TOP_K
+    for excerpt in result["excerpts"]:
+        text = excerpt["excerpt"]
+        assert len(text) <= policy_tool.MAX_EXCERPT_CHARS + policy_tool.MAX_STATUS_CHARS
+        if "Current implementation differs" not in text:
+            assert len(text) <= policy_tool.MAX_EXCERPT_CHARS
+
+
+def test_both_surfaces_recognise_the_caveat_with_one_definition():
+    """One expression, in `corpus`, used by the chat path and the agent path.
+
+    Two copies would be two definitions of "does this policy admit it is not
+    implemented", and the day they disagreed one surface would go back to
+    stating an unimplemented rule as current practice.
+    """
+    from app import policy_tool
+
+    assert pt.points_to_implementation_status(
+        "The code does not yet implement this.")
+    assert not pt.points_to_implementation_status("The APR is 12%.")
+    assert policy_tool.corpus.points_to_implementation_status is \
+        pt.points_to_implementation_status
+    assert "_CAVEAT_POINTER" not in pc.__dict__, (
+        "policy_chat kept a private copy of the pointer expression")
+
+
+def test_the_appended_section_stops_rather_than_skipping_ahead(monkeypatch):
+    """Document order under a budget that actually bites.
+
+    Found by mutation: turning the `break` into a `continue` left every test
+    above green, because the real section fits inside `MAX_STATUS_CHARS` and
+    nothing is ever truncated. It matters the moment something is -- a `continue`
+    lets a small later paragraph jump ahead of a large earlier one, and this
+    section is written to be read top to bottom: it says the policy and the code
+    differ, and only THEN what the code charges. Skipping the second to fit the
+    fifth produces a caveat that reads as if it were complete.
+    """
+    from app import policy_tool
+
+    chunks = [
+        {"chunk_id": "d.md#1.0", "doc_id": "d.md", "text": "policy row",
+         "implementation_status": False},
+        {"chunk_id": "d.md#2.0", "doc_id": "d.md",
+         "text": "## Current implementation differs\n" + "A" * 200,
+         "implementation_status": True},
+        {"chunk_id": "d.md#3.0", "doc_id": "d.md", "text": "B" * 400,
+         "implementation_status": True},
+        {"chunk_id": "d.md#4.0", "doc_id": "d.md", "text": "C" * 20,
+         "implementation_status": True},
+    ]
+    monkeypatch.setattr(policy_tool, "MAX_STATUS_CHARS", 300)
+    out = policy_tool._with_status(
+        "The code does not yet implement this.", "d.md", chunks)
+
+    assert "A" * 200 in out, "the opening of the section was dropped"
+    assert "B" * 400 not in out, "a paragraph larger than the budget was included"
+    assert "C" * 20 not in out, (
+        "a later, smaller paragraph jumped ahead of the one that did not fit; "
+        "the section is ordered prose, not a bag of paragraphs")
