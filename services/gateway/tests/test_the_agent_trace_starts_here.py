@@ -25,6 +25,7 @@ through `agent_trace.PROPAGATION_HEADERS` rather than retyped, so a header the
 SDK adds later cannot be stripped in one place and forgotten in the other.
 """
 import json
+import re
 import threading
 import time
 import uuid
@@ -453,6 +454,78 @@ def test_the_run_id_is_random_and_derived_from_nothing(tracing_on):
         "run ids repeat, so they encode something about the request")
 
 
+#: A dotted-order segment: a microsecond timestamp followed by a run uuid.
+#: `RunTree.to_headers()` builds `langsmith-trace` out of these, so the header is
+#: mostly machine-generated opacity.
+_GENERATED = re.compile(
+    r"\d{8}T\d{6}\d*Z?"                                  # 20260830T234819123456Z
+    r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"      # a dashed uuid
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    # Bounded by NON-HEX rather than by a word boundary: in a dotted-order
+    # segment the run id follows the timestamp's `Z`, which is itself a word
+    # character, so \b never fires there and the id went unmasked. The
+    # false positive this whole helper exists for survived the first fix
+    # because of it, and the reproduction case is what caught that.
+    r"|(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])"    # or an undashed one
+)
+
+
+def _scannable(blob: str) -> str:
+    """The forwarded context with its GENERATED identifiers removed.
+
+    A leak probe must not be able to cry wolf, and this one could. The check is
+    a substring search for short request identifiers -- `4242` among them --
+    over a string that is mostly random hex: a run uuid has 32 hex characters,
+    so any given four-digit decimal string appears in one by chance roughly once
+    in two thousand ids, and CI mints several per run. It duly failed on `main`
+    at 4c5bb13 with `assert '4242' not in '20260830T23...'`, reporting a leak
+    that had not happened.
+
+    A security assertion that fires at random is worse than none, because the
+    response to it is to rerun the job.
+
+    Removing the generated segments cannot hide a real leak: they are minted
+    here from a uuid4 and a clock, and nothing about the request reaches them --
+    `test_run_ids_do_not_encode_the_request` asserts exactly that. Anything the
+    application actually attached travels in `baggage`, which is left intact,
+    and `test_the_masking_does_not_hide_a_real_leak` proves the masking does not
+    swallow one.
+    """
+    return _GENERATED.sub("", blob)
+
+
+def test_the_masking_does_not_hide_a_real_leak(tracing_on, staff_client):
+    """The probe above only means something if it still catches a leak.
+
+    Written because the fix to a false positive is exactly the kind of change
+    that quietly disarms the check it was meant to keep honest: mask a little
+    too much and the assertion passes forever.
+    """
+    staff_client.post(SUMMARY_PATH)
+    blob = "".join(_forwarded().get(h) or ""
+                   for h in agent_trace.PROPAGATION_HEADERS)
+
+    for planted in ("4242", str(USER_ID), "Bearer abc", "applications/4242"):
+        assert planted in _scannable(blob + planted), (
+            f"masking swallowed {planted!r}; the leak probe would no longer "
+            "catch it")
+
+
+def test_a_generated_id_that_happens_to_contain_a_request_number_is_not_a_leak():
+    """The false positive itself, reproduced so it cannot come back.
+
+    This is the exact shape that failed on `main` at 4c5bb13: a dotted-order
+    segment whose random hex happens to contain `4242`. No request identifier
+    leaked; the digits are a coincidence of uuid4, and the old probe called it a
+    leak.
+    """
+    coincidence = "20260830T234819123456Z" + "a1b24242c3d4e5f60718293a4b5c6d7e"
+    assert "4242" in coincidence, "the fixture must contain the digits"
+    assert "4242" not in _scannable(coincidence), (
+        "a generated identifier containing the digits by chance is still being "
+        "reported as a leaked request id")
+
+
 def test_the_forwarded_context_contains_no_request_identifiers(
         tracing_on, staff_client):
     """Read off the header that actually travels, not off the object.
@@ -471,7 +544,7 @@ def test_the_forwarded_context_contains_no_request_identifiers(
     # would be forbidding the categorical field this design chose to send, which
     # is a test asserting against its own contract rather than a leak check.
     for forbidden in ("4242", str(USER_ID), "Bearer", "applications/"):
-        assert forbidden not in blob, forbidden + " rides on the trace context"
+        assert forbidden not in _scannable(blob),             forbidden + " rides on the trace context"
 
 
 # ------------------------------------------------- the root always closes
