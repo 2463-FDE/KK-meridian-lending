@@ -13,7 +13,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from . import config
 from .logging_config import get_logger
-from .routers import applications, offers
+from .routers import applications, manual_dti, offers
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("origination")
@@ -25,6 +25,11 @@ config.validate_internal_token()
 app = FastAPI(title="Meridian Origination Service (LOS)", version="2.0.0")
 app.include_router(applications.router)
 app.include_router(offers.router)
+# RF-25. Two routers: the app-scoped evidence routes share the
+# /applications prefix, and the approved synthetic document registry is
+# its own resource rather than a sub-path of one application.
+app.include_router(manual_dti.router)
+app.include_router(manual_dti.registry_router)
 # W7: GET /metrics in Prometheus text format -- see gateway/app/main.py's
 # comment for why this exists across all 8 services now.
 Instrumentator().instrument(app).expose(app)
