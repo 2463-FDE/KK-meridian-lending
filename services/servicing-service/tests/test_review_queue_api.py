@@ -286,8 +286,16 @@ def test_a_disposition_records_the_verified_human_not_the_claimed_header(
 def test_a_disposition_moves_no_money(keys, fake_db, no_money):
     """`confirmed_duplicate` is the answer most likely to be mistaken for an
     instruction. Recording it must leave the ledger, the balances projection and
-    the payment itself untouched -- a reversal still goes through the
-    maker-checker, with the second person that requires."""
+    the payment itself untouched.
+
+    What a reviewer may do next is propose a balance ADJUSTMENT through
+    maker-checker, approved by a second person. That corrects the loan balance and
+    is not a card reversal: `maker_checker.ENTRY_TYPES` is
+    `{adjustment, fee_waived}`, and Meridian has no refund, void, reversal or
+    chargeback capability at all. This docstring used to say a reversal went
+    through maker-checker, which taught the false workflow the page copy was
+    corrected to remove.
+    """
     _client().post("/reconciliation/review-queue/1/disposition",
                    json={"disposition": "confirmed_duplicate"},
                    headers=_headers(keys))

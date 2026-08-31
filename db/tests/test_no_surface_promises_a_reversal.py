@@ -78,7 +78,68 @@ def _frontend_surfaces():
 _REVIEW_WORKFLOW_MODULES = (
     SERVICES / "servicing-service" / "app" / "review_queue.py",
     SERVICES / "servicing-service" / "app" / "maker_checker.py",
+    # The maintained TESTS that describe the same workflow. Codex review
+    # REV-COPY-02: both of these still taught that "a reversal goes through the
+    # maker-checker" after the page copy and the service docstring had been
+    # corrected. A test docstring is documentation the next implementer reads --
+    # arguably the documentation they trust most, because it sits beside an
+    # assertion that passes.
+    SERVICES / "servicing-service" / "tests" / "test_review_queue_api.py",
+    SERVICES / "servicing-service" / "tests" / "test_review_queue_real_postgres.py",
 )
+
+#: Words for the capability Meridian does not have.
+_REVERSAL_WORD = re.compile(r"\b(revers\w+|refund\w*|chargeback\w*|void(?:ing|ed)?)\b",
+                            re.IGNORECASE)
+
+#: The mechanism those words must not be attached to as a capability.
+_MECHANISM = re.compile(r"maker[- ]?checker|approvals\b", re.IGNORECASE)
+
+#: What makes a sentence a DENIAL or a HISTORICAL note rather than an instruction.
+#:
+#: This is the difference between "no active description teaches that a reversal
+#: exists" -- the invariant -- and "the character sequence may never appear", which
+#: would make documenting the defect impossible and the guard unmaintainable. A
+#: sentence may name the false workflow precisely when it is denying it, or
+#: recording that it used to be claimed.
+_NEGATED_OR_HISTORICAL = re.compile(
+    r"\b(?:no|not|never|cannot|can[' ]?t|does not|do not|doesn[' ]?t|without)\b"
+    r"|\bused to\b|\bpreviously\b|\bformerly\b|\bhas no\b|\bis not\b"
+    r"|\bnothing\b|\bfalse\b|\bincorrect\b|\bREV-COPY\b",
+    re.IGNORECASE,
+)
+
+
+def _sentences(text: str):
+    """Rough sentence split. Good enough, and deliberately not a parser.
+
+    Splitting on sentence-ending punctuation and blank lines keeps a denial in the
+    same unit as the claim it denies, which is the whole point: "This is not a card
+    reversal" must not be read as two fragments where the second one offers one.
+    """
+    for block in re.split(r"\n\s*\n", text):
+        flat = " ".join(block.split())
+        for sentence in re.split(r"(?<=[.;:!?])\s+", flat):
+            if sentence.strip():
+                yield sentence.strip()
+
+
+def _teaches_a_reversal(text: str) -> list[str]:
+    """Sentences that attach a reversal capability to a real mechanism, unnegated.
+
+    The invariant, stated once: *no maintained operator, runtime or test
+    description may teach that maker-checker (or Approvals) reverses a payment.*
+    """
+    out = []
+    for sentence in _sentences(text):
+        if not _REVERSAL_WORD.search(sentence):
+            continue
+        if not _MECHANISM.search(sentence):
+            continue
+        if _NEGATED_OR_HISTORICAL.search(sentence):
+            continue
+        out.append(sentence[:160])
+    return out
 
 
 def test_no_service_exposes_a_reversal_route():
@@ -156,39 +217,34 @@ def test_no_surface_promises_a_reversal_that_does_not_exist():
 
 
 def test_no_review_workflow_module_documents_a_reversal_either():
-    """The same rule, one layer down.
+    """The same rule, one layer down, and stated semantically.
 
-    Codex review of this PR (REV-COPY-01): the page copy was corrected while
-    `review_queue.py` still told the next reader that a `confirmed_duplicate`
-    "has to go through the maker-checker to reverse anything". The screen and the
-    service behind it disagreed, and the first version of this guard scanned only
-    `.tsx` surfaces, so it could not see it.
+    Codex review REV-COPY-01 then REV-COPY-02: the false workflow survived first
+    in `review_queue.py` and then in two maintained test files, each time because
+    the guard was scanning a narrower set than the claim lived in.
 
-    A docstring is not a screen, and the distinction is worth keeping: this is not
-    checking what a borrower is shown, it is checking that the module explaining
-    the workflow does not teach the false one. That is how the defect would have
-    come back -- not through the page, but through the next person implementing
-    against the page's own backend.
+    So this no longer matches fixed phrases. It looks for a sentence that attaches
+    a REVERSAL WORD to a real MECHANISM (maker-checker, Approvals) without
+    negating or historicising it -- which is the actual invariant:
 
-    Comments are NOT stripped here, unlike the frontend scan, because in a Python
-    module the docstring IS the documentation under test.
+        no maintained operator, runtime or test description may teach that
+        maker-checker reverses a payment.
+
+    A sentence may still name the false workflow when it is denying it ("this is
+    not a card reversal") or recording that it was once claimed ("used to say").
+    That is deliberate, and it is why the guard is sentence-scoped rather than a
+    forbidden substring: a check that fired on any mention of the defect would make
+    documenting the defect impossible, and would be gamed rather than fixed.
     """
     offenders = []
     for path in _REVIEW_WORKFLOW_MODULES:
         assert path.exists(), f"{path} moved; this guard is now scanning nothing"
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for pattern in (
-            re.compile(r"maker-checker\s+to\s+reverse", re.IGNORECASE),
-            re.compile(r"to\s+reverse\s+anything", re.IGNORECASE),
-            re.compile(r"reversal\s+is\s+a\s+separate", re.IGNORECASE),
-            re.compile(r"reversal\s+(?:goes|go)\s+through", re.IGNORECASE),
-        ):
-            if pattern.search(text):
-                offenders.append(
-                    f"{path.relative_to(REPO).as_posix()}: {pattern.pattern}")
+        for sentence in _teaches_a_reversal(
+                path.read_text(encoding="utf-8", errors="ignore")):
+            offenders.append(f"{path.relative_to(REPO).as_posix()}: {sentence}")
     assert not offenders, (
-        "a module documenting the review workflow still describes a reversal, "
-        f"and no service implements one: {offenders}"
+        "a maintained description teaches that maker-checker reverses a payment, "
+        "and no service implements one:\n  " + "\n  ".join(offenders)
     )
 
 

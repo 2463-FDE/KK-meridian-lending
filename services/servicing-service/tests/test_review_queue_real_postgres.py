@@ -267,8 +267,13 @@ def test_confirming_a_duplicate_moves_no_money(pg, flagged):
 
     The client's wording is that a flag is never a duplicate conclusion and never
     permission to move money. `confirmed_duplicate` IS the conclusion -- and it
-    still moves nothing. Reversing the payment goes through the maker-checker,
-    with the second person that requires.
+    still moves nothing.
+
+    Correcting the loan balance afterwards is a maker-checker ADJUSTMENT proposed
+    by one person and approved by another. It is not a card reversal, and this
+    docstring used to describe one: `maker_checker.ENTRY_TYPES` is
+    `{adjustment, fee_waived}`, and no service here exposes a refund, void,
+    reversal or chargeback route.
     """
     before_balance = pg("SELECT balance, past_due FROM balances WHERE loan_id = %s",
                         (flagged["loan_id"],))[0]
@@ -292,9 +297,13 @@ def test_confirming_a_duplicate_moves_no_money(pg, flagged):
 
 
 def test_no_pending_movement_is_raised_either(pg, flagged):
-    """Not even the safe version of acting on it. A proposal queued
-    automatically would put a reversal one click from happening on the strength
-    of a flag the client said is not a conclusion."""
+    """Not even the safe version of acting on it. A proposal queued automatically
+    would put a money movement one click from happening on the strength of a flag
+    the client said is not a conclusion.
+
+    The movement in question is a balance adjustment, not a card reversal --
+    Meridian has no reversal capability.
+    """
     review_queue.record_disposition(flagged["item_id"],
                                     disposition="confirmed_duplicate",
                                     note=None, actor=_Actor())
