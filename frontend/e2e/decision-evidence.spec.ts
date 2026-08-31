@@ -329,13 +329,179 @@ test("the model's decision and the current outcome are shown separately when the
     timeout: 20_000,
   });
   await expect(page.getByTestId("evidence-outcome")).toHaveText("approve");
-  await expect(page.getByTestId("evidence-outcome-differs")).toBeVisible();
+
+  const differs = page.getByTestId("evidence-outcome-differs");
+  await expect(differs).toBeVisible();
+  await expect(differs).toContainText("authorized manual review");
+  // The model's own word, quoted rather than described. Nothing on this screen
+  // may read as the model having approved when it referred.
+  await expect(page.getByTestId("evidence-differs-model-decision")).toHaveText("refer");
+  await expect(page.getByTestId("evidence-outcome-agrees")).toHaveCount(0);
 
   // And it survives the reload, so the refresh above reflected the database
   // rather than local state the handler happened to hold.
   await openApplication(page, Number(appId));
   await expect(page.getByTestId("evidence-model-decision")).toHaveText("refer");
   await expect(page.getByTestId("evidence-outcome")).toHaveText("approve");
+});
+
+test("an unchanged outcome does not read as two decisions", async ({ page }) => {
+  // The case that prompted this: "Model decision: approve / Current outcome:
+  // approve" is technically correct and invites the reader to count two
+  // approvals. The pair is shown compactly, with one quiet line saying no
+  // manual review changed it -- and NOT the divergence warning.
+  await signInAsStaff(page, "underwriter");
+  await page.route("**/applications/*/history", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        decision: {
+          outcome: "approve", model_decision: "approve",
+          model_score: 694, model_version: "creditai-2026.1-stub",
+          bureau_score: 680, reason_codes: [], occurred_at: null,
+        },
+      }),
+    }),
+  );
+  await page.goto("/underwriting/4471");
+
+  await expect(page.getByTestId("evidence-outcome")).toHaveText("approve", {
+    timeout: 60_000,
+  });
+  await expect(page.getByTestId("evidence-model-decision")).toHaveText("approve");
+  await expect(page.getByTestId("evidence-outcome-agrees")).toBeVisible();
+  await expect(page.getByTestId("evidence-outcome-differs")).toHaveCount(0);
+
+  // The labels themselves carry the distinction, so a reader who reads nothing
+  // else still knows which is which.
+  const panel = page.getByTestId("decision-evidence");
+  await expect(panel).toContainText("Final application outcome");
+  await expect(panel).toContainText("Automated model decision");
+  await expect(page.getByTestId("evidence-explainer")).toContainText(
+    "current persisted result after any authorized manual review",
+  );
+});
+
+test("a model REFER that staff denied is not described as a model denial", async ({
+  page,
+}) => {
+  // The other half of the divergence, and the one with a consumer consequence:
+  // a denial issued by a person must not be attributed to the model version or
+  // the model score sitting beside it.
+  const applicant = fictionalApplicant("Ilse", false, REFER_BAND_INCOME);
+  await submitApplication(page, applicant);
+  const appId = await currentAppId(page);
+  await getDecision(page);
+
+  await signInAsStaff(page);
+  await resolveReferAsStaff(
+    page, appId, "deny", "Documentation did not support the stated income",
+  );
+
+  await expect(page.getByTestId("evidence-outcome")).toHaveText("deny", {
+    timeout: 20_000,
+  });
+  await expect(page.getByTestId("evidence-model-decision")).toHaveText("refer");
+  await expect(page.getByTestId("evidence-differs-model-decision")).toHaveText("refer");
+  await expect(page.getByTestId("evidence-outcome-agrees")).toHaveCount(0);
+});
+
+test("the model evidence stays tied to the automated decision after a manual change", async ({
+  page,
+}) => {
+  // The evidence fields describe the event, and a manual review writes no
+  // event. So the version, the scores and the reason codes must be exactly what
+  // the automated decision recorded, even though the final outcome moved.
+  await signInAsStaff(page, "underwriter");
+  await page.route("**/applications/*/history", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        decision: {
+          outcome: "approve", model_decision: "refer",
+          model_score: 631, model_version: "creditai-2026.1-stub",
+          bureau_score: 655, reason_codes: ["THIN_FILE"],
+          occurred_at: "2026-08-20T09:00:00Z",
+        },
+      }),
+    }),
+  );
+  await page.goto("/underwriting/4471");
+
+  await expect(page.getByTestId("evidence-model-version")).toHaveText(
+    "creditai-2026.1-stub",
+    { timeout: 60_000 },
+  );
+  await expect(page.getByTestId("evidence-model-score")).toHaveText("631");
+  await expect(page.getByTestId("evidence-bureau-score")).toHaveText("655");
+  await expect(page.getByTestId("evidence-reason-THIN_FILE")).toBeVisible();
+  await expect(page.getByTestId("evidence-outcome-differs")).toBeVisible();
+});
+
+test("the lower decision panel names the same outcome rather than a second one", async ({
+  page,
+}) => {
+  // The chip beside the "Run decision" control and the final outcome in the
+  // evidence panel are ONE outcome shown twice -- once beside the control that
+  // can change it, once beside the evidence that explains it. The panel says
+  // so, and the score line that used to duplicate the evidence is gone.
+  // A decision is RUN here rather than an already-decided application opened,
+  // and that is the whole strength of the case. `decision.score` is only ever
+  // set by running a decision or recording a review in this session, so on a
+  // seeded application the duplicate line is absent whether or not the code
+  // removes it -- the assertion would pass for the wrong reason. Running one
+  // puts the score in hand and then asserts it is NOT repeated.
+  const applicant = fictionalApplicant("Perry", false, REFER_BAND_INCOME);
+  await submitApplication(page, applicant);
+  const appId = await currentAppId(page);
+
+  await signInAsStaff(page);
+  await page.goto(`/underwriting/${appId}`);
+  await expect(page.getByTestId("decision-evidence")).toBeVisible({
+    timeout: 60_000,
+  });
+  await page.getByRole("button", { name: /Run decision/ }).click();
+
+  // The evidence panel has the score, with its labels and its caveat...
+  await expect(page.getByTestId("evidence-model-score")).not.toHaveText(
+    "not recorded",
+    { timeout: 30_000 },
+  );
+  // ...so the decision panel does not repeat it.
+  await expect(page.getByTestId("decision-model-score")).toHaveCount(0);
+  await expect(page.getByTestId("decision-same-outcome")).toBeVisible();
+  // The action itself is untouched.
+  await expect(page.getByRole("button", { name: /Run decision/ })).toBeVisible();
+});
+
+test("the score survives when the evidence panel cannot be read", async ({ page }) => {
+  // Removing the duplicate must not lose the number. When the evidence request
+  // fails, the decision panel is the only place the score can appear, so it
+  // appears there and says why.
+  // A fresh application, because `decision.score` is only ever set by running a
+  // decision or recording a review in this session -- the seeded loan 4471 is
+  // already final, so its "Run decision" control is correctly disabled and the
+  // fallback could never be reached there.
+  const applicant = fictionalApplicant("Nadia", false, REFER_BAND_INCOME);
+  await submitApplication(page, applicant);
+  const appId = await currentAppId(page);
+
+  await signInAsStaff(page);
+  await page.route("**/applications/*/history", (route) =>
+    route.fulfill({ status: 500, contentType: "application/json", body: "{}" }),
+  );
+  await page.goto(`/underwriting/${appId}`);
+  await expect(page.getByTestId("decision-evidence-error")).toBeVisible({
+    timeout: 60_000,
+  });
+
+  await page.getByRole("button", { name: /Run decision/ }).click();
+  await expect(page.getByTestId("decision-model-score")).toContainText(
+    "could not be read",
+    { timeout: 30_000 },
+  );
 });
 
 test("an application with no model event does not attribute its outcome to a model", async ({
