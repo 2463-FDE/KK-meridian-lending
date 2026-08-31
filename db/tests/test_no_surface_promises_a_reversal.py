@@ -25,6 +25,8 @@ makes the two agree:
 import pathlib
 import re
 
+import pytest
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SERVICES = REPO / "services"
 FRONTEND = REPO / "frontend"
@@ -95,51 +97,147 @@ _REVERSAL_WORD = re.compile(r"\b(revers\w+|refund\w*|chargeback\w*|void(?:ing|ed
 #: The mechanism those words must not be attached to as a capability.
 _MECHANISM = re.compile(r"maker[- ]?checker|approvals\b", re.IGNORECASE)
 
-#: What makes a sentence a DENIAL or a HISTORICAL note rather than an instruction.
+#: What makes a CLAUSE a denial or a historical note rather than an instruction.
 #:
-#: This is the difference between "no active description teaches that a reversal
-#: exists" -- the invariant -- and "the character sequence may never appear", which
-#: would make documenting the defect impossible and the guard unmaintainable. A
-#: sentence may name the false workflow precisely when it is denying it, or
-#: recording that it used to be claimed.
+#: Codex review REV-GUARD-03. The first version of this evaluated whole SENTENCES
+#: and treated any negation anywhere in one as a denial -- so the original toast,
+#:
+#:     "No money moved -- a reversal goes through Approvals."
+#:
+#: passed clean: the leading "No" negates the MONEY MOVEMENT, not the reversal, and
+#: the second clause still promised one. The guard that justifies this whole PR did
+#: not hold against the defect the PR was written for. Reproduced before fixing:
+#: `_teaches_a_reversal` returned `[]` on that exact string.
+#:
+#: So negation now has to be LOCAL to the clause that names the reversal. A denial
+#: is a denial of the reversal, not of something else in the same sentence.
 _NEGATED_OR_HISTORICAL = re.compile(
-    r"\b(?:no|not|never|cannot|can[' ]?t|does not|do not|doesn[' ]?t|without)\b"
-    r"|\bused to\b|\bpreviously\b|\bformerly\b|\bhas no\b|\bis not\b"
-    r"|\bnothing\b|\bfalse\b|\bincorrect\b|\bREV-COPY\b",
+    r"\bno\s+(?:card\s+)?(?:refund|revers\w+|chargeback|void\w*)"
+    r"|\bnot\s+a\s+(?:card\s+)?(?:refund|revers\w+|chargeback)"
+    r"|\bno\s+(?:such\s+)?(?:reversal|refund)\s+capability"
+    r"|\b(?:cannot|can[' ]?not|can[' ]?t|does\s+not|do\s+not|doesn[' ]?t|never)\b"
+    r"|\bhas\s+no\b|\bis\s+not\b|\bare\s+not\b|\bwithout\b|\bnothing\b"
+    r"|\bused\s+to\b|\bpreviously\b|\bformerly\b|\bfalse\b|\bincorrect\b"
+    r"|\bREV-COPY\b|\bREV-GUARD\b",
     re.IGNORECASE,
 )
 
+#: Clause boundaries. A dash, semicolon or colon separates two independent claims,
+#: and the toast above is exactly that shape: a true first clause and a false
+#: second one joined by an em dash.
+_CLAUSE_SPLIT = re.compile(r"\s+--\s+|\s*[;:]\s*|\s*\u2014\s*|\s+-\s+")
+
 
 def _sentences(text: str):
-    """Rough sentence split. Good enough, and deliberately not a parser.
-
-    Splitting on sentence-ending punctuation and blank lines keeps a denial in the
-    same unit as the claim it denies, which is the whole point: "This is not a card
-    reversal" must not be read as two fragments where the second one offers one.
-    """
+    """Rough sentence split. Good enough, and deliberately not a parser."""
     for block in re.split(r"\n\s*\n", text):
         flat = " ".join(block.split())
-        for sentence in re.split(r"(?<=[.;:!?])\s+", flat):
+        for sentence in re.split(r"(?<=[.!?])\s+", flat):
             if sentence.strip():
                 yield sentence.strip()
 
 
 def _teaches_a_reversal(text: str) -> list[str]:
-    """Sentences that attach a reversal capability to a real mechanism, unnegated.
+    """Clauses that attach a reversal capability to a real mechanism, unnegated.
 
     The invariant, stated once: *no maintained operator, runtime or test
     description may teach that maker-checker (or Approvals) reverses a payment.*
+
+    Evaluated per CLAUSE rather than per sentence, because a sentence can be half
+    true: "No money moved -- a reversal goes through Approvals" negates the money
+    movement and still promises the reversal. Splitting on dash, semicolon and
+    colon puts each claim on its own, so the denial has to be a denial OF THE
+    REVERSAL to clear it.
     """
     out = []
     for sentence in _sentences(text):
-        if not _REVERSAL_WORD.search(sentence):
-            continue
-        if not _MECHANISM.search(sentence):
-            continue
-        if _NEGATED_OR_HISTORICAL.search(sentence):
-            continue
-        out.append(sentence[:160])
+        for clause in _CLAUSE_SPLIT.split(sentence):
+            clause = clause.strip()
+            if not clause:
+                continue
+            if not _REVERSAL_WORD.search(clause):
+                continue
+            if not _MECHANISM.search(clause):
+                continue
+            if _NEGATED_OR_HISTORICAL.search(clause):
+                continue
+            out.append(clause[:160])
     return out
+
+
+# --------------------------------------------------------------------------
+# The guard's own behaviour, pinned against the sentences it exists to catch.
+#
+# Codex review REV-GUARD-03: the first semantic version of this guard did NOT
+# flag the original toast, because it evaluated whole sentences and read the
+# leading "No money moved" as a denial of the reversal. A guard that misses the
+# defect its own PR removed is worse than no guard, so the shapes are now test
+# data rather than something a reader has to trust.
+# --------------------------------------------------------------------------
+
+#: Every wording this PR removed, verbatim. Each MUST be flagged.
+_MUST_FLAG = [
+    # The success toast. Two clauses: the first true, the second false.
+    "No money moved -- a reversal goes through Approvals.",
+    # Same, with the em dash the page actually rendered.
+    "No money moved — a reversal goes through Approvals.",
+    # The paragraph under the disposition buttons.
+    "Recording an answer moves no money. A reversal is a separate, two-person "
+    "decision in Approvals.",
+    # `test_review_queue_api.py`, before this PR.
+    "a reversal still goes through the maker-checker, with the second person "
+    "that requires",
+    # `test_review_queue_real_postgres.py`, before this PR.
+    "Reversing the payment goes through the maker-checker, with the second "
+    "person that requires.",
+    # The third passage, found unprompted.
+    "A proposal queued automatically would put a reversal one click from "
+    "happening in Approvals.",
+    # `review_queue.py`, before this PR.
+    "A reviewer who concludes confirmed_duplicate still has to go through the "
+    "maker-checker to reverse anything.",
+    # A sentence whose FIRST clause denies a reversal and whose second still
+    # promises one. This is the case only clause-splitting catches: at sentence
+    # level the leading "no card reversal" reads as a denial and clears the whole
+    # thing, which is REV-GUARD-03 in its most direct form.
+    "There is no card reversal here -- a reversal goes through Approvals.",
+]
+
+#: Wording that is TRUE and must stay writable. Each MUST NOT be flagged --
+#: otherwise the guard forbids describing the defect and gets gamed instead of
+#: fixed.
+_MUST_NOT_FLAG = [
+    # The current page copy.
+    "A correction is a separate two-person decision: a balance adjustment raised "
+    "on the loan's account page and approved by a different person in Approvals. "
+    "There is no card refund or reversal in this system.",
+    # The current toast.
+    "No money moved. A correction is a balance adjustment approved by a different "
+    "person in Approvals; there is no card reversal.",
+    # The current service docstring's denial.
+    "Maker-checker cannot do it: ENTRY_TYPES is {adjustment, fee_waived}, and no "
+    "service in this repository exposes a refund, void, reversal or chargeback "
+    "route.",
+    # A historical note, which this repository writes deliberately.
+    "This docstring used to send the reviewer through maker-checker to undo the "
+    "payment.",
+    # Reconciliation reading refund lines is not performing one.
+    "Reconciliation parses refund lines out of the processor's settlement file.",
+]
+
+
+@pytest.mark.parametrize("text", _MUST_FLAG)
+def test_the_guard_flags_every_wording_this_pr_removed(text):
+    assert _teaches_a_reversal(text), (
+        "the guard does not catch a sentence this PR removed, which is the "
+        f"REV-GUARD-03 defect returning: {text!r}")
+
+
+@pytest.mark.parametrize("text", _MUST_NOT_FLAG)
+def test_the_guard_permits_denials_and_historical_notes(text):
+    assert not _teaches_a_reversal(text), (
+        "the guard flags a true statement, so it forbids documenting the defect "
+        f"and will be gamed rather than fixed: {text!r}")
 
 
 def test_no_service_exposes_a_reversal_route():

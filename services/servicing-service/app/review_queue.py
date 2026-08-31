@@ -24,8 +24,8 @@ act on it.
 
 **And what happens next is a balance adjustment, not a reversal.** This paragraph
 used to finish by sending the reviewer through maker-checker to undo the payment
--- described in a way that read as though maker-checker could perform a card
-reversal. The old sentence is deliberately paraphrased rather than quoted:
+-- wrongly implying that maker-checker performs a card reversal, which it does
+not and never did. The old sentence is deliberately paraphrased rather than quoted:
 `db/tests/test_no_surface_promises_a_reversal.py` scans this file, and a verbatim
 quotation would trip the very guard that exists to keep the claim out.
 Maker-checker cannot do it: `maker_checker.ENTRY_TYPES` is
