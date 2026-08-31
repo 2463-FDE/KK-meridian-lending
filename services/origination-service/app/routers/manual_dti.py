@@ -292,6 +292,25 @@ def record_manual_dti(
         detail = str(exc).split("\n", 1)[0].strip()
         log.info("manual DTI refused for app_id=%s: %s", app_id, detail)
         raise HTTPException(status_code=409, detail=detail)
+    except psycopg2.errors.NumericValueOutOfRange:
+        # Codex review BDTI-API-01. `gross_monthly_income = 0.01` with
+        # `monthly_debt_obligations = 999999999999.99` both pass this schema, and
+        # the ratio they produce is ~1e17 -- past `dti_bp INTEGER`, so Postgres
+        # raised `integer out of range` and the request became a 500. My own
+        # boundary matrix had tested the opposite direction (a ratio rounding to
+        # zero) and not this one.
+        #
+        # ANSWERED BY THE DATABASE, deliberately, rather than by bounding the
+        # inputs here. A Python bound would need this formula a second time --
+        # the exact duplication this route avoids because Python and Postgres
+        # round differently at .5 -- and picking a maximum sensible DTI would be
+        # inventing a policy limit the client has not given. What is refused here
+        # is not "a ratio we consider too large"; it is a ratio that does not fit
+        # the column it would be stored in, which is a fact about the schema.
+        raise HTTPException(
+            status_code=422,
+            detail="the ratio these two figures produce is too large to record; "
+                   "check gross_monthly_income and monthly_debt_obligations")
     except psycopg2.errors.CheckViolation as exc:
         # A constraint the route did not pre-empt. Every one of them is a
         # statement about the caller's own numbers -- the reproducibility CHECK,

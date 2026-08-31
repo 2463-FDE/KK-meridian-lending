@@ -801,3 +801,50 @@ def test_a_cited_document_cannot_be_changed_afterwards(real_db, cur):
                     " WHERE doc_ref = 'SYN-PAYSTUB-002'")
     cur.execute("ROLLBACK TO SAVEPOINT s")
     assert "cited by" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 9. The overflow edge. Codex review BDTI-API-01.
+#
+# Every request that satisfies this schema must either record cleanly or be
+# refused with a 422. It could do neither: `0.01` income against
+# `999999999999.99` obligations produces roughly 1e17 basis points, past
+# `dti_bp INTEGER`, and Postgres' `integer out of range` reached the client as a
+# 500. The boundary matrix above had tested the direction that rounds to ZERO
+# and not the one that overflows.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("income,debt", [
+    ("0.01", "999999999999.99"),      # the reported case, ~1e17 bp
+    ("1.00", "214748.37"),            # one hundredth over INT_MAX basis points
+    ("0.01", "21474.84"),             # same edge reached from a tiny income
+])
+def test_a_ratio_too_large_to_store_is_refused_not_a_500(real_db, cur, income, debt):
+    app_id = _an_application(cur)
+    r = client.post(f"/applications/{app_id}/manual-dti",
+                    json=_body(gross_monthly_income=income,
+                               monthly_debt_obligations=debt),
+                    headers=_headers("underwriter"))
+    assert r.status_code == 422, r.text
+    assert "too large to record" in r.json()["detail"]
+    cur.connection.commit()
+    cur.execute("SELECT count(*) AS n FROM manual_dti_assessments WHERE app_id = %s",
+                (app_id,))
+    assert cur.fetchone()["n"] == 0
+
+
+def test_the_largest_storable_ratio_is_still_accepted(real_db, cur):
+    """The other side of the edge, so the refusal is not simply "large is bad".
+
+    `214748.36` against `1.00` is 2,147,483,600 basis points -- the largest
+    multiple of 100 that fits `INTEGER`. It is an absurd debt-to-income ratio and
+    it records, because nothing here has authority to decide which ratios are
+    plausible; the only limit enforced is the one the column actually has.
+    """
+    app_id = _an_application(cur)
+    r = client.post(f"/applications/{app_id}/manual-dti",
+                    json=_body(gross_monthly_income="1.00",
+                               monthly_debt_obligations="214748.36"),
+                    headers=_headers("underwriter"))
+    assert r.status_code == 201, r.text
+    assert r.json()["dti_bp"] == 2147483600
