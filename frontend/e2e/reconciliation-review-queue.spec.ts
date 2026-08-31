@@ -243,8 +243,45 @@ test("a reviewer records one of three answers, it sticks, and no money moves", a
           seeded.loanId,
         ])
       ).rows[0],
-      ledger: (await c.query("SELECT count(*) AS n FROM ledger_entries")).rows[0].n,
-      movements: (await c.query("SELECT count(*) AS n FROM pending_movements")).rows[0].n,
+      // SCOPED TO THE ACCOUNT UNDER TEST, not to the whole database.
+      //
+      // These two were `SELECT count(*) FROM ledger_entries` and the same for
+      // `pending_movements` -- global counts. The claim being made is "recording
+      // a disposition moved no money ON THIS ACCOUNT", and the balance check
+      // directly above was already scoped to `loan_id` while these two were not.
+      //
+      // So the assertion actually read "no ledger row appeared ANYWHERE in the
+      // system between these two queries", which is false whenever anything else
+      // writes one. The specs share one database with no per-spec isolation
+      // (RF-24), and payment-service's reconcile worker drains `applied_at IS
+      // NULL` payments on OTHER loans in the background and writes a ledger entry
+      // per component when it does. Observed in CI: 222 -> 236 between the two
+      // snapshots, fourteen entries this test neither caused nor cared about.
+      //
+      // Scoping to `loan_id` makes the assertion mean what its comment says, and
+      // makes it immune to writes on loans this test does not own.
+      ledger: (
+        await c.query(
+          "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = $1",
+          [seeded.loanId],
+        )
+      ).rows[0].n,
+      movements: (
+        await c.query(
+          "SELECT count(*) AS n FROM pending_movements WHERE loan_id = $1",
+          [seeded.loanId],
+        )
+      ).rows[0].n,
+      // And the strongest form of the same claim: nothing references THIS test's
+      // payments. The loan is shared (`ORDER BY l.id LIMIT 1`, the same row most
+      // specs take), so a loan-scoped count could in principle still move; these
+      // two payments are the rows this test genuinely owns.
+      onOurPayments: (
+        await c.query(
+          "SELECT count(*) AS n FROM ledger_entries WHERE payment_id = ANY($1::bigint[])",
+          [seeded.paymentIds],
+        )
+      ).rows[0].n,
     }));
 
     await signInAsStaff(page, "csr");
@@ -295,14 +332,55 @@ test("a reviewer records one of three answers, it sticks, and no money moves", a
           seeded.loanId,
         ])
       ).rows[0],
-      ledger: (await c.query("SELECT count(*) AS n FROM ledger_entries")).rows[0].n,
-      movements: (await c.query("SELECT count(*) AS n FROM pending_movements")).rows[0].n,
+      // SCOPED TO THE ACCOUNT UNDER TEST, not to the whole database.
+      //
+      // These two were `SELECT count(*) FROM ledger_entries` and the same for
+      // `pending_movements` -- global counts. The claim being made is "recording
+      // a disposition moved no money ON THIS ACCOUNT", and the balance check
+      // directly above was already scoped to `loan_id` while these two were not.
+      //
+      // So the assertion actually read "no ledger row appeared ANYWHERE in the
+      // system between these two queries", which is false whenever anything else
+      // writes one. The specs share one database with no per-spec isolation
+      // (RF-24), and payment-service's reconcile worker drains `applied_at IS
+      // NULL` payments on OTHER loans in the background and writes a ledger entry
+      // per component when it does. Observed in CI: 222 -> 236 between the two
+      // snapshots, fourteen entries this test neither caused nor cared about.
+      //
+      // Scoping to `loan_id` makes the assertion mean what its comment says, and
+      // makes it immune to writes on loans this test does not own.
+      ledger: (
+        await c.query(
+          "SELECT count(*) AS n FROM ledger_entries WHERE loan_id = $1",
+          [seeded.loanId],
+        )
+      ).rows[0].n,
+      movements: (
+        await c.query(
+          "SELECT count(*) AS n FROM pending_movements WHERE loan_id = $1",
+          [seeded.loanId],
+        )
+      ).rows[0].n,
+      // And the strongest form of the same claim: nothing references THIS test's
+      // payments. The loan is shared (`ORDER BY l.id LIMIT 1`, the same row most
+      // specs take), so a loan-scoped count could in principle still move; these
+      // two payments are the rows this test genuinely owns.
+      onOurPayments: (
+        await c.query(
+          "SELECT count(*) AS n FROM ledger_entries WHERE payment_id = ANY($1::bigint[])",
+          [seeded.paymentIds],
+        )
+      ).rows[0].n,
     }));
     expect(after.balance.balance).toBe(before.balance.balance);
     expect(after.balance.past_due).toBe(before.balance.past_due);
     expect(after.ledger).toBe(before.ledger);
-    // Not even a proposal: a queued reversal would put money one approval away
-    // on the strength of a flag that is not a conclusion.
+    // Collected in both snapshots, so assert it -- an unasserted field is a
+    // query that looks like a check and is not one.
+    expect(after.onOurPayments).toBe(before.onOurPayments);
+    expect(Number(after.onOurPayments)).toBe(0);
+    // Not even a proposal: a queued money movement would put a correction one
+    // approval away on the strength of a flag that is not a conclusion.
     expect(after.movements).toBe(before.movements);
   } finally {
     await cleanUp(seeded);
