@@ -1973,6 +1973,122 @@ CREATE TRIGGER manual_dti_document_approved
     FOR EACH ROW EXECUTE FUNCTION manual_dti_document_is_approved();
 
 -- ---------------------------------------------------------------------------
+-- REFERRED applications only, and the authority actually held.
+-- ---------------------------------------------------------------------------
+--
+-- Codex review of PR #146, BDTI-01 and BDTI-02. The first version of this
+-- migration left both of these to the route, and said so -- but `decisions.outcome`
+-- and `users.role` are both right here, so "the API will check" was a choice not to
+-- enforce something the database could enforce. Worse, the PR body claimed "a CSR
+-- assessment cannot be stored even if a future route forgets to check", and that
+-- was FALSE as written: the CHECK constrained the assessed_role STRING to
+-- underwriter/admin and tied it to nobody, so a CSR's user id stored with
+-- `assessed_role = 'underwriter'` was accepted.
+--
+-- BDTI-01: the client's rule is manual DTI on a REFERRED application only. An
+-- application that is submitted, approved, denied, or has no decision at all is
+-- outside it. `decisions.outcome = 'refer'` is the recorded fact.
+--
+-- BDTI-02: the role recorded must be the role the person actually holds. Checking
+-- `users.role` on insert is what makes the stored role evidence rather than an
+-- assertion by the caller. `is_active` is checked too: a deactivated account's
+-- authority is not current, and evidence signed by one would be worth less than it
+-- appears.
+--
+-- Both raise rather than silently dropping the row, and each names what it found so
+-- a route's bug is legible in the error instead of arriving as a constraint code.
+CREATE OR REPLACE FUNCTION manual_dti_is_permitted() RETURNS trigger AS $$
+DECLARE
+    outcome TEXT;
+    actual_role TEXT;
+    active BOOLEAN;
+BEGIN
+    SELECT d.outcome INTO outcome
+      FROM decisions d WHERE d.app_id = NEW.app_id;
+
+    IF outcome IS NULL THEN
+        RAISE EXCEPTION
+            'application % has no decision on record, so it is not in the '
+            'referred state manual DTI requires', NEW.app_id;
+    END IF;
+    IF outcome <> 'refer' THEN
+        RAISE EXCEPTION
+            'application % is %, not referred; manual DTI evidence is permitted '
+            'on a referred application only', NEW.app_id, outcome;
+    END IF;
+
+    SELECT u.role, u.is_active INTO actual_role, active
+      FROM users u WHERE u.id = NEW.assessed_by;
+
+    -- Unreachable while the foreign key holds. Asserted anyway: "the FK makes
+    -- this impossible" is how an unenforced rule survives a later migration.
+    IF actual_role IS NULL THEN
+        RAISE EXCEPTION 'user % does not exist', NEW.assessed_by;
+    END IF;
+    IF active IS NOT TRUE THEN
+        RAISE EXCEPTION
+            'user % is not active, so their authority is not current',
+            NEW.assessed_by;
+    END IF;
+    IF actual_role <> NEW.assessed_role THEN
+        RAISE EXCEPTION
+            'user % holds role %, but the assessment claims %; the recorded role '
+            'must be the role the person actually holds',
+            NEW.assessed_by, actual_role, NEW.assessed_role;
+    END IF;
+
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS manual_dti_permitted ON manual_dti_assessments;
+CREATE TRIGGER manual_dti_permitted
+    BEFORE INSERT ON manual_dti_assessments
+    FOR EACH ROW EXECUTE FUNCTION manual_dti_is_permitted();
+
+-- ---------------------------------------------------------------------------
+-- A CITED document cannot be changed underneath the evidence that cites it.
+-- ---------------------------------------------------------------------------
+--
+-- Codex review BDTI-03. The assessments and the link rows were append-only; the
+-- REGISTRY was not. So `doc_ref`, `kind`, `label` and `approved` could all be
+-- updated -- or the row deleted -- after an assessment cited it, silently changing
+-- what that assessment appears to rest on. Flipping `approved` on the
+-- deliberately-unapproved seed row would also have made the refusal case
+-- disappear.
+--
+-- Scoped to CITED rows rather than freezing the whole table, because the registry
+-- is meant to grow and an uncited draft is legitimately editable -- approving a
+-- new document is exactly the workflow this table exists for. What may not change
+-- is a row some committed evidence already points at.
+--
+-- `ON DELETE RESTRICT` on the link already blocks deleting a cited row; this adds
+-- the UPDATE half and gives the DELETE a message that says why.
+CREATE OR REPLACE FUNCTION manual_dti_cited_documents_are_frozen() RETURNS trigger AS $$
+DECLARE
+    citations INTEGER;
+    target INTEGER;
+BEGIN
+    target := COALESCE(OLD.id, NEW.id);
+    SELECT count(*) INTO citations
+      FROM manual_dti_assessment_documents WHERE document_id = target;
+
+    IF citations > 0 THEN
+        RAISE EXCEPTION
+            'source document % is cited by % manual DTI assessment(s) and cannot '
+            'be % -- changing it would alter what committed evidence rests on',
+            target, citations, lower(TG_OP);
+    END IF;
+
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS manual_dti_documents_frozen_once_cited
+    ON manual_dti_source_documents;
+CREATE TRIGGER manual_dti_documents_frozen_once_cited
+    BEFORE UPDATE OR DELETE ON manual_dti_source_documents
+    FOR EACH ROW EXECUTE FUNCTION manual_dti_cited_documents_are_frozen();
+
+-- ---------------------------------------------------------------------------
 -- At least one document, checked at COMMIT.
 -- ---------------------------------------------------------------------------
 --

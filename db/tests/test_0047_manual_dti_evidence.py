@@ -274,11 +274,178 @@ def test_only_the_two_authorised_roles_may_be_recorded(cur):
 
 
 def test_staff_identity_must_reference_a_real_user(cur):
+    """Either the trigger or the foreign key -- both refuse, and the trigger
+    reaches it first with a message that names the user."""
     app_id = _a_referred_application(cur)
     cur.execute("SAVEPOINT s")
-    with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+    with pytest.raises((psycopg2.errors.ForeignKeyViolation,
+                        psycopg2.errors.RaiseException)):
         _assess(cur, app_id, 999999)
     cur.execute("ROLLBACK TO SAVEPOINT s")
+
+
+# --------------------------------------------------------------------------
+# BDTI-01: referred applications only.
+# --------------------------------------------------------------------------
+
+def _an_application_in_state(c, *, status, outcome):
+    """An application whose decision is `outcome`, or with no decision at all."""
+    c.execute("INSERT INTO applicants (name) VALUES ('DTI State') RETURNING id")
+    applicant = c.fetchone()["id"]
+    c.execute(
+        "INSERT INTO applications (applicant_id, amount, term_months, status) "
+        "VALUES (%s, 15000, 36, %s) RETURNING id", (applicant, status))
+    app_id = c.fetchone()["id"]
+    if outcome is not None:
+        c.execute("INSERT INTO decisions (app_id, outcome) VALUES (%s, %s)",
+                  (app_id, outcome))
+    return app_id
+
+
+@pytest.mark.parametrize("status,outcome,expected", [
+    ("submitted", None, "no decision on record"),
+    ("approved", "approve", "not referred"),
+    ("denied", "deny", "not referred"),
+    ("funded", "approve", "not referred"),
+])
+def test_only_a_referred_application_may_be_assessed(cur, status, outcome, expected):
+    """Codex review BDTI-01.
+
+    The client's rule is manual DTI on a REFERRED application only. The first
+    version of this migration left that entirely to the route -- while
+    `decisions.outcome` sat right here, which made it a choice not to enforce
+    something the database could. Every fixture in this file built a referred
+    application, so no test would have noticed.
+
+    A submitted application with no decision at all is refused separately from one
+    that was decided the wrong way, because "nobody has looked yet" and "somebody
+    looked and approved" are different states and the message should say which.
+    """
+    staff = _a_staff_user(cur)
+    app_id = _an_application_in_state(cur, status=status, outcome=outcome)
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        _assess(cur, app_id, staff)
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+    assert expected in str(exc.value)
+
+
+# --------------------------------------------------------------------------
+# BDTI-02: the role recorded must be the role the person holds.
+# --------------------------------------------------------------------------
+
+def test_a_csr_cannot_be_recorded_as_an_underwriter(cur):
+    """Codex review BDTI-02, and it falsified a claim in the PR body.
+
+    The CHECK constrained the assessed_role STRING to underwriter/admin and tied
+    it to nobody, so a CSR's user id stored with `assessed_role = 'underwriter'`
+    was accepted -- while the PR claimed "a CSR assessment cannot be stored even if
+    a future route forgets to check". The earlier test only rejected the string.
+    """
+    app_id = _a_referred_application(cur)
+    csr = _a_staff_user(cur, role="csr")
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        _assess(cur, app_id, csr, role="underwriter")
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+    assert "holds role csr" in str(exc.value)
+
+
+def test_an_underwriter_cannot_be_recorded_as_an_admin(cur):
+    """The mismatch is refused in both directions, not only downward."""
+    app_id = _a_referred_application(cur)
+    uw = _a_staff_user(cur, role="underwriter")
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _assess(cur, app_id, uw, role="admin")
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+
+
+def test_a_borrower_cannot_record_an_assessment(cur):
+    app_id = _a_referred_application(cur)
+    borrower = _a_staff_user(cur, role="borrower")
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException):
+        _assess(cur, app_id, borrower, role="underwriter")
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+
+
+def test_a_deactivated_user_cannot_record_an_assessment(cur):
+    """Authority has to be current. Evidence signed by a deactivated account
+    would be worth less than it appears."""
+    app_id = _a_referred_application(cur)
+    staff = _a_staff_user(cur)
+    cur.execute("UPDATE users SET is_active = FALSE WHERE id = %s", (staff,))
+    cur.execute("SAVEPOINT s")
+    with pytest.raises(psycopg2.errors.RaiseException) as exc:
+        _assess(cur, app_id, staff)
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+    assert "not active" in str(exc.value)
+
+
+@pytest.mark.parametrize("role", ["underwriter", "admin"])
+def test_both_authorised_roles_are_accepted_when_they_match(cur, role):
+    """The positive half. Without it the trigger could refuse everything."""
+    app_id = _a_referred_application(cur)
+    staff = _a_staff_user(cur, role=role)
+    aid = _assess(cur, app_id, staff, role=role)
+    _attach(cur, aid, _doc(cur))
+    cur.execute("SELECT assessed_role FROM manual_dti_assessments WHERE id = %s", (aid,))
+    assert cur.fetchone()["assessed_role"] == role
+
+
+# --------------------------------------------------------------------------
+# BDTI-03: a cited document cannot change underneath its evidence.
+# --------------------------------------------------------------------------
+
+def test_a_cited_document_cannot_be_updated(cur):
+    """Codex review BDTI-03.
+
+    Assessments and link rows were append-only; the REGISTRY was not, so
+    `doc_ref`, `kind`, `label` and `approved` could all be changed after an
+    assessment cited the row -- silently altering what that evidence rests on.
+    """
+    _, _, aid = _complete(cur)
+    cited = _doc(cur)
+    for column, value in (("approved", "FALSE"), ("doc_ref", "'SYN-RENAMED'"),
+                          ("label", "'Something else'")):
+        cur.execute("SAVEPOINT s")
+        with pytest.raises(psycopg2.errors.RaiseException) as exc:
+            cur.execute(
+                f"UPDATE manual_dti_source_documents SET {column} = {value} "
+                " WHERE id = %s", (cited,))
+        cur.execute("ROLLBACK TO SAVEPOINT s")
+        assert "cited by" in str(exc.value)
+
+
+def test_a_cited_document_cannot_be_deleted(cur):
+    _, _, aid = _complete(cur)
+    cited = _doc(cur)
+    cur.execute("SAVEPOINT s")
+    with pytest.raises((psycopg2.errors.RaiseException,
+                        psycopg2.errors.ForeignKeyViolation)):
+        cur.execute("DELETE FROM manual_dti_source_documents WHERE id = %s", (cited,))
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+
+
+def test_an_uncited_document_may_still_be_edited_and_approved(cur):
+    """Scoped to CITED rows, deliberately.
+
+    The registry is meant to grow, and approving a new document is exactly the
+    workflow it exists for. Freezing the whole table would have made the fix
+    bigger than the defect and broken the one operation the table is for.
+    """
+    cur.execute(
+        "INSERT INTO manual_dti_source_documents (doc_ref, kind, label) "
+        "VALUES ('SYN-NEW-001', 'paystub', 'Newly added, not yet approved') "
+        "RETURNING id")
+    fresh = cur.fetchone()["id"]
+    cur.execute("UPDATE manual_dti_source_documents SET approved = TRUE "
+                " WHERE id = %s", (fresh,))
+    cur.execute("SELECT approved FROM manual_dti_source_documents WHERE id = %s",
+                (fresh,))
+    assert cur.fetchone()["approved"] is True
+    cur.execute("DELETE FROM manual_dti_source_documents WHERE id = %s", (fresh,))
 
 
 # --------------------------------------------------------------------------
