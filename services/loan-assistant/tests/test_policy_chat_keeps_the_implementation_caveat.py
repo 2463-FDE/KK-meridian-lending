@@ -202,3 +202,67 @@ def test_the_prompt_stays_inside_the_cost_guard(monkeypatch):
     pc.answer_policy_question("What is the late fee?")
     estimated = pc.llm_client._estimate_tokens(capture["system"] + capture["prompt"])
     assert estimated < pc.llm_client.MAX_INPUT_TOKENS, estimated
+
+
+# --------------------------------------------------------------------------
+# Document scoping, on a synthetic corpus.
+#
+# Found by mutation rather than by reading: deleting `and c.get("doc_id") ==
+# doc_id` from `_context_for` left every test above GREEN, because exactly one
+# document in the real corpus carries a status section, so cross-document
+# leakage has nothing to leak yet. It would the day a second policy file gains
+# one -- and the failure would be an answer about fees carrying an unrelated
+# document's implementation caveat, which is a new false statement rather than a
+# missing true one.
+#
+# `_context_for` is a pure function over dicts, so this is asserted on chunks
+# built here rather than on the corpus on disk.
+# --------------------------------------------------------------------------
+
+_POINTER_TEXT = ("Late payment fee: the lesser of $35.00 and 5%. *The code does "
+                 "not yet implement this.*")
+
+
+def _chunk(chunk_id, doc_id, text, status=False):
+    return {"chunk_id": chunk_id, "doc_id": doc_id, "text": text,
+            "implementation_status": status}
+
+
+def test_another_documents_status_section_is_not_borrowed():
+    top = _chunk("a.md#1.0", "a.md", _POINTER_TEXT)
+    chunks = [
+        top,
+        _chunk("b.md#9.0", "b.md",
+               "## Current implementation differs\nb.md's runtime charges nothing.",
+               status=True),
+    ]
+    context = pc._context_for(top, [top], chunks)
+    assert context == top["text"], (
+        "a.md's answer picked up b.md's implementation-status section. The two "
+        "documents describe different runtimes, so that is a false statement "
+        "about a.md rather than a missing true one")
+
+
+def test_the_documents_own_status_section_is_still_appended():
+    """The other half of the same scoping -- it must not simply append nothing."""
+    top = _chunk("a.md#1.0", "a.md", _POINTER_TEXT)
+    own = _chunk("a.md#2.0", "a.md",
+                 "## Current implementation differs\na.md's runtime charges a flat fee.",
+                 status=True)
+    other = _chunk("b.md#9.0", "b.md",
+                   "## Current implementation differs\nb.md's runtime charges nothing.",
+                   status=True)
+    context = pc._context_for(top, [top], [top, own, other])
+    assert "a.md's runtime charges a flat fee" in context
+    assert "b.md's runtime charges nothing" not in context
+
+
+def test_a_pointer_with_no_status_section_anywhere_changes_nothing():
+    """A policy file may claim it is unimplemented without publishing a section.
+
+    Nothing is synthesised to fill the gap: the answer is grounded in the excerpt
+    it was always grounded in, and the system prompt still requires the model to
+    repeat the claim the excerpt itself makes.
+    """
+    top = _chunk("a.md#1.0", "a.md", _POINTER_TEXT)
+    assert pc._context_for(top, [top], [top]) == top["text"]
