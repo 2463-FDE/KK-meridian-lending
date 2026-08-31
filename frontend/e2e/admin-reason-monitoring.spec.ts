@@ -89,6 +89,27 @@ test("the panel is named for what it measures, and carries its qualifier", async
     "not a protected-class disparity analysis",
   );
   await expect(qualifier).toContainText("production fairness determination");
+
+  // WHAT IS COUNTED. The distribution reads `decision_events` and filters on
+  // that table's own `decision`, so a denial with no model event -- one issued
+  // on manual review, for instance -- is not in these figures. That is right
+  // for model governance and wrong only if a reader takes the heading to mean
+  // every adverse action a person received. The page says which it is.
+  //
+  // Asserted as ONE contiguous claim, not three scattered phrases. A first
+  // version checked "recorded by the model", "manual review" and "not counted
+  // here" separately, and a mutation that reversed the meaning of the sentence
+  // -- while leaving those fragments in place -- passed. Substring checks over
+  // a sentence do not test what the sentence says.
+  const scope = page.getByTestId("reason-monitoring-scope");
+  await expect(scope).toContainText(
+    "These counts describe decisions recorded by the model, per model version.",
+  );
+  await expect(scope).toContainText(
+    "is not counted here and carries no model reason codes",
+  );
+  // And the reverse claim is not on the page under any wording.
+  await expect(scope).not.toContainText("is counted here");
 });
 
 test("no fairness verdict, protected class or proxy is rendered", async ({ page }) => {

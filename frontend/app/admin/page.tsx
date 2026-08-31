@@ -249,6 +249,26 @@ function AdminOverviewContent() {
         determination.
       </p>
 
+      {/* WHAT IS COUNTED, said on the page rather than left to be assumed.
+          `reason_distribution.py` reads `decision_events` and filters on that
+          table's own `decision` column, so a denial that carries no model
+          event is not in these figures at all -- and a manual review changes
+          `decisions.outcome` without writing an event. In this database 64
+          denials are on file and 2 are model decision events.
+
+          That is CORRECT for model governance, which is what spec 0003 §1.3
+          asks for: these counts describe a model's output, per version. It is
+          wrong only if a reader takes "adverse-action reasons" to mean every
+          adverse action a person received, which the heading alone invites.
+          Saying so costs one sentence and removes the misreading; adding a
+          second count would be inventing a control nobody asked for. */}
+      <p className="sub" style={{ marginTop: 4 }} data-testid="reason-monitoring-scope">
+        These counts describe decisions recorded by the model, per model
+        version. An adverse action taken without a model decision event — a
+        denial issued on manual review, for example — is not counted here and
+        carries no model reason codes.
+      </p>
+
       {reasonsError ? (
         <div className="alert alert-error" data-testid="reason-monitoring-error">
           {reasonsError}
