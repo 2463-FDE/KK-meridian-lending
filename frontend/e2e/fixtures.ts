@@ -221,12 +221,24 @@ export async function resolveReferAsStaff(
   await page.goto(`/underwriting/${appId}`);
   await expect(page.getByText(/manual-review band/i)).toBeVisible({ timeout: 15_000 });
 
-  const record = page.getByRole("button", { name: /^Record (approval|denial)$/ });
+  // SCOPED TO THE MANUAL-REVIEW CARD. This used to reach for `page.locator(
+  // "textarea")` -- "the only textarea on the page" -- which was true until
+  // RF-25's manual DTI panel put a second one on the same screen, and four
+  // specs then failed on a strict-mode violation while the decision control
+  // they were driving still worked perfectly. The card is found by the sentence
+  // only it carries, so a future panel can add a third textarea without this
+  // reaching for it.
+  const reviewCard = page
+    .locator(".card")
+    .filter({ hasText: /manual-review band/i })
+    .first();
+
+  const record = reviewCard.getByRole("button", { name: /^Record (approval|denial)$/ });
   // A reason is mandatory: the control is disabled until one is typed.
   await expect(record).toBeDisabled();
 
-  await page.locator("select").filter({ hasText: "Approve" }).first().selectOption(outcome);
-  await page.locator("textarea").fill(reason);
+  await reviewCard.locator("select").filter({ hasText: "Approve" }).first().selectOption(outcome);
+  await reviewCard.locator("textarea").fill(reason);
 
   await expect(record).toBeEnabled();
   await record.click();
