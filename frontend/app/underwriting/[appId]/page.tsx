@@ -528,46 +528,69 @@ function UnderwritingDetailContent() {
           </div>
         ) : (
           <div className="card">
-            {/* THE MODEL'S OWN DECISION, and it is deliberately the first line.
-                `decision_events.decision` is append-only and nothing updates
-                it. Everything below -- version, scores, reason codes -- comes
-                from that same row, so this is the outcome those figures
-                actually explain. */}
+            {/* TWO OUTCOMES, ONE OF WHICH A HUMAN CAN CHANGE.
+                `decisions.outcome` is the current persisted result and a manual
+                review updates it. `decision_events.decision` is append-only and
+                nothing rewrites it. Everything below -- version, scores, reason
+                codes -- comes from that event row, so it describes the
+                AUTOMATED decision whatever the final outcome later became.
+
+                The final outcome is read first because it is the question a
+                client asks first. The automated decision sits directly under
+                it, so the pair is read as one fact with two parts rather than
+                as two separate determinations -- an equal pair must not look
+                like two approvals happened. */}
             <div className="spread">
-              <span>Model decision</span>
+              <span>Final application outcome</span>
+              <strong data-testid="evidence-outcome">{evidence.outcome}</strong>
+            </div>
+            <div className="spread">
+              <span>Automated model decision</span>
               <strong data-testid="evidence-model-decision">
                 {evidence.model_decision || "not recorded"}
               </strong>
             </div>
 
-            {/* The current outcome is a DIFFERENT fact, and conflating the two
-                was the defect here. Staff manual review runs `UPDATE decisions
-                SET outcome = ...` and writes no new event, so a model `refer`
-                that an underwriter later approved used to render as "Recorded
-                outcome: approve" beside the model version and reason codes that
-                produced `refer` -- a decision the model never made, attributed
-                to a named model version. Two applications in the seeded
-                database are already in that state. */}
-            <div className="spread">
-              <span>Current outcome</span>
-              <strong data-testid="evidence-outcome">{evidence.outcome}</strong>
-            </div>
             {evidence.model_decision &&
             evidence.model_decision !== evidence.outcome ? (
-              <p className="muted" data-testid="evidence-outcome-differs">
-                The current outcome differs from the model&rsquo;s. It was
-                changed after the model decided — see the decision panel below
-                for who changed it and why. The evidence here describes the
-                model&rsquo;s decision, not theirs.
+              /* They diverge, and that is the case a reader must not miss. The
+                 model's own word is quoted rather than described, so nothing
+                 here can be read as the model having approved when it
+                 referred. */
+              <div className="alert alert-warn" data-testid="evidence-outcome-differs">
+                The final outcome differs from the automated model decision
+                because an authorized manual review changed the application
+                outcome. The model evidence below still describes the original
+                automated decision (
+                <strong data-testid="evidence-differs-model-decision">
+                  {evidence.model_decision}
+                </strong>
+                ) — see the decision panel below for who changed it and why.
+              </div>
+            ) : evidence.model_decision ? (
+              /* Equal. Said once, quietly, so the reader knows the pair agrees
+                 without being invited to count two decisions. */
+              <p className="hint" style={{ margin: "2px 0 8px" }}
+                 data-testid="evidence-outcome-agrees">
+                No manual review has changed this outcome; it is the automated
+                model decision as recorded.
               </p>
             ) : null}
+
             {!evidence.model_decision ? (
               <p className="muted" data-testid="evidence-no-model-record">
-                No model decision event was recorded for this application, so
-                the model evidence below is empty. The outcome above is the
-                decision on file.
+                No automated model decision event was recorded for this
+                application, so the model evidence below is empty. The final
+                outcome above is the decision on file.
               </p>
             ) : null}
+
+            <p className="hint" style={{ margin: "2px 0 10px" }}
+               data-testid="evidence-explainer">
+              The automated model decision records what the scorer originally
+              decided. The final application outcome reflects the current
+              persisted result after any authorized manual review.
+            </p>
 
             <div className="spread">
               <span>Decided at</span>
@@ -730,16 +753,42 @@ function UnderwritingDetailContent() {
               Underwriting decision
             </div>
             {currentDecision ? (
-              <StatusChip status={currentDecision} />
+              <>
+                <StatusChip status={currentDecision} />
+                {/* Named as the SAME fact, not a second one. This chip and the
+                    "Final application outcome" line in Decision evidence are one
+                    outcome shown twice -- once beside the control that can
+                    change it, once beside the evidence that explains it -- and
+                    a reader who counts two determinations has been misled by
+                    the layout. */}
+                <p className="hint" style={{ marginTop: 8 }}
+                   data-testid="decision-same-outcome">
+                  {/* R1-MINOR: "as shown above" pointed at a card that is not
+                      there when the evidence request failed -- the panel above
+                      is an error in that state. The sentence exists to stop a
+                      reader counting two determinations, and it has to do that
+                      whether or not the evidence loaded, so it names its source
+                      instead of a place on the page. */}
+                  {evidenceError
+                    ? "The final application outcome, from the application record."
+                    : "The final application outcome, as shown under Decision evidence above."}
+                </p>
+              </>
             ) : (
               <span className="muted">No decision yet.</span>
             )}
-            {typeof decision?.score === "number" ? (
+            {/* The score, ONLY when the evidence panel could not supply it.
+                Decision evidence reloads after every run and shows the
+                persisted score with its labels and its caveat, so repeating it
+                here is duplication in the ordinary case -- but the evidence
+                request has its own error state, and when it fails this is the
+                only place the figure survives. Duplication removed without
+                losing the number. */}
+            {evidenceError && typeof decision?.score === "number" ? (
               <p className="hint" style={{ marginTop: 10 }}
                  data-testid="decision-model-score">
-                {/* Same relabelling as the evidence panel: one screen must not
-                    call the same number two different things. */}
-                Underwriting model score: {decision.score}
+                Underwriting model score: {decision.score} — shown here because
+                the decision evidence could not be read.
               </p>
             ) : null}
             {decision?.adverse_action_reason ? (
