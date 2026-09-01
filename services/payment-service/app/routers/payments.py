@@ -36,6 +36,29 @@ def get_unreconciled(
     return reconcile.unreconciled_summary()
 
 
+@router.get("/payments/unreconciled/items")
+def get_unreconciled_items(
+    limit: int = reconcile.UNRECONCILED_LIST_LIMIT,
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """Which payments are captured and uncredited, not just how many.
+
+    The summary route above answers "is anything wrong" -- what an alert needs.
+    It cannot answer "whose money", which is what the person the alert wakes
+    needs, and until this route existed the answer required psql.
+
+    Same internal-token gate as everything else here. The gateway additionally
+    requires a staff session before it will proxy this, because a list of
+    borrowers whose payments are in limbo is operational data rather than
+    something a borrower should read about other borrowers.
+
+    Read-only: no retry, no resolve, no refund. `POST /payments/reconcile` is
+    the control that acts, and it already exists.
+    """
+    _require_internal_token(x_internal_token)
+    return reconcile.unreconciled_items(limit)
+
+
 @router.post("/payments/reconcile")
 def post_reconcile(
     x_internal_token: str | None = Header(None, alias="X-Internal-Token"),

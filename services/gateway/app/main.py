@@ -575,6 +575,25 @@ async def payments(path: str, request: Request, authorization: str | None = Head
             return await _proxy(PAYMENT_URL, "/payments", request, user, extra_headers=payment_headers)
         raise HTTPException(status_code=403, detail="forbidden")
 
+    # The operator view of money that was captured and never credited.
+    #
+    # These were reachable only from inside the compose network: the gauges
+    # (`payments_unapplied_count`, `payments_unapplied_exhausted_count`) page
+    # somebody, and the only way for that somebody to find out WHICH borrower
+    # had been charged without their balance moving was psql. An alert nobody
+    # can act on is most of the way to no alert.
+    #
+    # STAFF, not money-movers. `can_move_money` is the gate on charging a card;
+    # this reads a list and moves nothing, so it takes the same staff gate as
+    # the other operational reads -- a CSR fielding the call from the borrower
+    # in that list is exactly who needs it. Never anonymous and never a
+    # borrower: it names other people's payments.
+    if request.method == "GET" and path in ("unreconciled", "unreconciled/items"):
+        if not auth.is_staff(user):
+            raise HTTPException(status_code=403, detail="staff only")
+        return await _proxy(PAYMENT_URL, f"/payments/{path}", request, user,
+                            extra_headers={"X-Internal-Token": INTERNAL_SERVICE_TOKEN})
+
     raise HTTPException(status_code=404, detail="not found")
 
 
