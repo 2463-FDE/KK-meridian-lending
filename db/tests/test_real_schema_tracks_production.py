@@ -94,9 +94,17 @@ def test_dependencies_match_the_references_in_the_file():
     the canonical file actually carries.
     """
     for table, declared in real_schema.DEPENDENCIES.items():
-        body = real_schema.definition_of(table)
+        # COMMENTS STRIPPED, and the table name must be followed by the column
+        # list a real foreign key carries. The first version matched
+        # `REFERENCES\s+(\w+)` anywhere in the definition, and `ledger_entries`
+        # has a comment containing the word "REFERENCES here" -- so the guard
+        # demanded a dependency on a table called `here`. A constraint parser
+        # that reads prose reports defects that do not exist and, worse, would
+        # miss a real FK written in a shape it does not expect.
+        body = re.sub(r"--.*", "", real_schema.definition_of(table))
         referenced = {
-            name for name in re.findall(r"REFERENCES\s+(\w+)", body)
+            name for name in re.findall(r"REFERENCES\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(",
+                                        body)
             if name != table
         }
         missing = referenced - set(declared)
@@ -104,6 +112,22 @@ def test_dependencies_match_the_references_in_the_file():
             "%s REFERENCES %s, which real_schema.DEPENDENCIES does not declare "
             "-- creating it would fail with UndefinedTable"
             % (table, sorted(missing)))
+
+        # BOTH DIRECTIONS. Codex review of PR #159, RF26-DEPS-EXTRA-UNCHECKED:
+        # checking only `referenced - declared` accepts an EXTRA declared parent,
+        # and my own first draft had one -- `loans -> offers`, guessed from the
+        # name, when `loans` has no foreign keys at all in production. An extra
+        # edge is not harmless: every caller asking for `loans` would silently
+        # also get a canonical `offers`, which is exactly what the one harness
+        # that must deviate cannot have. The graph is meant to mirror the file,
+        # so it is compared to the file exactly.
+        extra = set(declared) - referenced
+        assert not extra, (
+            "real_schema.DEPENDENCIES declares %s as a parent of %s and the "
+            "canonical definition does not REFERENCE it. An invented edge drags "
+            "an unrelated table into every caller's schema -- and can force a "
+            "canonical shape on a harness that deliberately deviates."
+            % (sorted(extra), table))
 
 
 def test_resolve_orders_parents_before_children():
