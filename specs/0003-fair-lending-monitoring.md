@@ -417,9 +417,10 @@ synthetic document registry landed. `docs/DEBT.md` RF-25 carries the detail.
 What that does NOT change is anything in this spec. A manual DTI is evidence
 for a human reviewer and reaches no decision, no model input and no adverse
 action, so the monitoring this spec defines counts exactly what it counted
-before. The half of RF-25 still open is the one that would touch this document
-if it ever moved: a free-text manual-review reason naming DTI still reaches
-`adverse_action_reason` with no figures behind it. `adr/0007-underwriting-policy-dti-
+before. What would touch this document if it ever moved is now **RF-29**, split out of
+RF-25 so that a closed row and an open one are not the same row: a free-text
+manual-review reason naming DTI still reaches `adverse_action_reason` with no
+figures behind it. `adr/0007-underwriting-policy-dti-
 fraud-gap.md` (G-DTI, why the system computes no DTI and therefore cannot offer
 it as a reason) is unaffected — the decision authorises a HUMAN to compute a
 ratio from documents, and changes nothing about what the system computes.
