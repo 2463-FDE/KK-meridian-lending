@@ -339,6 +339,176 @@ def test_the_cards_monitoring_claim_matches_what_exists():
             "it -- the card is behind the code")
 
 
+def _decision_tracing_is_suppressed() -> bool:
+    """Whether the decision graph suppresses LangSmith tracing.
+
+    Detected by the IMPORT rather than by the call site. An earlier version
+    looked for the literal `suppressed_tracing()`, and mutating the call to
+    `_st()` made both guards below skip or take the wrong branch -- a guard with
+    a rename-shaped disarm. A module that has stopped suppressing stops
+    importing from `.tracing` at all, which is the thing that actually changes.
+    """
+    graph = (REPO / "services" / "decision-service" / "app"
+             / "graph.py").read_text(encoding="utf-8")
+    return "from .tracing import" in graph
+
+
+def test_the_cards_tracing_claim_matches_what_the_graph_does():
+    """The sentence that was WRONG, pinned in both directions.
+
+    The card said every run of the decision graph "is traced via LangSmith
+    (project `2463-fde`) -- bureau pull and scoring call are each individually
+    visible". That was true of the code when it was written. It is now the
+    opposite of what the code does: `graph.py` runs inside
+    `suppressed_tracing()` and posts nothing, because the graph's state carries
+    the applicant's SSN and roughly 30KB per decision was leaving for a
+    third-party SaaS.
+
+    This is the worst class of defect a model card can carry. It is not a stale
+    number or a moved file -- it told a reader that a per-step trace of every
+    credit decision exists, in the document a regulator reads first. Somebody
+    asked to produce that trace would find nothing, and somebody assessing data
+    flows would record an export that does not happen.
+
+    TWO-WAY, like the reason-code guard above. If the suppression is ever
+    removed, this fails until the card stops describing it -- so the card cannot
+    lag the code in that direction either, which matters more here than usual:
+    unsuppressing is exactly the change that would resume sending SSNs.
+    """
+    card = CARD.read_text(encoding="utf-8")
+
+    suppressed = _decision_tracing_is_suppressed()
+    claims_suppressed = "suppressed_tracing" in card
+    claims_traced = re.search(
+        r"[Ee]very run of the decision graph[^.]{0,120}is traced", card)
+
+    if suppressed:
+        assert claims_suppressed, (
+            "the decision graph runs inside suppressed_tracing() and the model "
+            "card does not say so. A governance artefact that omits a control "
+            "is describing a different system")
+        assert not claims_traced, (
+            "the model card still claims every run of the decision graph is "
+            "traced to LangSmith while graph.py suppresses exactly that. A "
+            "reader asked to produce the trace would find nothing")
+    else:
+        assert not claims_suppressed, (
+            "the card describes tracing suppression that graph.py no longer "
+            "applies -- and unsuppressing is the change that resumes sending "
+            "the applicant SSN in the graph state to a third party")
+
+
+#: Where a claim about the DECISION path being traced can live. Deliberately
+#: includes service source, because a docstring is read by the next engineer and
+#: a roadmap row by the next auditor, and both were wrong in the same way.
+_TRACING_CLAIM_FILES = (
+    REPO / "docs" / "model_card.md",
+    REPO / "docs" / "ROADMAP.md",
+    REPO / "services" / "decision-service" / "app" / "graph.py",
+    REPO / "services" / "decision-service" / "app" / "decision.py",
+)
+
+#: One or more blank lines. Built with `chr(10)` so the pattern survives being
+#: written through tooling that mangles backslash escapes.
+_BLANK_LINE = re.compile(chr(10) + r"\s*" + chr(10))
+
+
+def _paragraphs(text: str) -> list:
+    """Blank-line-separated blocks, which is a paragraph in Markdown and in a
+    docstring alike. A Markdown table row is one line and therefore one
+    paragraph, which is what makes a row's claim and its qualification count as
+    being in the same place."""
+    # Whitespace-normalised, because prose WRAPS: a phrase split across a line
+    # break is the same claim, and the first version of
+    # this guard matched neither -- a mutation that put the unqualified claim
+    # back into a wrapped docstring passed, because the phrase happened to
+    # straddle a line break.
+    blocks = []
+    for block in re.split(_BLANK_LINE, text):
+        if not block.strip():
+            continue
+        # A MARKDOWN TABLE ROW IS SPLIT BY CELL, not kept whole. These rows run
+        # to thousands of characters, and treating one as a single paragraph let
+        # a claim in the evidence column be "qualified" by an unrelated word in
+        # the caveat column three thousand characters away. Measured: restoring
+        # `docs/ROADMAP.md` to its pre-fix wording PASSED this guard, because
+        # the row happened to contain "deliberately" somewhere else in it.
+        if block.lstrip().startswith("|"):
+            blocks.extend(cell for cell in block.split("|") if cell.strip())
+        else:
+            blocks.append(block)
+    return [" ".join(b.split()) for b in blocks]
+
+
+#: Phrasings that assert the decision path is observable in LangSmith.
+_TRACING_CLAIM = re.compile(
+    r"individually traceable"
+    r"|is traced via LangSmith"
+    r"|per-step LangSmith"
+    r"|tracing comes for free",
+    re.IGNORECASE)
+
+#: What turns an assertion into a retraction, IN THE SAME PARAGRAPH.
+#:
+#: Scoped to the paragraph rather than the file, and that is the whole
+#: mechanism. A file-wide check passed a mutation that put the unqualified claim
+#: back into `graph.py`'s module docstring, because the file still contained the
+#: token `suppressed_tracing` further down in an import -- the identifier being
+#: present is not the same as a reader being told.
+_RETRACTION = re.compile(
+    r"suppress"
+    r"|used to"
+    r"|no longer"
+    r"|deliberately"
+    r"|switched off"
+    r"|posts nothing"
+    r"|is now the opposite"
+    # Added after the cell-split tightening flagged a CORRECT sentence: the
+    # roadmap's caveat column says per-step LangSmith visibility of a decision
+    # "is not available and is not intended to be", which retracts the claim
+    # without using any of the words above. A guard that fires on accurate text
+    # gets edited away, so the vocabulary has to cover how the retraction is
+    # actually written rather than how I first imagined writing it.
+    r"|not available"
+    r"|not intended",
+    re.IGNORECASE)
+
+
+def test_no_file_claims_the_decision_path_is_traced_without_saying_it_is_not():
+    """The scope gap that let three sites through, closed as a rule.
+
+    The first version of this correction swept `docs/`, `README.md`, `adr/` and
+    `specs/` -- and missed `graph.py`'s module docstring, `decide()`'s docstring
+    and a second ROADMAP row, all of which still told a reader that each
+    decision step is individually traceable in LangSmith. A sweep is a thing
+    somebody did once; this is the thing that keeps being true.
+
+    IT DOES NOT BAN THE PHRASE, which is the point. Every corrected passage here
+    QUOTES the retired claim in order to retract it -- "this said 'now
+    individually traceable', which described LangSmith visibility that
+    app/tracing.py deliberately suppresses" -- and a guard that banned the words
+    would force the history out of the files and leave a reader wondering why
+    the correction was made. What it requires is that any file making such a
+    claim also names the suppression, so an assertion cannot stand alone.
+    """
+    if not _decision_tracing_is_suppressed():               # pragma: no cover
+        pytest.skip("the decision graph no longer suppresses tracing")
+
+    offenders = []
+    for path in _TRACING_CLAIM_FILES:
+        for para in _paragraphs(path.read_text(encoding="utf-8")):
+            if _TRACING_CLAIM.search(para) and not _RETRACTION.search(para):
+                offenders.append(
+                    "%s: %s" % (path.relative_to(REPO).as_posix(),
+                                " ".join(para.split())[:110]))
+
+    assert offenders == [], (
+        "these files tell a reader the decision path is traced in LangSmith and "
+        "never mention that it is suppressed: %s. The graph posts nothing -- its "
+        "state carries the applicant SSN -- so an unqualified claim here sends "
+        "somebody looking for a trace that does not exist." % offenders)
+
+
 def test_the_card_names_an_owner_and_an_update_trigger():
     """Scoped to the ownership section, with no whole-document fallback.
 

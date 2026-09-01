@@ -5,10 +5,17 @@ plain function body. This builds the exact same three steps as an explicit graph
 instead: each node calls the same functions decide() always called (_pull_credit,
 _run_model), so behavior, every fail-closed exception, and the existing test suite
 (which monkeypatches decision.httpx/decision.EXPERIAN_KEY etc.) are unchanged. What
-the graph buys over the plain function body: each step is now individually
-traceable in LangSmith, and each has an explicit node boundary to extend later
-(e.g. a retry policy on just the bureau-pull node) instead of editing inline
-function code.
+the graph buys over the plain function body: each step has an explicit node
+boundary to extend later (e.g. a retry policy on just the bureau-pull node)
+instead of editing inline function code.
+
+This paragraph used to end "each step is now individually traceable in
+LangSmith", which was true when it was written and is now the opposite of what
+this module does. `_decide_via_graph` runs the graph inside
+`suppressed_tracing()` (see `app/tracing.py`) and posts NOTHING, because the
+graph's state carries the applicant's SSN and roughly 30KB per decision was
+leaving for a third-party SaaS. The node boundaries are real; the LangSmith
+visibility of a decision is deliberately not.
 
 PR #6 review (Finding 2): the third node used to persist decision_events directly
 (via decision.db.transaction) -- it is now compute-only, same as the rest of this

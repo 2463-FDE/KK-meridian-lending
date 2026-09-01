@@ -391,7 +391,10 @@ async def decide(application: dict) -> dict:
 
     Week 3: the pull-credit / score / finalize steps are an explicit
     LangGraph graph (app/graph.py) instead of inline code here -- same
-    three calls, same fail-closed exceptions, now individually traceable.
+    three calls, same fail-closed exceptions, with an explicit node boundary
+    each. This said "now individually traceable", which described LangSmith
+    visibility that `app/tracing.py` deliberately suppresses: the graph state
+    carries the applicant's SSN, so the decision path posts nothing.
     Deferred import: graph.py imports this module at its own load time, so
     importing it up top would be circular; by the time decide() is
     actually called, this module has finished loading and the import below
