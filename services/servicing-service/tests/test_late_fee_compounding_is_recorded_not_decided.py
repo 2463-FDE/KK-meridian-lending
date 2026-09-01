@@ -12,11 +12,14 @@ INTEREST for THAT installment)`, with previous late fees and all other fees
 excluded from the base.
 
 **These tests still pass, and that is correct, because the BEHAVIOUR has not
-changed.** The decided rule needs installment-level facts this schema does not
-hold -- nothing records which installment a payment satisfied, or which
-installment a fee belongs to -- so it cannot be implemented without a
-data-model expansion, and it will not be approximated from `past_due`. D23
-carries the traced gate and the missing primitive.
+changed.** PR #143 landed fee-installment identity and the database guarantee
+that one cited installment can receive at most one fee. The money path does not
+use that primitive: nothing records which installment a payment satisfied, so
+unpaid scheduled P&I after a payment cannot be derived without choosing an
+allocation order. The exact grace-period boundary and that allocation order are
+not present in the current authority artifacts. Until both are supplied, the
+runtime remains on `past_due` rather than approximating the decided rule. D23
+separates the landed primitive from that uncut runtime path.
 
 So what these are has shifted, and saying so is the point. They were
 characterization tests of an UNDECIDED rule; they are now characterization tests

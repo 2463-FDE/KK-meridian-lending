@@ -48,7 +48,8 @@ notice must be sent stating the **specific principal reason(s)**. Timing:
 
 ## Debt-to-income (DTI) — defined, not currently applied
 
-> **Manual DTI in a referred review — decided 2026-08-29, not built.** Staff may
+> **Manual DTI in a referred review — decided 2026-08-29 and built
+> 2026-08-31.** Staff may
 > apply DTI manually, but only on a **referred** application, only as an
 > **underwriter or admin**, and only from **approved synthetic source
 > documents**. It is **human-review evidence and must not approve, deny,

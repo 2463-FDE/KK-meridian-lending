@@ -291,16 +291,18 @@ def test_d23_names_both_client_blockers_and_neither_is_invented():
 #: Codex review of PR #157 called this out as the actual defect: the first sweep
 #: matched on wording, so each round of review found another site -- the
 #: function docstring, then `policies/fee_schedule.md`, then the module
-#: docstring and the client handoff deck. Four sites of one claim, discovered one
-#: at a time, because the search was for a sentence rather than for the places
-#: that can carry it.
+#: docstring and the client handoff deck, then the servicing tests a cutover
+#: engineer reads first. Sites of one claim were discovered one at a time
+#: because the search was for a sentence rather than for the places that can
+#: carry it.
 #:
 #: Globs, so a new document or a new module cannot join the set silently.
 def _d23_read_paths():
     seen = []
     for pattern in ("docs/*.md", "docs/presentations/*.md", "policies/*.md",
                     "services/servicing-service/app/delinquency.py",
-                    "services/servicing-service/app/installments.py"):
+                    "services/servicing-service/app/installments.py",
+                    "services/servicing-service/tests/test_late_fee*.py"):
         seen.extend(sorted(REPO.glob(pattern)))
     return seen
 
@@ -309,10 +311,11 @@ def test_no_read_path_denies_the_installment_primitive():
     """The set, not the sentence.
 
     Any file that describes D23 -- register, roadmap, policy corpus, client deck,
-    or the modules themselves -- may quote the retired claim in order to retract
-    it, and may not assert it. `policies/fee_schedule.md` is served to Policy
-    Chat and the handoff deck is client-facing, so these are not documentation
-    hygiene: they are answers given to people.
+    the modules themselves, or the late-fee tests a cutover engineer reads --
+    may quote the retired claim in order to retract it, and may not assert it.
+    `policies/fee_schedule.md` is served to Policy Chat and the handoff deck is
+    client-facing, so these are not documentation hygiene: they are answers
+    given to people.
     """
     if not _primitive_exists():                            # pragma: no cover
         pytest.skip("the installment primitive is genuinely absent")
@@ -338,7 +341,8 @@ def test_the_read_path_set_is_not_empty_or_trivially_small():
     paths = _d23_read_paths()
     assert len(paths) >= 8, [p.name for p in paths]
     names = {p.name for p in paths}
-    for required in ("DEBT.md", "fee_schedule.md", "delinquency.py"):
+    for required in ("DEBT.md", "fee_schedule.md", "delinquency.py",
+                     "test_late_fee_compounding_is_recorded_not_decided.py"):
         assert required in names, (required, sorted(names))
 
 

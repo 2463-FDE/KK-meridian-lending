@@ -457,9 +457,12 @@ def test_two_concurrent_assessments_agree_with_running_them_one_after_another(
 
     The property under test is therefore NOT "no double fee". That question is
     now answered -- since 2026-08-29 the rule is one fee per missed scheduled
-    installment (`docs/DEBT.md` D23) -- but it is not implemented, because
-    nothing records which installment a fee belongs to. So this test still
-    pins what the code does rather than what the policy says, deliberately.
+    installment (`docs/DEBT.md` D23). PR #143 records a fee's installment and
+    enforces one cited fee per installment in the database, but this runtime
+    path does not cite one. Payment-to-installment attribution, its allocation
+    order and the exact grace-period boundary remain unavailable, so this test
+    still pins what the code does rather than what the policy says,
+    deliberately.
     What it asserts is that the two ORDERINGS AGREE: run concurrently, the total
     must match running them back to back.
 
