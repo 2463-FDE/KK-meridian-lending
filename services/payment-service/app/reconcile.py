@@ -101,6 +101,77 @@ def reconcile_once(limit: int = 20) -> dict:
             "still_pending": len(claimed) - applied}
 
 
+#: How many rows a single listing returns. A cap rather than a page size,
+#: because this is an incident tool: if there are more than this many payments
+#: captured and uncredited, the number is the emergency and the list is not what
+#: anybody should be reading first. `unreconciled_summary()` still reports the
+#: true total, so a truncated listing can never be mistaken for the whole of it.
+UNRECONCILED_LIST_LIMIT = 200
+
+
+def unreconciled_items(limit: int = UNRECONCILED_LIST_LIMIT) -> dict:
+    """WHICH payments are captured and uncredited -- not just how many.
+
+    `unreconciled_summary()` answers "is anything wrong", which is what an alert
+    needs. It cannot answer "whose money", which is what the person the alert
+    wakes needs: a borrower has been charged and their balance has not moved,
+    and the only way to find out which borrower was to open psql. The gauge that
+    pages someone and the query that tells them what to do about it should not
+    be in different rooms.
+
+    WHAT IS DELIBERATELY NOT HERE. No cardholder name, no `last4`, no
+    `processor_token`, no `authorization_id`. None of it is needed to identify
+    the affected payment or to act on it -- `payment_id` and `loan_id` are --
+    and this response reaches a browser, so every field it does not carry is a
+    field that cannot leak from there. `test_pan_cvv_never_enter_the_payment_path`
+    holds the same line at the other end of the flow.
+
+    OLDEST FIRST. The row that has been in limbo longest is the borrower most
+    likely to have already called, and ordering by age puts them at the top
+    rather than leaving the reader to sort a screen.
+
+    READ-ONLY. This lists; it does not retry, resolve, refund or reverse
+    anything. Retrying is what the drain does and `POST /payments/reconcile`
+    already triggers a pass by hand; there is no refund capability anywhere in
+    this system, and adding a control here would be inventing one.
+    """
+    limit = max(1, min(int(limit), UNRECONCILED_LIST_LIMIT))
+    rows = db.query(
+        "SELECT id, loan_id, amount, created_at, apply_attempts, "
+        "       apply_next_attempt_at, correlation_id "
+        "  FROM payments "
+        " WHERE auth_status = 'captured' AND applied_at IS NULL "
+        " ORDER BY created_at ASC, id ASC "
+        " LIMIT %s",
+        (limit,),
+    )
+    items = [
+        {
+            "payment_id": r["id"],
+            "loan_id": r["loan_id"],
+            "amount": float(r["amount"]),
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "apply_attempts": r["apply_attempts"],
+            # The distinction that decides what a human does next: a row still
+            # being retried needs patience, a row that has stopped being retried
+            # needs a person.
+            "exhausted": r["apply_attempts"] >= RECONCILE_MAX_ATTEMPTS,
+            "next_attempt_at": (r["apply_next_attempt_at"].isoformat()
+                                if r["apply_next_attempt_at"] else None),
+            "correlation_id": r["correlation_id"],
+        }
+        for r in rows
+    ]
+    summary = unreconciled_summary()
+    return {
+        # Both, in one response, so a truncated list cannot be read as the total.
+        "total": summary["pending"],
+        "returned": len(items),
+        "truncated": summary["pending"] > len(items),
+        "items": items,
+    }
+
+
 def unreconciled_summary() -> dict:
     """What an operator (or an alert) needs to see: how much money is captured
     and not credited, how old the oldest one is, and how many have exhausted
