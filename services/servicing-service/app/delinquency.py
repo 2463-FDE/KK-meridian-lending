@@ -19,14 +19,27 @@ module does instead is price off `balances.past_due` -- one projected total
 mixing principal, interest and every fee already assessed -- and it applies no
 per-installment cap at all.
 
-That gap is deliberate and it is not a TODO. The decided rule needs facts this
-schema does not hold: nothing records which installment a payment satisfied
-(`payment_applications` stores one total per payment, `ledger_entries` a delta
-per component, neither with a period), and nothing records which installment a
-fee belongs to. Deriving "unpaid scheduled P&I for installment N" would mean
-inventing an allocation order across installments and writing it down as though
-it had been observed. D23 states the missing primitive, the smallest addition
-that would close it, and why no backfill could be truthful.
+That gap is deliberate and it is not a TODO -- but half of the reason it used to
+give has expired, and the half that remains is not an engineering one.
+
+This paragraph said the decided rule needs facts the schema does not hold,
+including that nothing records which installment a fee belongs to. Since PR
+#143 the schema DOES: `ledger_entries.installment_no`, a partial unique index
+that refuses a second `fee_assessed` for the same installment, a trigger that
+refuses an installment outside the loan's own schedule, and
+`late_fee_for_installment()` below implementing the decided arithmetic.
+
+What is still missing is one fact and two answers. The fact: nothing records
+which installment a PAYMENT satisfied -- `payment_applications` stores one total
+per payment and `ledger_entries` a delta per component, neither with a period.
+The answers, neither of which this repository holds: the exact grace period
+(recorded nowhere, which is why `installments.overdue_installments()` takes
+`grace_days` as a required argument with no default) and the order in which a
+payment settles overdue installments (`adr/0010` puts D14's allocation order
+deliberately out of scope). Deriving "unpaid scheduled P&I for installment N"
+without the second would mean inventing an allocation order and writing it down
+as though it had been observed, which is why `installments.unpaid_scheduled_pi()`
+raises instead. D23 records what is built and what is waiting.
 
 So a reader should not take the comparison below for current policy. It is the
 older published rule, still faithfully implemented, and knowingly superseded.

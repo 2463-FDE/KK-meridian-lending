@@ -125,7 +125,12 @@ def _clauses(row: str) -> list:
 #: claim about what is true now.
 _HISTORICAL = re.compile(
     r"previously read|used to|stopped being true|no longer true"
-    r"|was true when|this column previously|had been false|before #143",
+    r"|was true when|this column previously|had been false|before #143"
+    # Prose retracts itself in more than one voice: a register row says "this
+    # column previously read", a module docstring says "this paragraph said",
+    # and the client deck says "when this deck was written".
+    r"|paragraph said|this paragraph|row said|when this deck was written"
+    r"|since #143|has expired|since pr #143",
     re.IGNORECASE)
 
 
@@ -133,10 +138,25 @@ _HISTORICAL = re.compile(
 #: row actually made before #143, kept as a pattern rather than a literal so a
 #: reworded version of the same falsehood is caught too.
 _DENIES_THE_PRIMITIVE = (
-    re.compile(r"nothing records which installment", re.I),
+    # Scoped to the FEE claim. "nothing records which installment a PAYMENT
+    # satisfied" is still true -- payment-to-installment attribution is the half
+    # that did not land in #143 -- and a guard that forced that sentence out
+    # would be trading one false statement for another.
+    re.compile(r"nothing records which installment a fee", re.I),
     re.compile(r"no `?installment[_ ]?(no|number)?`?[^.]{0,40}column exists", re.I),
     re.compile(r"IMPLEMENTATION REQUIRES DATA-MODEL EXPANSION", re.I),
     re.compile(r"installment.{0,30}NOT REPRESENTED", re.I),
+    # PARAPHRASES, added after the guard passed on a reverted client deck.
+    # The deck never used the register's wording -- it said the decided rule
+    # "needs installment-level facts this system does not persist" and that
+    # nothing records "which installment a fee belongs to" at the far end of a
+    # long sentence. Both are the same claim, and matching only the register's
+    # phrasing is how four sites of one falsehood were found one at a time.
+    re.compile(r"installment[- ]level facts[^.]{0,60}not persist", re.I),
+    re.compile(r"(nothing|does not) record[s]?[^.]{0,80}installment a fee "
+               r"belongs to", re.I),
+    re.compile(r"the (exact )?missing primitive|smallest (data-model )?addition",
+               re.I),
 )
 
 
@@ -264,6 +284,62 @@ def test_d23_names_both_client_blockers_and_neither_is_invented():
                      installments, re.S), (
         "overdue_installments no longer takes grace_days as a required "
         "argument. A default here would be a grace period nobody decided")
+
+
+#: EVERY place D23 is described, enumerated as a SET rather than as filenames.
+#:
+#: Codex review of PR #157 called this out as the actual defect: the first sweep
+#: matched on wording, so each round of review found another site -- the
+#: function docstring, then `policies/fee_schedule.md`, then the module
+#: docstring and the client handoff deck. Four sites of one claim, discovered one
+#: at a time, because the search was for a sentence rather than for the places
+#: that can carry it.
+#:
+#: Globs, so a new document or a new module cannot join the set silently.
+def _d23_read_paths():
+    seen = []
+    for pattern in ("docs/*.md", "docs/presentations/*.md", "policies/*.md",
+                    "services/servicing-service/app/delinquency.py",
+                    "services/servicing-service/app/installments.py"):
+        seen.extend(sorted(REPO.glob(pattern)))
+    return seen
+
+
+def test_no_read_path_denies_the_installment_primitive():
+    """The set, not the sentence.
+
+    Any file that describes D23 -- register, roadmap, policy corpus, client deck,
+    or the modules themselves -- may quote the retired claim in order to retract
+    it, and may not assert it. `policies/fee_schedule.md` is served to Policy
+    Chat and the handoff deck is client-facing, so these are not documentation
+    hygiene: they are answers given to people.
+    """
+    if not _primitive_exists():                            # pragma: no cover
+        pytest.skip("the installment primitive is genuinely absent")
+
+    offenders = []
+    for path in _d23_read_paths():
+        text = " ".join(path.read_text(encoding="utf-8", errors="ignore").split())
+        for clause in _clauses(text):
+            if _HISTORICAL.search(clause):
+                continue
+            for pattern in _DENIES_THE_PRIMITIVE:
+                if pattern.search(clause):
+                    offenders.append(
+                        "%s: %s" % (path.relative_to(REPO).as_posix(),
+                                    clause[:100]))
+    assert offenders == [], (
+        "these read paths still assert that the installment primitive does not "
+        "exist: " + "; ".join(offenders))
+
+
+def test_the_read_path_set_is_not_empty_or_trivially_small():
+    """A glob that stopped matching would make the sweep above vacuous."""
+    paths = _d23_read_paths()
+    assert len(paths) >= 8, [p.name for p in paths]
+    names = {p.name for p in paths}
+    for required in ("DEBT.md", "fee_schedule.md", "delinquency.py"):
+        assert required in names, (required, sorted(names))
 
 
 def test_the_policy_file_does_not_deny_the_primitive_either():
