@@ -114,8 +114,8 @@ status column says what is true instead.
 | **SEC-05** | No Content-Security-Policy and no security response headers (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`). `next.config.mjs` sets `reactStrictMode` and `output: standalone` only. | **DEPLOYMENT HARDENING / OPEN / NEEDS RUNTIME VERIFICATION.** Deliberately not added blind: a CSP that breaks the app during demo week is worse than none, and the Google-Fonts plus inline-style surface needs measuring before a policy is written. | A measured CSP, added with a browser regression test | `frontend/next.config.mjs` |
 | **SEC-06** | No `USER` directive in any of the nine Dockerfiles and no `user:` override in compose, so containers run as the base image's default user — root for `python:3.12-slim` and `node:20-alpine`. | **DEPLOYMENT HARDENING / OPEN.** Verified per file rather than asserted: all nine were checked individually and none declares a `USER`; `docker-compose.yml` contains zero `user:` keys. | A non-root runtime user per image, with file ownership adjusted | every `services/*/Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml` |
 | **SEC-07** | Postgres is published to the host on `5432`. | **LOCAL DEVELOPMENT EXPOSURE / INTENDED.** The browser E2E suite and `db/tests` both connect from the host, so the training setup requires it. Not a production posture and not claimed as one. | No host publication in a deployed environment | `docker-compose.yml:11` |
-| **SEC-08** | Redis is published to the host on `6379`. | **LOCAL DEVELOPMENT EXPOSURE / NEEDS RUNTIME VERIFICATION.** Unlike Postgres, nothing in the suites needs this — it appears to be convenience. Narrowing it is small and safe, and is a candidate for a later PR rather than a demo-week one. | No host publication in a deployed environment | `docker-compose.yml:24` |
-| **SEC-09** | Redis has no authentication: `REDIS_URL=redis://redis:6379/0` with no password, and no `requirepass` anywhere in compose or `.env.example`. | **DEPLOYMENT HARDENING / OPEN / NEEDS RUNTIME VERIFICATION.** It holds every live session, so on a shared network it is the store that matters most. Local-only today, and combined with SEC-08 it is reachable from the host. | `requirepass` plus a credential, or network isolation | `.env.example:11`, `docker-compose.yml` |
+| **SEC-08** | Redis is published to the host on `6379`. | **FIXED 2026-08-31 (PR #148) — AND VERIFIED BY RUNNING THE STACK, not by reading the file that changed.** The publication is gone entirely rather than narrowed to loopback: the row's own premise — nothing on the host connects to it — was checked before removing it, and a repository-wide search for `localhost:6379` still returns nothing outside the guard that forbids it. With the stack up, `docker compose ps` reports `redis 6379/tcp` with no host binding, a socket probe of `127.0.0.1:6379` is refused exactly as a port nothing has ever listened on is, and services still reach it in-network (`redis-cli PING` → `PONG`, and the gateway's own `redis://redis:6379/0` → `True`). Postgres kept a publication because `db/tests`, the browser suite and CI's e2e job all connect from the host — narrowed to `127.0.0.1` rather than every interface. `db/tests/test_local_topology_does_not_publish_more_than_it_needs.py` holds both rules through one function, so the base file and the e2e overlay cannot drift apart. | Done | `docker-compose.yml`, `db/tests/test_local_topology_does_not_publish_more_than_it_needs.py` |
+| **SEC-09** | Redis has no authentication: `REDIS_URL=redis://redis:6379/0` with no password, and no `requirepass` anywhere in compose or `.env.example`. | **STILL OPEN — but the sentence that made it urgent is no longer true, and saying so is the point.** This row read "combined with SEC-08 it is reachable from the host". Since PR #148 it is not: Redis has no host publication at all, verified with the stack up (see SEC-08). The store remains unauthenticated, and that is unchanged — anything inside the compose network can read every live session — so the row stays open on its own merits rather than on a compounding claim that has expired. The marker comes off because the reachability question was answered by running the stack; whether `requirepass` is configured is answered by reading, and the answer is no. | `requirepass` plus a credential, or network isolation | `.env.example:11`, `docker-compose.yml` |
 | **SEC-10** | No TLS anywhere: inter-service traffic and the gateway itself are plain HTTP. | **DEPLOYMENT HARDENING / NON-TRAINING REQUIREMENT.** Recorded, not treated as an incident — local Compose over HTTP is ordinary and no training brief asks for TLS. It matters where a deployment exists, since the bearer token would otherwise travel in clear. | TLS termination and an internal transport policy at deployment | `docker-compose.yml` |
 | **SEC-11** | Dependency audits run in CI but are **non-blocking**, and the findings have never been triaged — the step's own name says "first run, findings not yet triaged". Run 2026-08-26: frontend `npm audit --omit=dev` reports **4 (1 critical, 3 high)** — `next` 15.1.3 (dev-server information exposure; cache-poisoning DoS; fix `next@15.5.24`), `postcss` (XSS via unescaped `</style>`; file read via `sourceMappingURL`), `sharp` (inherited libvips CVEs), `nanoid` (unbounded loop). CI's `pip-audit` reports **13 findings across 2 packages** for the gateway: `cryptography` 48.0.0 (4) and `starlette` 0.41.3 (7 or more). | **OPEN ENGINEERING GAP — TRIAGE, NOT YET REMEDIATION.** A CVE in a dependency is not a demonstrated path through this application, and none of these has been traced to one. Deliberately not upgraded: a Next minor bump plus a `cryptography` bump in demo week is exactly the change that breaks a demo. `cryptography` is called out because it verifies the Ed25519 principal on the money path — the one dependency where a flaw would touch a control rather than a page. | Triage each finding against actual reachability, then a planned upgrade with the suites green; and a decision on whether CI should block | `.github/workflows/ci.yml:326`, `:340` |
 | **SEC-12** | Rate limiting is a per-IP fixed-window counter (`ratelimit:{ip}:{epoch//window}`) and it **fails open**: any Redis error is caught and the request proceeds. | **TRAINING-SCOPE ACCEPTED LIMITATION / NEEDS RUNTIME VERIFICATION**, with the trade-off recorded rather than left to be discovered. Fail-open is deliberate and commented ("Redis hiccup must not block all traffic"), which is a defensible availability choice — but a Redis outage silently disables the control, and a fixed window admits a double burst at the boundary. Shared-NAT clients share a bucket. | A decision on fail-open versus fail-closed for this control, and a sliding window or token bucket if abuse is in scope | `services/gateway/app/rate_limit.py:35`, `:43` |
@@ -135,15 +135,14 @@ first route, so the second is dead. Redundant, harmless, left alone.
 
 **What NEEDS RUNTIME VERIFICATION means here.** This pass was static plus
 in-process, and the marker is on the rows where that is load-bearing rather than
-across the section as a whole — seven of the seventeen: **SEC-02** (logout
+across the section as a whole — five of the seventeen: **SEC-02** (logout
 invalidating server-side across a real session), **SEC-03** (cross-origin
 behaviour in a browser), **SEC-05** (response headers as actually served, not as
-configured), **SEC-08** and **SEC-09** (reachability from the host with the stack
-up), **SEC-12** (fail-open under an actual Redis outage rather than by reading
-the `except`), **SEC-13** (what an upstream body contains when a real one is not
-JSON).
+configured), **SEC-12** (fail-open under an actual Redis outage rather than by
+reading the `except`), **SEC-13** (what an upstream body contains when a real one
+is not JSON).
 
-The other ten are not marked, for two different reasons. Eight are settled by
+The other twelve are not marked, for two different reasons. Eight are settled by
 reading the repository, and running it a second time would not change the answer: `sha256`
 password hashing (**SEC-01**), the `localStorage` token and the absence of any
 injection sink (**SEC-04**), the missing `USER` directive in all nine Dockerfiles
@@ -151,8 +150,13 @@ injection sink (**SEC-04**), the missing `USER` directive in all nine Dockerfile
 (**SEC-07**), plain HTTP throughout (**SEC-10**), the audit counts (**SEC-11**),
 the unscreened corpus path (**SEC-14**) and the log file's history (**SEC-15**).
 
-The remaining two are unmarked for the opposite reason, and the first of them is
-the point of having the marker at all. **SEC-16** carried it because its
+The remaining four are unmarked for the opposite reason, and the first of them is
+the point of having the marker at all. **SEC-08** and **SEC-09** are the newest
+instances: both carried the marker because the question was reachability from the
+host, and that question was answered on 2026-08-31 by bringing the stack up —
+`docker compose ps`, a socket probe and an in-network `PING` — rather than by
+reading the compose file that changed. SEC-08 is fixed; SEC-09 stays open on the
+half a run cannot settle, which is that no password is configured. **SEC-16** carried it because its
 conclusion depended on running the stack; the stack was run on 2026-08-27, the
 boundary turned out to be wider than the row had claimed, and the control is now
 implemented and re-verified — so the row states a measured result instead of a
