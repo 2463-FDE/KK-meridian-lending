@@ -214,6 +214,26 @@ def _upstream_name(base: str) -> str:
     return "upstream"
 
 
+def _reject_non_finite(constant: str):
+    """Refuse `NaN`, `Infinity` and `-Infinity` at the PARSE step.
+
+    Codex review of PR #158, GW-NONFINITE-UPSTREAM. `json.loads` accepts those
+    three by default -- they are not JSON, but Python's decoder takes them -- so
+    a body of `{"amount": NaN}` parsed successfully, satisfied the object check,
+    and then blew up in `JSONResponse`, which serialises with `allow_nan=False`.
+    That raise happened OUTSIDE the guarded block, so the request became an
+    unhandled 500 rather than the fixed refusal, on every one of the nineteen
+    proxied routes. Reproduced before fixing.
+
+    Handling it here rather than by widening the `try` is deliberate: a body
+    carrying a non-finite number is unreadable in exactly the sense this
+    function means -- nothing downstream can represent it -- so it belongs in
+    the same branch as malformed JSON, not in a second one that happens to
+    produce a similar answer.
+    """
+    raise ValueError("upstream JSON carried the non-finite constant %r" % constant)
+
+
 def _json_or_refuse(base: str, path: str, resp) -> Response:
     """The upstream body, or a refusal -- never the body verbatim.
 
@@ -252,7 +272,8 @@ def _json_or_refuse(base: str, path: str, resp) -> Response:
         return Response(status_code=resp.status_code)
 
     try:
-        payload = json.loads(resp.content.decode("utf-8"))
+        payload = json.loads(resp.content.decode("utf-8"),
+                             parse_constant=_reject_non_finite)
         if not isinstance(payload, (dict, list)):
             raise ValueError("upstream JSON was not an object or array")
     except Exception as exc:                          # noqa: BLE001 -- see below

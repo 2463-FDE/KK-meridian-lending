@@ -153,6 +153,13 @@ _LEAKY_BODIES = [
     ("empty body", b"", "application/json"),
     ("bare json scalar", b'42', "text/plain"),
     ("bare json string", b'"an internal message"', "text/plain"),
+    # `json.loads` accepts these three even though JSON does not have them, so
+    # they parsed cleanly and then raised inside `JSONResponse` -- outside the
+    # guarded block, as an unhandled 500. Codex GW-NONFINITE-UPSTREAM.
+    ("nan", b'{"amount": NaN}', "application/json"),
+    ("infinity", b'{"amount": Infinity}', "application/json"),
+    ("negative infinity", b'{"amount": -Infinity}', "application/json"),
+    ("nan nested in a list", b'[{"amount": NaN}]', "application/json"),
 ]
 
 
@@ -172,7 +179,8 @@ def test_an_unreadable_body_is_never_reflected(client, upstream, label, body,
     # in a key as easily as in a value.
     for fragment in ("nginx", "origination-service", "servicing-service",
                      "Traceback", "RuntimeError", "DATABASE_URL", "postgresql",
-                     "unterminated", "an internal message", "42"):
+                     "unterminated", "an internal message", "42",
+                     "NaN", "Infinity"):
         assert fragment not in rendered, (
             f"{fragment!r} from an upstream {label} reached the caller")
 
