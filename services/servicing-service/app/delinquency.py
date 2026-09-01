@@ -261,10 +261,27 @@ def assess_late_fee(loan_id: int) -> float:
     That question is now DECIDED and this function does not implement the
     answer. Since 2026-08-29 the rule is one fee per missed scheduled
     installment, priced off that installment's unpaid scheduled principal and
-    interest (`policies/fee_schedule.md`, `docs/DEBT.md` D23). Enforcing it
-    needs a fact this schema does not hold -- which installment a fee belongs to
-    -- so the guard cannot be written here yet, and the older published
-    comparison is what runs. Not invented, not approximated from `past_due`.
+    interest (`policies/fee_schedule.md`, `docs/DEBT.md` D23).
+
+    This paragraph used to continue "enforcing it needs a fact this schema does
+    not hold -- which installment a fee belongs to". THAT IS NO LONGER TRUE.
+    PR #143 added `ledger_entries.installment_no`, a partial unique index that
+    refuses a second `fee_assessed` for the same installment, a trigger that
+    refuses an installment outside the loan's schedule, and
+    `late_fee_for_installment()` implementing the decided arithmetic. The
+    primitive exists; this function still does not use it.
+
+    What blocks the cutover is no longer the data model. It is two answers
+    nobody in this repository holds: the exact grace period (no grace period is
+    recorded anywhere -- `overdue_installments()` therefore takes `grace_days`
+    as a required argument with no default), and the order in which a payment
+    settles overdue installments (`adr/0010` puts D14's allocation order
+    deliberately out of scope). Without the second, unpaid scheduled P&I for a
+    given installment is not derivable once any payment exists, which is why
+    `installments.unpaid_scheduled_pi()` raises rather than choosing an order.
+
+    So the older published comparison is what runs. Not invented, not
+    approximated from `past_due`.
     """
     with db.transaction() as cur:
         # FOR UPDATE: see the docstring. Locks this loan's balances row for the
