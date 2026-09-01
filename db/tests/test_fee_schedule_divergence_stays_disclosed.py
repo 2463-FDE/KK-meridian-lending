@@ -138,10 +138,24 @@ def test_no_document_claims_the_decided_rule_is_implemented():
     d23 = [line for line in DEBT.read_text(encoding="utf-8").splitlines()
            if line.startswith("| **D23**")]
     assert d23, "docs/DEBT.md no longer carries a D23 row"
-    row = d23[0]
-    assert "DATA-MODEL EXPANSION" in row.upper(), (
-        "D23 no longer records that the decided late-fee rule needs a data-model "
-        "expansion. If it has genuinely been implemented, this guard and the "
-        "divergence section should be removed together with the old rule -- not "
-        "the register row alone."
-    )
+    row = d23[0].upper()
+
+    # RE-KEYED. This asserted `DATA-MODEL EXPANSION` appeared in the row, which
+    # stopped being the right question when #143 landed the primitive: the row
+    # now says the expansion is DONE and names two client answers as what
+    # remains. Keying on the retired phrase would have passed only because the
+    # rewritten row quotes its own old wording in order to retract it -- a guard
+    # satisfied by a quotation is not checking anything.
+    #
+    # What must stay true while the runtime still charges the older rule is that
+    # the register names the reasons, and neither reason is something this
+    # repository may answer for itself.
+    assert "GRACE PERIOD" in row, (
+        "D23 no longer names the missing grace period. If the client has since "
+        "supplied one, the runtime cutover -- not just this row -- is what "
+        "should change, and this guard and the divergence section go with it.")
+    assert "ALLOCATION ORDER" in row or "ATTRIBUTION" in row, (
+        "D23 no longer names payment-to-installment attribution as outstanding.")
+    assert "PARTIAL" in row, (
+        "D23 no longer reads as partially implemented while the assessment "
+        "route still prices off the arrears total.")

@@ -48,7 +48,8 @@ notice must be sent stating the **specific principal reason(s)**. Timing:
 
 ## Debt-to-income (DTI) — defined, not currently applied
 
-> **Manual DTI in a referred review — decided 2026-08-29, not built.** Staff may
+> **Manual DTI in a referred review — decided 2026-08-29 and built
+> 2026-08-31.** Staff may
 > apply DTI manually, but only on a **referred** application, only as an
 > **underwriter or admin**, and only from **approved synthetic source
 > documents**. It is **human-review evidence and must not approve, deny,
@@ -56,14 +57,22 @@ notice must be sent stating the **specific principal reason(s)**. Timing:
 > income, monthly debt obligations, source-document references, the calculation,
 > staff identity, timestamp and reason — a bare percentage is not sufficient.
 >
-> **None of that is implemented.** The evidence cannot be stored truthfully
-> today: there is no place for the figures, no document registry for the
-> references to point at, and the one table that records a staff review
-> (`manual_reviews`) makes an approve/deny outcome mandatory, so writing
-> evidence into it would itself decide the application. `docs/DEBT.md` RF-25
-> states the gate and the smallest addition that would close it. Until then a
-> manual DTI has no supported home, and a free-text reason mentioning DTI is
-> **not** the evidence this section describes.
+> **This is implemented, since 2026-08-31.** This paragraph used to read "none
+> of that is implemented" and explain that there was no place for the figures,
+> no document registry for the references to point at, and that `manual_reviews`
+> makes an approve/deny outcome mandatory so writing evidence into it would
+> itself decide the application. All three were true when it was written and
+> were addressed together: `manual_dti_assessments` holds the figures with a
+> database CHECK tying the stored ratio to them, `manual_dti_source_documents`
+> is the approved synthetic registry the references point at, and the evidence
+> lives in its own append-only table, so recording it changes no decision.
+>
+> What has NOT changed is the last sentence, and it is the one that matters
+> here: a free-text manual-review reason mentioning DTI is **not** the evidence
+> this section describes, and it still reaches an applicant as an adverse-action
+> reason with no figures behind it. That is tracked as `docs/DEBT.md` RF-29, and
+> whether such a notice may assert a human-computed ratio at all is a question
+> for the client rather than for this file.
 
 
 DTI = total monthly debt obligations ÷ gross monthly income. Include the new loan's

@@ -14,9 +14,13 @@ What these cases still pin is real and unchanged: the code computes
     $35 flat, or 5% of the past-due amount, whichever is less
 
 and it is the only rule it computes. That is the older published rule, kept
-deliberately rather than approximated toward the new one, because the decided
-rule needs installment-level facts this schema does not hold (`docs/DEBT.md`
-D23). When it is implemented, these cases are expected to fail loudly.
+deliberately rather than approximated toward the new one. PR #143 landed fee
+installment identity, installment bounds and one-fee-per-installment database
+enforcement, but the runtime does not use them. Payment-to-installment
+attribution is still unknown, and the current authority artifacts supply
+neither its allocation order nor the exact grace-period boundary
+(`docs/DEBT.md` D23). When the runtime is legitimately cut over, these cases are
+expected to fail loudly.
 
 Only the flat half was implemented for months. That is not a rounding nit and it
 is not conservative: the flat fee is the LARGER of the two for any arrears below
