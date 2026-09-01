@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import type { Client } from "pg";
@@ -102,12 +105,16 @@ async function aReferredApplication(page: Page): Promise<string> {
   return appId;
 }
 
-test("an underwriter records manual DTI evidence, and it decides nothing", async ({
+// Both roles the client authorised, not just the one that is easy to reach for.
+// `admin` is permitted by the API and by the panel, and an authorisation list
+// with an unexercised member is a list nobody has checked.
+for (const role of ["underwriter", "admin"] as const) {
+test(`${role} records manual DTI evidence, and it decides nothing`, async ({
   page,
 }) => {
   const appId = await aReferredApplication(page);
 
-  await signInAsStaff(page, "underwriter");
+  await signInAsStaff(page, role);
   await page.goto(`/underwriting/${appId}`);
 
   const panel = page.getByTestId("manual-dti");
@@ -157,7 +164,7 @@ test("an underwriter records manual DTI evidence, and it decides nothing", async
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].dti_bp).toBe(3360);
-    expect(rows[0].assessed_role).toBe("underwriter");
+    expect(rows[0].assessed_role).toBe(role);
 
     const { rows: docs } = await client.query(
       "SELECT d.doc_ref FROM manual_dti_assessment_documents l " +
@@ -183,9 +190,10 @@ test("an underwriter records manual DTI evidence, and it decides nothing", async
   // And it is on the register, attributed, for the next reviewer to read.
   const entry = panel.getByTestId("manual-dti-assessment").first();
   await expect(entry).toContainText("33.60%");
-  await expect(entry).toContainText("underwriter");
+  await expect(entry).toContainText(role);
   await expect(entry).toContainText("SYN-PAYSTUB-001");
 });
+}
 
 test("a CSR is not offered the form", async ({ page }) => {
   const appId = await aReferredApplication(page);
@@ -212,4 +220,97 @@ test("a CSR is not offered the form", async ({ page }) => {
   // And the page really is the one this test thinks it is -- an error page or a
   // redirect would also have no panel on it.
   await expect(page.getByText(`Application #${appId}`)).toBeVisible();
+});
+
+/**
+ * The role that decides what this panel renders must be the SERVER's answer.
+ *
+ * Codex review MDTI-UI-01. The panel used to read `getUser()?.role` -- the
+ * cached session copy in `localStorage`, which the person looking at the screen
+ * can edit and which goes stale on its own whenever a role changes server-side.
+ * `RequireRole` was already asking `/auth/me` for this page load and discarding
+ * the answer.
+ *
+ * Both directions are tested, because a cache-driven gate is wrong both ways.
+ */
+
+/** Overwrite the cached role without touching the real session token. */
+async function tamperCachedRole(page: Page, role: string): Promise<void> {
+  await page.evaluate((r) => {
+    const raw = window.localStorage.getItem("meridian.user");
+    if (!raw) throw new Error("no cached session to tamper with");
+    const user = JSON.parse(raw);
+    user.role = r;
+    window.localStorage.setItem("meridian.user", JSON.stringify(user));
+  }, role);
+}
+
+test("a CSR who edits their cached role is still not offered the form", async ({
+  page,
+}) => {
+  const appId = await aReferredApplication(page);
+
+  await signInAsStaff(page, "csr");
+  await page.goto(`/underwriting/${appId}`);
+  await tamperCachedRole(page, "underwriter");
+  await page.reload();
+
+  await expect(page.getByRole("heading", { name: "Offer", exact: true }))
+    .toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("manual-dti")).toHaveCount(0);
+  await expect(page.getByText(`Application #${appId}`)).toBeVisible();
+});
+
+test("an underwriter with a stale cached role still gets the form", async ({
+  page,
+}) => {
+  // The same defect facing the other way, and the one a real person would hit:
+  // a role changed server-side leaves the cached copy behind, and a panel gated
+  // on the cache hides itself from somebody entitled to it.
+  const appId = await aReferredApplication(page);
+
+  await signInAsStaff(page, "underwriter");
+  await page.goto(`/underwriting/${appId}`);
+  await tamperCachedRole(page, "csr");
+  await page.reload();
+
+  await expect(page.getByTestId("manual-dti")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("manual-dti-submit")).toBeVisible();
+});
+
+test("the panel reads the verified role, not the cached one", async () => {
+  /**
+   * A source-level guard, because the behaviour above cannot distinguish this.
+   *
+   * `RequireRole` now does two things: it publishes the verified role AND it
+   * reconciles the cached copy with it, so that the nav chip and every other
+   * `getUser()` consumer stop disagreeing with the server. That reconciliation
+   * runs before this panel ever renders, so by then the cached role and the
+   * verified role are equal -- and the two browser tests above pass even
+   * against a build where the panel reads the cache. Found by mutating the
+   * panel back and watching them both stay green.
+   *
+   * The behavioural tests are still the ones that matter: they pin what a
+   * person actually experiences, in both directions. This pins the thing they
+   * cannot see -- that the panel does not depend on a store the user can edit,
+   * so it stays correct if the reconciliation is ever removed or reordered.
+   */
+  // `__dirname` rather than `import.meta.url`: this suite is transpiled to
+  // CommonJS, and `import.meta` is a syntax error there -- the whole FILE fails
+  // to load, so Playwright reports "no tests found" rather than a failing test.
+  const source = readFileSync(
+    join(__dirname, "..", "app", "underwriting", "[appId]", "ManualDtiPanel.tsx"),
+    "utf-8"
+  );
+
+  expect(
+    source.includes("useVerifiedRole"),
+    "the panel no longer reads the role verified by /auth/me"
+  ).toBe(true);
+  expect(
+    /\bgetUser\b/.test(source.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "")),
+    "the panel reads the cached localStorage session for its role gate; a user " +
+      "can edit that store, and it goes stale on its own when a role changes " +
+      "server-side"
+  ).toBe(false);
 });

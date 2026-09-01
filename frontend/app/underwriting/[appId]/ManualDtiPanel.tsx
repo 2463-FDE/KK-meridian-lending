@@ -34,7 +34,8 @@
  */
 import { useCallback, useEffect, useState } from "react";
 
-import { apiGet, apiPost, getUser } from "../../../lib/api";
+import { useVerifiedRole } from "../../../components/RequireRole";
+import { apiGet, apiPost } from "../../../lib/api";
 
 /** Roles the client authorised for manual DTI. Not the page's staff set. */
 const AUTHORISED_ROLES = ["underwriter", "admin"];
@@ -97,7 +98,19 @@ export default function ManualDtiPanel({
   /** Whether the application is currently in the referred state. */
   isReferred: boolean;
 }) {
-  const role = getUser()?.role ?? null;
+  // THE VERIFIED ROLE, not the cached one. Codex review MDTI-UI-01: this read
+  // `getUser()?.role`, which comes from `localStorage` -- editable by the person
+  // looking at the screen, and stale on its own whenever a role changes
+  // server-side. That is wrong in both directions: it offered the form to a CSR
+  // whose every request would be refused, and it hid the panel from a genuine
+  // underwriter whose cached copy had gone stale. `RequireRole` already
+  // verifies the role against `/auth/me` for this page load; it now publishes
+  // that answer instead of discarding it.
+  //
+  // `null` means "not known yet", and this component only renders inside
+  // `RequireRole`, which shows nothing until the check completes -- so a null
+  // here is a transient state rather than a refusal.
+  const role = useVerifiedRole();
   const authorised = role !== null && AUTHORISED_ROLES.includes(role);
 
   const [documents, setDocuments] = useState<SourceDocument[]>([]);

@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiGet, clearSession, getUser, roleHome } from "../lib/api";
+import { apiGet, clearSession, getToken, getUser, roleHome, setSession } from "../lib/api";
 
 /**
  * Client-side route guard: redirects to /login (no session) or the caller's
@@ -24,6 +24,28 @@ import { apiGet, clearSession, getUser, roleHome } from "../lib/api";
  * D8 as the reason "the gateway/API still accept any authenticated caller",
  * which stopped being true of the money routes in PRs #33-#35.*
  */
+/**
+ * The role `/auth/me` returned for THIS page load.
+ *
+ * Codex review of PR #152, MDTI-UI-01. This guard already fetched the verified
+ * role and then threw it away, so anything downstream that needed to know who
+ * was looking fell back to `getUser()` -- the cached `localStorage` copy, which
+ * a user can edit and which goes stale on its own (a role changed server-side
+ * outlives the cache). A panel gated on the cache is wrong in both directions:
+ * it shows a form to someone whose every request will be refused, and it hides
+ * one from someone genuinely entitled to it.
+ *
+ * `null` means the role is not known yet, which is not the same as "not
+ * permitted" -- a consumer must not treat it as a refusal, because this guard
+ * renders nothing until the check completes.
+ */
+const VerifiedRoleContext = createContext<string | null>(null);
+
+/** The verified role for the current page, or `null` before it is known. */
+export function useVerifiedRole(): string | null {
+  return useContext(VerifiedRoleContext);
+}
+
 export default function RequireRole({
   allow,
   children,
@@ -33,6 +55,7 @@ export default function RequireRole({
 }) {
   const router = useRouter();
   const [status, setStatus] = useState<"checking" | "ok">("checking");
+  const [verifiedRole, setVerifiedRole] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,6 +79,15 @@ export default function RequireRole({
         router.replace(roleHome(role));
         return;
       }
+      // Reconcile the cache with what the server just said. Without this the
+      // stale copy survives the page load and every OTHER consumer of
+      // `getUser()` keeps reading it -- the nav's role chip among them, so the
+      // screen would disagree with itself about who is looking.
+      const token = getToken();
+      if (cached.role !== role && token) {
+        setSession(token, { ...cached, role });
+      }
+      setVerifiedRole(role);
       setStatus("ok");
     })();
     // Only re-check on mount -- this guard wraps a page.tsx, which already
@@ -74,5 +106,9 @@ export default function RequireRole({
     );
   }
 
-  return <>{children}</>;
+  return (
+    <VerifiedRoleContext.Provider value={verifiedRole}>
+      {children}
+    </VerifiedRoleContext.Provider>
+  );
 }
