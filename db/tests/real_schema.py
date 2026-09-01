@@ -36,6 +36,25 @@ import re
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 INIT_SCHEMA = REPO_ROOT / "db" / "init" / "001_schema.sql"
 
+#: Every init file that defines a table, in the order Postgres applies them.
+#:
+#: RF-26 widening. This module read `001_schema.sql` alone, which is why callers
+#: needing `manual_reviews` (005) or `decision_events` (004) had no choice but to
+#: hand-write them -- the helper could not have supplied them. Reading the whole
+#: init set is what makes "take it from the real schema" an option for those
+#: tables rather than advice a caller cannot follow.
+#:
+#: Seeds are deliberately absent: `002_seed.sql` and `003_seed_bulk.sql` insert
+#: rows, and a harness that wants the SHAPE of a table does not want sixty
+#: seeded applications appearing in its assertions.
+INIT_FILES = (
+    REPO_ROOT / "db" / "init" / "001_schema.sql",
+    REPO_ROOT / "db" / "init" / "004_decision_events.sql",
+    REPO_ROOT / "db" / "init" / "005_manual_reviews.sql",
+    REPO_ROOT / "db" / "init" / "006_decision_attempts.sql",
+    REPO_ROOT / "db" / "init" / "007_ledger_opening_balances.sql",
+)
+
 #: Tables each table needs before it can be created, so a caller can ask for one
 #: thing and get a schema that actually builds. Kept explicit rather than derived
 #: from the REFERENCES clauses: a wrong dependency graph fails confusingly, and
@@ -46,6 +65,23 @@ DEPENDENCIES = {
     "applicants": (),
     "applications": ("applicants",),
     "decisions": ("applications",),
+    "kyc_checks": ("applicants", "applications"),
+    "decision_events": ("applications",),
+    "manual_reviews": ("applications",),
+    "decision_attempts": ("applications",),
+    "offers": ("applications", "decisions"),
+    # No foreign keys at all in production -- `loans.app_id` is a plain INTEGER.
+    # Declaring `offers` here (the intuitive guess) would have made every caller
+    # that wants `loans` also get a canonical `offers`, which is precisely what
+    # `test_decision_attempt_real_postgres.py` must NOT have: it creates a
+    # deliberately relaxed `offers` so the Gap F tests can seed incomplete rows.
+    "loans": (),
+    "balances": ("loans",),
+    "ledger_entries": ("loans",),
+    "payments": ("loans",),
+    # Also FK-free in production, despite the name.
+    "payment_applications": (),
+    "audit_logs": (),
 }
 
 
@@ -55,16 +91,20 @@ def _definition(table: str) -> str:
     Verbatim is the whole point: a paraphrase is a fourth hand-written copy with
     extra steps.
     """
-    sql = INIT_SCHEMA.read_text(encoding="utf-8")
-    match = re.search(
+    pattern = re.compile(
         r"CREATE TABLE (?:IF NOT EXISTS )?%s\s*\(.*?\n\);" % re.escape(table),
-        sql, re.S)
-    if match is None:
-        raise LookupError(
-            "no CREATE TABLE for %r in %s -- if the table was renamed, this "
-            "helper should fail loudly rather than let a test build a shape "
-            "production does not have" % (table, INIT_SCHEMA))
-    return match.group(0)
+        re.S)
+    for path in INIT_FILES:
+        if not path.is_file():                             # pragma: no cover
+            continue
+        match = pattern.search(path.read_text(encoding="utf-8"))
+        if match is not None:
+            return match.group(0)
+    raise LookupError(
+        "no CREATE TABLE for %r in %s -- if the table was renamed or moved to "
+        "an init file this helper does not read, it should fail loudly rather "
+        "than let a test build a shape production does not have"
+        % (table, ", ".join(p.name for p in INIT_FILES)))
 
 
 def definition_of(table: str) -> str:

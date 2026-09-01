@@ -41,7 +41,9 @@ pass, pytest reports XPASS as a failure, so the marker cannot outlive the defect
 Mutation-verified both ways, including that an atomic correction produces the
 XPASS failure rather than an error.
 """
+import importlib.util
 import os
+import pathlib
 import threading
 from contextlib import contextmanager
 
@@ -50,6 +52,18 @@ import psycopg2.extras
 import pytest
 
 from app import balance
+
+#: `db/tests/real_schema.py`, loaded by path -- standard library only, so it
+#: imports cleanly from a service test.
+_REAL_SCHEMA_PATH = (pathlib.Path(__file__).resolve().parents[3]
+                     / "db" / "tests" / "real_schema.py")
+assert _REAL_SCHEMA_PATH.is_file(), (
+    "expected the canonical schema helper at %s -- if it moved, this test must "
+    "fail rather than fall back to a hand-written table" % _REAL_SCHEMA_PATH)
+_spec = importlib.util.spec_from_file_location("meridian_real_schema",
+                                               _REAL_SCHEMA_PATH)
+real_schema = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(real_schema)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -175,72 +189,25 @@ def pg():
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
         cur.execute(f"SET search_path TO {SCHEMA}")
+        # RF-26: every table here is the real definition from `db/init`.
+        #
+        # `loans` exists because the waterfall (D14) reads the loan's stored
+        # contractual schedule to work out interest owed, and every `balances`
+        # row has one in production -- so a fixture without it modelled a
+        # database that cannot exist. `schedule_version` is left NULL by the
+        # seed below, on purpose: these tests are about concurrency, not
+        # allocation, and a loan with no stored schedule owes no derivable
+        # interest, so the whole payment goes to principal.
+        cur.execute(real_schema.sql_for(SCHEMA, [
+            "loans", "balances", "payments", "payment_applications",
+            "ledger_entries",
+        ]))
+        # NOT from the helper, and not production's projection either: the real
+        # one lives in `db/migrations/0035` and does considerably more than
+        # these cases need. This stand-in exists so a ledger insert moves
+        # `balances` at all, which is the thing the lost-update proof observes.
         cur.execute(
             """
-            -- `loans` exists here because the waterfall (D14) reads the loan's
-            -- stored contractual schedule to work out interest owed. Every
-            -- `balances` row has one in production -- there is a foreign key --
-            -- so a fixture without it was modelling a database that cannot
-            -- exist, and would have hidden a broken join rather than caught it.
-            --
-            -- `schedule_version` is NULL on purpose: these tests are about
-            -- concurrency, not allocation, and a loan with no stored schedule
-            -- owes no derivable interest, so the whole payment goes to
-            -- principal exactly as it did before the waterfall landed.
-            CREATE TABLE loans (
-                id                    INTEGER PRIMARY KEY,
-                principal             NUMERIC(14,2),
-                note_rate_pct         NUMERIC(7,3),
-                term_months           INTEGER,
-                regular_payment       NUMERIC(14,2),
-                regular_payment_count INTEGER,
-                final_payment         NUMERIC(14,2),
-                schedule_version      TEXT,
-                opened_at             TIMESTAMPTZ DEFAULT now()
-            );
-            CREATE TABLE balances (
-                loan_id    INTEGER PRIMARY KEY,
-                balance    NUMERIC(14,2) NOT NULL,
-                past_due   NUMERIC(14,2) DEFAULT 0,
-                updated_at TIMESTAMPTZ DEFAULT now()
-            )
-            """
-        )
-        # apply_payment_once's idempotency guard lives here; without this table
-        # the production path cannot run at all.
-        cur.execute(
-            """
-            CREATE TABLE payment_applications (
-                payment_id INTEGER PRIMARY KEY,
-                loan_id    INTEGER NOT NULL,
-                amount     NUMERIC(14,2) NOT NULL,
-                applied_at TIMESTAMPTZ DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE payments (
-                id INTEGER PRIMARY KEY,
-                loan_id INTEGER NOT NULL,
-                amount NUMERIC(14,2) NOT NULL,
-                auth_status TEXT NOT NULL DEFAULT 'captured',
-                UNIQUE (id, loan_id)
-            );
-            CREATE TABLE ledger_entries (
-                id SERIAL PRIMARY KEY,
-                loan_id INTEGER NOT NULL,
-                component TEXT NOT NULL,
-                amount NUMERIC(14,2) NOT NULL,
-                entry_type TEXT NOT NULL,
-                payment_id INTEGER,
-                -- db/migrations/0043. apply_payment_once names this column in
-                -- its INSERT, so a fixture without it fails on SQL rather than
-                -- on the lost-update behaviour these cases exist to prove.
-                correlation_id TEXT,
-                UNIQUE (payment_id, component),
-                FOREIGN KEY (payment_id, loan_id) REFERENCES payments(id, loan_id)
-            );
             CREATE FUNCTION project_test_ledger() RETURNS trigger AS $$
             BEGIN
                 UPDATE balances SET balance = balance + NEW.amount

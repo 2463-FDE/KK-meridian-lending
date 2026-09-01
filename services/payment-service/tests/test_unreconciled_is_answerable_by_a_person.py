@@ -24,7 +24,9 @@ Real Postgres, on the same throwaway-schema pattern as
 predicate, its ordering and its limit -- and a mocked cursor would assert none
 of it.
 """
+import importlib.util
 import os
+import pathlib
 
 import psycopg2
 import psycopg2.extras
@@ -32,6 +34,18 @@ import pytest
 
 from app import db, reconcile
 from app.config import RECONCILE_MAX_ATTEMPTS
+
+#: `db/tests/real_schema.py`, loaded by path -- standard library only, so it
+#: imports cleanly from a service test.
+_REAL_SCHEMA_PATH = (pathlib.Path(__file__).resolve().parents[3]
+                     / "db" / "tests" / "real_schema.py")
+assert _REAL_SCHEMA_PATH.is_file(), (
+    "expected the canonical schema helper at %s -- if it moved, this test must "
+    "fail rather than fall back to a hand-written table" % _REAL_SCHEMA_PATH)
+_spec = importlib.util.spec_from_file_location("meridian_real_schema",
+                                               _REAL_SCHEMA_PATH)
+real_schema = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(real_schema)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -41,34 +55,17 @@ SCHEMA = "payment_unreconciled_view_test"
 
 
 def _schema_sql():
-    """The `payments` shape this view reads, matching `db/init/001_schema.sql`
-    plus `db/migrations/0028` and `0043`.
+    """`payments`, verbatim from `db/init`.
 
-    The card columns are present ON PURPOSE even though nothing here reads
-    them: a test whose fixture omits `last4` cannot prove that `last4` stays out
-    of the response.
+    RF-26. The first version of this file hand-wrote the table and said the card
+    columns were "present ON PURPOSE even though nothing here reads them: a test
+    whose fixture omits `last4` cannot prove that `last4` stays out of the
+    response". That reasoning is right and is now free -- the real definition
+    carries every column production has, including the ones this test needs to
+    exist in order to prove their absence, and it carries them without anybody
+    keeping a copy in step.
     """
-    return f"""
-        SET search_path TO {SCHEMA};
-        CREATE TABLE payments (
-            id SERIAL PRIMARY KEY,
-            loan_id INTEGER,
-            amount NUMERIC(14,2) NOT NULL,
-            method TEXT DEFAULT 'card',
-            brand TEXT,
-            last4 TEXT,
-            name TEXT,
-            auth_status TEXT NOT NULL DEFAULT 'captured',
-            authorization_id TEXT,
-            idempotency_key TEXT,
-            applied_at TIMESTAMPTZ,
-            apply_attempts INTEGER NOT NULL DEFAULT 0,
-            apply_next_attempt_at TIMESTAMPTZ,
-            apply_last_error TEXT,
-            correlation_id TEXT,
-            created_at TIMESTAMPTZ DEFAULT now()
-        );
-    """
+    return real_schema.sql_for(SCHEMA, ["payments"])
 
 
 @pytest.fixture
@@ -79,6 +76,14 @@ def pg(monkeypatch):
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
         cur.execute(_schema_sql())
+        # `payments.loan_id` REFERENCES `loans(id)` in production, which the
+        # hand-written copy omitted.
+        cur.execute(
+            "INSERT INTO loans (id, applicant_name, principal, note_rate_pct, "
+            "                   term_months) "
+            "SELECT n, 'Fixture ' || n, 10000.00, 7.99, 48 "
+            "  FROM generate_series(0, 100) AS n "
+            "ON CONFLICT (id) DO NOTHING")
     monkeypatch.setattr(db, "_conn", conn, raising=False)
     yield conn
     with conn.cursor() as cur:
@@ -99,10 +104,11 @@ def _payment(conn, *, loan_id=1, amount="100.00", auth_status="captured",
     row = _rows(
         conn,
         "INSERT INTO payments (loan_id, amount, auth_status, applied_at, "
-        "  apply_attempts, correlation_id, created_at, brand, last4, name, "
-        "  authorization_id, idempotency_key) "
+        "  apply_attempts, correlation_id, created_at, brand, last4, "
+        "  authorization_id, processor_ref, capture_source, idempotency_key) "
         "VALUES (%s, %s, %s, %s, %s, %s, now() - (%s || ' minutes')::interval, "
-        "        'visa', '4242', 'Maria Gonzalez', 'auth_abc123', 'idem-key') "
+        "        'visa', '4242', 'auth_abc123', 'ch_live_ref', 'processor', "
+        "        'idem-key') "
         "RETURNING id",
         (loan_id, amount, auth_status,
          "2026-01-01T00:00:00+00:00" if applied else None,
@@ -163,9 +169,18 @@ def test_the_oldest_is_first(pg):
 def test_no_card_data_reaches_the_listing(pg):
     """This response goes to a browser, so every field it omits cannot leak.
 
-    The fixture writes a cardholder name, a brand, a `last4`, an authorization
-    id and an idempotency key precisely so their absence here means something.
-    `test_cardholder_name_not_logged` holds the same line at the log, and
+    The fixture writes a brand, the card's `last4` digits, an authorization
+    id, a processor reference, a capture source and an idempotency key --
+    every card-adjacent column production actually has -- precisely so their
+    absence here means something.
+
+    A cardholder NAME is not among them, and that is worth stating rather than
+    silently dropping: the first version of this fixture wrote one, and moving
+    to the real schema (RF-26) revealed that `payments` has no `name` column at
+    all. The name is never persisted (D5d took it out of the log; nothing ever
+    stored it), so "the listing does not return it" was a weaker claim than the
+    truth, which is that there is nothing to return.
+    `test_cardholder_name_not_logged` holds that line at the log, and
     `test_pan_cvv_never_enter_the_payment_path` at the intake end.
     """
     _payment(pg, loan_id=5)
@@ -173,7 +188,8 @@ def test_no_card_data_reaches_the_listing(pg):
     result = reconcile.unreconciled_items()
     blob = repr(result)
 
-    for forbidden in ("Maria Gonzalez", "4242", "visa", "auth_abc123", "idem-key"):
+    for forbidden in ("4242", "visa", "auth_abc123", "ch_live_ref", "processor",
+                      "idem-key"):
         assert forbidden not in blob, f"{forbidden!r} reached the operator listing"
 
     (item,) = result["items"]
