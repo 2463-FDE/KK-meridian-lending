@@ -44,6 +44,7 @@ SCHEMA = REPO / "db" / "init" / "001_schema.sql"
 MIGRATION = REPO / "db" / "migrations" / "0046_ledger_installment_no.sql"
 DELINQUENCY = (REPO / "services" / "servicing-service" / "app" / "delinquency.py")
 INSTALLMENTS = (REPO / "services" / "servicing-service" / "app" / "installments.py")
+POLICY = REPO / "policies" / "fee_schedule.md"
 
 
 def _d23_row() -> str:
@@ -263,6 +264,51 @@ def test_d23_names_both_client_blockers_and_neither_is_invented():
                      installments, re.S), (
         "overdue_installments no longer takes grace_days as a required "
         "argument. A default here would be a grace period nobody decided")
+
+
+def test_the_policy_file_does_not_deny_the_primitive_either():
+    """The read path my own inventory missed, and the one that reaches users.
+
+    Codex review of PR #157, D23-FEE-SCHEDULE-STALE. `policies/fee_schedule.md`
+    is served to Policy Chat -- `loan-assistant` retrieves it -- so a stale
+    sentence there is not a documentation defect, it is an answer given to
+    somebody. It still read "nothing records which installment a fee belongs to"
+    and pointed at "the smallest data-model addition", after #143 had landed
+    exactly that. Two read paths of one fact disagreed, and the one that was
+    wrong was the one people read.
+
+    Scoped the same way as the register: an assertion is forbidden, a quotation
+    that retracts it is not.
+    """
+    if not _primitive_exists():                            # pragma: no cover
+        pytest.skip("the installment primitive is genuinely absent")
+
+    policy = " ".join(POLICY.read_text(encoding="utf-8").split())
+    offenders = []
+    for clause in _clauses(policy):
+        if _HISTORICAL.search(clause):
+            continue
+        offenders.extend(p.pattern for p in _DENIES_THE_PRIMITIVE
+                         if p.search(clause))
+    assert offenders == [], (
+        "policies/fee_schedule.md still denies the installment primitive, and "
+        "loan-assistant serves this file to Policy Chat -- so this is not a "
+        "stale document, it is a wrong answer given to a reader. Offending "
+        "patterns: %s" % offenders)
+
+
+def test_the_policy_file_names_the_two_answers_it_is_waiting_for():
+    """And says what it is blocked ON, not merely that it is blocked.
+
+    A borrower or staff member reading Policy Chat should be able to learn why
+    the published rule is not the charged one without opening the register.
+    """
+    if not _runtime_still_uses_arrears():                  # pragma: no cover
+        pytest.skip("the runtime has cut over")
+
+    policy = POLICY.read_text(encoding="utf-8")
+    assert re.search(r"grace period", policy, re.I)
+    assert re.search(r"allocation order|which installment a payment", policy, re.I)
 
 
 def test_the_migration_backfilled_nothing():

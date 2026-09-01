@@ -25,9 +25,9 @@ client.
 balances.past_due)`. `past_due` is one projected total mixing principal,
 interest and every fee already assessed — so the base is wider than the decided
 rule allows, and a posted fee raises it, which is the compounding the client
-asked about at the 2026-08-19 demo. There is also no per-installment cap of any
-kind: nothing records which installment a fee belongs to, so nothing can refuse
-a second one.
+asked about at the 2026-08-19 demo. The assessment route also applies no
+per-installment cap: it does not consult an installment at all, so nothing on
+that path refuses a second fee for the same one.
 
 Measured against the decided policy, that can charge **more** than is due, in
 those two independent ways. It is bounded and legible rather than silent — $35
@@ -35,12 +35,28 @@ per assessment at most, every fee on the immutable ledger, reversible by waiver
 — and the assessment route has no scheduler behind it, so a repeat requires a
 person to ask for it.
 
-**Why it is not simply corrected.** The decided rule needs installment-level
-facts this system does not persist: nothing records which installment a payment
-satisfied, or which installment a fee belongs to, so "unpaid scheduled principal
-and interest for that installment" is not derivable. `docs/DEBT.md` D23 states
-the exact missing primitive, the smallest data-model addition that would close
-it, and why no backfill of existing loans could be truthful.
+**Why it is not simply corrected.** This section used to say the rule needed
+installment-level facts the system does not persist. Half of that is no longer
+true, and the half that remains is not an engineering gap.
+
+Since 2026-08-31 the database DOES record which installment a fee belongs to:
+`ledger_entries.installment_no`, with a unique index that refuses a second late
+fee for the same installment, a trigger that refuses an installment outside the
+loan's own schedule, and the decided arithmetic implemented and tested. The
+assessment route has not been switched over to it.
+
+What is still missing is not a column. It is two answers this system has no
+authority to invent:
+
+* **the exact grace period** — no grace period is recorded anywhere in this
+  repository, including in the vendor's own version of this file, so "after the
+  grace period" has no number behind it;
+* **which installment a payment settled** — deciding that requires an
+  allocation order across overdue installments, which no policy here publishes.
+  Without it, "unpaid scheduled principal and interest for that installment" is
+  still not derivable once any payment has been applied.
+
+`docs/DEBT.md` D23 records both, and what is already built.
 
 **It will not be approximated from the past-due total.** A number that resembles
 the decided rule without being it is worse than one that is legibly the older
