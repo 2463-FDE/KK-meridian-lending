@@ -30,15 +30,28 @@ import re
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
-#: Production tables. Anything on this list, created by a test, is either taken
-#: from the real schema or explained.
-_PRODUCTION_TABLES = {
-    "applicants", "applications", "decisions", "kyc_checks", "decision_events",
-    "manual_reviews", "decision_attempts", "offers", "loans", "balances",
-    "ledger_entries", "payments", "payment_applications", "audit_logs",
-    "pending_movements", "reconciliation_review_items",
-    "manual_dti_assessments", "manual_dti_source_documents",
-}
+#: Production tables, PARSED from `db/init` rather than typed here.
+#:
+#: Codex review of PR #159, RF26-GUARD-PARTIAL: the first version was a
+#: hand-maintained literal and it was already incomplete -- `users`,
+#: `ledger_control`, `reconciliation_runs` and
+#: `manual_dti_assessment_documents` were all missing, so a new test could
+#: hand-write `CREATE TABLE users` and the suite would pass. A guard whose
+#: RULE is "no hand-maintained copy of production" cannot itself rest on a
+#: hand-maintained copy of production. The inventory is now derived from the
+#: same files the tables are defined in.
+def _production_tables() -> set:
+    init = REPO / "db" / "init"
+    found = set()
+    for path in sorted(init.glob("*.sql")):
+        found.update(
+            m.lower() for m in re.findall(
+                r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z_0-9]*)",
+                path.read_text(encoding="utf-8"), re.IGNORECASE))
+    return found
+
+
+_PRODUCTION_TABLES = _production_tables()
 
 #: Test trees that must build from the real schema.
 #:
@@ -79,6 +92,22 @@ def _hand_written(path: pathlib.Path):
         context = "\n".join(lines[max(0, i - 12):i + 1])
         found.append((table, context))
     return found
+
+
+def test_the_production_table_inventory_is_derived_and_complete():
+    """The inventory the rule rests on, checked against `db/init`.
+
+    Named because they were the specific omissions: a hand-written list had
+    already drifted past `users`, `ledger_control`, `reconciliation_runs` and
+    `manual_dti_assessment_documents`.
+    """
+    for table in ("users", "ledger_control", "reconciliation_runs",
+                  "manual_dti_assessment_documents", "applications",
+                  "ledger_entries", "payments"):
+        assert table in _PRODUCTION_TABLES, (
+            "%s is defined in db/init and is not in the inventory this guard "
+            "checks against, so a test could hand-write it unnoticed" % table)
+    assert len(_PRODUCTION_TABLES) >= 20, sorted(_PRODUCTION_TABLES)
 
 
 def test_the_scan_finds_the_files_it_claims_to_check():

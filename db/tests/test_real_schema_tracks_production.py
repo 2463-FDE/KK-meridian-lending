@@ -113,6 +113,22 @@ def test_dependencies_match_the_references_in_the_file():
             "-- creating it would fail with UndefinedTable"
             % (table, sorted(missing)))
 
+        # BOTH DIRECTIONS. Codex review of PR #159, RF26-DEPS-EXTRA-UNCHECKED:
+        # checking only `referenced - declared` accepts an EXTRA declared parent,
+        # and my own first draft had one -- `loans -> offers`, guessed from the
+        # name, when `loans` has no foreign keys at all in production. An extra
+        # edge is not harmless: every caller asking for `loans` would silently
+        # also get a canonical `offers`, which is exactly what the one harness
+        # that must deviate cannot have. The graph is meant to mirror the file,
+        # so it is compared to the file exactly.
+        extra = set(declared) - referenced
+        assert not extra, (
+            "real_schema.DEPENDENCIES declares %s as a parent of %s and the "
+            "canonical definition does not REFERENCE it. An invented edge drags "
+            "an unrelated table into every caller's schema -- and can force a "
+            "canonical shape on a harness that deliberately deviates."
+            % (sorted(extra), table))
+
 
 def test_resolve_orders_parents_before_children():
     order = real_schema.resolve(["decisions"])
