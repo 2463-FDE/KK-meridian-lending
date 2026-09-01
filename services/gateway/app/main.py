@@ -25,7 +25,7 @@ import re
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
@@ -182,10 +182,114 @@ async def _proxy(base: str, path: str, request: Request, user: dict | None, extr
     # ("Jos\xc3\xa9" instead of "Jos\xe9") on every route, not just one.
     # RFC 8259 mandates JSON is UTF-8 (unless a BOM says otherwise) -- decode
     # the raw bytes as UTF-8 directly instead of letting httpx guess.
+    return _json_or_refuse(base, path, resp)
+
+
+#: Statuses that carry no body by definition (RFC 9110). Nothing upstream
+#: returns one today -- checked route by route -- but a body-less status must
+#: not be treated as an unreadable body if one ever does, because that would
+#: turn a correct response into a 502.
+_BODYLESS_STATUSES = frozenset({204, 304})
+
+#: What an external caller is told when an upstream answers with something this
+#: gateway cannot read. Fixed, generic, and identical for every cause: a caller
+#: learns that the request could not be completed and nothing else.
+_UNREADABLE_DETAIL = "upstream service returned an unreadable response"
+
+
+def _upstream_name(base: str) -> str:
+    """A short internal label for a service, for the LOG only.
+
+    Derived from the configured base URL rather than logged verbatim: an
+    internal hostname and port is exactly the kind of topology detail that
+    should not travel, and a label is enough to know which service to go and
+    look at.
+    """
+    for name, url in (("origination", ORIGINATION_URL), ("servicing", SERVICING_URL),
+                      ("kyc", KYC_URL), ("decision", DECISION_URL),
+                      ("disclosure", DISCLOSURE_URL), ("payment", PAYMENT_URL),
+                      ("loan-assistant", LOAN_ASSISTANT_URL)):
+        if url and base == url:
+            return name
+    return "upstream"
+
+
+def _reject_non_finite(constant: str):
+    """Refuse `NaN`, `Infinity` and `-Infinity` at the PARSE step.
+
+    Codex review of PR #158, GW-NONFINITE-UPSTREAM. `json.loads` accepts those
+    three by default -- they are not JSON, but Python's decoder takes them -- so
+    a body of `{"amount": NaN}` parsed successfully, satisfied the object check,
+    and then blew up in `JSONResponse`, which serialises with `allow_nan=False`.
+    That raise happened OUTSIDE the guarded block, so the request became an
+    unhandled 500 rather than the fixed refusal, on every one of the nineteen
+    proxied routes. Reproduced before fixing.
+
+    Handling it here rather than by widening the `try` is deliberate: a body
+    carrying a non-finite number is unreadable in exactly the sense this
+    function means -- nothing downstream can represent it -- so it belongs in
+    the same branch as malformed JSON, not in a second one that happens to
+    produce a similar answer.
+    """
+    raise ValueError("upstream JSON carried the non-finite constant %r" % constant)
+
+
+def _json_or_refuse(base: str, path: str, resp) -> Response:
+    """The upstream body, or a refusal -- never the body verbatim.
+
+    SEC-13. This used to end `except Exception: return {"raw":
+    resp.content.decode(...)}`, which reflected whatever the upstream sent
+    straight to an external caller. Every upstream here is FastAPI and answers
+    with JSON, so anything else is by definition unexpected -- an HTML error
+    page from a proxy, a stack trace from a crashed worker, a plain-text
+    message naming an internal host. Reflecting an unexpected body is how a
+    caller learns what is behind the gateway, and the more broken the estate is,
+    the more the body tends to say.
+
+    STATUS SEMANTICS, chosen rather than defaulted:
+
+      * A body-less status (204, 304) is returned as itself, with no body. It is
+        not an unreadable response; it is a response with nothing in it.
+      * An upstream ERROR status is preserved. A 404 is still a 404 and a 503 is
+        still a 503 -- the caller's retry decision depends on that, and the
+        status is not the part that leaks.
+      * An upstream SUCCESS status with an unreadable body becomes 502. Calling
+        it 200 would assert that the request succeeded while returning an error
+        body, and a caller that trusted the status would act on nothing.
+
+    WHAT IS PARSED, AND WHAT COUNTS AS PARSED. `json.loads` accepts bare
+    scalars, so a `text/plain` body of `123` would "parse" and be reflected as
+    `123`. Every proxied route returns an object or a list -- verified route by
+    route -- so anything else is treated as unreadable rather than passed
+    through on a technicality.
+
+    WHAT IS LOGGED. Service label, status, content-type and body LENGTH. Never
+    the body: the whole point is that its contents are untrusted and possibly
+    sensitive, and a log line is a place they would persist. Length and
+    content-type are enough to tell an HTML error page from a truncated write.
+    """
+    if resp.status_code in _BODYLESS_STATUSES:
+        return Response(status_code=resp.status_code)
+
     try:
-        return JSONResponse(status_code=resp.status_code, content=json.loads(resp.content.decode("utf-8")))
-    except Exception:
-        return JSONResponse(status_code=resp.status_code, content={"raw": resp.content.decode("utf-8", errors="replace")})
+        payload = json.loads(resp.content.decode("utf-8"),
+                             parse_constant=_reject_non_finite)
+        if not isinstance(payload, (dict, list)):
+            raise ValueError("upstream JSON was not an object or array")
+    except Exception as exc:                          # noqa: BLE001 -- see below
+        # Type only, never the exception's message: a JSONDecodeError's message
+        # quotes the offending document.
+        log.warning(
+            "unreadable upstream response service=%s path=%s status=%s "
+            "content_type=%s body_bytes=%d error=%s",
+            _upstream_name(base), path, resp.status_code,
+            resp.headers.get("content-type", "unknown"),
+            len(resp.content), type(exc).__name__,
+        )
+        status = resp.status_code if resp.status_code >= 400 else 502
+        return JSONResponse(status_code=status, content={"detail": _UNREADABLE_DETAIL})
+
+    return JSONResponse(status_code=resp.status_code, content=payload)
 
 
 def _require_user(authorization: str | None) -> dict:
