@@ -339,6 +339,53 @@ def test_the_cards_monitoring_claim_matches_what_exists():
             "it -- the card is behind the code")
 
 
+def test_the_cards_tracing_claim_matches_what_the_graph_does():
+    """The sentence that was WRONG, pinned in both directions.
+
+    The card said every run of the decision graph "is traced via LangSmith
+    (project `2463-fde`) -- bureau pull and scoring call are each individually
+    visible". That was true of the code when it was written. It is now the
+    opposite of what the code does: `graph.py` runs inside
+    `suppressed_tracing()` and posts nothing, because the graph's state carries
+    the applicant's SSN and roughly 30KB per decision was leaving for a
+    third-party SaaS.
+
+    This is the worst class of defect a model card can carry. It is not a stale
+    number or a moved file -- it told a reader that a per-step trace of every
+    credit decision exists, in the document a regulator reads first. Somebody
+    asked to produce that trace would find nothing, and somebody assessing data
+    flows would record an export that does not happen.
+
+    TWO-WAY, like the reason-code guard above. If the suppression is ever
+    removed, this fails until the card stops describing it -- so the card cannot
+    lag the code in that direction either, which matters more here than usual:
+    unsuppressing is exactly the change that would resume sending SSNs.
+    """
+    card = CARD.read_text(encoding="utf-8")
+    graph = (REPO / "services" / "decision-service" / "app"
+             / "graph.py").read_text(encoding="utf-8")
+
+    suppressed = "suppressed_tracing()" in graph
+    claims_suppressed = "suppressed_tracing" in card
+    claims_traced = re.search(
+        r"[Ee]very run of the decision graph[^.]{0,120}is traced", card)
+
+    if suppressed:
+        assert claims_suppressed, (
+            "the decision graph runs inside suppressed_tracing() and the model "
+            "card does not say so. A governance artefact that omits a control "
+            "is describing a different system")
+        assert not claims_traced, (
+            "the model card still claims every run of the decision graph is "
+            "traced to LangSmith while graph.py suppresses exactly that. A "
+            "reader asked to produce the trace would find nothing")
+    else:
+        assert not claims_suppressed, (
+            "the card describes tracing suppression that graph.py no longer "
+            "applies -- and unsuppressing is the change that resumes sending "
+            "the applicant SSN in the graph state to a third party")
+
+
 def test_the_card_names_an_owner_and_an_update_trigger():
     """Scoped to the ownership section, with no whole-document fallback.
 

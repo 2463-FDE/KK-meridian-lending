@@ -123,11 +123,28 @@ origination — see above):
 
 ## Monitoring
 
-- Every run of the decision graph (`app/graph.py`, a LangGraph `StateGraph`)
-  is traced via LangSmith (project `2463-fde`) — bureau pull and scoring call
-  are each individually visible. Persistence is no longer part of this graph;
-  it happens in origination. Local/training-only: tracing is opt-in and has
-  only ever run against seeded fictional applicants.
+- **The decision graph is deliberately NOT traced to LangSmith, and that is a
+  control rather than a gap.** This card previously said every run "is traced
+  via LangSmith (project `2463-fde`) — bureau pull and scoring call are each
+  individually visible". That was true of the code when written and is now the
+  opposite of what it does: `app/graph.py` runs the graph inside
+  `suppressed_tracing()` (`app/tracing.py`), and the suppressor **fails closed**
+  — if tracing is switched on and cannot be suppressed, the decision is refused
+  rather than traced.
+  Why: `langgraph` pulls in `langchain-core`, which auto-instruments every
+  `ainvoke` whenever `LANGSMITH_TRACING` and `LANGSMITH_API_KEY` are set, and
+  both are set in every deployed environment here. The graph's state is the
+  payload, and `DecisionState.application` carries the applicant's SSN — so a
+  measurement against a local sink found the SSN, the bureau score, the bureau
+  reference id, the applicant name, income and the application id all present in
+  roughly 30KB posted per decision. Every one of those is on the client's
+  prohibited-retention list, and an SSN leaving the estate for a third-party
+  SaaS is a different category of problem from a verbose log.
+  What this costs is per-step observability of the decision, which nobody asked
+  for; what it protects is the applicant data that would otherwise leave. The
+  audit record for any past decision is `decision_events` below, which is
+  append-only and queryable. Pinned by
+  `decision-service/tests/test_the_decision_graph_transmits_nothing.py`.
 - `decision_events` itself is the long-term audit record — append-only,
   DB-trigger-enforced, queryable for any past decision.
 - **Reason-code frequency is now measurable**, per model version and over a
