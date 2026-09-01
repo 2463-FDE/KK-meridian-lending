@@ -407,9 +407,19 @@ Related, and not reopened here. **RF-25** (whether staff may apply DTI manually
 in a referred review) was *deferred* when this spec was written; the client
 answered it on 2026-08-29 — permitted on a referred application, by an
 underwriter or admin, from approved synthetic source documents, as human-review
-evidence that must not change the decision. **It is decided and not built**: the
-evidence it requires is not representable on the current data model, and
-`docs/DEBT.md` RF-25 carries the traced gate. `adr/0007-underwriting-policy-dti-
+evidence that must not change the decision. **It is decided and, since
+2026-08-31, built** -- schema, API and screen (#146, #151, #152). The sentence
+here used to read "decided and not built: the evidence it requires is not
+representable on the current data model", which was true when this spec was
+written and stopped being true when `manual_dti_assessments` and the approved
+synthetic document registry landed. `docs/DEBT.md` RF-25 carries the detail.
+
+What that does NOT change is anything in this spec. A manual DTI is evidence
+for a human reviewer and reaches no decision, no model input and no adverse
+action, so the monitoring this spec defines counts exactly what it counted
+before. The half of RF-25 still open is the one that would touch this document
+if it ever moved: a free-text manual-review reason naming DTI still reaches
+`adverse_action_reason` with no figures behind it. `adr/0007-underwriting-policy-dti-
 fraud-gap.md` (G-DTI, why the system computes no DTI and therefore cannot offer
 it as a reason) is unaffected — the decision authorises a HUMAN to compute a
 ratio from documents, and changes nothing about what the system computes.
