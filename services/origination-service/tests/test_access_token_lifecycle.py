@@ -67,64 +67,22 @@ def real_db(monkeypatch):
         # said the quiet part out loud: it "has to be kept in step by hand, which
         # is why adding a column to the real schema breaks these tests rather
         # than the code". It does not any more.
-        cur.execute(real_schema.sql_for(SCHEMA, ["applications"]))
+        # RF-26: every one of these tables now comes from `db/init`, verbatim,
+        # instead of being re-typed here. The hand-written copies had already
+        # drifted -- `offers` was missing columns the boarding path reads -- and
+        # the failure mode of the next drift is an `UndefinedColumn` pointing at
+        # this fixture rather than at the change that caused it.
+        cur.execute(real_schema.sql_for(SCHEMA, [
+            "applications", "kyc_checks", "decisions", "offers",
+            "manual_reviews", "decision_events",
+        ]))
         cur.execute(f"""
             SET search_path TO {SCHEMA};
-            -- Still created here: db/init/001_schema.sql carries this index too,
-            -- and the helper extracts table definitions rather than indexes.
+            -- Still created here: `db/init/001_schema.sql` carries this index
+            -- too, and the helper extracts TABLE definitions rather than
+            -- indexes. `intake` relies on it for the retry contract.
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
-            CREATE TABLE kyc_checks (
-                id SERIAL PRIMARY KEY,
-                applicant_id INTEGER REFERENCES applicants(id),
-                application_id INTEGER REFERENCES applications(id),
-                name_verified BOOLEAN, dob_verified BOOLEAN,
-                address_verified BOOLEAN, ssn_verified BOOLEAN,
-                cip_passed BOOLEAN,
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
-            CREATE TABLE decisions (
-                app_id INTEGER PRIMARY KEY REFERENCES applications(id), outcome TEXT NOT NULL
-            );
-            -- PR #8: an approval now reports DecisionOut.offer_ready, which
-            -- means run_decision reads offers on the approve path.
-            CREATE TABLE offers (
-                id SERIAL PRIMARY KEY,
-                app_id INTEGER REFERENCES applications(id) UNIQUE,
-                decision_id INTEGER REFERENCES decisions(app_id) UNIQUE,
-                fee_pct_used NUMERIC(5,4),
-                -- note_rate_pct is canonical: _complete_offer_exists() queries it,
-                -- so a fixture omitting it fails with UndefinedColumn.
-                note_rate_pct NUMERIC(7,3),
-                apr NUMERIC(7,3), finance_charge NUMERIC(14,2),
-                monthly_payment NUMERIC(14,2), amount_financed NUMERIC(14,2),
-                total_of_payments NUMERIC(14,2),
-                -- Model B schedule facts (db/migrations/0030). Boarding requires
-                -- these, so a fixture omitting them cannot board.
-                regular_payment_count INTEGER,
-                final_payment NUMERIC(14,2),
-                term_months INTEGER,
-                schedule_version TEXT,
-            principal NUMERIC(14,2),
-                accepted_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
-            CREATE TABLE manual_reviews (
-                id SERIAL PRIMARY KEY,
-                app_id INTEGER NOT NULL REFERENCES applications(id) UNIQUE,
-                reviewer_role TEXT NOT NULL, reviewer_name TEXT,
-                outcome TEXT NOT NULL, reason TEXT NOT NULL,
-                reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
-            CREATE TABLE decision_events (
-                id SERIAL PRIMARY KEY,
-                app_id INTEGER NOT NULL REFERENCES applications(id),
-                requested_amount NUMERIC(14,2), term_months INTEGER,
-                annual_income NUMERIC(14,2), bureau_score INTEGER,
-                model_score DOUBLE PRECISION, model_version TEXT NOT NULL,
-                top_features JSONB, decision TEXT NOT NULL,
-                reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb, attempt_id INTEGER
-            );
         """)
     conn.commit()
     with conn.cursor() as cur:

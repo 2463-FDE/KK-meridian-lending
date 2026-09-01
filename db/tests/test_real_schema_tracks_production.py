@@ -94,9 +94,17 @@ def test_dependencies_match_the_references_in_the_file():
     the canonical file actually carries.
     """
     for table, declared in real_schema.DEPENDENCIES.items():
-        body = real_schema.definition_of(table)
+        # COMMENTS STRIPPED, and the table name must be followed by the column
+        # list a real foreign key carries. The first version matched
+        # `REFERENCES\s+(\w+)` anywhere in the definition, and `ledger_entries`
+        # has a comment containing the word "REFERENCES here" -- so the guard
+        # demanded a dependency on a table called `here`. A constraint parser
+        # that reads prose reports defects that do not exist and, worse, would
+        # miss a real FK written in a shape it does not expect.
+        body = re.sub(r"--.*", "", real_schema.definition_of(table))
         referenced = {
-            name for name in re.findall(r"REFERENCES\s+(\w+)", body)
+            name for name in re.findall(r"REFERENCES\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(",
+                                        body)
             if name != table
         }
         missing = referenced - set(declared)

@@ -17,7 +17,9 @@ concurrency, the backoff is computed in the database, and the partial index
 predicate is what scopes the work. A mocked cursor would assert none of it.
 Only the HTTP boundary to servicing is faked.
 """
+import importlib.util
 import os
+import pathlib
 import threading
 
 import psycopg2
@@ -27,6 +29,19 @@ import pytest
 from app import db, reconcile
 from app.config import RECONCILE_BACKOFF_CAP_SECONDS, RECONCILE_MAX_ATTEMPTS
 
+#: `db/tests/real_schema.py`, loaded by path -- standard library only, so it
+#: imports cleanly from a service test (the same pattern origination and
+#: disclosure use).
+_REAL_SCHEMA_PATH = (pathlib.Path(__file__).resolve().parents[3]
+                     / "db" / "tests" / "real_schema.py")
+assert _REAL_SCHEMA_PATH.is_file(), (
+    "expected the canonical schema helper at %s -- if it moved, this test must "
+    "fail rather than fall back to a hand-written table" % _REAL_SCHEMA_PATH)
+_spec = importlib.util.spec_from_file_location("meridian_real_schema",
+                                               _REAL_SCHEMA_PATH)
+real_schema = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(real_schema)
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against")
 
@@ -34,28 +49,18 @@ SCHEMA = "payment_reconcile_test"
 
 
 def _schema_sql():
-    """The payments columns this drain depends on, matching db/init/001_schema.sql
-    plus db/migrations/0028."""
-    return f"""
+    """`payments`, verbatim from `db/init`, plus the index the drain scans.
+
+    RF-26. This used to hand-write the columns "the drain depends on ... matching
+    db/init/001_schema.sql plus db/migrations/0028" -- which is the pattern that
+    row is about: a copy kept in step by whoever remembers, and correct only
+    until the next column. `correlation_id` (0043) had already been added here
+    by hand for exactly that reason, and the comment beside it says so.
+    """
+    return real_schema.sql_for(SCHEMA, ["payments"]) + f"""
         SET search_path TO {SCHEMA};
-        CREATE TABLE payments (
-            id SERIAL PRIMARY KEY,
-            loan_id INTEGER,
-            amount NUMERIC(14,2) NOT NULL,
-            method TEXT DEFAULT 'card',
-            auth_status TEXT NOT NULL DEFAULT 'captured',
-            authorization_id TEXT,
-            idempotency_key TEXT,
-            applied_at TIMESTAMPTZ,
-            apply_attempts INTEGER NOT NULL DEFAULT 0,
-            apply_next_attempt_at TIMESTAMPTZ,
-            apply_last_error TEXT,
-            -- db/migrations/0043. The drain RETURNS this column, so a fixture
-            -- without it fails the claim query rather than the assertion, and
-            -- the failure names SQL instead of behaviour.
-            correlation_id TEXT,
-            created_at TIMESTAMPTZ DEFAULT now()
-        );
+        -- Not a table, so the helper does not carry it: the partial index whose
+        -- predicate scopes the drain's claim query.
         CREATE INDEX idx_payments_unapplied ON payments (apply_next_attempt_at)
             WHERE auth_status = 'captured' AND applied_at IS NULL;
     """
@@ -69,6 +74,17 @@ def pg(monkeypatch):
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
         cur.execute(_schema_sql())
+        # The loan every payment here belongs to. The hand-written `payments`
+        # this replaced had no foreign key, so the fixture could reference a
+        # loan that did not exist -- a database that cannot occur in production,
+        # where `payments.loan_id` REFERENCES `loans(id)`. Seeding it is not
+        # ceremony: a drain that only ever ran against orphaned rows was never
+        # exercising the join production has.
+        cur.execute(
+            "INSERT INTO loans (id, applicant_name, principal, note_rate_pct, "
+            "                   term_months) "
+            "VALUES (1, 'Reconcile Fixture', 10000.00, 7.99, 48) "
+            "ON CONFLICT (id) DO NOTHING")
     monkeypatch.setattr(db, "_conn", conn, raising=False)
     yield conn
     with conn.cursor() as cur:

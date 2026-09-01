@@ -75,46 +75,13 @@ def _full_schema_sql():
     # `request_fingerprint` -- which is the column the retry contract this file
     # tests is keyed on, so the drift was one migration away from failing the
     # harness instead of the code.
-    return real_schema.sql_for(SCHEMA, ["applications"]) + f"""
+    return real_schema.sql_for(SCHEMA, [
+        "applications", "kyc_checks", "decisions", "manual_reviews",
+        "decision_events",
+    ]) + f"""
         SET search_path TO {SCHEMA};
             CREATE UNIQUE INDEX applications_idempotency_key_uniq
                 ON applications (idempotency_key) WHERE idempotency_key IS NOT NULL;
-        CREATE TABLE kyc_checks (
-            id SERIAL PRIMARY KEY,
-            applicant_id INTEGER REFERENCES applicants(id),
-                application_id INTEGER REFERENCES applications(id),
-            name_verified BOOLEAN, dob_verified BOOLEAN,
-            address_verified BOOLEAN, ssn_verified BOOLEAN,
-                cip_passed BOOLEAN,
-            created_at TIMESTAMPTZ DEFAULT now()
-        );
-        CREATE TABLE decisions (
-            app_id INTEGER PRIMARY KEY REFERENCES applications(id),
-            outcome TEXT NOT NULL
-        );
-        CREATE TABLE manual_reviews (
-            id SERIAL PRIMARY KEY,
-            app_id INTEGER NOT NULL REFERENCES applications(id) UNIQUE,
-            reviewer_role TEXT NOT NULL,
-            reviewer_name TEXT,
-            outcome TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        CREATE TABLE decision_events (
-            id SERIAL PRIMARY KEY,
-            app_id INTEGER NOT NULL REFERENCES applications(id),
-            requested_amount NUMERIC(14,2),
-            term_months INTEGER,
-            annual_income NUMERIC(14,2),
-            bureau_score INTEGER,
-            model_score DOUBLE PRECISION,
-            model_version TEXT NOT NULL,
-            top_features JSONB,
-            decision TEXT NOT NULL,
-            reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
-            attempt_id INTEGER
-        );
         -- Canonical offer row (db/init/001_schema.sql). Nullable amounts on
         -- purpose: the Gap F tests seed deliberately incomplete rows to prove
         -- the read/accept paths refuse them. The production schema carries a
@@ -144,63 +111,13 @@ def _full_schema_sql():
             created_at TIMESTAMPTZ DEFAULT now(),
             accepted_at TIMESTAMPTZ
         );
-        -- Boarding sink (db/init/001_schema.sql:117-138). Present so the A3
-        -- route-removal test can assert on REAL row counts rather than on a
-        -- spy for one particular implementation of boarding.
-        CREATE TABLE loans (
-            id SERIAL PRIMARY KEY,
-            app_id INTEGER UNIQUE,
-            applicant_name TEXT,
-            principal NUMERIC(14,2) NOT NULL,
-            note_rate_pct NUMERIC(7,3) NOT NULL,
-            -- D19 expand (db/migrations/0038). Added because boarding now
-            -- dual-writes it -- and this hand-copied DDL diverged the moment it
-            -- did: ten tests failed with "column note_rate_pct does not exist".
-            --
-            -- That is the risk the comment below already names, demonstrated.
-            -- The copy is kept rather than replaced by a db/init build, because
-            -- these tests want a schema they can reason about in isolation -- but
-            -- it IS a copy and it will drift again. What makes that survivable is
-            -- that the drift failed loudly rather than passing on a shape
-            -- production would reject.
-            term_months INTEGER NOT NULL,
-            -- The Model B contract as boarded (db/migrations/0030), WITH its
-            -- constraints. Copying only the columns would let these tests pass
-            -- on a boarding write that real Postgres rejects -- and the whole
-            -- point of a real-Postgres fixture is that it does not diverge
-            -- from the deployed schema in ways the tests cannot see.
-            regular_payment NUMERIC(14,2),
-            regular_payment_count INTEGER,
-            final_payment NUMERIC(14,2),
-            schedule_version TEXT,
-            status TEXT DEFAULT 'current',
-            opened_at TIMESTAMPTZ DEFAULT now(),
-            CONSTRAINT loans_schedule_all_or_nothing CHECK (
-                (regular_payment IS NULL AND regular_payment_count IS NULL
-                 AND final_payment IS NULL AND schedule_version IS NULL)
-                OR
-                (regular_payment IS NOT NULL AND regular_payment_count IS NOT NULL
-                 AND final_payment IS NOT NULL AND schedule_version IS NOT NULL)
-            ),
-            CONSTRAINT loans_schedule_term_agrees CHECK (
-                regular_payment_count IS NULL OR regular_payment_count + 1 = term_months
-            ),
-            CONSTRAINT loans_schedule_amounts_positive CHECK (
-                (regular_payment IS NULL OR regular_payment > 0)
-                AND (final_payment IS NULL OR final_payment > 0)
-                AND (regular_payment_count IS NULL OR regular_payment_count >= 0)
-            ),
-            CONSTRAINT loans_schedule_version_supported CHECK (
-                schedule_version IS NULL OR schedule_version IN ('B1')
-            )
-        );
-        CREATE TABLE balances (
-            loan_id INTEGER PRIMARY KEY REFERENCES loans(id),
-            balance NUMERIC(14,2) NOT NULL,
-            past_due NUMERIC(14,2) DEFAULT 0,
-            updated_at TIMESTAMPTZ DEFAULT now()
-        );
-    """
+    """ + real_schema.sql_for(SCHEMA, ["loans", "balances"])
+    # RF-26: `loans` and `balances` come from `db/init` verbatim. The hand-copied
+    # `loans` above had ALREADY diverged once -- 0038 added `note_rate_pct`,
+    # boarding started dual-writing it, and ten tests failed with "column
+    # note_rate_pct does not exist" pointing at this fixture rather than at the
+    # migration. `loans` is the boarding sink the A3 route-removal test counts
+    # rows in, so it has to be the real shape.
 
 
 @pytest.fixture

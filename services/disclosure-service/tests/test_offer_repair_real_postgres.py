@@ -104,27 +104,17 @@ def _schema_sql():
             created_at TIMESTAMPTZ DEFAULT now(),
             accepted_at TIMESTAMPTZ
         );
-        -- Present because the repair guard reads it: an offer with a loan has
-        -- been boarded, whatever accepted_at says on an upgraded database.
-        CREATE TABLE loans (
-            id SERIAL PRIMARY KEY,
-            app_id INTEGER UNIQUE,
-            applicant_name TEXT,
-            principal NUMERIC(14,2) NOT NULL,
-            note_rate_pct NUMERIC(7,3) NOT NULL,
-            term_months INTEGER NOT NULL,
-            status TEXT DEFAULT 'current',
-            opened_at TIMESTAMPTZ DEFAULT now()
-        );
-        CREATE TABLE audit_logs (
-            id SERIAL PRIMARY KEY,
-            actor TEXT,
-            action TEXT,
-            detail TEXT,
-            deleted_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ DEFAULT now()
-        );
-    """
+    """ + real_schema.sql_for(SCHEMA, ["loans", "audit_logs"])
+    # RF-26: `loans` and `audit_logs` come from `db/init` verbatim. Only `offers`
+    # deviates here, and deliberately -- this file exists to repair rows that
+    # predate 0026's `offers_canonical_terms_present`, so it must be able to
+    # seed rows that constraint would reject. The deviation is written down
+    # beside the thing it deviates from, which is the rule `real_schema` states;
+    # the two tables that had no reason to deviate no longer do.
+    #
+    # `loans` matters more than it looks: the repair guard reads it to decide
+    # whether an offer has been boarded, so a hand-copied shape that drifted
+    # would change what the guard concludes rather than merely failing to build.
 
 
 @pytest.fixture
