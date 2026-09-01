@@ -232,6 +232,24 @@ test("a CSR is not offered the form", async ({ page }) => {
  * the answer.
  *
  * Both directions are tested, because a cache-driven gate is wrong both ways.
+ *
+ * WHAT THESE TWO SPECS DO AND DO NOT PIN -- read this before deleting the
+ * source-level guard at the bottom of this file as redundant.
+ *
+ * `RequireRole` now ALSO reconciles the cached copy with what the server said,
+ * and that reconciliation lands before this panel renders. So by the time the
+ * panel asks anything, the cached role and the verified role are equal.
+ * Measured against a build where the panel was put back to `getUser()`: the
+ * CSR-tampers-upward spec stayed GREEN, and the stale-underwriter spec failed
+ * -- and that one is timing-sensitive, since it depends on which render sees
+ * the reconciled value. Neither is a dependable guard on WHERE the panel gets
+ * its role.
+ *
+ * What they do pin is the behaviour a person experiences, in both directions,
+ * which is the thing that actually matters and would survive any reasonable
+ * refactor. The source-level assertion pins the property they cannot see: that
+ * the panel does not read a store the user can edit, so it stays correct if the
+ * reconciliation is ever removed, reordered, or moved behind a condition.
  */
 
 /** Overwrite the cached role without touching the real session token. */
