@@ -496,133 +496,151 @@ export async function retireFixtureLoans(client: Client, label: string): Promise
 }
 
 /**
- * A serviced loan the SEEDED BORROWER owns, created for one spec file (RF-30).
+ * A whole borrower IDENTITY, created for one spec file (RF-30).
  *
- * WHY THIS EXISTS, and why `createFixtureLoan` above could not be reused. The
- * borrower payment specs pay through the real UI, and a payment permanently
- * reduces the loan's balance. They all pointed at `SEEDED_BORROWER.loanId`, so
- * every run drew that balance down and never gave it back -- the ledger is
- * append-only, and D14 refuses an overpayment, so once the balance approaches
- * zero those specs fail on a refusal that is correct.
+ * WHY THIS EXISTS. The borrower payment specs pay through the real UI, and a
+ * payment permanently reduces the loan's balance. They all pointed at
+ * `SEEDED_BORROWER.loanId`, so every run drew that balance down and never gave
+ * it back -- the ledger is append-only, and D14 refuses an overpayment, so once
+ * the balance approaches zero those specs fail on a refusal that is correct.
  *
  * Measured on a FRESH volume rather than inferred: `db/init` seeds `4471` at
  * `12200.00`; after roughly one and a half full runs it stood at `11169.73`.
  * That is about **1030 per full run**, so **eleven or twelve runs** exhaust it.
  * RF-27's reserved band lasted about fifteen. Same pattern, same order of
- * magnitude -- which is why this is a fix rather than a note. An earlier draft
- * of the RF-30 row said the specs had "room for many more sessions"; that was
- * based on a drain measured across an already-mutated database and it
- * understated the defect.
+ * magnitude -- which is why this is a fix rather than a note.
  *
- * `createFixtureLoan` does not transfer, because a borrower's access is not a
- * property of the loan. `gateway/app/main.py::_borrower_loans` resolves it as
- * `loans.app_id -> applications.applicant_id = users.applicant_id`, so a loan
- * with no application, or one whose application belongs to somebody else, is
- * invisible to the borrower however correct its balances are. This creates the
- * application too, owned by the signed-in borrower's applicant.
+ * WHY IT CREATES AN APPLICANT AND A USER, not just a loan. A borrower's access
+ * is not a property of the loan. `gateway/app/main.py::_borrower_loans` resolves
+ * it as `loans.app_id -> applications.applicant_id = users.applicant_id`, so a
+ * loan with no application, or one whose application belongs to somebody else,
+ * is invisible to the borrower however correct its balances are.
  *
- * RETIREMENT IS DIFFERENT HERE TOO, and this is the part worth reading.
- * `_borrower_loans` applies **no status filter** -- it lists every loan for the
- * applicant. So closing the loan, which is all `retireFixtureLoans` does and is
- * enough for every staff spec, would leave it in the borrower's own portfolio
- * for ever and the list would grow without bound on every run: the same defect
- * in a different column. Teardown therefore also points the fixture APPLICATION
- * at a dedicated synthetic holder, so the loan leaves the borrower's portfolio.
+ * WHY IT DOES NOT REASSIGN `applications.applicant_id`, which an earlier version
+ * of this fixture did at teardown. That version created the loan under the
+ * SEEDED borrower and then, to keep it out of that borrower's portfolio,
+ * repointed the application at a synthetic holder -- rewriting who applied,
+ * after the application had already produced a funded loan and payment history.
  *
- * That is a deliberate trade and not a tidy one: it rewrites who applied. It is
- * acceptable only because these rows are fixtures with a traceable name and
- * nothing reads the reassigned application afterwards -- and the alternative,
- * deleting, is not available: `balances` refuses a DELETE outright during ledger
- * cutover, and removing the loan while its balances row survived would leave an
- * orphan. Neither is topping the balance back up: that is a ledger write, and
- * inventing money to make a fixture reusable is exactly the history-rewriting
- * RF-27 forbade.
+ * Audited before being accepted, and it did not survive the audit:
+ *
+ *   - no trigger or constraint on `applications` forbids it, but
+ *   - NO production code path anywhere updates `applications.applicant_id`; the
+ *     column is written once at intake and only ever read afterwards, by
+ *     origination, kyc and the gateway, so it is immutable by convention even
+ *     though nothing enforces it; and
+ *   - `kyc_checks` carries its OWN `applicant_id` alongside `application_id`, so
+ *     reassigning one and not the other desynchronises two records that are
+ *     supposed to describe the same person.
+ *
+ * Absence of a constraint is not permission. So the fixture owns its identity
+ * from the applicant down, and `applicant_id` is never mutated after creation.
+ * Nothing in production behaviour was changed to make the tests easier --
+ * notably `_borrower_loans` was NOT taught to hide closed loans, because no
+ * product authority says a closed loan should disappear from a borrower's
+ * history.
+ *
+ * Teardown closes the loan and deactivates the synthetic user. Both are states
+ * the product already has; neither rewrites history. Deleting is not available
+ * either way -- `balances` refuses a DELETE outright during ledger cutover --
+ * and topping the balance back up would be a ledger write, which is inventing
+ * money to make a fixture reusable and is exactly what RF-27 forbade.
  */
-export interface BorrowerFixtureLoan {
+export interface BorrowerFixtureIdentity {
+  /** Sign in with this. Same demo password as every other seeded login. */
+  username: string;
   loanId: number;
   appId: number;
-  applicantName: string;
+  applicantId: number;
   balance: number;
 }
 
-/** Where a retired borrower fixture loan is parked. Named so a stray row says
- * what it is. */
-const RETIRED_FIXTURE_HOLDER = "E2E Retired Fixture Holder";
 
-export async function createBorrowerLoan(
+export async function createBorrowerIdentity(
   client: Client,
   label: string,
   balance = 12_000.0,
-): Promise<BorrowerFixtureLoan> {
-  // The borrower's applicant, read rather than hard-coded: the seed's ids are
-  // the seed's business, and a spec that pinned `1` here would break silently
-  // the day the seed renumbered.
-  const who = await client.query(
-    "SELECT applicant_id FROM users WHERE username = $1", [SEEDED_BORROWER.username]);
-  const applicantId = who.rows[0]?.applicant_id;
-  if (!applicantId) {
-    throw new Error(
-      `no applicant_id on user ${SEEDED_BORROWER.username}; a borrower loan cannot ` +
-      "be owned by anyone, so this fixture must fail rather than create an " +
-      "invisible loan");
-  }
+): Promise<BorrowerFixtureIdentity> {
+  const name = `${fixtureLoanPrefix(label)} #${++fixtureLoanSeq}`;
 
-  const applicantName = `${fixtureLoanPrefix(label)} #${++fixtureLoanSeq}`;
+  const applicant = await client.query(
+    "INSERT INTO applicants (name, is_entity) VALUES ($1, FALSE) RETURNING id",
+    [name]);
+  const applicantId = Number(applicant.rows[0].id);
+
+  // Username carries the same traceable prefix, so a stray row says what it is
+  // and teardown can find it without a separate registry.
+  const username = `e2e-${label}-${FIXTURE_RUN}-${fixtureLoanSeq}`;
+
+  // The password hash is COPIED FROM THE SEEDED BORROWER rather than written
+  // here as a literal. Two reasons, and the second is why the literal is gone:
+  //
+  //   1. it cannot drift. If the seed's demo credential or the hashing scheme
+  //      ever changes, this fixture follows it instead of silently minting a
+  //      user nobody can sign in as.
+  //   2. a 64-character hex literal in a source file is indistinguishable from
+  //      a real leaked secret. gitleaks flagged the first version of this line
+  //      as `DEMO_PASSWORD_HASH` and failed CI -- correctly, on the shape.
+  //      Reading the value keeps the credential out of the tree entirely.
+  //
+  // This introduces no new credential: the synthetic borrower accepts exactly
+  // the same demo password every seeded login already accepts, in a local
+  // training repository.
+  await client.query(
+    `INSERT INTO users (username, password_hash, role, display_name, applicant_id)
+     SELECT $1, u.password_hash, 'borrower', $2, $3
+       FROM users u WHERE u.username = $4`,
+    [username, name, applicantId, SEEDED_BORROWER.username]);
+
+  const created = await client.query(
+    "SELECT 1 FROM users WHERE username = $1", [username]);
+  if (created.rowCount !== 1) {
+    throw new Error(
+      `could not create the synthetic borrower ${username}: no password hash ` +
+      `was copied, which means the seeded user ${SEEDED_BORROWER.username} is ` +
+      "missing. Failing rather than leaving a login that cannot authenticate");
+  }
 
   const app = await client.query(
     `INSERT INTO applications (applicant_id, amount, term_months, purpose,
                                income, status)
      VALUES ($1, 12000.00, 36, 'personal', 60000, 'funded')
      RETURNING id`,
-    [applicantId],
-  );
+    [applicantId]);
   const appId = Number(app.rows[0].id);
 
-  // Same amortizing contract as `createFixtureLoan`, and for the same reason:
-  // `375.98 x 35` then `376.03` closes 12,000 at 0.00, so the loan does not
-  // trip the schedule route's data-defect warning.
-  // `db/tests/test_fixture_contracts_amortize.py` checks these numbers against
-  // servicing's own generator.
+  // The amortizing contract: `375.98 x 35` then `376.03` closes 12,000 at 0.00,
+  // so this loan does not trip the schedule route's data-defect warning.
+  // `db/tests/test_fixture_contracts_amortize.py` checks it against servicing's
+  // own generator.
   const loan = await client.query(
     `INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct,
                         term_months, regular_payment, regular_payment_count,
                         final_payment, schedule_version, status)
      VALUES ($1, $2, 12000.00, 7.99, 36, 375.98, 35, 376.03, 'B1', 'current')
      RETURNING id`,
-    [appId, applicantName],
-  );
+    [appId, name]);
   const loanId = Number(loan.rows[0].id);
 
-  // `past_due` 0 deliberately -- see `createFixtureLoan`: a non-zero seed
-  // writes a `legacy_direct_write` fees entry of its own.
+  // `past_due` 0 deliberately -- a non-zero seed writes a `legacy_direct_write`
+  // fees entry of its own, so an exact fee assertion would be wrong by the seed.
   await client.query(
     "INSERT INTO balances (loan_id, balance, past_due) VALUES ($1, $2, 0.00)",
-    [loanId, balance],
-  );
+    [loanId, balance]);
 
-  return { loanId, appId, applicantName, balance };
+  return { username, loanId, appId, applicantId, balance };
 }
 
-export async function retireBorrowerLoans(client: Client, label: string): Promise<void> {
+export async function retireBorrowerIdentity(
+  client: Client,
+  label: string,
+): Promise<void> {
   const prefix = `${fixtureLoanPrefix(label)}%`;
-
-  // One holder row, reused. `applicants` has no unique constraint on name, so
-  // this reads before it writes rather than relying on ON CONFLICT.
-  const existing = await client.query(
-    "SELECT id FROM applicants WHERE name = $1 LIMIT 1", [RETIRED_FIXTURE_HOLDER]);
-  let holderId = existing.rows[0]?.id;
-  if (!holderId) {
-    const made = await client.query(
-      "INSERT INTO applicants (name, is_entity) VALUES ($1, FALSE) RETURNING id",
-      [RETIRED_FIXTURE_HOLDER]);
-    holderId = made.rows[0].id;
-  }
-
-  // Out of the borrower's portfolio first, then out of the serviced one.
-  await client.query(
-    `UPDATE applications SET applicant_id = $1
-      WHERE id IN (SELECT app_id FROM loans WHERE applicant_name LIKE $2)`,
-    [holderId, prefix]);
+  // Out of the serviced portfolio, and the synthetic login switched off. Both
+  // are ordinary product states. `applications.applicant_id` is deliberately
+  // untouched -- see the note above.
   await client.query(
     "UPDATE loans SET status = 'closed' WHERE applicant_name LIKE $1", [prefix]);
+  await client.query(
+    "UPDATE users SET is_active = FALSE WHERE display_name LIKE $1", [prefix]);
 }

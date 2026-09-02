@@ -2,9 +2,9 @@ import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import type { Client } from "pg";
 import {
-  createBorrowerLoan,
+  createBorrowerIdentity,
   dbClient,
-  retireBorrowerLoans,
+  retireBorrowerIdentity,
   signInAsBorrower,
 } from "./fixtures";
 
@@ -51,12 +51,18 @@ const FIXTURE_LABEL = "payment-receipt";
 
 let LOAN = 0;
 
+/** The synthetic borrower this file signs in as. Created with its own applicant,
+ * user, application and loan, so nothing here touches the seeded borrower. */
+let BORROWER = "";
+
 test.beforeAll(async () => {
-  LOAN = await withDb(async (c) => (await createBorrowerLoan(c, FIXTURE_LABEL)).loanId);
+  const who = await withDb((c) => createBorrowerIdentity(c, FIXTURE_LABEL));
+  LOAN = who.loanId;
+  BORROWER = who.username;
 });
 
 test.afterAll(async () => {
-  await withDb((c) => retireBorrowerLoans(c, FIXTURE_LABEL));
+  await withDb((c) => retireBorrowerIdentity(c, FIXTURE_LABEL));
 });
 
 async function openAccount(page: Page): Promise<void> {
@@ -119,7 +125,7 @@ test("the payment form states the contract and the account context", async ({
       ).rows[0],
   );
 
-  await signInAsBorrower(page);
+  await signInAsBorrower(page, BORROWER);
   await openAccount(page);
 
   // The false promise is gone. It said payments post immediately, which the
@@ -157,7 +163,7 @@ test("a captured payment shows a receipt for that exact payment", async ({
   const decoyId = 900001;
   const realId = 900002;
 
-  await signInAsBorrower(page);
+  await signInAsBorrower(page, BORROWER);
 
   // Payment history carries two rows with the SAME amount. The decoy is newest,
   // so "latest row" picks the wrong one; its split differs, so the receipt shows
@@ -222,7 +228,7 @@ test("a captured payment shows a receipt for that exact payment", async ({
 test("a pending payment claims nothing, and keeps the same idempotency key", async ({
   page,
 }) => {
-  await signInAsBorrower(page);
+  await signInAsBorrower(page, BORROWER);
   await chargeReturns(page, { status: "pending", payment_id: 900010 });
 
   await openAccount(page);
@@ -262,7 +268,7 @@ test("a declined payment says declined, and frees the key for a new attempt", as
    * The defect this spec exists for. A decline used to render as pending with
    * the key retained, so the retry the screen suggested replayed a refusal.
    */
-  await signInAsBorrower(page);
+  await signInAsBorrower(page, BORROWER);
   await chargeReturns(page, { status: "failed", payment_id: 900020 });
 
   await openAccount(page);
@@ -293,7 +299,7 @@ test("a captured payment with no allocation evidence says so rather than showing
    * recorded -- the distinction `lib/allocation.ts` exists to keep.
    */
   const id = 900030;
-  await signInAsBorrower(page);
+  await signInAsBorrower(page, BORROWER);
   await page.route(`**/lss/loans/${LOAN}/payments`, (route) =>
     route.fulfill({
       status: 200,
