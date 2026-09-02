@@ -57,6 +57,7 @@ def schema():
         for name in INIT_FILES:
             cur.execute(f"SET search_path TO {SCHEMA}")
             cur.execute((INIT / name).read_text(encoding="utf-8"))
+    _seed_users(conn)
     yield
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
@@ -101,6 +102,47 @@ def _propose(conn, loan, *, amount="-100.00", component="principal",
         "RETURNING id", (loan, component, amount, entry_type, requester, role))[0]["id"]
     conn.commit()
     return movement
+
+
+#: The accounts these cases resolve as.
+#:
+#: `resolve_pending_movement` re-reads the resolver in `users` and refuses one it
+#: cannot confirm is active and holding the role claimed (migration 0048, G-02):
+#: the authority someone held when a proposal was raised is not evidence about
+#: the authority they hold when money moves. This file builds its schema from
+#: `001_schema.sql` alone, so `users` was EMPTY and every resolution here was by
+#: an account that did not exist.
+#:
+#: These rows are the fixture that was always missing rather than an
+#: accommodation of the new check. A resolution by a non-existent account should
+#: never have been accepted, and before 0048 it was -- including the case
+#: asserting the ledger actor is user 42, which was writing an actor no `users`
+#: row backed.
+#:
+#: Ids are explicit because the cases name them. Role 7 is deliberately `csr`
+#: while two cases resolve as it claiming `underwriter`/`admin`: those are the
+#: self-approval cases, and self-approval is refused BEFORE authority is
+#: considered, so they still prove what they were written to prove.
+_FIXTURE_USERS = (
+    (1, "csr"),
+    (2, "underwriter"),
+    (3, "admin"),
+    (7, "csr"),
+    (42, "admin"),
+)
+
+
+def _seed_users(conn):
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
+        for uid, role in _FIXTURE_USERS:
+            cur.execute(
+                "INSERT INTO users (id, username, password_hash, role, display_name, "
+                "                   is_active) "
+                "VALUES (%s, %s, 'x', %s, %s, TRUE) ON CONFLICT (id) DO UPDATE "
+                "SET role = EXCLUDED.role, is_active = TRUE",
+                (uid, f"fixture_{uid}", role, f"Fixture {role} {uid}"))
+    conn.commit()
 
 
 def _resolve(conn, movement, *, resolver=2, role="underwriter", resolution="approved",
