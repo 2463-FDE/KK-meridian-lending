@@ -494,3 +494,135 @@ export async function retireFixtureLoans(client: Client, label: string): Promise
   await client.query("UPDATE loans SET status = 'closed' WHERE applicant_name LIKE $1",
                      [`${fixtureLoanPrefix(label)}%`]);
 }
+
+/**
+ * A serviced loan the SEEDED BORROWER owns, created for one spec file (RF-30).
+ *
+ * WHY THIS EXISTS, and why `createFixtureLoan` above could not be reused. The
+ * borrower payment specs pay through the real UI, and a payment permanently
+ * reduces the loan's balance. They all pointed at `SEEDED_BORROWER.loanId`, so
+ * every run drew that balance down and never gave it back -- the ledger is
+ * append-only, and D14 refuses an overpayment, so once the balance approaches
+ * zero those specs fail on a refusal that is correct.
+ *
+ * Measured on a FRESH volume rather than inferred: `db/init` seeds `4471` at
+ * `12200.00`; after roughly one and a half full runs it stood at `11169.73`.
+ * That is about **1030 per full run**, so **eleven or twelve runs** exhaust it.
+ * RF-27's reserved band lasted about fifteen. Same pattern, same order of
+ * magnitude -- which is why this is a fix rather than a note. An earlier draft
+ * of the RF-30 row said the specs had "room for many more sessions"; that was
+ * based on a drain measured across an already-mutated database and it
+ * understated the defect.
+ *
+ * `createFixtureLoan` does not transfer, because a borrower's access is not a
+ * property of the loan. `gateway/app/main.py::_borrower_loans` resolves it as
+ * `loans.app_id -> applications.applicant_id = users.applicant_id`, so a loan
+ * with no application, or one whose application belongs to somebody else, is
+ * invisible to the borrower however correct its balances are. This creates the
+ * application too, owned by the signed-in borrower's applicant.
+ *
+ * RETIREMENT IS DIFFERENT HERE TOO, and this is the part worth reading.
+ * `_borrower_loans` applies **no status filter** -- it lists every loan for the
+ * applicant. So closing the loan, which is all `retireFixtureLoans` does and is
+ * enough for every staff spec, would leave it in the borrower's own portfolio
+ * for ever and the list would grow without bound on every run: the same defect
+ * in a different column. Teardown therefore also points the fixture APPLICATION
+ * at a dedicated synthetic holder, so the loan leaves the borrower's portfolio.
+ *
+ * That is a deliberate trade and not a tidy one: it rewrites who applied. It is
+ * acceptable only because these rows are fixtures with a traceable name and
+ * nothing reads the reassigned application afterwards -- and the alternative,
+ * deleting, is not available: `balances` refuses a DELETE outright during ledger
+ * cutover, and removing the loan while its balances row survived would leave an
+ * orphan. Neither is topping the balance back up: that is a ledger write, and
+ * inventing money to make a fixture reusable is exactly the history-rewriting
+ * RF-27 forbade.
+ */
+export interface BorrowerFixtureLoan {
+  loanId: number;
+  appId: number;
+  applicantName: string;
+  balance: number;
+}
+
+/** Where a retired borrower fixture loan is parked. Named so a stray row says
+ * what it is. */
+const RETIRED_FIXTURE_HOLDER = "E2E Retired Fixture Holder";
+
+export async function createBorrowerLoan(
+  client: Client,
+  label: string,
+  balance = 12_000.0,
+): Promise<BorrowerFixtureLoan> {
+  // The borrower's applicant, read rather than hard-coded: the seed's ids are
+  // the seed's business, and a spec that pinned `1` here would break silently
+  // the day the seed renumbered.
+  const who = await client.query(
+    "SELECT applicant_id FROM users WHERE username = $1", [SEEDED_BORROWER.username]);
+  const applicantId = who.rows[0]?.applicant_id;
+  if (!applicantId) {
+    throw new Error(
+      `no applicant_id on user ${SEEDED_BORROWER.username}; a borrower loan cannot ` +
+      "be owned by anyone, so this fixture must fail rather than create an " +
+      "invisible loan");
+  }
+
+  const applicantName = `${fixtureLoanPrefix(label)} #${++fixtureLoanSeq}`;
+
+  const app = await client.query(
+    `INSERT INTO applications (applicant_id, amount, term_months, purpose,
+                               income, status)
+     VALUES ($1, 12000.00, 36, 'personal', 60000, 'funded')
+     RETURNING id`,
+    [applicantId],
+  );
+  const appId = Number(app.rows[0].id);
+
+  // Same amortizing contract as `createFixtureLoan`, and for the same reason:
+  // `375.98 x 35` then `376.03` closes 12,000 at 0.00, so the loan does not
+  // trip the schedule route's data-defect warning.
+  // `db/tests/test_fixture_contracts_amortize.py` checks these numbers against
+  // servicing's own generator.
+  const loan = await client.query(
+    `INSERT INTO loans (app_id, applicant_name, principal, note_rate_pct,
+                        term_months, regular_payment, regular_payment_count,
+                        final_payment, schedule_version, status)
+     VALUES ($1, $2, 12000.00, 7.99, 36, 375.98, 35, 376.03, 'B1', 'current')
+     RETURNING id`,
+    [appId, applicantName],
+  );
+  const loanId = Number(loan.rows[0].id);
+
+  // `past_due` 0 deliberately -- see `createFixtureLoan`: a non-zero seed
+  // writes a `legacy_direct_write` fees entry of its own.
+  await client.query(
+    "INSERT INTO balances (loan_id, balance, past_due) VALUES ($1, $2, 0.00)",
+    [loanId, balance],
+  );
+
+  return { loanId, appId, applicantName, balance };
+}
+
+export async function retireBorrowerLoans(client: Client, label: string): Promise<void> {
+  const prefix = `${fixtureLoanPrefix(label)}%`;
+
+  // One holder row, reused. `applicants` has no unique constraint on name, so
+  // this reads before it writes rather than relying on ON CONFLICT.
+  const existing = await client.query(
+    "SELECT id FROM applicants WHERE name = $1 LIMIT 1", [RETIRED_FIXTURE_HOLDER]);
+  let holderId = existing.rows[0]?.id;
+  if (!holderId) {
+    const made = await client.query(
+      "INSERT INTO applicants (name, is_entity) VALUES ($1, FALSE) RETURNING id",
+      [RETIRED_FIXTURE_HOLDER]);
+    holderId = made.rows[0].id;
+  }
+
+  // Out of the borrower's portfolio first, then out of the serviced one.
+  await client.query(
+    `UPDATE applications SET applicant_id = $1
+      WHERE id IN (SELECT app_id FROM loans WHERE applicant_name LIKE $2)`,
+    [holderId, prefix]);
+  await client.query(
+    "UPDATE loans SET status = 'closed' WHERE applicant_name LIKE $1", [prefix]);
+}

@@ -1,6 +1,11 @@
 import { test, expect, Page } from "@playwright/test";
 import { Client } from "pg";
-import { dbClient, signInAsBorrower, SEEDED_BORROWER } from "./fixtures";
+import {
+  createBorrowerLoan,
+  dbClient,
+  retireBorrowerLoans,
+  signInAsBorrower,
+} from "./fixtures";
 
 /**
  * "Can the user tell what a payment was applied to?" -- the 2026-08-19 demo.
@@ -25,7 +30,31 @@ import { dbClient, signInAsBorrower, SEEDED_BORROWER } from "./fixtures";
  * tokenizer's test card.
  */
 
-const LOAN_ID = SEEDED_BORROWER.loanId;
+/**
+ * A loan this file OWNS, created for it and owned by the signed-in borrower.
+ *
+ * It used to be `SEEDED_BORROWER.loanId`. Every payment below goes through the
+ * real UI, and a payment permanently reduces the balance, so each run drew the
+ * shared seeded loan down and never gave it back -- about 1030 per full run
+ * against a seeded 12,200, so eleven or twelve runs exhausted it and these
+ * specs then failed on D14 correctly refusing an overpayment. That is RF-30,
+ * and it is the same deterministic exhaustion RF-27 had.
+ *
+ * `createBorrowerLoan` creates the APPLICATION as well as the loan, because a
+ * borrower's access is `loans.app_id -> applications.applicant_id`, not a
+ * property of the loan.
+ */
+const FIXTURE_LABEL = "payment-allocation";
+
+let LOAN_ID = 0;
+
+test.beforeAll(async () => {
+  LOAN_ID = await withDb(async (c) => (await createBorrowerLoan(c, FIXTURE_LABEL)).loanId);
+});
+
+test.afterAll(async () => {
+  await withDb((c) => retireBorrowerLoans(c, FIXTURE_LABEL));
+});
 
 let _seq = 0;
 /** A distinctive dollar amount, unique within and across runs. */

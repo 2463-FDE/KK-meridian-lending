@@ -1,7 +1,12 @@
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import type { Client } from "pg";
-import { dbClient, signInAsBorrower, SEEDED_BORROWER } from "./fixtures";
+import {
+  createBorrowerLoan,
+  dbClient,
+  retireBorrowerLoans,
+  signInAsBorrower,
+} from "./fixtures";
 
 /**
  * A payment tells the borrower which of three things happened, and the receipt
@@ -39,7 +44,20 @@ async function withDb<T>(fn: (c: Client) => Promise<T>): Promise<T> {
   }
 }
 
-const LOAN = SEEDED_BORROWER.loanId;
+/** A loan this file owns. See `payment-allocation.spec.ts` and RF-30: these
+ * specs pay through the real UI, and a payment permanently reduces the balance,
+ * so sharing the seeded borrower loan drained it at about 1030 per full run. */
+const FIXTURE_LABEL = "payment-receipt";
+
+let LOAN = 0;
+
+test.beforeAll(async () => {
+  LOAN = await withDb(async (c) => (await createBorrowerLoan(c, FIXTURE_LABEL)).loanId);
+});
+
+test.afterAll(async () => {
+  await withDb((c) => retireBorrowerLoans(c, FIXTURE_LABEL));
+});
 
 async function openAccount(page: Page): Promise<void> {
   await page.goto(`/servicing/${LOAN}`);
