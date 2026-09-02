@@ -1,5 +1,6 @@
 import { Page, expect } from "@playwright/test";
 import { Client } from "pg";
+import { GATEWAY_URL, SESSION_KEYS, roleHome } from "../lib/api";
 
 /** Fictional test data only -- no real/production-like SSNs or card data.
  * The last SSN digit is fixed (even -> approve band, odd -> deny/refer
@@ -175,15 +176,113 @@ export async function countRows(client: Client, table: string, whereCol: string,
  * decision-service/app/decision.py::_run_model). */
 export const REFER_BAND_INCOME = 60_000;
 
-/** Seeded staff logins (db/init/002_seed.sql) -- demo credentials in a local
- * training repo, never real. */
-export async function signInAsStaff(page: Page, username = "underwriter"): Promise<void> {
+/**
+ * Sign in, and do not return until the browser is PROVABLY authenticated.
+ *
+ * THE DEFECT THIS REPLACES. Both helpers used to end at
+ * `expect(page).not.toHaveURL(/\/login$/)`. That is a proxy for "signed in",
+ * and it is a proxy that comes true too early: the address can stop ending in
+ * `/login` while `localStorage` is still empty and `RequireRole` has not yet
+ * completed its `/auth/me` check. The next `page.goto(...)` then renders a
+ * role-gated screen with no session, the guard sends the browser back to
+ * `/login`, and the spec fails somewhere with no visible relationship to
+ * signing in -- a nav-link count, a missing approvals card, a heading that
+ * never appears. Every failure looks like a different bug.
+ *
+ * Both of PR #160's remaining CI failures were this: the artifacts show the
+ * LOGIN PAGE at assertion time, and the "2 nav links" the appbar case saw are
+ * the anonymous Apply / Log in pair.
+ *
+ * WHAT IS PROVEN HERE, in order, each one a thing a later step depends on:
+ *
+ *   1. no visible authentication error -- fail immediately rather than after a
+ *      15s wait for something that is never going to appear;
+ *   2. the session is readable in the browser, under the app's OWN keys
+ *      (`SESSION_KEYS`, imported rather than re-typed);
+ *   3. the stored user is the account that was asked for;
+ *   4. the gateway agrees -- `/auth/me` returns that same account and role,
+ *      which is the check `RequireRole` is about to make on every guarded page;
+ *   5. the app has landed on that role's home (`roleHome`, imported, so the
+ *      suite cannot drift from the app's own routing), and is not on /login.
+ *
+ * This is STRICTER than what it replaces, not looser. The original URL
+ * assertion is still made, at step 5. Nothing here retries, sleeps, or widens a
+ * timeout.
+ */
+async function signInAndProveIt(page: Page, username: string): Promise<void> {
   await page.goto("/login");
   await page.locator("#username").fill(username);
   await page.locator("#password").fill("password");
   await page.getByRole("button", { name: /Sign in/ }).click();
-  // The app redirects away from /login once the session is established.
+
+  // 1. A visible failure is final -- waiting on it would only slow the report.
+  const authError = page.locator(".alert-error");
+  await expect
+    .poll(async () => (await authError.count()) > 0 ? await authError.innerText() : null,
+          { timeout: 15_000, message: "sign-in reported an error" })
+    .toBeNull()
+    .catch(async () => {
+      throw new Error(
+        `sign-in as ${username} failed: ${(await authError.innerText()).trim()}`);
+    });
+
+  // 2 + 3. The session exists in the browser, and it is the right account.
+  await page.waitForFunction(
+    ([tokenKey, userKey, expected]) => {
+      try {
+        const token = window.localStorage.getItem(tokenKey);
+        const raw = window.localStorage.getItem(userKey);
+        if (!token || !raw) return false;
+        return (JSON.parse(raw) as { username?: string }).username === expected;
+      } catch {
+        return false;
+      }
+    },
+    [SESSION_KEYS.token, SESSION_KEYS.user, username] as const,
+    { timeout: 15_000 },
+  );
+
+  const stored = await page.evaluate(
+    ([tokenKey, userKey]) => ({
+      token: window.localStorage.getItem(tokenKey) as string,
+      user: JSON.parse(window.localStorage.getItem(userKey) as string) as
+        { username: string; role: string },
+    }),
+    [SESSION_KEYS.token, SESSION_KEYS.user] as const,
+  );
+
+  // 4. The gateway agrees. This is the same question RequireRole asks, so a
+  // session the guard would reject fails here instead of three steps later.
+  // The token goes in a header and is never logged; only the status is.
+  const me = await page.request.get(`${GATEWAY_URL}/auth/me`, {
+    headers: { Authorization: `Bearer ${stored.token}` },
+  });
+  if (!me.ok()) {
+    throw new Error(
+      `/auth/me refused a session that had just been created for ${username}: ` +
+      `HTTP ${me.status()} (${categoriseAuthFailure(me.status())})`);
+  }
+  const body = (await me.json()) as { username: string; role: string };
+  expect(body.username, "/auth/me returned a different account").toBe(username);
+  expect(body.role, "/auth/me returned a different role").toBe(stored.user.role);
+
+  // 5. Landed where this role belongs, and off the login page.
+  await expect(page).toHaveURL(new RegExp(`${roleHome(body.role)}/?$`), { timeout: 15_000 });
   await expect(page).not.toHaveURL(/\/login$/, { timeout: 15_000 });
+}
+
+/** Name the failure class without printing anything sensitive. */
+function categoriseAuthFailure(status: number): string {
+  if (status === 401 || status === 403) return "credentials rejected";
+  if (status === 429) return "rate limited";
+  if (status >= 500) return "gateway error";
+  return "unexpected";
+}
+
+/** Seeded staff logins (db/init/002_seed.sql) -- demo credentials in a local
+ * training repo, never real. */
+export async function signInAsStaff(page: Page, username = "underwriter"): Promise<void> {
+  await signInAndProveIt(page, username);
 }
 
 /** The seeded borrower (db/init/002_seed.sql): `maria` owns applicant 1,
@@ -202,11 +301,7 @@ export async function signInAsBorrower(
   page: Page,
   username: string = SEEDED_BORROWER.username,
 ): Promise<void> {
-  await page.goto("/login");
-  await page.locator("#username").fill(username);
-  await page.locator("#password").fill("password");
-  await page.getByRole("button", { name: /Sign in/ }).click();
-  await expect(page).not.toHaveURL(/\/login$/, { timeout: 15_000 });
+  await signInAndProveIt(page, username);
 }
 
 /** Resolve a REFER from the staff underwriting screen. `reason` is required by
