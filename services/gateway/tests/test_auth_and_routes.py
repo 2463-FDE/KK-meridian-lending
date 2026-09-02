@@ -774,22 +774,50 @@ def test_assistant_summary_accepts_staff_roles(monkeypatch, role):
     assert resp.status_code == 200
 
 
-def test_assistant_policy_chat_proxies_anonymously_with_no_session(monkeypatch):
-    # Policy Q&A is generic lending-policy content, no per-applicant financials
-    # or risk_tier -- unlike /assistant/applications/*/summary, it's open to a
-    # borrower with no account, same anonymous-allowed pattern as /los/*.
+#: The client's decision for the EXISTING Policy Chat: an internal tool for
+#: lending, compliance and underwriting staff.
+#:
+#: These two cases previously asserted the opposite -- anonymous allowed,
+#: borrower allowed -- on the reasoning that policy Q&A carries no per-applicant
+#: data. That reasoning was never wrong about the content; it was answering a
+#: question nobody had decided, while the browser page enforced the other
+#: answer. `docs/DEBT.md` RF-28 held the split open rather than letting either
+#: side win by default. The decision resolves it, so the assertions invert
+#: rather than being deleted: what the route used to permit is exactly what it
+#: must now refuse, and that is worth keeping visible.
+_POLICY_CHAT_ROLES = [
+    ("csr", 200),
+    ("underwriter", 200),
+    ("admin", 200),
+    ("borrower", 403),
+]
+
+
+def test_assistant_policy_chat_refuses_an_anonymous_caller(monkeypatch):
+    """No session at all: 401, and nothing is proxied.
+
+    Previously 200. A borrower who had been told about the feature could ask
+    lending-policy questions of an internal tool without an account.
+    """
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(auth, "get_session", lambda token: None)
 
     resp = client.post("/assistant/policy-chat", json={"question": "x"})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 401
 
 
-def test_assistant_policy_chat_allows_borrower_role(monkeypatch):
+@pytest.mark.parametrize("role,expected", _POLICY_CHAT_ROLES)
+def test_assistant_policy_chat_matches_the_decided_audience(monkeypatch, role, expected):
+    """The whole matrix in one place, so a role cannot be added without a verdict.
+
+    403 for the borrower rather than 401: that caller HAS identified themselves
+    and is not permitted, which is the distinction `/kyc/*`, `/decision/*` and
+    `/disclosure/*` already draw and the one an operator reading logs needs.
+    """
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(auth, "get_session", lambda token: {
-        "id": 1, "username": "maria", "role": "borrower", "name": "Maria Gonzalez",
+        "id": 1, "username": f"fixture_{role}", "role": role, "name": f"Fixture {role}",
     })
 
     resp = client.post(
@@ -798,7 +826,23 @@ def test_assistant_policy_chat_allows_borrower_role(monkeypatch):
         headers={"Authorization": "Bearer faketoken123"},
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == expected, (
+        f"{role} should get {expected} on the internal Policy Chat")
+
+
+def test_the_policy_chat_route_is_gated_the_same_way_the_page_is(monkeypatch):
+    """The two halves that used to disagree, asserted against each other.
+
+    RF-28 was not a bug in either half -- it was the product being unable to say
+    who the feature was for. This pins the answer on the server side; the page's
+    `RequireRole` list is pinned by the browser suite. If someone widens one,
+    this is the test that should make them widen the other deliberately.
+    """
+    monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
+    allowed = {role for role, code in _POLICY_CHAT_ROLES if code == 200}
+    assert allowed == set(auth.STAFF_ROLES), (
+        "the audience this route permits has drifted from the gateway's own "
+        "definition of staff")
 
 
 @pytest.mark.parametrize("prefix", ["/decision/decisions", "/disclosure/offers"])

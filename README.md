@@ -35,9 +35,13 @@ System (LSS)** bolted together behind a single API gateway, with a Next.js borro
 servicing portal. (Lending Ops asked for an "AI underwriting assistant"; it now exists as
 `loan-assistant` — a LangChain agent that reaches the lending-policy corpus through one
 bounded read-only tool and refuses to summarise when that tool returns no policy evidence.
-Its two routes are gated differently on purpose: `/assistant/applications/{id}/summary` is
-**staff-only**, because it returns per-applicant financials; `/assistant/policy-chat` is
-**anonymous-allowed**, because generic lending-policy Q&A carries no applicant data. See
+Both routes are **staff-only**, for different reasons:
+`/assistant/applications/{id}/summary` because it returns per-applicant financials, and
+`/assistant/policy-chat` because the client's decision makes the existing Policy Chat an
+INTERNAL tool for lending, compliance and underwriting staff. Policy Q&A does not carry
+applicant data — the route was anonymous-allowed on that reasoning, and the browser page
+disagreed the whole time — but who the feature is FOR was a product question, and it has
+been answered. A borrower-facing chat would be a separate surface with its own corpus. See
 [ARCHITECTURE.md](ARCHITECTURE.md).)
 
 Since the handoff the in-house team has begun **extracting the LOS monolith into focused
@@ -80,7 +84,7 @@ rather than being fixed.
 
   loan-assistant :8007
     ◄── /assistant/applications/{id}/summary   staff only (csr/underwriter/admin)
-    ◄── /assistant/policy-chat                 anonymous-allowed, no applicant data
+    ◄── /assistant/policy-chat                 staff-only (internal policy tool)
     LangChain agent · one bounded read-only policy tool over the policy corpus
     reads applications from origination-service over HTTP
     NO line to Postgres above, deliberately: it holds no database connection
@@ -126,7 +130,7 @@ and a borrower login `maria`.
 | `services/decision-service/` | FastAPI | 8004 | async credit pull + AI scorecard; **compute-only — persists nothing** (origination writes `decisions` and `decision_events`) |
 | `services/disclosure-service/` | FastAPI | 8005 | TILA/Reg-Z offer + APR + amortization |
 | `services/payment-service/` | FastAPI | 8006 | card/ACH charge; posts to servicing via `apply-payment` |
-| `services/loan-assistant/` | FastAPI + LangChain agent | 8007 | `applications/{id}/summary` **staff-only** (per-applicant financials); `policy-chat` **anonymous-allowed** (generic policy Q&A, no applicant data); one bounded read-only policy tool; **holds no database connection** — reads applications from origination over HTTP |
+| `services/loan-assistant/` | FastAPI + LangChain agent | 8007 | `applications/{id}/summary` **staff-only** (per-applicant financials); `policy-chat` **staff-only** (internal policy tool; client decision, see `docs/DEBT.md` RF-28); one bounded read-only policy tool; **holds no database connection** — reads applications from origination over HTTP |
 | `db/` | Postgres init + seed | 5432 | schema, migrations, seed data (shared by the seven services that use it) |
 
 ## Compliance

@@ -703,23 +703,42 @@ async def payments(path: str, request: Request, authorization: str | None = Head
 
 @app.post("/assistant/policy-chat")
 async def assistant_policy_chat(request: Request, authorization: str | None = Header(None)):
-    # Registered before the /assistant/{path:path} catch-all below so this literal
-    # path wins the match. Policy Q&A is generic lending-policy content -- no
-    # per-applicant financials or risk_tier -- so it doesn't need the staff-only
-    # gate that protects /assistant/applications/*/summary; a borrower can ask
-    # without an account, same anonymous-allowed pattern as /los/*.
+    # Registered before the /assistant/{path:path} catch-all below so this
+    # literal path wins the match.
     #
-    # NOTE, so this comment is not read as a description of the product: the
-    # BROWSER page disagrees. `/policy-chat` wraps itself in `RequireRole`
-    # (csr/underwriter/admin), so a borrower who reaches this route directly is
-    # answered while the same borrower visiting the screen is refused. Nothing
-    # in the specs or the roadmap resolves which audience is intended, so both
-    # halves are deliberately left as they are and the question is recorded in
-    # `docs/DEBT.md` RF-28 rather than settled by an edit here. Do not "fix" the
-    # inconsistency by loosening or tightening one side without that decision.
+    # STAFF ONLY, and that is now a product decision rather than an accident.
+    # This route used to resolve a session and proxy regardless -- anonymous
+    # allowed, borrower allowed -- on the reasoning that policy Q&A carries no
+    # per-applicant financials or risk tier. The browser page disagreed the
+    # whole time: `/policy-chat` wraps itself in `RequireRole`
+    # (csr/underwriter/admin), so a borrower reaching this route directly was
+    # answered while the same borrower visiting the screen was refused. That
+    # split was recorded as `docs/DEBT.md` RF-28 rather than settled by
+    # guessing, because loosening the page or tightening the route are both
+    # security-relevant edits and neither had authority behind it.
+    #
+    # The client has now answered: the existing Policy Chat is an INTERNAL tool
+    # for lending, compliance and underwriting staff. So the route matches the
+    # page, and both match the decision.
+    #
+    # 401 for no session, 403 for a session that is not staff -- the same
+    # distinction `/kyc/*`, `/decision/*` and `/disclosure/*` draw, because one
+    # is a caller who has not identified themselves and the other is a caller
+    # who has and is not permitted. A borrower-facing chat, if it is ever
+    # wanted, is a separate surface with its own corpus and its own route; it is
+    # NOT this one with the gate removed.
+    #
     # loan-assistant's own cost guard (MAX_INPUT_TOKENS) and this gateway's
-    # per-IP rate limiter both already apply regardless of caller identity.
-    user = auth.get_session(auth.bearer_token(authorization))
+    # per-IP rate limiter still apply on top.
+    #
+    # SCOPE, stated so it is not mistaken for a wider claim: this closes the
+    # EXTERNAL path. `loan-assistant`'s own `POST /policy-chat` still takes a
+    # body and no token, so any service on the compose network can reach it --
+    # the shared-secret trust boundary tracked as SEC-17, not something this
+    # change addresses.
+    user = _require_user(authorization)
+    if not auth.is_staff(user):
+        raise HTTPException(status_code=403, detail="staff only")
     return await _proxy(LOAN_ASSISTANT_URL, "/policy-chat", request, user)
 
 

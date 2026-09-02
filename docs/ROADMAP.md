@@ -454,7 +454,7 @@ read-only — see the Weeks 1–6 audit above.
 | **kyc-service** | Identity verification stub. |
 | **servicing-service (LSS)** | Post-funding: balance, payments, adjustments, fee waivers, reconciliation. |
 | **payment-service** | Card/ACH charge capture, idempotency, hands the balance-apply off to servicing. |
-| **loan-assistant** | Claude-backed. Policy Q&A (anyone) + AI application summary (staff only — pulls financials from origination-service). |
+| **loan-assistant** | Claude-backed. Policy Q&A (**staff only** -- client decision, `docs/DEBT.md` RF-28) + AI application summary (staff only — pulls financials from origination-service). |
 
 **Loan lifecycle**
 1. **Apply** — `POST /los/applications` → KYC auto-runs → one-time `access_token` minted (proves ownership for step 2 with no account needed). `applications.status` starts `submitted`.
@@ -1208,7 +1208,7 @@ indexes, foreign keys and defaults. Four migrations could not replay onto a
 fresh database at all before this; the legacy-versus-fresh comparison then found
 five indexes that `db/init` creates and no migration ever did.
 
-**Browser end-to-end** (`frontend/e2e/`, **41** spec files, recounted by
+**Browser end-to-end** (`frontend/e2e/`, **42** spec files, recounted by
 `db/tests/test_the_roadmap_counts_the_specs_it_has.py` rather than by hand).
 
 **What they cover**, grouped rather than listed one by one, and these are

@@ -40,7 +40,7 @@ paths below.
 
 ```
  Borrower / Servicing Rep ─► Next.js portal (3000)
-                                   │  Authorization: Bearer <session> (optional for /los, /assistant/policy-chat)
+                                   │  Authorization: Bearer <session> (optional for /los only)
                                    ▼
                           gateway / BFF (8000)  ── Redis (sessions, per-IP rate limit)
      /auth · /los · /lss · /kyc · /decision · /disclosure · /payments · /assistant
@@ -175,7 +175,7 @@ now fails on either wording.
 | `decision-service` | 8004 | FastAPI + LangGraph + psycopg2 | Credit pull + AI scorer chain (`decision.py`). **Compute-only — persists nothing.** Origination is the sole writer of both `decisions` and the append-only `decision_events` audit row, written atomically after its own finality recheck (PR #6). The bureau call goes through a `BureauClient` seam that forwards an idempotency key so a retry after an ambiguous timeout recovers the original pull. Only `application_id` is trusted from a caller — everything else the model actually scores is loaded server-side from the application's own record. No host port; requires `X-Internal-Token`. |
 | `disclosure-service` | 8005 | FastAPI + SQLAlchemy + psycopg2 | TILA/Reg-Z offer + APR + amortization (Decimal internally, float at the API boundary). `POST /offers` atomically checks decision approval and inserts (`INSERT ... SELECT ... FROM decisions WHERE outcome='approve'`) and is non-mutating on conflict (`ON CONFLICT DO NOTHING` + read-back) — a retry can never rewrite an already-disclosed loan's terms, even across a fee-rule change. `fee_pct_used` is snapshotted per offer. No host port; requires `X-Internal-Token`. |
 | `payment-service` | 8006 | FastAPI + SQLAlchemy + psycopg2 | Card/ACH charge. **Idempotent** since PR #6: `idempotency_key` is required at the API boundary and backed by a partial unique index, so a retried POST no longer double-charges (`db/migrations/0007`, re-asserted by `0010`; tests in `payment-service/tests/test_charge_flow.py`), with atomic dedupe + apply-once reconciliation (`0012`/`0013`). **PCI debt closed in PR #8:** card capture is tokenized client-side (ADR 0008, supersedes ADR 0003) — the service never receives a raw PAN/CVV/SSN, only a processor token plus last4/brand, and the token itself is never persisted. After inserting the `payments` row it calls servicing's `apply-payment`. No host port; requires `X-Internal-Token`. |
-| `loan-assistant` | 8007 | FastAPI + LangGraph/RAG + Anthropic or Bedrock | Two capabilities behind guardrails (redaction, corpus hygiene, cost guard on input tokens, fail-closed on a missing/unreachable model): `POST /applications/{id}/summary` (officer-facing risk tier + flags, **staff-only** at the gateway) and `POST /policy-chat` (generic lending-policy Q&A, **open to any caller including anonymous**, same pattern as `/los/*`). Optional LangSmith tracing, and the two capabilities differ. The summary path suppresses the framework's own tracing entirely and emits a trace built from a structural allow-list of categorical and provenance fields instead (`app/trace.py`), parented under a `gateway_entry` run the gateway mints after it authorises the caller. Policy chat emits **no** trace: its client is not wrapped for tracing, because that wrapper recorded the question and the completion. The claim this row used to make -- that traces were "PII-scrubbed by the same guardrails" -- was measured and was false: those guardrails run on what the summary RETURNS, while the tracer serialised the whole run. No host port; requires `X-Internal-Token`. |
+| `loan-assistant` | 8007 | FastAPI + LangGraph/RAG + Anthropic or Bedrock | Two capabilities behind guardrails (redaction, corpus hygiene, cost guard on input tokens, fail-closed on a missing/unreachable model): `POST /applications/{id}/summary` (officer-facing risk tier + flags, **staff-only** at the gateway) and `POST /policy-chat` (generic lending-policy Q&A, **staff-only at the gateway** -- the client's decision makes the existing Policy Chat an internal tool for lending, compliance and underwriting staff; the content carries no applicant data, but who it is FOR was a product question, answered in `docs/DEBT.md` RF-28). Optional LangSmith tracing, and the two capabilities differ. The summary path suppresses the framework's own tracing entirely and emits a trace built from a structural allow-list of categorical and provenance fields instead (`app/trace.py`), parented under a `gateway_entry` run the gateway mints after it authorises the caller. Policy chat emits **no** trace: its client is not wrapped for tracing, because that wrapper recorded the question and the completion. The claim this row used to make -- that traces were "PII-scrubbed by the same guardrails" -- was measured and was false: those guardrails run on what the summary RETURNS, while the tracer serialised the whole run. No host port; requires `X-Internal-Token`. |
 | `frontend` | 3000 | Next.js 15 (App Router) | Borrower application wizard, offer/disclosure screen, servicing dashboard + loan detail. |
 | `prometheus` / `grafana` | 9090 / 3001 | Prometheus + Grafana | Scrapes `/metrics` (request count, latency histograms, in-progress requests) off all 8 backend services. No cross-service metrics existed before this (W7). The claim that LangSmith "only ever covered loan-assistant's own LLM calls" was wrong: `decision-service` and `origination-service` both run LangGraph, which auto-instruments through `langchain-core` whenever `LANGSMITH_TRACING` is set, and both were exporting their graph state. Both now suppress it. |
 
@@ -219,11 +219,15 @@ rather than escalation, but caller-controlled.
 
 The gateway enforces per-route tiers rather than a single authenticated-or-not gate:
 
-- **Anonymous-allowed**: `/los/*` (an applicant can apply/check status without an
-  account) and `/assistant/policy-chat` (generic policy Q&A, no per-applicant financials).
+- **Anonymous-allowed**: `/los/*` only (an applicant can apply and check status without
+  an account).
 - **Staff-only**: `/decision/*`, `/disclosure/*`, `/kyc/*` (ops/inspection path only — the
   real decision/offer/CIP flow is origination calling those services server-to-server,
-  never through the gateway), `/assistant/applications/*/summary` (returns risk tier +
+  never through the gateway), `/assistant/policy-chat` (the existing Policy Chat is an
+  internal tool for lending, compliance and underwriting staff — a client decision, RF-28;
+  it was listed as anonymous-allowed here on the reasoning that the content carries no
+  applicant data, which was true of the content and silent about the audience),
+  `/assistant/applications/*/summary` (returns risk tier +
   internal underwriting flags a borrower shouldn't see about their own application), and
   the portfolio-wide/money-moving parts of `/lss/*`/`/payments/*` (list the whole
   portfolio, balance adjustments, fee waivers, reconciliation).
