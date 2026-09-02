@@ -43,6 +43,19 @@ export default function PaymentAllocation({
     );
   }
 
+  if (view.kind === "authorizing") {
+    // NOT the "Captured" sentence above. `payment-service` writes the row as
+    // `pending` BEFORE it calls the processor, so this borrower's card may not
+    // have been charged at all -- saying "Captured" would assert a charge that
+    // may never have happened. And it must not fall through to the historical
+    // wording either: nothing about this payment is historical.
+    return (
+      <span className="muted alloc-authorizing" data-testid="alloc-authorizing">
+        Authorization in progress — nothing applied yet.
+      </span>
+    );
+  }
+
   if (view.kind === "declined") {
     // Not a missing figure. A declined payment moved nothing, and leaving it in
     // the "not available" bucket invited the reading that an allocation exists

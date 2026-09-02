@@ -80,6 +80,22 @@ export type AllocationView =
    * is nothing to show -- but the reason is knowable and worth saying.
    */
   | { kind: "pending" }
+  /**
+   * Authorization not yet confirmed. The card may not have been charged at all.
+   *
+   * A DIFFERENT state from `pending`, and the distinction is the whole reason
+   * this variant exists rather than being folded into it. `payment-service`
+   * inserts the row as `auth_status = 'pending'` BEFORE it calls the processor,
+   * so a row sitting in that state means authorization is in flight -- or was
+   * left in flight by a crash mid-authorization. Nothing has been captured.
+   *
+   * Telling that borrower "Captured -- allocation pending" would assert a charge
+   * that may never have happened, which is the same class of untruth as telling
+   * them a figure that has no ledger behind it. And falling through to
+   * `unavailable`, which is what happened before, gave them legacy-gap wording
+   * about a payment that is neither historical nor settled.
+   */
+  | { kind: "authorizing" }
   /** Declined. Nothing was applied, and this must not read as a missing figure. */
   | { kind: "declined" }
   | { kind: "unavailable" };
@@ -137,6 +153,12 @@ export function allocationView(payment: PaymentAllocationFields): AllocationView
     if (payment.auth_status === "failed") return { kind: "declined" };
     if (payment.auth_status === "captured" && payment.applied !== true) {
       return { kind: "pending" };
+    }
+    // Authorization still in flight. Deliberately checked AFTER `captured`,
+    // because `applied` is what separates the two settled-but-unallocated
+    // cases and `pending` is not settled at all.
+    if (payment.auth_status === "pending" && payment.applied !== true) {
+      return { kind: "authorizing" };
     }
     return { kind: "unavailable" };
   }

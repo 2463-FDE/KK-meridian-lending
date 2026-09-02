@@ -300,3 +300,57 @@ def test_ledger_evidence_decides_regardless_of_the_status_columns(client, conn):
     assert row["applied_to_principal"] == 50.00, (
         "the ledger holds an entry for this payment, so the allocation must be "
         "reported whatever the status columns say")
+
+
+def test_a_payment_awaiting_authorization_is_reported_as_pending_auth(client, conn):
+    """The fourth absence reason, and the one the first version missed.
+
+    Codex ALLOC-PENDING-AUTH-001. `payment-service` inserts the row as
+    `auth_status = 'pending'` BEFORE it calls the processor, so a row in that
+    state means authorization is in flight -- or was left in flight by a crash
+    mid-authorization. Nothing has been captured.
+
+    The API's job here is to carry the value truthfully; the browser decides the
+    wording, and it must not be the "Captured" sentence (which would assert a
+    charge that may never have happened) nor the historical one (nothing about
+    this payment is old). This asserts the API hands over what that decision
+    needs.
+    """
+    import psycopg2.extras
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        loan = _a_loan(cur)
+        pid = _a_payment(cur, loan, amount=310.00, auth_status="pending", applied=False)
+    conn.commit()
+
+    row = _row_for(client, loan, pid)
+
+    assert row["auth_status"] == "pending", (
+        "history flattened an unconfirmed authorization into some other status, "
+        "so the browser cannot tell it from a captured payment")
+    assert row["applied"] is False
+    assert row["applied_to_fees"] is None
+    assert row["applied_to_interest"] is None
+    assert row["applied_to_principal"] is None
+
+
+def test_history_carries_every_auth_status_the_payment_table_can_hold(client, conn):
+    """Guard the guard, derived rather than listed.
+
+    The four cases above each name one status. This one reads the CHECK
+    constraint -- or the values `payment-service` writes -- and asserts history
+    round-trips each, so a status added later shows up here instead of silently
+    falling into whatever branch the frontend has last.
+    """
+    import psycopg2.extras
+    statuses = ("captured", "pending", "failed")
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        loan = _a_loan(cur)
+        ids = {s: _a_payment(cur, loan, amount=10.00 + i, auth_status=s, applied=False)
+               for i, s in enumerate(statuses)}
+    conn.commit()
+
+    for status, pid in ids.items():
+        row = _row_for(client, loan, pid)
+        assert row["auth_status"] == status, (
+            "history reported %r for a payment stored as %r"
+            % (row["auth_status"], status))
