@@ -458,6 +458,19 @@ def resolve(movement_id: int, *, resolution: str, actor) -> dict:
             raise HTTPException(status_code=409, detail=message) from exc
         if "may not resolve it" in message:
             raise HTTPException(status_code=403, detail=message) from exc
+        if "does not hold current authority" in message:
+            # 0048's refusal, and an AUTHORISATION failure rather than a
+            # validation one. Worth mapping explicitly instead of letting it
+            # fall through, because of who reaches it: the caller holds a
+            # valid, unexpired, correctly-signed principal, so nothing earlier
+            # in the stack refuses them and this exception is the only thing
+            # between them and a money movement. A 422 would tell that caller
+            # their request was malformed and invite a retry, when what
+            # happened is that their authority was withdrawn between the
+            # assertion being minted and the resolve landing -- deactivated,
+            # deleted, or role changed. It would also hide the event from
+            # anything counting authorisation failures.
+            raise HTTPException(status_code=403, detail=message) from exc
         # A target that has moved on, or a limit that cannot be resolved: both
         # are refusals of this specific movement, not server faults.
         raise HTTPException(status_code=422, detail=message) from exc
