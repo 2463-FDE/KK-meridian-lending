@@ -1198,7 +1198,7 @@ briefed. All blocking unless noted:
 | `docker-build` | `docker compose build` on a clean checkout — every Dockerfile used to `COPY` a gitignored CA bundle and fail |
 | `e2e` | Full stack up, Playwright drives the browser, Postgres rows verified directly |
 | `frontend` | `npm run build` |
-| `dependency-audit`, `dependency-audit-frontend` | pip-audit / npm audit. **Non-blocking** — first run's findings are not triaged, so a green tick here is not a clean-scan result |
+| `dependency-audit`, `dependency-audit-frontend` | pip-audit / npm audit. **Non-blocking** — so a green tick here is not a clean-scan result. *This cell said the findings were "not triaged"; they were triaged on 2026-09-01 (`docs/DEBT.md` SEC-11) — two upgrades applied and the rest accepted with reachability arguments.* What keeps the step non-blocking is the absence of a machine-readable advisory allowlist for it to consult |
 
 **Migration parity** (`db/tests/test_migration_paths_converge.py`) builds the
 schema four ways — fresh init; legacy plus migrations; fresh init plus

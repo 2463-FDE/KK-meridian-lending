@@ -308,11 +308,21 @@ jobs:
         run: docker compose logs --tail=500
 
   # Dependency vulnerability scan -- no SAST/dependency audit existed at all before this.
-  # Non-blocking for now: this repo has never been scanned, so the first run's findings
-  # need triage (upgrade vs. accept-risk vs. false positive) before it's safe to gate the
-  # build on. Drop continue-on-error once that triage lands. Covers all eight backend
-  # services regardless of the money-math split above -- a vulnerable dependency is
-  # unrelated to RF-13's float-money test failures.
+  #
+  # Non-blocking, and the REASON changed on 2026-09-01. It used to be "the first run's
+  # findings need triage"; that triage has since happened and is written up in
+  # `docs/DEBT.md` SEC-11: two upgrades applied (`cryptography` 48.0.1, `next` 15.5.25)
+  # and every remaining advisory accepted with a checkable reachability argument.
+  #
+  # What keeps it non-blocking now is that there is no machine-readable allowlist for a
+  # job to consult. Flipping `continue-on-error` today would fail the build on findings
+  # SEC-11 has already dispositioned, which trains everyone to ignore the step. What has
+  # to exist first is an allowlist keyed by advisory id, carrying the reachability
+  # rationale and an expiry, so an accepted finding is a dated decision rather than a red
+  # step people skip. SEC-11 records that as the next bounded piece of work on the row.
+  #
+  # Covers all eight backend services regardless of the money-math split above -- a
+  # vulnerable dependency is unrelated to RF-13's float-money test failures.
   dependency-audit:
     runs-on: ubuntu-latest
     strategy:
@@ -323,7 +333,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: pip-audit (non-blocking -- first run, findings not yet triaged)
+      - name: pip-audit (non-blocking -- triaged in docs/DEBT.md SEC-11; needs an advisory allowlist before it can gate)
         continue-on-error: true
         run: |
           pip install pip-audit

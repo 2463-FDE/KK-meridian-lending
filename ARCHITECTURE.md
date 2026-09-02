@@ -331,8 +331,11 @@ from the LOS UI.
 (blocking — the `|| true` that used to mask every test failure, including a missing
 pytest install, is gone), a `docker compose build` smoke test (catches a Dockerfile that
 only builds on a dev machine with local state, like the CA-bundle-copy break that shipped
-once), and a non-blocking `pip-audit`/`npm audit` dependency scan (first run, findings not
-yet triaged — no SAST tool yet).
+once), and a non-blocking `pip-audit`/`npm audit` dependency scan — no SAST tool yet. *That
+scan's findings were triaged on 2026-09-01 (`docs/DEBT.md` SEC-11); this sentence used to
+say they were not.* It stays non-blocking because no machine-readable advisory allowlist
+exists yet for the job to consult, so gating today would fail the build on findings
+SEC-11 has already dispositioned.
 
 ## Local development
 
