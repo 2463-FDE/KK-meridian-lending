@@ -165,7 +165,7 @@ def _a_loan(cur):
         "INSERT INTO loans (applicant_name, principal, note_rate_pct, term_months, "
         "                   regular_payment, regular_payment_count, final_payment, "
         "                   schedule_version, status) "
-        "VALUES ('History Reason Fixture', 9000.00, 7.99, 36, 281.96, 35, 281.90, "
+        "VALUES ('History Reason Fixture', 9000.00, 7.99, 36, 281.99, 35, 281.85, "
         "        'B1', 'current') RETURNING id")
     loan_id = cur.fetchone()["id"]
     cur.execute("INSERT INTO balances (loan_id, balance, past_due) "
