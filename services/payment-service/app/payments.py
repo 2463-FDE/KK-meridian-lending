@@ -432,7 +432,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                         payment_id, correlation_id, exc)
             return {
                 "payment_id": payment_id, "loan_id": row["loan_id"],
-                "status": "failed", "applied_amount": float(row["amount"]),
+                "status": "failed", "applied_amount": 0.0,
             }
         # Review fix: auth_status and authorization_id used to be written in
         # two separate statements -- a crash between them left 'captured'
@@ -518,7 +518,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
             # (a genuinely new attempt), not a replay of a declined one.
             return {
                 "payment_id": payment_id, "loan_id": row["loan_id"],
-                "status": "failed", "applied_amount": float(row["amount"]),
+                "status": "failed", "applied_amount": 0.0,
             }
 
         if row["auth_status"] == "pending":
@@ -585,7 +585,7 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
                                 payment_id, correlation_id, exc)
                     return {
                         "payment_id": payment_id, "loan_id": row["loan_id"],
-                        "status": "failed", "applied_amount": float(row["amount"]),
+                        "status": "failed", "applied_amount": 0.0,
                     }
                 auth_id = auth.authorization_id
                 # This branch charged just now, so unless the processor reports
@@ -638,7 +638,42 @@ def charge(loan_id: int, processor_token: str, last4: str, amount: float, idempo
         # "failed" means the processor declined the authorization -- no balance
         # was ever touched.
         "status": "captured" if applied else "pending",
-        "applied_amount": float(row["amount"]),
+        # The amount APPLIED, read from the record that PROVES it was applied.
+        #
+        # This used to return `row["amount"]` unconditionally -- the amount the
+        # caller ASKED for -- on every path including the three `failed` returns
+        # above, whose own comment says "no balance was ever touched". Measured
+        # on a running stack: a declined charge answered
+        # `{"status": "failed", "applied_amount": 123.45}` with zero
+        # `ledger_entries`, zero `payment_applications` and the balance unmoved,
+        # and a capture whose apply was refused answered
+        # `{"status": "pending", "applied_amount": 999999.0}` on the same empty
+        # evidence. A field named for what was applied must not report what was
+        # requested.
+        #
+        # `applied` is what makes this truthful, and the reason is the apply
+        # path's atomicity rather than an assumption about it.
+        #
+        # `applied` is True only when the call to servicing's `apply-payment`
+        # returned success, and servicing returns success only after
+        # `balance.apply_payment_once` has COMMITTED -- the `ledger_entries`
+        # rows and the `payment_applications` row are written in that same
+        # transaction. Every refusal is an error status instead:
+        # `PaymentExceedsAmountOwed` and `PaymentReplayConflict` map to 409 and
+        # `AmountIsNotWholeCents` to 400, each of which raises here. So
+        # `applied` True means the money reached the loan, and False means it
+        # did not.
+        #
+        # The full amount is exact because an apply is all-or-nothing:
+        # `waterfall.allocate` REFUSES a payment larger than everything owed
+        # rather than absorbing part of it (D14), so there is no partial
+        # application for this figure to misreport. If partial application is
+        # ever introduced, this line is what has to change -- the value would
+        # then have to come from `payment_applications`, not from the request.
+        #
+        # The value is the PERSISTED amount, so the cent quantisation `charge()`
+        # already does is not undone by reporting the caller's float back.
+        "applied_amount": float(row["amount"]) if applied else 0.0,
     }
 
 

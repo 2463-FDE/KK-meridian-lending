@@ -4,23 +4,23 @@ import PolicyChat from "../../components/PolicyChat";
 import RequireRole from "../../components/RequireRole";
 
 export default function PolicyChatPage() {
-  // Staff-gated HERE while the gateway allows the same route ANONYMOUSLY
-  // (`gateway/app/main.py::assistant_policy_chat`, which says so explicitly:
-  // policy Q&A carries no per-applicant data, so a borrower may ask without an
-  // account). The two are not in agreement about who this feature is for, and
-  // that is a product question rather than a bug in either half:
+  // Staff-gated here, and the gateway agrees. This gate came first and stood
+  // alone for a while: `assistant_policy_chat` resolved a session and proxied
+  // regardless, so a borrower this screen refused was answered by the route.
+  // Neither half was a bug on its own -- the gateway's own comment reasoned
+  // that policy Q&A carries no per-applicant data -- so the disagreement was
+  // recorded as `docs/DEBT.md` RF-28 rather than settled by whoever edited a
+  // file last.
   //
-  //   * `docs/ROADMAP.md` describes loan-assistant as "Policy Q&A (anyone)";
-  //   * the same file's demo walkthrough says to log in as csr/underwriter/
-  //     admin and visit `/policy-chat`, which is what this gate enforces.
+  // The client has answered: Policy Chat is an INTERNAL tool for lending,
+  // compliance and underwriting staff. The gateway now refuses an anonymous
+  // caller with 401 and a non-staff session with 403, so this list and that
+  // route are two halves of one decision. Widening either one alone would
+  // recreate exactly the split RF-28 recorded.
   //
-  // Neither statement is false -- one describes the API, the other describes
-  // the screen -- so nothing here resolves whether a BORROWER should be able to
-  // use it in the browser. This gate is therefore left exactly as it is:
-  // loosening it would widen access on a guess, and tightening the gateway
-  // would remove access the gateway deliberately granted. Recorded as a
-  // decision in `docs/DEBT.md` (RF-28) instead of settled by whoever edited
-  // this file last.
+  // A borrower-facing policy assistant, if it is ever wanted, is a separate
+  // surface with its own corpus and its own route -- not this page with the
+  // gate removed.
   return (
     <RequireRole allow={["csr", "underwriter", "admin"]}>
       <main className="wrap wrap-narrow">

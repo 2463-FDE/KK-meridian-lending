@@ -300,6 +300,8 @@ def loan_payments(loan_id: int, session: Session = Depends(get_session)):
             applied_to_fees=split.get("fees", 0.0) if split else None,
             applied_to_interest=split.get("interest", 0.0) if split else None,
             applied_to_principal=split.get("principal", 0.0) if split else None,
+            auth_status=p.auth_status,
+            applied=p.applied_at is not None,
         ))
     return PaymentsOut(loan_id=loan_id, items=items)
 

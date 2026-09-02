@@ -12,7 +12,24 @@ SELECT g,
     || ' ' ||
   (ARRAY['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Rodriguez','Martinez','Hernandez','Lopez','Gonzalez','Wilson','Anderson','Thomas','Taylor','Moore','Jackson','Martin'])[1 + ((g * 7) % 20)],
   (DATE '1960-01-01' + ((g * 97) % 14000)),
-  lpad(((g * 131) % 900 + 100)::text, 3, '0') || '-' || lpad(((g * 17) % 90 + 10)::text, 2, '0') || '-' || lpad(((g * 53) % 9000 + 1000)::text, 4, '0'),
+  -- Last digit forced to the bureau tier the application's seeded OUTCOME
+  -- needs: `decision.py::_stub_score` returns 680 for an even last digit and
+  -- 612 otherwise, and nothing else about the SSN reaches the model. Before
+  -- this, the digit was arbitrary and the seeded outcome was an unrelated
+  -- rotation, so the deterministic scorer reproduced only 135 of 306 stored
+  -- outcomes and no honest `decision_events` row could be written for the rest.
+  -- The applicant id g maps to application 7000 + (g - 100); approve and refer
+  -- want 680, deny wants 612. See db/tools/regenerate_seed_decision_events.py.
+  lpad(((g * 131) % 900 + 100)::text, 3, '0') || '-' || lpad(((g * 17) % 90 + 10)::text, 2, '0') || '-' ||
+    lpad((
+      CASE WHEN (((g * 53) % 9000 + 1000) % 2 = 0)
+                = ((ARRAY['approve','approve','approve','deny','refer'])
+                     [1 + (((7000 + (g - 100)) * 2) % 5)] <> 'deny')
+           THEN ((g * 53) % 9000 + 1000)
+           WHEN ((g * 53) % 9000 + 1000) % 10 <> 9
+           THEN ((g * 53) % 9000 + 1000) + 1
+           ELSE ((g * 53) % 9000 + 1000) - 1
+      END)::text, 4, '0'),
   'user' || g || '@example.com',
   '555-01' || lpad((g % 100)::text, 2, '0'),
   FALSE,
@@ -28,7 +45,22 @@ SELECT g,
   (1000 + ((g * 263) % 49000))::double precision,
   (ARRAY[12,24,36,48,60])[1 + ((g * 3) % 5)],
   (ARRAY['debt_consolidation','home_improvement','auto','medical','personal','other'])[1 + ((g * 7) % 6)],
-  (24000 + ((g * 311) % 180000))::double precision,
+  -- Income inside the band the seeded outcome names, rather than a single
+  -- range that ignored it. `_stub_model_score(bureau, income) = int(bureau *
+  -- 0.9 + income / 1000)`, so with the bureau tier above:
+  --   approve  needs >= 660  ->  680 and income >= 48000
+  --   refer    needs 600..659 -> 680 and income <  48000
+  --   deny     needs <  600  ->  612 and income <  49200
+  -- The `(g * 311) % n` shape is kept so the spread stays wide and the values
+  -- stay obviously arithmetic rather than hand-picked.
+  -- `g` IS the application id in this statement (generate_series(7000, 7299)),
+  -- so the outcome map is indexed on it directly. The applicants statement
+  -- above sees `g` as the APPLICANT id and has to map across.
+  (CASE (ARRAY['approve','approve','approve','deny','refer'])[1 + ((g * 2) % 5)]
+     WHEN 'approve' THEN 48000 + ((g * 311) % 150000)
+     WHEN 'refer'   THEN 24000 + ((g * 311) % 23000)
+     ELSE                24000 + ((g * 311) % 25000)
+   END)::double precision,
   (ARRAY['Acme Corp','Globex','Initech','Umbrella Co','Hooli','Stark Industries','Wayne Enterprises','Soylent Inc'])[1 + ((g * 5) % 8)],
   (ARRAY['Analyst','Manager','Technician','Clerk','Engineer','Driver','Nurse','Teacher'])[1 + ((g * 11) % 8)],
   ((g % 15) + 1)::double precision,

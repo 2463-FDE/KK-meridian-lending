@@ -17,10 +17,16 @@ once here -- `loan-assistant/app/config.py` records the round where
 origination-service began requiring the token and this service was not sending
 it, and every summary request 403'd until it did.
 
-`/assistant/policy-chat` is deliberately not covered: it is registered as its
-own route ahead of this catch-all, is anonymous-allowed on purpose, and
-loan-assistant's policy-chat route requires no token. A test asserting it
-carries one would be asserting the wrong contract.
+`/assistant/policy-chat` is deliberately not covered, and the reason is the
+token rather than the audience: it is registered as its own route ahead of this
+catch-all, and loan-assistant's policy-chat route requires no internal token, so
+a test asserting it carries one would be asserting the wrong contract.
+
+Its AUDIENCE is a separate question and is covered separately, in
+`test_auth_and_routes.py`: the route is staff-only at the gateway -- 401
+anonymous, 403 for a non-staff session (RF-28). This docstring used to say
+"anonymous-allowed on purpose", which was true when it was written and stopped
+being true when that decision landed.
 """
 import json
 

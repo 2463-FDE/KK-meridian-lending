@@ -203,12 +203,24 @@ def test_the_split_reports_the_ledger_even_when_a_recomputation_would_disagree()
 def test_the_read_model_still_exposes_no_card_data():
     """The allocation fields are new surface on a payment response, and the
     boundary they sit on is the one PR #51 traced. Re-asserted here rather than
-    assumed: a read path can leak what no write path ever stored."""
+    assumed: a read path can leak what no write path ever stored.
+
+    An EXACT set, not a subset, on purpose: this is an allowlist, so a field
+    added to the response has to be admitted here deliberately rather than
+    arriving unnoticed. `auth_status` and `applied` were admitted that way --
+    they say WHY an allocation is absent (captured-but-unapplied, versus a legacy
+    row with no ledger evidence, versus declined), which payment history needs in
+    order to stop telling a borrower that a payment captured seconds ago is
+    "not available". Neither carries instrument data: one is the processor's
+    authorization state ('pending' | 'captured' | 'failed'), the other a boolean
+    over `payments.applied_at`.
+    """
     from app import schemas
 
     assert set(schemas.PaymentItem.model_fields) == {
         "id", "amount", "method", "masked_pan", "created_at",
         "applied_to_fees", "applied_to_interest", "applied_to_principal",
+        "auth_status", "applied",
     }
 
 

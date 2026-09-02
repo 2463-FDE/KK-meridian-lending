@@ -260,9 +260,16 @@ class PolicyChatIn(BaseModel):
 
 @app.post("/policy-chat", response_model=PolicyAnswer)
 def policy_chat(body: PolicyChatIn):
-    # Gateway only proxies /assistant/* for csr/underwriter/admin sessions
-    # (gateway/app/main.py assistant()) -- no per-request role check needed
-    # here, this doesn't touch per-applicant financials the way /summary does.
+    # No per-request role check here, and that is a statement about the
+    # BOUNDARY rather than about this route being open to everyone.
+    # `gateway/app/main.py::assistant_policy_chat` is staff-only -- 401
+    # anonymous, 403 for a non-staff session -- so every EXTERNAL caller has
+    # been through csr/underwriter/admin before reaching this function.
+    #
+    # What that does not cover, said here rather than left to be discovered:
+    # this route takes a body and no token, so anything already on the compose
+    # network reaches it directly. That is the shared-secret trust boundary
+    # tracked as SEC-17, not something the gateway's gate closes.
     #
     # Same llm_client exception -> HTTP status mapping as summarize() above --
     # answer_policy_question() calls the same guardrailed call_api(), so it can
