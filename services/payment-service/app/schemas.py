@@ -149,6 +149,19 @@ class PaymentOut(BaseModel):
     # (the processor declined the authorization -- no balance was ever
     # touched). See app/payments.py::charge() and app/processor.py.
     status: Literal["captured", "pending", "failed"]
+    #: How much reached the LOAN, not how much was asked for.
+    #:
+    #: Zero unless `status` is "captured". A declined authorization touches no
+    #: balance, and a capture whose apply has not confirmed has moved nothing
+    #: yet -- reporting the requested figure in either case told a caller money
+    #: had been applied when the ledger held no entry for it.
+    #:
+    #: Exact rather than approximate when it is non-zero: an apply is
+    #: all-or-nothing, because `waterfall.allocate` refuses a payment larger
+    #: than everything owed instead of absorbing part of it (D14), and servicing
+    #: reports success only after that apply has committed. If partial
+    #: application is ever supported, this figure has to come from
+    #: `payment_applications` rather than from the payment row.
     applied_amount: float
 
 
