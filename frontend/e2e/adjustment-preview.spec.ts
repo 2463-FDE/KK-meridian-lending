@@ -69,31 +69,78 @@ function money(text: string | null): number {
  * portfolio, and a past-due of 0.00 beside a five-figure principal is the sharper
  * case anyway: a mis-paired preview shows thousands where it should show nothing.
  */
-async function aLoanWithDistinctBalances(): Promise<{
-  loanId: number;
-  balance: number;
-  pastDue: number;
-}> {
-  const row = await withDb(
-    async (c) =>
-      (
-        await c.query(
-          `SELECT b.loan_id, b.balance::float8 AS balance,
-                  COALESCE(b.past_due, 0)::float8 AS past_due
-             FROM balances b JOIN loans l ON l.id = b.loan_id
-            WHERE l.status = 'current'
-              AND b.balance <> COALESCE(b.past_due, 0)
-            ORDER BY b.loan_id LIMIT 1`,
-        )
-      ).rows[0],
-  );
-  if (!row) {
-    throw new Error(
-      "no serviced loan has a principal balance distinct from its past-due " +
-        "balance, so a mis-paired preview would be undetectable",
+/**
+ * A loan created FOR THIS FILE, with a principal balance distinct from its
+ * past-due balance.
+ *
+ * WHY IT IS NOT A SEEDED LOAN ANY MORE. This used to be
+ * `ORDER BY b.loan_id LIMIT 1` over the seeded portfolio -- the lowest-numbered
+ * serviced loan whose two balances differ. Every case here then read that
+ * loan's balance from the database and asserted the browser's arithmetic
+ * against the number it had read. That holds only while nothing else moves the
+ * loan, and other specs in this suite apply payments to the seeded portfolio.
+ * When one did, this file failed on a subtraction that was perfectly correct:
+ * expected `$5,975.00`, received `$5,625.01`, the two differing by exactly the
+ * payment another spec had applied between the read and the render.
+ *
+ * The assertion was right and its premise was not, so the premise is what
+ * changed. Nothing else touches this loan, so "the page agrees with the
+ * database" is a claim about the preview again rather than about test ordering.
+ *
+ * Deliberately NOT a seeded row and deliberately obvious: the applicant name
+ * carries the fixture's own name so a stray row is traceable to it, and
+ * `afterAll` removes it. Inserted with a complete contract group
+ * (`regular_payment`/`regular_payment_count`/`final_payment`/`schedule_version`)
+ * because `loans` has a CHECK requiring all four together, and with no ledger
+ * entries at all -- `balances` is written directly, exactly as
+ * `db/tests/test_0046_one_late_fee_per_installment.py` builds its own loan, so
+ * teardown does not have to delete from the append-only ledger.
+ */
+const FIXTURE_APPLICANT = "Adjustment Preview Fixture";
+
+/** Created once for this file, retired once at the end. */
+let fixtureLoan: { loanId: number; balance: number; pastDue: number } | null = null;
+
+test.beforeAll(async () => {
+  const balance = 11_950.0;
+  const pastDue = 25.0;   // distinct from `balance`, and the fees case needs > 0
+  fixtureLoan = await withDb(async (c) => {
+    const inserted = await c.query(
+      `INSERT INTO loans (applicant_name, principal, note_rate_pct, term_months,
+                          regular_payment, regular_payment_count, final_payment,
+                          schedule_version, status)
+       VALUES ($1, 12000.00, 7.99, 36, 375.98, 35, 376.03, 'B1', 'current')
+       RETURNING id`,
+      [FIXTURE_APPLICANT],
     );
-  }
-  return { loanId: row.loan_id, balance: row.balance, pastDue: row.past_due };
+    const loanId = inserted.rows[0].id as number;
+    await c.query(
+      "INSERT INTO balances (loan_id, balance, past_due) VALUES ($1, $2, $3)",
+      [loanId, balance, pastDue],
+    );
+    return { loanId, balance, pastDue };
+  });
+});
+
+test.afterAll(async () => {
+  // RETIRED, not deleted, and the difference is not tidiness.
+  //
+  // `balances` refuses a DELETE outright -- "balances rows cannot be deleted
+  // during ledger cutover" -- so removing the row is not available, and
+  // deleting the loan while its balances row survives would leave an orphan
+  // pointing at nothing. Closing the loan takes it out of the serviced
+  // portfolio, which is the only property any other spec cares about: they all
+  // select `l.status = 'current'`.
+  if (!fixtureLoan) return;
+  await withDb(async (c) => {
+    await c.query("UPDATE loans SET status = 'closed' WHERE applicant_name = $1",
+                  [FIXTURE_APPLICANT]);
+  });
+});
+
+function aLoanWithDistinctBalances(): { loanId: number; balance: number; pastDue: number } {
+  if (!fixtureLoan) throw new Error("the fixture loan was not created");
+  return fixtureLoan;
 }
 
 /**
@@ -120,7 +167,7 @@ const adjustCard = (page: Page) =>
 test("a principal change previews against principal, in both directions", async ({
   page,
 }) => {
-  const loan = await aLoanWithDistinctBalances();
+  const loan = aLoanWithDistinctBalances();
 
   await signInAsStaff(page, "csr");
   await openStaffLoanPage(page, loan.loanId);
@@ -156,7 +203,7 @@ test("a fees change previews against past-due fees, not principal", async ({
    *  `component = 'principal'` entries and `past_due` from `'fees'`
    *  (db/migrations/0035), so reaching for the wrong one is a real possibility,
    *  and the chosen loan makes it visible. */
-  const loan = await aLoanWithDistinctBalances();
+  const loan = aLoanWithDistinctBalances();
   expect(loan.pastDue).not.toBeCloseTo(loan.balance, 2);
 
   await signInAsStaff(page, "csr");
@@ -175,7 +222,7 @@ test("a fees change previews against past-due fees, not principal", async ({
 });
 
 test("a partial amount reads as no change rather than NaN", async ({ page }) => {
-  const loan = await aLoanWithDistinctBalances();
+  const loan = aLoanWithDistinctBalances();
 
   await signInAsStaff(page, "csr");
   await openStaffLoanPage(page, loan.loanId);
@@ -209,7 +256,7 @@ test("a change below zero is refused, and the boundary at zero is not", async ({
    * A preview that shows a refused state as an approved outcome is worse than no
    * preview.
    */
-  const loan = await aLoanWithDistinctBalances();
+  const loan = aLoanWithDistinctBalances();
 
   await signInAsStaff(page, "csr");
   await openStaffLoanPage(page, loan.loanId);
