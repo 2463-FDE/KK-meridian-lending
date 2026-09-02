@@ -109,7 +109,7 @@ test.beforeAll(async () => {
       `INSERT INTO loans (applicant_name, principal, note_rate_pct, term_months,
                           regular_payment, regular_payment_count, final_payment,
                           schedule_version, status)
-       VALUES ($1, 12000.00, 7.99, 36, 375.94, 35, 375.90, 'B1', 'current')
+       VALUES ($1, 12000.00, 7.99, 36, 375.98, 35, 376.03, 'B1', 'current')
        RETURNING id`,
       [FIXTURE_APPLICANT],
     );
