@@ -23,33 +23,138 @@ payment the same way instead of inventing a second set of words.
 
 Against real PostgreSQL: the point is what the ledger and the payment columns
 actually hold together, and a mock would let this file agree with itself.
+
+**HOW IT GETS THAT POSTGRES, which is where the first version was wrong.** It
+connected to `DATABASE_URL` and inserted straight into `loans`, assuming the
+production schema was already there. It is, on a developer machine running the
+stack; it is not in CI, where the `backend (servicing-service)` job starts a bare
+Postgres service container. All five cases failed with
+`psycopg2.errors.UndefinedTable: relation "loans" does not exist` -- a test
+harness defect that pointed at the database rather than at the behaviour, which
+is exactly the shape RF-26 records.
+
+So it builds its own throwaway schema from the CANONICAL definitions in
+`db/init`, via `db/tests/real_schema.py` (the RF-26 helper, PR #159). Not a
+hand-written `loans`: a hand-written copy is how the drift RF-26 measured
+happened -- one of the three copies it found created five columns out of
+twenty-four -- and this file depends on real column shapes, `payments.auth_status`
+and `payments.applied_at` among them. Taking the definitions verbatim means the
+next column added to `payments` arrives here by construction.
+
+Only the tables the route actually touches are built, plus `balances`.
+`loan_payments` reads `payments` and `ledger_entries` and never looks at
+`balances` -- but a `loans` row without one models a database production cannot
+have, and the equivalent servicing harness makes the same call for the same
+reason.
+
+The app is pointed at that schema by overriding the ONE dependency the route
+resolves its session through, so the code under test is the shipped route rather
+than a copy of its query.
 """
+import importlib.util
 import os
+import pathlib
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
+
+#: `db/tests/real_schema.py`, loaded by path -- standard library only, so it
+#: imports cleanly from a service test that is not on the repo's sys.path.
+_REAL_SCHEMA_PATH = (pathlib.Path(__file__).resolve().parents[3]
+                     / "db" / "tests" / "real_schema.py")
+assert _REAL_SCHEMA_PATH.is_file(), (
+    "expected the canonical schema helper at %s -- if it moved, this test must "
+    "fail rather than fall back to a hand-written table" % _REAL_SCHEMA_PATH)
+_spec = importlib.util.spec_from_file_location("meridian_real_schema",
+                                               _REAL_SCHEMA_PATH)
+real_schema = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(real_schema)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL, reason="DATABASE_URL not set -- no Postgres to test against")
 
+SCHEMA = "servicing_history_reason_test"
+
+#: Everything the route reads, plus `balances` -- see the module docstring.
+TABLES = ["loans", "balances", "payments", "ledger_entries"]
+
 
 @pytest.fixture()
-def client():
+def pg():
+    """A throwaway schema holding the real shapes, dropped afterwards."""
+    import psycopg2
+    admin = psycopg2.connect(DATABASE_URL)
+    admin.autocommit = True
+    with admin.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+        cur.execute(f"CREATE SCHEMA {SCHEMA}")
+        cur.execute(real_schema.sql_for(SCHEMA, TABLES))
+        # Guard the guard: a helper that silently produced nothing would leave
+        # every case below passing against an empty schema for the wrong reason.
+        cur.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = %s",
+            (SCHEMA,))
+        built = cur.fetchone()[0]
+    assert built == len(TABLES), (
+        f"expected {len(TABLES)} canonical tables in {SCHEMA}, built {built}")
+    yield admin
+    with admin.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+    admin.close()
+
+
+@pytest.fixture()
+def client(pg):
+    """The shipped app, with its session dependency pointed at the schema above.
+
+    `loan_payments` takes `session: Session = Depends(get_session)`, so
+    overriding that one dependency reaches the real route, the real query and the
+    real response model. Nothing about the code under test is replaced.
+
+    `TestClient(app)` is used WITHOUT its context manager on purpose: the
+    lifespan starts the reconciliation scheduler, which uses the raw psycopg2
+    layer on the default search_path and would log `UndefinedTable` noise this
+    file has no interest in. No startup work is needed to serve this route.
+    """
     from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import get_session
     from app.main import app
-    with TestClient(app) as c:
-        yield c
+
+    engine = create_engine(
+        DATABASE_URL, future=True, pool_pre_ping=True,
+        connect_args={"options": f"-csearch_path={SCHEMA}"})
+    Session = sessionmaker(bind=engine, autoflush=False, future=True)
+
+    def _session_in_the_test_schema():
+        session = Session()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_session] = _session_in_the_test_schema
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+        engine.dispose()
 
 
 @pytest.fixture()
-def conn():
+def conn(pg):
+    """A writer on the same schema. Committed rows are what the route then reads."""
     import psycopg2
     import psycopg2.extras
     c = psycopg2.connect(DATABASE_URL)
     c.autocommit = False
+    with c.cursor() as cur:
+        cur.execute(f"SET search_path TO {SCHEMA}")
     yield c
     c.rollback()
     c.close()
