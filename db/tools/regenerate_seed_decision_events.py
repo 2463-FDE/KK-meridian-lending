@@ -112,23 +112,119 @@ EVENTS_SQL = REPO / "db" / "init" / "008_seed_decision_events.sql"
 BEGIN = "-- BEGIN GENERATED DECISION EVENT ROWS (db/tools/regenerate_seed_decision_events.py)"
 END = "-- END GENERATED DECISION EVENT ROWS"
 
-#: The anchor applications in `002_seed.sql`, which are hand-written rather than
-#: generated. Listed with the values the seed holds so this tool can be checked
-#: against the file it reads -- `_assert_anchors_match_the_seed()` does exactly
-#: that, so a hand edit to those rows cannot silently diverge from here.
+#: The anchor applications in `002_seed.sql` are hand-written rather than
+#: generated, so their inputs are PARSED OUT OF THE SEED rather than restated
+#: here.
 #:
-#: Three SSNs were corrected so the recorded bureau tier matches the recorded
-#: outcome, and one income was moved 47000 -> 48000 for the same reason. Every
-#: OUTCOME is untouched.
-ANCHORS = (
-    # app_id, ssn,            income,    amount,   term, outcome
-    (4471, "412-55-9982",  52000.00, 18000.00, 48, "approve"),
-    (5582, "501-22-7734",  48000.00, 12000.00, 36, "approve"),
-    (6011, "622-41-0098",  84000.00, 15000.00, 36, "approve"),
-    (6012, "330-90-5511",  31000.00,  9000.00, 24, "deny"),
-    (6013, "447-08-2261",  29500.00,  7500.00, 24, "deny"),
-    (6014, "",            240000.00, 50000.00, 60, "approve"),
-)
+#: They were restated here, in a literal table, and it was wrong within an hour:
+#: application 6013's amount was typed as 7500 while the seed says 8000, so its
+#: generated event recorded a requested amount no application had. Codex caught
+#: it. The guard that was supposed to prevent exactly that --
+#: `_assert_anchors_match_the_seed` -- only checked the SSN and the decisions
+#: row, so it passed over the amount, the term and the income.
+#:
+#: Restating a value the file next to you already holds is the defect, not the
+#: typo. Parsing removes the class: a hand edit to any anchor's amount, term or
+#: income now reaches the generated events on the next `--write`, and the drift
+#: check fails until it does.
+#:
+#: Three SSNs and one income were deliberately CHANGED in the seed so each
+#: recorded bureau tier matches its recorded outcome. Every OUTCOME is untouched.
+
+_APPLICATIONS_INSERT = re.compile(
+    r"INSERT INTO applications\s*\(([^)]*)\)\s*VALUES\s*(?P<rows>.*?);", re.S)
+_APPLICANTS_INSERT = re.compile(
+    r"INSERT INTO applicants\s*\(([^)]*)\)\s*VALUES\s*(?P<rows>.*?);", re.S)
+_DECISIONS_INSERT = re.compile(
+    r"INSERT INTO decisions\s*\(([^)]*)\)\s*VALUES\s*(?P<rows>.*?);", re.S)
+
+
+def _split_row(row: str):
+    """Split one VALUES tuple on commas that are not inside a quoted literal."""
+    out, buf, quoted = [], [], False
+    for ch in row:
+        if ch == "'":
+            quoted = not quoted
+            buf.append(ch)
+        elif ch == "," and not quoted:
+            out.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    out.append("".join(buf).strip())
+    return out
+
+
+def _rows_by_name(text: str, pattern):
+    """Every VALUES tuple of one INSERT, as `{column: literal}`."""
+    m = pattern.search(text)
+    assert m, "expected an INSERT this tool can read in db/init/002_seed.sql"
+    columns = [c.strip() for c in m.group(1).split(",")]
+    rows = []
+    depth, buf = 0, []
+    quoted = False
+    for ch in m.group("rows"):
+        if ch == "'":
+            quoted = not quoted
+        if not quoted and ch == "(":
+            depth += 1
+            if depth == 1:
+                buf = []
+                continue
+        if not quoted and ch == ")":
+            depth -= 1
+            if depth == 0:
+                parts = _split_row("".join(buf))
+                if len(parts) == len(columns):
+                    rows.append(dict(zip(columns, parts)))
+                continue
+        if depth == 1:
+            buf.append(ch)
+    return rows
+
+
+def _lit(value: str):
+    v = value.strip()
+    if v.upper() == "NULL":
+        return None
+    if v.startswith("'"):
+        return v[1:-1].replace("''", "'")
+    return v
+
+
+def _anchor_inputs():
+    """The six curated applications, read from the seed rather than restated."""
+    text = SEED_ANCHOR.read_text(encoding="utf-8")
+
+    ssn_by_applicant = {}
+    for row in _rows_by_name(text, _APPLICANTS_INSERT):
+        ssn_by_applicant[int(row["id"])] = _lit(row["ssn"]) or ""
+
+    outcome_by_app = {}
+    for row in _rows_by_name(text, _DECISIONS_INSERT):
+        outcome_by_app[int(row["app_id"])] = _lit(row["outcome"])
+
+    anchors = []
+    for row in _rows_by_name(text, _APPLICATIONS_INSERT):
+        app_id = int(row["id"])
+        applicant = int(row["applicant_id"])
+        assert applicant in ssn_by_applicant, (
+            "application %d references applicant %d, which 002_seed.sql does "
+            "not create" % (app_id, applicant))
+        assert app_id in outcome_by_app, (
+            "anchor application %d has no seeded decision, so no event can "
+            "explain one" % app_id)
+        anchors.append((
+            app_id,
+            ssn_by_applicant[applicant],
+            float(row["income"]),
+            float(row["amount"]),
+            int(row["term_months"]),
+            outcome_by_app[app_id],
+        ))
+    assert anchors, "no anchor applications parsed out of db/init/002_seed.sql"
+    return tuple(anchors)
+
 
 BULK_FIRST, BULK_LAST = 7000, 7299
 
@@ -185,9 +281,7 @@ def _bulk_term(app_id: int) -> int:
 
 def _seeded_inputs():
     """Every application with a decision, and the inputs the model saw."""
-    rows = []
-    for app_id, ssn, income, amount, term, outcome in ANCHORS:
-        rows.append((app_id, ssn, income, amount, term, outcome))
+    rows = list(_anchor_inputs())
     for app_id in range(BULK_FIRST, BULK_LAST + 1):
         outcome = _intended_outcome(app_id)
         rows.append((app_id, _bulk_ssn(app_id, outcome),
@@ -271,22 +365,29 @@ def generated_block() -> str:
 
 
 def _assert_anchors_match_the_seed():
-    """The anchor values above must be the ones `002_seed.sql` actually holds.
+    """Guard-the-guard for the half of the input set that is not derivable.
 
-    Guard-the-guard for the half of the input set this tool cannot derive: the
-    anchors are hand-written in the seed, so a literal table here could drift
-    from them silently and every generated event for those six applications
-    would then describe inputs no database has.
+    The anchors are now PARSED, so drift between this tool and the seed is not
+    possible in the way it was. What is still worth asserting is that the parse
+    found the whole set and something real: a regex that silently matched
+    nothing would make every anchor event disappear, and the bulk rows would
+    still generate, so the run would look successful.
     """
+    anchors = _anchor_inputs()
+    assert len(anchors) >= 6, (
+        "parsed only %d anchor applications out of db/init/002_seed.sql; the "
+        "INSERT shape has changed and this tool must fail rather than emit a "
+        "partial seed" % len(anchors))
     text = SEED_ANCHOR.read_text(encoding="utf-8")
-    for app_id, ssn, income, _amount, _term, _outcome in ANCHORS:
+    for app_id, ssn, income, amount, term, outcome in anchors:
+        assert outcome in ("approve", "deny", "refer"), (
+            "application %d has outcome %r" % (app_id, outcome))
+        assert amount > 0 and term > 0, (
+            "application %d parsed as amount=%s term=%s -- the column order in "
+            "002_seed.sql has moved" % (app_id, amount, term))
         if ssn:
             assert ssn in text, (
-                "db/init/002_seed.sql does not contain SSN %s for application "
-                "%d -- the anchor table in this tool has drifted from the seed"
-                % (ssn, app_id))
-        assert re.search(r"\(\s*%d\s*,\s*'(approve|deny|refer)'\s*\)" % app_id, text), (
-            "no decisions row for anchor application %d in 002_seed.sql" % app_id)
+                "parsed SSN %s for application %d is not in the seed" % (ssn, app_id))
 
 
 HEADER = """-- Seeded automated decision evidence.

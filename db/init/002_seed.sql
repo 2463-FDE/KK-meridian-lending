@@ -54,7 +54,23 @@ INSERT INTO kyc_checks (applicant_id, application_id, name_verified, dob_verifie
   -- entity: no real person verified, cleared anyway (D11)
   (6, 6014, TRUE, FALSE, TRUE, FALSE, TRUE);
 
--- Decisions: outcome only. Denials 6012/6013 have no recorded reason anywhere.
+-- Decisions: the FINAL outcome, and only that. The reason a denial was reached
+-- lives in `decision_events.reason_codes`, which 008_seed_decision_events.sql
+-- now seeds for every application here -- so 6012 and 6013 each carry the
+-- shipped attribution ("Low credit bureau score relative to lending criteria")
+-- rather than nothing.
+--
+-- This comment read "Denials 6012/6013 have no recorded reason anywhere", which
+-- was true when it was written and stopped being true with that file. It is
+-- corrected rather than deleted because the distinction it was drawing still
+-- holds and is the point of two tables: `decisions` records WHAT, and it is
+-- still outcome-only.
+--
+-- What is genuinely still absent is a MANUAL review reason for these two: no
+-- `manual_reviews` row is seeded anywhere, deliberately -- see
+-- db/tests/test_seed_decision_event_consistency.py, which fails if that
+-- changes, because a human override makes a model/outcome divergence correct
+-- and the seed's coherence assertions would then be the wrong claim.
 INSERT INTO decisions (app_id, outcome) VALUES
   (4471, 'approve'),
   (5582, 'approve'),

@@ -87,6 +87,8 @@ def _events():
         out.append({
             "app_id": int(d["app_id"]),
             "occurred_at": d["occurred_at"],
+            "requested_amount": float(d["requested_amount"]),
+            "term_months": int(d["term_months"]),
             "annual_income": float(d["annual_income"]),
             "bureau_score": int(d["bureau_score"]),
             "model_score": int(d["model_score"]),
@@ -327,3 +329,114 @@ def test_the_events_table_is_still_append_only():
     assert "BEFORE UPDATE OR DELETE ON decision_events" in ddl, (
         "the append-only trigger on decision_events is gone, so seeded and "
         "runtime evidence can both be rewritten in place")
+
+# --- the event must describe the application it points at ---------------------
+#
+# Codex found application 6013 recording `requested_amount = 7500` while
+# `applications.amount` says 8000. One row, one typo, and it existed because the
+# generator RESTATED the six anchor applications in a literal table instead of
+# reading them out of the seed. The tool now parses them; these cases are the
+# check that would have caught it either way.
+#
+# Deliberately three fields, not one. `requested_amount`, `term_months` and
+# `annual_income` are the whole of what the event claims the model was given, and
+# an event whose inputs are not the application's inputs is not evidence about
+# that application -- it is a plausible-looking record of a decision on some
+# other loan. The score is derived from income, so a wrong income would have been
+# caught by the derivation test; a wrong AMOUNT or TERM would not have been by
+# anything.
+
+
+def _seeded_applications():
+    """`{app_id: {amount, term_months, income}}`, read from both seed files.
+
+    The anchors are literal rows; the bulk rows are SQL arithmetic. Both are
+    read here rather than assumed, and the bulk formulas are taken from the seed
+    text itself so a change to them fails this test instead of silently
+    redefining what "consistent" means.
+    """
+    out = {}
+
+    anchor = SEED_ANCHOR.read_text(encoding="utf-8")
+    m = re.search(
+        r"INSERT INTO applications\s*\(([^)]*)\)\s*VALUES\s*(?P<rows>.*?);",
+        anchor, re.S)
+    assert m, "no anchor applications INSERT in 002_seed.sql"
+    columns = [c.strip() for c in m.group(1).split(",")]
+    for name in ("id", "amount", "term_months", "income"):
+        assert name in columns, (
+            "002_seed.sql's applications INSERT no longer names %r" % name)
+    at = {name: columns.index(name) for name in ("id", "amount", "term_months", "income")}
+    for row in re.finditer(r"\(([^()]*)\)", m.group("rows")):
+        parts = [x.strip() for x in row.group(1).split(",")]
+        if len(parts) != len(columns):
+            continue
+        out[int(parts[at["id"]])] = {
+            "amount": float(parts[at["amount"]]),
+            "term_months": int(parts[at["term_months"]]),
+            "income": float(parts[at["income"]]),
+        }
+
+    bulk = SEED_BULK.read_text(encoding="utf-8")
+    # The formulas, asserted present rather than assumed, then applied.
+    assert "(1000 + ((g * 263) % 49000))" in bulk, (
+        "003_seed_bulk.sql's amount formula changed; this test would compare "
+        "against arithmetic the seed no longer uses")
+    assert "(ARRAY[12,24,36,48,60])[1 + ((g * 3) % 5)]" in bulk, (
+        "003_seed_bulk.sql's term formula changed")
+    for app_id in range(7000, 7300):
+        outcome = ("approve", "approve", "approve", "deny", "refer")[(app_id * 2) % 5]
+        spread = app_id * 311
+        if outcome == "approve":
+            income = float(48_000 + (spread % 150_000))
+        elif outcome == "refer":
+            income = float(24_000 + (spread % 23_000))
+        else:
+            income = float(24_000 + (spread % 25_000))
+        out[app_id] = {
+            "amount": float(1_000 + ((app_id * 263) % 49_000)),
+            "term_months": (12, 24, 36, 48, 60)[(app_id * 3) % 5],
+            "income": income,
+        }
+    return out
+
+
+@pytest.mark.parametrize("event", _events(), ids=lambda e: str(e["app_id"]))
+def test_every_event_records_the_application_it_points_at(event):
+    """The inputs the event claims must be the application's own."""
+    apps = _seeded_applications()
+    app = apps.get(event["app_id"])
+    assert app is not None, (
+        "decision event for application %d, which neither seed file creates"
+        % event["app_id"])
+
+    assert event["requested_amount"] == app["amount"], (
+        "application %d requested %.2f; its decision event records %.2f. An "
+        "event whose inputs are not the application's inputs is evidence about "
+        "some other loan"
+        % (event["app_id"], app["amount"], event["requested_amount"]))
+    assert event["term_months"] == app["term_months"], (
+        "application %d is a %d-month term; its decision event records %d"
+        % (event["app_id"], app["term_months"], event["term_months"]))
+    assert event["annual_income"] == app["income"], (
+        "application %d records income %.2f; its decision event records %.2f -- "
+        "and the score is derived from income, so the two disagreeing means one "
+        "of them is not what the model saw"
+        % (event["app_id"], app["income"], event["annual_income"]))
+
+
+def test_the_application_side_of_that_comparison_was_actually_read():
+    """Guard the guard.
+
+    If the anchor INSERT stopped matching, `_seeded_applications` would return
+    only the 300 bulk rows and the six anchors -- the ones the demo points at,
+    and the ones the defect was in -- would pass by not being compared.
+    """
+    apps = _seeded_applications()
+    assert len(apps) >= 306, (
+        "parsed only %d seeded applications; the anchors or the bulk range are "
+        "missing from the comparison" % len(apps))
+    for anchor in (4471, 5582, 6011, 6012, 6013, 6014):
+        assert anchor in apps, (
+            "anchor application %d was not read, so its event is unchecked "
+            "against it -- which is exactly how 6013 shipped wrong" % anchor)
