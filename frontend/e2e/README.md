@@ -53,8 +53,9 @@ repeatable. These tests are.
   | `offer-disclosure-ui` | `UPDATE offers` |
   | `regeneration-reprices-the-offer` | `UPDATE offers` |
   | `reconstructed-schedule-warning` | `UPDATE loans` |
+  | `adjustment-preview` | `INSERT loans`, `INSERT balances`, `UPDATE loans` (its own fixture loan, created and retired per file) |
 
-  Ten specs, and one shared HELPER. The helper is kept out of the table above
+  Eleven specs, and one shared HELPER. The helper is kept out of the table above
   deliberately: it is not a spec, and its writes belong to whichever test calls
   it.
 
