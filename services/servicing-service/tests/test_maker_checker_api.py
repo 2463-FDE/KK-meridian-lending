@@ -478,3 +478,117 @@ def test_a_movement_that_exactly_empties_a_component_is_allowed(keys, fake_db, n
         headers=_headers(keys, role="csr"))
     assert response.status_code == 202, response.text
     assert fake_db["inserts"]
+
+
+# --- a refusal of AUTHORITY is reported as one --------------------------------
+#
+# Codex MC-AUTHZ-STATUS on PR #161, reproduced before being fixed. The database
+# guard added by migration 0048 refuses a resolver who no longer holds the
+# authority the assertion claims -- deactivated, deleted, or role changed since
+# the principal was minted. `resolve()` mapped `"is already"` to 409 and
+# self-approval to 403, and everything else fell through to 422.
+#
+# 422 is the wrong answer, and not only cosmetically. This is precisely the
+# path the DB layer exists to cover: the caller holds a VALID, unexpired,
+# correctly-signed principal, so nothing earlier in the stack refuses them, and
+# the only thing standing between them and a money movement is this exception.
+# Reporting it as a validation error tells that caller their request was
+# malformed and invites a retry, when what happened is that their authority was
+# withdrawn. It also hides the event from anything that counts authorisation
+# failures.
+#
+# Driven through the ROUTE rather than through `resolve()` directly: the status
+# code is what an external caller sees, and only the route produces it.
+
+#: The first line of migration 0048's exception, as psycopg2 surfaces it.
+_NO_AUTHORITY = (
+    "resolver 2 does not hold current authority as admin (account inactive, "
+    "deleted, or role changed since the assertion was minted)")
+
+
+def _resolver_has_no_authority(state, monkeypatch):
+    """Make `resolve_pending_movement` raise 0048's refusal, as Postgres would."""
+    original = maker_checker.db.query
+
+    def _query(sql, params=None):
+        if "resolve_pending_movement" in " ".join(sql.split()):
+            raise RuntimeError(_NO_AUTHORITY)
+        return original(sql, params)
+
+    monkeypatch.setattr(maker_checker.db, "query", _query)
+
+
+def test_a_resolver_without_current_authority_is_refused_as_forbidden(
+        keys, fake_db, no_money, monkeypatch):
+    """403, not 422. The caller's authority is gone, not their JSON."""
+    _resolver_has_no_authority(fake_db, monkeypatch)
+
+    resp = _client().post(
+        "/movements/7/resolve", json={"resolution": "approved"},
+        headers=_headers(keys, sub="2", role="admin"))
+
+    assert resp.status_code == 403, (
+        "0048's authority refusal is reported as %s; a caller holding a valid "
+        "signed principal is told their request was invalid rather than that "
+        "their authority was withdrawn" % resp.status_code)
+    assert "current authority" in resp.json()["detail"]
+
+
+def test_the_authority_refusal_is_not_reported_as_a_conflict_either(
+        keys, fake_db, no_money, monkeypatch):
+    """409 would say "try again when the state settles". It will not settle.
+
+    The negative control for the fix: a mapping that sent every unrecognised
+    refusal to 403 would pass the case above and be wrong. `"is already"` --
+    a movement someone else resolved first -- must stay 409, and a bounds
+    refusal must stay 422.
+    """
+    _resolver_has_no_authority(fake_db, monkeypatch)
+
+    resp = _client().post(
+        "/movements/7/resolve", json={"resolution": "approved"},
+        headers=_headers(keys, sub="2", role="admin"))
+
+    assert resp.status_code not in (409, 422)
+
+
+def test_an_already_resolved_movement_is_still_a_conflict(
+        keys, fake_db, no_money, monkeypatch):
+    """The mapping this fix must not disturb."""
+    original = maker_checker.db.query
+
+    def _query(sql, params=None):
+        if "resolve_pending_movement" in " ".join(sql.split()):
+            raise RuntimeError("movement 7 is already resolved as approved")
+        return original(sql, params)
+
+    monkeypatch.setattr(maker_checker.db, "query", _query)
+
+    resp = _client().post(
+        "/movements/7/resolve", json={"resolution": "approved"},
+        headers=_headers(keys, sub="2", role="admin"))
+
+    assert resp.status_code == 409, resp.text
+
+
+def test_a_refusal_that_is_neither_still_falls_through_to_422(
+        keys, fake_db, no_money, monkeypatch):
+    """A movement whose target moved on is a refusal of that movement.
+
+    Kept as the fall-through so the fix stays a mapping of ONE named refusal
+    rather than a widening of the 403 branch.
+    """
+    original = maker_checker.db.query
+
+    def _query(sql, params=None):
+        if "resolve_pending_movement" in " ".join(sql.split()):
+            raise RuntimeError("loan 4471 is no longer in a permitted status")
+        return original(sql, params)
+
+    monkeypatch.setattr(maker_checker.db, "query", _query)
+
+    resp = _client().post(
+        "/movements/7/resolve", json={"resolution": "approved"},
+        headers=_headers(keys, sub="2", role="admin"))
+
+    assert resp.status_code == 422, resp.text

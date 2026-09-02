@@ -8,7 +8,14 @@ prometheus-fastapi-instrumentator==7.0.0
 # Signed human principal (spec 0002 REQ-ID-3). PyJWT for the claim envelope
 # with a pinned single-algorithm allowlist; cryptography for Ed25519 itself.
 PyJWT==2.13.0
-cryptography==48.0.0
+# 48.0.1, not 48.0.0: the wheels statically link OpenSSL, and the copy in
+# 48.0.0 carries GHSA-537c-gmf6-5ccf. A patch release on the same minor, taken
+# because this is the dependency that verifies the Ed25519 principal on the
+# money path -- the one place a flaw would touch a control rather than a page.
+# The three OTHER cryptography advisories open against 48.0.0 are PKCS7
+# decryption and X.509 chain building, and this estate calls neither: the only
+# imports anywhere are `serialization` and Ed25519. See docs/DEBT.md SEC-11.
+cryptography==48.0.1
 # The trace root. The gateway is where an agent request is authenticated, so it
 # is where the client's trace has to start (app/agent_trace.py); minting and
 # propagating that context needs LangSmith's own RunTree, because the parenting

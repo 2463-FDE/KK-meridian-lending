@@ -1651,6 +1651,40 @@ BEGIN
                         'resolve it', proposal.id, proposal.requested_by;
     END IF;
 
+    -- 3a. THE RESOLVER'S AUTHORITY MUST BE CURRENT (G-02). Locked and re-read
+    -- here for the same reason the loan and the component are re-read below: the
+    -- authority someone held when they opened the queue is not evidence about
+    -- the authority they hold now, and this is the statement that moves money.
+    --
+    -- The gateway also refuses a deactivated account, and that is the boundary
+    -- that closes the eight-hour session window. It cannot close this one. A
+    -- deactivation committing between the gateway's check and this UPDATE would
+    -- otherwise still write a ledger entry naming an approver whose authority
+    -- had already been withdrawn -- a TOCTOU window measured in milliseconds
+    -- rather than hours, but writing an immutable row that cannot be taken back.
+    -- `FOR SHARE` makes the deactivation wait for this transaction rather than
+    -- interleave with it, so the two orderings agree.
+    --
+    -- The ROLE is re-read too, not just the flag: `resolved_role` is written from
+    -- the caller's claim, and a role that has since changed would be recorded as
+    -- evidence of an authority the person no longer has. Same reasoning as
+    -- `manual_dti_is_permitted` (BDTI-02), which this deliberately mirrors.
+    --
+    -- ONLY the resolver. The proposer is not re-checked, and that is a decision:
+    -- a proposal moves nothing, so it stays answerable -- approvable or
+    -- rejectable -- even if the person who raised it has since left. Refusing it
+    -- would strand the row in the queue for ever, which is the same trap the
+    -- rejection path above is shaped to avoid.
+    PERFORM 1 FROM users
+      WHERE id = p_resolver AND is_active AND role = p_resolver_role
+      FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'resolver % does not hold current authority as % (account '
+                        'missing, deactivated, or role changed), so movement % '
+                        'may not be resolved', p_resolver, p_resolver_role,
+                        proposal.id;
+    END IF;
+
     -- Revalidate the whole executable target INSIDE the lock. A proposal that
     -- was valid when raised is not necessarily valid now: the loan may have
     -- closed, servicing may have been removed, the fees may have been paid down.
@@ -1749,10 +1783,10 @@ END $$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION resolve_pending_movement(BIGINT, INTEGER, TEXT, TEXT, NUMERIC, TEXT[]) IS
     'The only path that resolves a maker-checker proposal (ADR 0011). Locks the '
     'proposal, permits exactly one transition, refuses self-approval, revalidates '
-    'the executable target inside the lock, and on approval writes exactly one '
-    'ledger entry built from the locked row. Policy (threshold, permitted '
-    'statuses) is passed in by a caller that read it from configuration -- this '
-    'function encodes none.';
+    'the executable target AND the resolver''s current authority inside the lock, '
+    'and on approval writes exactly one ledger entry built from the locked row. '
+    'Policy (threshold, permitted statuses) is passed in by a caller that read it '
+    'from configuration -- this function encodes none.';
 
 
 -- ===========================================================================

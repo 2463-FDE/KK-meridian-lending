@@ -18,12 +18,15 @@ register is where it is tracked, because a caveat in a docstring is invisible to
 """
 import hashlib
 import json
+import logging
 import uuid
 
 import redis
 
 from . import db
 from .config import REDIS_URL, SESSION_TTL_SECONDS
+
+log = logging.getLogger("gateway.auth")
 
 _redis = None
 
@@ -108,11 +111,67 @@ def create_session(user: dict) -> str:
     return token
 
 
+def account_is_current(user_id) -> bool:
+    """Is this account still active, as of now?
+
+    Deliberately a fresh read rather than anything cached. The whole value of
+    this check is that it reflects a change made a moment ago; a cached answer
+    to "is this account still allowed" is the defect, not an optimisation.
+
+    Fails CLOSED. If the row is gone the account cannot be confirmed, and an
+    unconfirmable account is not a current one.
+    """
+    rows = db.query("SELECT is_active FROM users WHERE id = %s", (user_id,))
+    return bool(rows) and bool(rows[0]["is_active"])
+
+
 def get_session(token: str) -> dict | None:
+    """Resolve a bearer token to the account it belongs to, or None.
+
+    WHY THIS RE-READS `users.is_active` (G-02). The session in Redis is a
+    SNAPSHOT taken at login: it carries the id, role and name the account had
+    then, and it lives for `SESSION_TTL_SECONDS` -- eight hours by default.
+    Nothing re-checked the account behind it, so deactivating a staff member
+    revoked nothing they were already holding. Measured on a running stack
+    before this change, with `is_active` set false and the same bearer token
+    reused: `POST /auth/login` correctly refused with 401, while `GET /auth/me`
+    answered 200 and that same session went on to raise a balance-adjustment
+    proposal, raise a fee waiver, APPROVE a pending movement (writing a real
+    `ledger_entries` row), assess a late fee (another ledger row), record a
+    reconciliation review disposition, and deny an application -- setting the
+    adverse-action reason the applicant is told. Offboarding and compromise
+    response were ineffective for up to eight hours.
+
+    This is the boundary half of the fix, and it is here because this is the one
+    funnel every path shares: `/auth/me`, the `X-User-*` pair `_proxy` forwards
+    to every backend, and the Ed25519 principal the gateway mints for servicing
+    all resolve identity through this function. One check covers them together
+    instead of eight call sites, one of which would be forgotten. The database
+    half -- what makes a money write safe against a deactivation racing it --
+    is `resolve_pending_movement`.
+
+    WHAT IT COSTS, stated rather than left to be discovered: one indexed
+    primary-key read per authenticated request, on top of the Redis lookup
+    already being made. That is the price of revocation actually taking effect,
+    and the alternative is the behaviour measured above.
+
+    The session is NOT deleted here. A deactivation can be reversed, and
+    treating "not currently allowed" as "destroy the session" would also mean a
+    brief database problem silently ending every session in progress -- failing
+    closed in the wrong direction, unavailable rather than merely refused.
+    """
     if not token:
         return None
     raw = _client().get(f"session:{token}")
-    return json.loads(raw) if raw else None
+    if not raw:
+        return None
+    user = json.loads(raw)
+    if not account_is_current(user.get("id")):
+        # Logged so an operator can tell a revoked account from an expired
+        # session; the caller is told the same thing either way.
+        log.warning("session presented for inactive account id=%s", user.get("id"))
+        return None
+    return user
 
 
 def delete_session(token: str) -> None:

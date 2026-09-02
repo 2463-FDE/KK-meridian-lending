@@ -337,12 +337,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: npm audit (non-blocking -- first run, findings not yet triaged)
+      # Runtime dependencies only, which is the surface SEC-11 reasons about and
+      # the command that row quotes its frontend counts from.
+      #
+      # This used to run `npm audit --audit-level=high` with no `--omit=dev`,
+      # while SEC-11 attributed its counts to `npm audit --omit=dev`. Two
+      # different audit surfaces reported as one: the row reasoned about what
+      # ships, the job measured what ships plus Playwright, eslint, typescript
+      # and the type packages. They happen to agree today -- both report the
+      # same three packages -- and that is exactly why the drift survived. The
+      # command is now the one the row names, and
+      # db/tests/test_sec11_triage_matches_the_pins.py pins the literal string
+      # so the two cannot separate again.
+      #
+      # KNOWN ASYMMETRY, recorded rather than left to be discovered: the backend
+      # job above audits `requirements.txt` AND `requirements-dev.txt`, so the
+      # two halves of this scan cover different scopes. That is deliberate --
+      # a vulnerable Python dev tool runs in CI, whereas a vulnerable frontend
+      # dev dependency does not reach the standalone image -- and SEC-11 says so.
+      - name: npm audit (non-blocking -- see docs/DEBT.md SEC-11 for the triage)
         continue-on-error: true
         run: |
           cd frontend
           npm ci || npm install
-          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=high
 
   # GAP: dependency-audit/dependency-audit-frontend above are still continue-on-error --
   # this repo has never had a dependency scan before, so findings need a first triage
