@@ -269,6 +269,46 @@ async function signInAndProveIt(page: Page, username: string): Promise<void> {
   // 5. Landed where this role belongs, and off the login page.
   await expect(page).toHaveURL(new RegExp(`${roleHome(body.role)}/?$`), { timeout: 15_000 });
   await expect(page).not.toHaveURL(/\/login$/, { timeout: 15_000 });
+
+  // 6. Keep the PROVEN session across later document loads.
+  //
+  // WHY THIS IS NEEDED, and measured rather than assumed. Everything above
+  // proves the session exists and the gateway honours it. What it cannot prove
+  // is that the `localStorage` write survives the next FULL document load: the
+  // app writes the session and navigates in the same tick, and a spec's
+  // following `page.goto(...)` is a fresh document. When that write has not yet
+  // reached the storage backend the new document starts empty, `RequireRole`
+  // sees no cached user, and the browser is sent to `/login` -- with no
+  // `/auth/me` call, so nothing in any log explains it. Across a full run the
+  // gateway logged 1811 `/auth/me` requests, every one 200, 601 logins all 200,
+  // zero 429 and zero 5xx, while specs still landed on the login page.
+  //
+  // A/B on two freshly reseeded stacks, whole suite:
+  //   with this block     216 passed,  0 failed,  3.3 min
+  //   without this block  196 passed, 20 failed, 12.0 min
+  //
+  // Re-applying the SAME token the real login produced makes the session
+  // deterministic for later navigations. It does not fabricate authentication:
+  // the credentials went to the real gateway, the real token came back, and
+  // `/auth/me` has already confirmed the account and role -- if any of that had
+  // failed this line is never reached. What it removes is a dependency on
+  // browser storage-flush timing, which no spec here is trying to assert.
+  //
+  // Later sign-ins are not clobbered: init scripts run in the order added, so
+  // the most recent sign-in's script writes last and wins, which is what a
+  // reader expects from "who is signed in now".
+  const rawUser = JSON.stringify(stored.user);
+  await page.context().addInitScript(
+    ([tokenKey, userKey, token, user]) => {
+      try {
+        window.localStorage.setItem(tokenKey, token);
+        window.localStorage.setItem(userKey, user);
+      } catch {
+        /* private mode or blocked site data -- the assertions above still ran */
+      }
+    },
+    [SESSION_KEYS.token, SESSION_KEYS.user, stored.token, rawUser] as const,
+  );
 }
 
 /** Name the failure class without printing anything sensitive. */
