@@ -297,6 +297,70 @@ test("a captured payment not yet applied says so, rather than 'not available'", 
 });
 
 
+test("a payment awaiting authorization is not described as captured", async ({
+  page,
+}) => {
+  /**
+   * Codex ALLOC-PENDING-AUTH-001. `auth_status = 'pending'` fell through to the
+   * historical-payment wording, so a borrower whose authorization was in flight
+   * -- or left in flight by a crash mid-authorization -- read legacy-gap copy
+   * about a payment that is neither historical nor settled.
+   *
+   * The wording matters more here than in any of the other absence states.
+   * `payment-service` inserts the row as `pending` BEFORE it calls the
+   * processor, so this borrower's card may never have been charged. "Captured
+   * -- allocation pending" would assert a charge this system cannot claim; the
+   * historical sentence would call an in-flight payment old. Both are wrong in
+   * the borrower's favour in one direction and against it in the other, which
+   * is why this asserts the sentence rather than only the state.
+   *
+   * Route-mocked for the same reason the captured case above is: a real pending
+   * row is what the authorization path is actively resolving, so seeding one and
+   * then reading the screen races the thing under test. The API side is covered
+   * against real PostgreSQL in
+   * `servicing-service/tests/test_history_says_why_an_allocation_is_absent.py`.
+   */
+  await page.route(`**/lss/loans/${LOAN_ID}/payments`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        loan_id: LOAN_ID,
+        items: [
+          {
+            id: 999003,
+            amount: 310.0,
+            method: "card",
+            masked_pan: "•••• 1111",
+            created_at: new Date().toISOString(),
+            applied_to_fees: null,
+            applied_to_interest: null,
+            applied_to_principal: null,
+            auth_status: "pending",
+            applied: false,
+          },
+        ],
+      }),
+    }),
+  );
+
+  await openAccountAsBorrower(page);
+
+  const row = rowForAmount(page, "$310.00").first();
+  await expect(row).toBeVisible();
+  await expect(row.getByTestId("alloc-authorizing")).toHaveText(
+    "Authorization in progress — nothing applied yet.",
+  );
+  // Not the captured sentence: nothing has been captured.
+  await expect(row).not.toContainText("Captured");
+  // Not the legacy wording either.
+  await expect(row).not.toContainText("not available for this historical payment");
+  // No allocation table, and no zero standing in for an unknown.
+  await expect(row.getByLabel("What this payment was applied to")).toHaveCount(0);
+  await expect(row).not.toContainText("$0.00");
+});
+
+
 test("a declined payment reads as declined, not as a missing figure", async ({
   page,
 }) => {
