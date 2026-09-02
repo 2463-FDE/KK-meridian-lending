@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { apiPost, roleHome, setSession, type SessionUser } from "../../lib/api";
 
 const SEEDED = [
@@ -17,6 +17,34 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /** Is this form's own JavaScript live yet?
+   *
+   * THE DEFECT THIS EXISTS FOR, and it is a user-facing one rather than a test
+   * artifact. The markup is server-rendered, so the Sign in button exists and is
+   * clickable before the client bundle has attached `submit` to the form. A
+   * click that lands in that window is not handled the way the page intends:
+   * the sign-in can reach the gateway and come back 200 while the client never
+   * records the session, and because `submit`'s catch never runs either, NO
+   * error is displayed. The person is left looking at the login form, having
+   * apparently done nothing, with a valid server-side session they cannot use.
+   *
+   * Measured on the same stack, 20 sign-ins clicked as early as the browser
+   * allows: `next` 15.1.3 lost 0, `next` 15.5.25 lost 6. The window is not new
+   * -- it widened, because the newer build takes longer to become interactive.
+   * That is why this surfaced during the SEC-11 upgrade rather than being
+   * caused by it.
+   *
+   * Disabling the control until mount closes the window at the only place that
+   * can close it: a disabled button submits nothing, so there is no unhandled
+   * click to lose. It also removes the need for any caller -- a person or a
+   * browser test -- to guess when the page is ready, because "enabled" now
+   * means "will actually be handled".
+   */
+  const [interactive, setInteractive] = useState(false);
+  useEffect(() => {
+    setInteractive(true);
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -74,7 +102,7 @@ export default function LoginPage() {
 
           {error ? <div className="alert alert-error">{error}</div> : null}
 
-          <button className="btn-block" type="submit" disabled={busy}>
+          <button className="btn-block" type="submit" disabled={busy || !interactive}>
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>

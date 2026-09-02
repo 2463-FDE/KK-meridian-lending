@@ -13,6 +13,19 @@ export interface SessionUser {
 const TOKEN_KEY = "meridian.token";
 const USER_KEY = "meridian.user";
 
+/**
+ * Where the browser session actually lives.
+ *
+ * Exported so the browser suite can assert against the real contract rather
+ * than a second copy of these strings. A test that hardcodes "meridian.token"
+ * agrees with itself: rename the key here and the test still passes while
+ * proving nothing. This is the same reason the suite reads `roleHome` from this
+ * module instead of keeping its own role-to-route table.
+ *
+ * Read-only to consumers -- `setSession`/`clearSession` remain the only writers.
+ */
+export const SESSION_KEYS = { token: TOKEN_KEY, user: USER_KEY } as const;
+
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return window.localStorage.getItem(TOKEN_KEY);
