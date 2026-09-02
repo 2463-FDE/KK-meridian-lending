@@ -1,5 +1,10 @@
 import { test, expect } from "@playwright/test";
-import { signInAsStaff, dbClient } from "./fixtures";
+import {
+  createFixtureLoan,
+  dbClient,
+  retireFixtureLoans,
+  signInAsStaff,
+} from "./fixtures";
 import type { Client } from "pg";
 
 /**
@@ -27,7 +32,8 @@ import type { Client } from "pg";
  *   - The REJECTION runs against the loan every approvals spec shares. It moves
  *     no money and leaves nothing permanent behind, so it is safe there.
  *   - The APPROVAL writes a real, permanent ledger entry, so it runs against a
- *     reserved untouched loan and knowingly consumes one (RF-27).
+ *     loan created for it. It used to draw one from a finite reserved band and
+ *     consume it, which is the fixture defect RF-27 recorded.
  *
  * The approval could not be faked, and that is worth stating. The first attempt
  * seeded an already-resolved row pointing at an existing entry; the database
@@ -77,48 +83,37 @@ async function raiseProposal(
 }
 
 /**
- * A loan in the reserved band that nothing has touched yet.
+ * A loan created for the approval case, not taken from a finite supply.
  *
  * The approval below writes a real, permanent ledger entry, so it must not land
- * on the low-id loan every other spec shares. Same reserved-band mechanism as
- * `fee-waiver-clarity.spec.ts`, and the same accepted cost (RF-27): a run
- * consumes one untouched loan, and an exhausted band says to reseed rather than
- * failing as though the code were wrong.
+ * on the low-id loan every other approvals spec shares. It used to take an
+ * untouched loan from a band past the ids the rest of the suite reaches, and
+ * consumed one per run (RF-27) -- the band emptied after roughly fifteen local
+ * runs against the same persistent database and the case then failed with
+ * `no untouched serviced loan left in the reserved band -- reseed the database`,
+ * which is a statement about the fixture's supply rather than about the code.
+ *
+ * Creating the loan removes the supply, so there is nothing to exhaust. The
+ * REJECTION case above is unchanged: it moves no money and leaves nothing
+ * permanent behind, so the shared loan is still safe for it, and keeping it
+ * there is what shows the two cases differ for a reason.
  */
-const RESERVED_OFFSET = 100;
+const FIXTURE_LABEL = "approvals-resolved";
 
 async function aDedicatedLoan(client: Client): Promise<number> {
-  const floorRow = (
-    await client.query(
-      `SELECT b.loan_id FROM balances b JOIN loans l ON l.id = b.loan_id
-        WHERE l.status = 'current' ORDER BY b.loan_id OFFSET $1 LIMIT 1`,
-      [RESERVED_OFFSET],
-    )
-  ).rows[0];
-  if (!floorRow) {
-    throw new Error(
-      `fewer than ${RESERVED_OFFSET + 1} serviced loans: the reserved band does not exist`,
-    );
-  }
-  const row = (
-    await client.query(
-      `SELECT b.loan_id FROM balances b JOIN loans l ON l.id = b.loan_id
-        WHERE l.status = 'current'
-          AND b.loan_id >= $1
-          AND NOT EXISTS (SELECT 1 FROM ledger_entries e
-                           WHERE e.loan_id = b.loan_id
-                             AND e.entry_type <> 'opening_balance')
-          AND NOT EXISTS (SELECT 1 FROM pending_movements m
-                           WHERE m.loan_id = b.loan_id)
-        ORDER BY b.loan_id LIMIT 1`,
-      [Number(floorRow.loan_id)],
-    )
-  ).rows[0];
-  if (!row) {
-    throw new Error("no untouched serviced loan left in the reserved band -- reseed the database");
-  }
-  return Number(row.loan_id);
+  return (await createFixtureLoan(client, FIXTURE_LABEL)).loanId;
 }
+
+test.afterAll(async () => {
+  const client = dbClient();
+  await client.connect();
+  try {
+    await retireFixtureLoans(client, FIXTURE_LABEL);
+  } finally {
+    await client.end();
+  }
+});
+
 
 async function resolutionOf(client: Client, id: number) {
   const res = await client.query(

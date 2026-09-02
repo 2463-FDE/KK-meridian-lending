@@ -62,13 +62,20 @@ repeatable. These tests are.
 
   **Two of those writes are append-only and cannot be undone**, both
   `ledger_entries` inserts. Everything else is set up and torn down within a
-  test. That is why `fee-waiver-clarity` consumes a loan per test from a
-  reserved band rather than restoring one: repeated local runs against a single
-  database eventually exhaust the band and the spec says
-  `no untouched serviced loan left in the reserved band -- reseed the database`.
-  Reseed with `docker compose down -v` and start the stack again. Tracked as
-  **RF-27** in [`docs/DEBT.md`](../../docs/DEBT.md); CI is unaffected because
-  every run starts from a fresh volume.
+  test. So `fee-waiver-clarity` and `approvals-resolved-history` do not reuse a
+  seeded loan and do not restore one either -- a loan they have assessed a fee
+  against cannot truthfully become untouched again. Each **creates** the loan it
+  needs (`createFixtureLoan` in `fixtures.ts`) and closes it in `afterAll`.
+
+  They used to take an untouched loan from a reserved band past the ids the rest
+  of the suite reaches, and consumed one per test: repeated local runs against a
+  single database exhausted the band and the specs failed with `no untouched
+  serviced loan left in the reserved band -- reseed the database`, whose remedy
+  was `docker compose down -v`. That was **RF-27** in
+  [`docs/DEBT.md`](../../docs/DEBT.md), now closed -- the fixture no longer draws
+  on a finite supply, so there is nothing to exhaust and no reseed to remember.
+  CI was never affected either way, because every run starts from a fresh
+  volume.
 - `E2E_BASE_URL` -- optional, defaults to `http://localhost:3000`
   (the frontend's own dev/prod server).
 

@@ -1,7 +1,12 @@
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import type { Client } from "pg";
-import { dbClient, signInAsStaff } from "./fixtures";
+import {
+  createFixtureLoan,
+  dbClient,
+  retireFixtureLoans,
+  signInAsStaff,
+} from "./fixtures";
 
 /**
  * Proposing a fee waiver shows what is owed, what can be waived, and where the
@@ -55,71 +60,42 @@ function usdText(value: number): string {
 }
 
 /**
- * A loan reserved for this spec alone.
+ * A loan created for one test, not borrowed from a finite supply.
  *
  * Every other spec in this suite selects `ORDER BY ... LIMIT 1`, so they all
  * share the lowest-id serviced loan and mutate it: `approval-queue-self-approval`
  * has an admin resolve a movement against it, and the borrower payment specs
- * post against it too. This file took that same loan, so its fee balance was
- * whatever the specs before it had left behind. A fixed offset past the ids
- * every other spec reaches gives each test here its own seeded loan instead.
+ * post against it too. This file cannot share a loan at all -- each case needs
+ * an EXACT fee balance, and it puts that balance on through a `fee_assessed`
+ * ledger entry, which is permanent.
  *
- * Ascending order is what makes the choice stable: specs that board new loans
- * append higher ids, which cannot shift a low offset.
+ * So it used to take an untouched loan from a band past the ids the rest of the
+ * suite reaches, skipping any loan already carrying a ledger entry or a pending
+ * movement. That made the file re-runnable and it CONSUMED the band: five loans
+ * per run, and after roughly fifteen local runs against the same persistent
+ * database the band was empty and every case failed with `no untouched serviced
+ * loan left in the reserved band -- reseed the database` (RF-27, observed twice
+ * during the pre-freeze audit).
  *
- * The band is a floor, not the whole answer -- the query also SKIPS any loan
- * that already carries a ledger entry or a pending movement. That is what makes
- * the file re-runnable against a database it has already run on, and it means a
- * loan another spec reaches is stepped over rather than fought over. If the band
- * is ever exhausted the error says to reseed, which is a statement about the
- * data rather than a failed assertion about the code.
+ * A created loan has no supply to draw down, so the file is repeatable with no
+ * reseed. What did NOT fix it, and is worth naming because each looks like a
+ * fix: a wider OFFSET (a bigger band still empties), a retry (there is nothing
+ * to retry -- the loans are gone), a sleep (nothing is racing), randomising the
+ * pick (it collides sooner rather than later), and depending on a reseed (which
+ * is the workaround, not the fix).
+ *
+ * `createFixtureLoan` seeds `past_due` at 0 deliberately -- see its own note --
+ * so `withFees` below lands on exactly the figure it asserts.
  */
-const RESERVED_OFFSET = 100;
+const FIXTURE_LABEL = "fee-waiver";
 
-async function aDedicatedLoan(index: number): Promise<number> {
-  return withDb(async (c) => {
-    // The floor of the reserved band, resolved once so the band is defined by a
-    // position rather than by an id this file would have to hard-code.
-    const floorRow = (
-      await c.query(
-        `SELECT b.loan_id FROM balances b JOIN loans l ON l.id = b.loan_id
-          WHERE l.status = 'current' ORDER BY b.loan_id OFFSET $1 LIMIT 1`,
-        [RESERVED_OFFSET],
-      )
-    ).rows[0];
-    if (!floorRow) {
-      throw new Error(
-        `fewer than ${RESERVED_OFFSET + 1} serviced loans: the reserved band does not exist`,
-      );
-    }
-
-    // Untouched loans only, so a second run on the same database takes the next
-    // ones along instead of inheriting the fees and proposals the first run
-    // left. The ledger is append-only and a fee assessment cannot be reversed
-    // without a proposal and a second approver, so "give the loan back" is not
-    // available -- taking a fresh one is.
-    const row = (
-      await c.query(
-        `SELECT b.loan_id FROM balances b JOIN loans l ON l.id = b.loan_id
-          WHERE l.status = 'current'
-            AND b.loan_id >= $1
-            AND NOT EXISTS (SELECT 1 FROM ledger_entries e
-                             WHERE e.loan_id = b.loan_id
-                               AND e.entry_type <> 'opening_balance')
-            AND NOT EXISTS (SELECT 1 FROM pending_movements m
-                             WHERE m.loan_id = b.loan_id)
-          ORDER BY b.loan_id OFFSET $2 LIMIT 1`,
-        [Number(floorRow.loan_id), index],
-      )
-    ).rows[0];
-    if (!row) {
-      throw new Error(
-        "no untouched serviced loan left in the reserved band -- reseed the database",
-      );
-    }
-    return Number(row.loan_id);
-  });
+async function aDedicatedLoan(): Promise<number> {
+  return withDb(async (c) => (await createFixtureLoan(c, FIXTURE_LABEL)).loanId);
 }
+
+test.afterAll(async () => {
+  await withDb((c) => retireFixtureLoans(c, FIXTURE_LABEL));
+});
 
 
 /**
@@ -179,7 +155,7 @@ const waiverCard = (page: Page) =>
 test("with no fees owed, the form says so and cannot be submitted", async ({
   page,
 }) => {
-  const loanId = await aDedicatedLoan(0);
+  const loanId = await aDedicatedLoan();
 
   await withFees(loanId, "0.00", async () => {
     await signInAsStaff(page, "csr");
@@ -215,7 +191,7 @@ test("with no fees owed, the form says so and cannot be submitted", async ({
 test("a partial waiver previews against the fee balance and is proposable", async ({
   page,
 }) => {
-  const loanId = await aDedicatedLoan(1);
+  const loanId = await aDedicatedLoan();
 
   await withFees(loanId, "500.00", async () => {
     await signInAsStaff(page, "csr");
@@ -253,7 +229,7 @@ test("waiving exactly the fee balance is allowed and lands on zero", async ({
    *  landing exactly on zero is legal -- waiving the last cent of a fee balance
    *  is not an error, and a guard that used `>=` would forbid the commonest
    *  waiver of all. */
-  const loanId = await aDedicatedLoan(2);
+  const loanId = await aDedicatedLoan();
 
   await withFees(loanId, "350.00", async () => {
     await signInAsStaff(page, "csr");
@@ -274,7 +250,7 @@ test("waiving exactly the fee balance is allowed and lands on zero", async ({
 test("an over-waiver is refused before it is sent, and names the ceiling", async ({
   page,
 }) => {
-  const loanId = await aDedicatedLoan(3);
+  const loanId = await aDedicatedLoan();
 
   await withFees(loanId, "100.00", async () => {
     await signInAsStaff(page, "csr");
@@ -309,7 +285,7 @@ test("an over-waiver is refused before it is sent, and names the ceiling", async
 test("a partial or non-numeric amount reads as no proposal, not as NaN", async ({
   page,
 }) => {
-  const loanId = await aDedicatedLoan(4);
+  const loanId = await aDedicatedLoan();
 
   await withFees(loanId, "500.00", async () => {
     await signInAsStaff(page, "csr");
