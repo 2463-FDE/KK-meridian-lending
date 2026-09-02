@@ -103,3 +103,95 @@ test("a non-numeric figure is unknown rather than coerced", () => {
   expect(view.lines).toEqual([{ label: "Principal", amount: 400 }]);
   expect(view.unknownLabels).toEqual(["Fees", "Interest"]);
 });
+
+// --- WHY an allocation is absent ---------------------------------------------
+//
+// `unavailable` used to answer for four different situations, and only one of
+// them is genuinely historical. These pin the other three, including the one
+// Codex found missing (ALLOC-PENDING-AUTH-001): `auth_status === "pending"`
+// fell through to the legacy-gap wording.
+
+test("a captured payment that has not been applied says so", () => {
+  const view = allocationView({
+    applied_to_fees: null,
+    applied_to_interest: null,
+    applied_to_principal: null,
+    auth_status: "captured",
+    applied: false,
+  });
+
+  expect(view.kind).toBe("pending");
+});
+
+test("a payment whose authorization is still in flight is not called captured", () => {
+  // `payment-service` inserts the row as `pending` BEFORE calling the
+  // processor, so this card may never have been charged. "Captured --
+  // allocation pending" would assert a charge that did not happen, and the
+  // historical wording would call an in-flight payment old.
+  const view = allocationView({
+    applied_to_fees: null,
+    applied_to_interest: null,
+    applied_to_principal: null,
+    auth_status: "pending",
+    applied: false,
+  });
+
+  expect(view.kind).toBe("authorizing");
+});
+
+test("a declined payment is declined, not missing", () => {
+  const view = allocationView({
+    applied_to_fees: null,
+    applied_to_interest: null,
+    applied_to_principal: null,
+    auth_status: "failed",
+    applied: false,
+  });
+
+  expect(view.kind).toBe("declined");
+});
+
+test("a genuinely historical payment keeps the historical answer", () => {
+  // Applied, and no ledger evidence: applied before the ledger existed. This
+  // is the ONE case "not available for this historical payment" was written
+  // for, and it must not be absorbed by the new states.
+  const view = allocationView({
+    applied_to_fees: null,
+    applied_to_interest: null,
+    applied_to_principal: null,
+    auth_status: "captured",
+    applied: true,
+  });
+
+  expect(view.kind).toBe("unavailable");
+});
+
+test("ledger evidence still wins over every status column", () => {
+  // The negative control for all four branches above: a status must only ever
+  // EXPLAIN an absence, never suppress figures that exist.
+  for (const auth_status of ["pending", "captured", "failed"]) {
+    const view = allocationView({
+      applied_to_fees: 0,
+      applied_to_interest: 5,
+      applied_to_principal: 95,
+      auth_status,
+      applied: false,
+    });
+
+    expect(view.kind, `${auth_status} suppressed a real allocation`).toBe("known");
+  }
+});
+
+test("an unrecognised status is unavailable rather than guessed at", () => {
+  // A value this frontend has not been taught. Falling through to the honest
+  // "we do not know" is right; inventing a branch for it would not be.
+  const view = allocationView({
+    applied_to_fees: null,
+    applied_to_interest: null,
+    applied_to_principal: null,
+    auth_status: "reversed",
+    applied: false,
+  });
+
+  expect(view.kind).toBe("unavailable");
+});

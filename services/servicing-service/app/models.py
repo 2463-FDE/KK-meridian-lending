@@ -117,6 +117,12 @@ class Payment(Base):
     amount: Mapped[float] = mapped_column(Numeric(14, 2, asdecimal=False))
     method: Mapped[str | None] = mapped_column(String, default="card")
     auth_status: Mapped[str] = mapped_column(String, default="captured")
+    # Mapped so payment history can tell "captured, not applied yet" apart from
+    # "applied, but before the ledger existed". Both have no ledger entries, and
+    # without this column the API returned the same absent allocation for each --
+    # so the screen said "not available" to a borrower whose payment was simply
+    # still in flight. payment-service sets it when servicing confirms the apply.
+    applied_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
