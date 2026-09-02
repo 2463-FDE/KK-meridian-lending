@@ -285,7 +285,23 @@ export async function resolveReferAsStaff(
  * that need fees put them on through the ledger entry that justifies them.
  *
  * The four contract columns are supplied together because `loans` has a CHECK
- * requiring all four or none.
+ * requiring all four or none, and the amounts are the ones servicing's own
+ * generator produces for `12000.00 @ 7.99% / 36` -- NOT numbers chosen to look
+ * plausible.
+ *
+ * That distinction was a real defect, found by this audit rather than by a test.
+ * The first version of this fixture carried `375.94 / 375.90`, which does not
+ * amortize 12,000: the closing balance lands at 1.72, and `GET
+ * /loans/{id}/schedule` correctly answers "This loan's recorded terms do not add
+ * up ... 1.72 remains unaccounted for". Sixty-two fixture loans in the local
+ * database carried it. Every one was a synthetic loan tripping a warning built
+ * to report a genuine data defect, and while a run is in flight those loans are
+ * `current`, so a demo landing on one is shown that warning about a loan the
+ * test suite manufactured.
+ *
+ * `db/tests/test_fixture_contracts_amortize.py` now checks these amounts against
+ * the generator, because the generator lives in Python and these numbers live in
+ * TypeScript -- so the only way this stays true is a guard that reads both.
  */
 export interface FixtureLoan {
   loanId: number;
@@ -313,7 +329,7 @@ export async function createFixtureLoan(
     `INSERT INTO loans (applicant_name, principal, note_rate_pct, term_months,
                         regular_payment, regular_payment_count, final_payment,
                         schedule_version, status)
-     VALUES ($1, 12000.00, 7.99, 36, 375.94, 35, 375.90, 'B1', 'current')
+     VALUES ($1, 12000.00, 7.99, 36, 375.98, 35, 376.03, 'B1', 'current')
      RETURNING id`,
     [applicantName],
   );
