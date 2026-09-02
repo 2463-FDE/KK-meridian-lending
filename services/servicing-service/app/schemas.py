@@ -106,6 +106,23 @@ class PaymentItem(BaseModel):
     applied_to_interest: Optional[float] = None
     applied_to_principal: Optional[float] = None
 
+    # Why an absent allocation is absent. Two different situations produce no
+    # ledger entries, and the borrower is owed different sentences for them:
+    #
+    #   captured + not applied -> the payment is in flight. "Captured --
+    #       allocation pending", the same words the receipt uses.
+    #   applied + no entries   -> a legacy row applied before the ledger
+    #       existed. Genuinely unknown, and saying so is the honest answer.
+    #   failed                 -> declined. Nothing was applied, and it must not
+    #       read as an allocation that is merely missing.
+    #
+    # The vocabulary is deliberately the one `PaymentOut.status` already uses,
+    # so the receipt and the history row describe the same payment the same way
+    # instead of inventing a second set of words for one state machine.
+    auth_status: Optional[str] = None
+    #: True once servicing confirmed the apply (`payments.applied_at` is set).
+    applied: bool = False
+
 
 class PaymentsOut(BaseModel):
     loan_id: int

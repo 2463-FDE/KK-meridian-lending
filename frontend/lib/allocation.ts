@@ -35,6 +35,17 @@ export interface PaymentAllocationFields {
   applied_to_fees?: number | null;
   applied_to_interest?: number | null;
   applied_to_principal?: number | null;
+  /**
+   * Why an allocation is absent, when it is.
+   *
+   * The same vocabulary `PaymentOut.status` uses, so a history row and the
+   * receipt describe one payment the same way. Optional because a caller with an
+   * older response shape still renders correctly -- it simply cannot distinguish
+   * the reasons, which is the behaviour that existed before these arrived.
+   */
+  auth_status?: "captured" | "pending" | "failed" | string | null;
+  /** True once servicing confirmed the apply. */
+  applied?: boolean | null;
 }
 
 /** One component of an allocation, with an amount we actually know. */
@@ -59,9 +70,32 @@ export type AllocationView =
        */
       unknownLabels: string[];
     }
+  /**
+   * Captured by the processor, not yet applied to the loan.
+   *
+   * NOT the same as `unavailable`, and conflating them is the defect this
+   * variant exists for: both have no ledger entries, so history told a borrower
+   * whose payment was merely in flight that the details were "not available".
+   * An allocation is read from ledger evidence that does not exist yet, so there
+   * is nothing to show -- but the reason is knowable and worth saying.
+   */
+  | { kind: "pending" }
+  /** Declined. Nothing was applied, and this must not read as a missing figure. */
+  | { kind: "declined" }
   | { kind: "unavailable" };
 
-const COMPONENTS: { label: string; key: keyof PaymentAllocationFields }[] = [
+/**
+ * Only the three money fields, never the status ones.
+ *
+ * `keyof PaymentAllocationFields` used to be exactly the allocation columns, so
+ * it was safe to index with. It no longer is -- `auth_status` is a string and
+ * `applied` a boolean -- and widening the loop would hand `knownAmount` a value
+ * it would quietly classify as "unknown". Naming the three keys keeps the
+ * compiler enforcing that this loop only ever reads money.
+ */
+type AllocationKey = "applied_to_fees" | "applied_to_interest" | "applied_to_principal";
+
+const COMPONENTS: { label: string; key: AllocationKey }[] = [
   // Waterfall order: fees, then accrued interest, then principal. It matches
   // `policies/fee_schedule.md` and `servicing-service/app/waterfall.py`, so the
   // borrower reads the components in the order their money was applied.
@@ -96,6 +130,15 @@ export function allocationView(payment: PaymentAllocationFields): AllocationView
     }
   }
 
-  if (lines.length === 0) return { kind: "unavailable" };
+  if (lines.length === 0) {
+    // Ledger evidence decides FIRST. A payment with entries has an allocation
+    // whatever its status columns say, so the status is only consulted to
+    // explain an absence -- never to override figures that exist.
+    if (payment.auth_status === "failed") return { kind: "declined" };
+    if (payment.auth_status === "captured" && payment.applied !== true) {
+      return { kind: "pending" };
+    }
+    return { kind: "unavailable" };
+  }
   return { kind: "known", lines, unknownLabels };
 }

@@ -52,6 +52,9 @@ interface PaymentRow {
   // component received nothing. `lib/allocation.ts` keeps the two apart; see the
   // note there about `usd(null)` rendering as "$0.00".
   applied_to_fees?: number | null;
+  // Why an absent allocation is absent -- see lib/allocation.ts.
+  auth_status?: string | null;
+  applied?: boolean | null;
   applied_to_interest?: number | null;
   applied_to_principal?: number | null;
 }

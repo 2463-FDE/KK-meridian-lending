@@ -240,6 +240,103 @@ test("a payment with no ledger evidence says so instead of showing zeros", async
   }
 });
 
+test("a captured payment not yet applied says so, rather than 'not available'", async ({
+  page,
+}) => {
+  /**
+   * The client's decision: a payment captured but not yet applied reads
+   * "Captured -- allocation pending", the same words the receipt uses. Never an
+   * estimate, and never the historical-payment wording -- a borrower whose card
+   * was charged seconds ago is not reading about a legacy row.
+   *
+   * Route-mocked rather than seeded, and that is not convenience. A real
+   * `auth_status = 'captured' AND applied_at IS NULL` row is precisely what
+   * payment-service's reconciler drains: it would apply the payment mid-test and
+   * write the ledger entries this state is defined by NOT having. The API side
+   * of this contract is covered against real PostgreSQL in
+   * `servicing-service/tests/test_history_says_why_an_allocation_is_absent.py`;
+   * what only a browser can show is which sentence the borrower reads.
+   */
+  await page.route(`**/lss/loans/${LOAN_ID}/payments`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        loan_id: LOAN_ID,
+        items: [
+          {
+            id: 999001,
+            amount: 150.0,
+            method: "card",
+            masked_pan: "•••• 1111",
+            created_at: new Date().toISOString(),
+            // No ledger evidence yet -- that is the state, not a gap.
+            applied_to_fees: null,
+            applied_to_interest: null,
+            applied_to_principal: null,
+            auth_status: "captured",
+            applied: false,
+          },
+        ],
+      }),
+    }),
+  );
+
+  await openAccountAsBorrower(page);
+
+  const row = rowForAmount(page, "$150.00").first();
+  await expect(row).toBeVisible();
+  await expect(row.getByTestId("alloc-pending")).toHaveText(
+    "Captured — allocation pending.",
+  );
+  // Not the legacy wording, and not an allocation table.
+  await expect(row).not.toContainText("not available for this historical payment");
+  await expect(row.getByLabel("What this payment was applied to")).toHaveCount(0);
+  // And no estimate stood in for the missing figures.
+  await expect(row).not.toContainText("$0.00");
+});
+
+
+test("a declined payment reads as declined, not as a missing figure", async ({
+  page,
+}) => {
+  /** Nothing was applied. Leaving it in the "not available" bucket invited the
+   *  reading that an allocation exists and merely failed to load. */
+  await page.route(`**/lss/loans/${LOAN_ID}/payments`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        loan_id: LOAN_ID,
+        items: [
+          {
+            id: 999002,
+            amount: 60.0,
+            method: "card",
+            masked_pan: null,
+            created_at: new Date().toISOString(),
+            applied_to_fees: null,
+            applied_to_interest: null,
+            applied_to_principal: null,
+            auth_status: "failed",
+            applied: false,
+          },
+        ],
+      }),
+    }),
+  );
+
+  await openAccountAsBorrower(page);
+
+  const row = rowForAmount(page, "$60.00").first();
+  await expect(row).toBeVisible();
+  await expect(row.getByTestId("alloc-declined")).toHaveText(
+    "Declined — nothing applied.",
+  );
+  await expect(row).not.toContainText("$0.00");
+});
+
+
 test("two payments each show their own allocation", async ({ page }) => {
   await openAccountAsBorrower(page);
 

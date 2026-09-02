@@ -30,6 +30,30 @@ export default function PaymentAllocation({
 }) {
   const view = allocationView(payment);
 
+  if (view.kind === "pending") {
+    // The SAME words the receipt uses (`PaymentOutcome`'s pending branch), on
+    // purpose. This row used to read "not available for this historical
+    // payment" for a payment captured moments ago -- both wrong about the
+    // payment and wrong about why. No allocation is shown because the ledger
+    // evidence an allocation is read from does not exist yet.
+    return (
+      <span className="muted alloc-pending" data-testid="alloc-pending">
+        Captured — allocation pending.
+      </span>
+    );
+  }
+
+  if (view.kind === "declined") {
+    // Not a missing figure. A declined payment moved nothing, and leaving it in
+    // the "not available" bucket invited the reading that an allocation exists
+    // and simply was not loaded.
+    return (
+      <span className="muted alloc-declined" data-testid="alloc-declined">
+        Declined — nothing applied.
+      </span>
+    );
+  }
+
   if (view.kind === "unavailable") {
     return (
       <span className="muted alloc-empty">
