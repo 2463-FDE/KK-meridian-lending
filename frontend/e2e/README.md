@@ -30,12 +30,15 @@ repeatable. These tests are.
   correction matters because a reader who trusts it draws the wrong conclusion
   when the suite behaves as though state carried over -- which it does.
 
-  Rather than trust this list, re-derive it:
+  Rather than trust this list, re-derive it. Note the second filter and the
+  absence of `-o`: `grep -o` prints only the matched SQL, which throws away the
+  `//` or `*` that marks a comment, so a command built on it cannot tell code
+  from prose and over-reports by two.
 
   ```
-  grep -rnoE '(INSERT INTO|UPDATE|DELETE FROM) [a-z_]+' frontend/e2e/*.ts
+  grep -rnE '(INSERT INTO|UPDATE|DELETE FROM) [a-z_]+' frontend/e2e/*.ts \
+    | grep -vE ':[0-9]+: *(\*|//|/\*)'
   ```
-
   As of this commit that is:
 
   | Spec | Writes |
@@ -43,32 +46,61 @@ repeatable. These tests are.
   | `fee-waiver-clarity` | `INSERT ledger_entries` (a `fee_assessed` entry) |
   | `servicing-raises-a-proposal` | `INSERT ledger_entries` |
   | `approval-queue-self-approval` | `INSERT pending_movements` |
+  | `approvals-resolved-history` | `INSERT pending_movements` |
   | `payment-allocation` | `INSERT` / `DELETE payments` |
-  | `reconciliation-review-queue` | `INSERT` / `DELETE payments`, `reconciliation_review_items` |
+  | `reconciliation-review-queue` | `INSERT` / `DELETE payments`, `INSERT` / `DELETE reconciliation_review_items` |
   | `amount-financed-breakdown` | `UPDATE offers` |
   | `offer-disclosure-ui` | `UPDATE offers` |
   | `regeneration-reprices-the-offer` | `UPDATE offers` |
   | `reconstructed-schedule-warning` | `UPDATE loans` |
+  | `adjustment-preview` | `INSERT loans`, `INSERT balances`, `UPDATE loans` (its own fixture loan, created and retired per file) |
 
-  (The grep also matches `UPDATE balances` in `fee-waiver-clarity` -- that one is
-  prose in its docstring describing what the fixture used to do, not code. PR
-  #113 removed the direct write to the projection.)
+  Eleven specs, and one shared HELPER. The helper is kept out of the table above
+  deliberately: it is not a spec, and its writes belong to whichever test calls
+  it.
 
-  A first version of this table said "seven" and omitted
-  `servicing-raises-a-proposal` and `regeneration-reprices-the-offer`, because
-  the command it came from was truncated with `head`. An inventory presented as
-  complete and quietly missing entries is the same wrong-model failure this
-  section exists to remove, which is why the command is given above.
+  | Helper | Writes |
+  |---|---|
+  | `fixtures.ts` (`createFixtureLoan`, `retireFixtureLoans`) | `INSERT loans`, `INSERT balances`, `UPDATE loans` (the retire) |
+
+  (Two matches the naive grep reports are prose, not code: `UPDATE balances` in
+  `fee-waiver-clarity`, describing what the fixture used to do before PR #113
+  removed the direct write to the projection, and `UPDATE decisions` in
+  `decision-evidence`, in a comment explaining what a staff override does.
+  Neither spec performs that write, which is why the command above is filtered.)
+
+  This table has now been wrong twice, in the same way, which is why it is no
+  longer maintained by hand alone.
+
+  A first version said "seven" and omitted `servicing-raises-a-proposal` and
+  `regeneration-reprices-the-offer`, because the command it came from was
+  truncated with `head`. The second omitted `approvals-resolved-history` --
+  which the paragraphs below already discussed as an append-only writer -- and
+  the `fixtures.ts` writes this suite's fixture helper had just gained. An
+  inventory presented as complete and quietly missing entries is the same
+  wrong-model failure this section exists to remove, and giving the re-derive
+  command was evidently not enough on its own.
+
+  `db/tests/test_e2e_write_inventory_is_complete.py` re-derives the set and
+  fails when this table and the tree disagree, so a third omission is a red
+  build rather than a paragraph a reader trusts.
 
   **Two of those writes are append-only and cannot be undone**, both
   `ledger_entries` inserts. Everything else is set up and torn down within a
-  test. That is why `fee-waiver-clarity` consumes a loan per test from a
-  reserved band rather than restoring one: repeated local runs against a single
-  database eventually exhaust the band and the spec says
-  `no untouched serviced loan left in the reserved band -- reseed the database`.
-  Reseed with `docker compose down -v` and start the stack again. Tracked as
-  **RF-27** in [`docs/DEBT.md`](../../docs/DEBT.md); CI is unaffected because
-  every run starts from a fresh volume.
+  test. So `fee-waiver-clarity` and `approvals-resolved-history` do not reuse a
+  seeded loan and do not restore one either -- a loan they have assessed a fee
+  against cannot truthfully become untouched again. Each **creates** the loan it
+  needs (`createFixtureLoan` in `fixtures.ts`) and closes it in `afterAll`.
+
+  They used to take an untouched loan from a reserved band past the ids the rest
+  of the suite reaches, and consumed one per test: repeated local runs against a
+  single database exhausted the band and the specs failed with `no untouched
+  serviced loan left in the reserved band -- reseed the database`, whose remedy
+  was `docker compose down -v`. That was **RF-27** in
+  [`docs/DEBT.md`](../../docs/DEBT.md), now closed -- the fixture no longer draws
+  on a finite supply, so there is nothing to exhaust and no reseed to remember.
+  CI was never affected either way, because every run starts from a fresh
+  volume.
 - `E2E_BASE_URL` -- optional, defaults to `http://localhost:3000`
   (the frontend's own dev/prod server).
 

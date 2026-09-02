@@ -1,6 +1,11 @@
 import { test, expect, Page } from "@playwright/test";
 import { Client } from "pg";
-import { dbClient, signInAsBorrower, SEEDED_BORROWER } from "./fixtures";
+import {
+  createBorrowerIdentity,
+  dbClient,
+  retireBorrowerIdentity,
+  signInAsBorrower,
+} from "./fixtures";
 
 /**
  * "Can the user tell what a payment was applied to?" -- the 2026-08-19 demo.
@@ -25,7 +30,37 @@ import { dbClient, signInAsBorrower, SEEDED_BORROWER } from "./fixtures";
  * tokenizer's test card.
  */
 
-const LOAN_ID = SEEDED_BORROWER.loanId;
+/**
+ * A loan this file OWNS, created for it and owned by the signed-in borrower.
+ *
+ * It used to be `SEEDED_BORROWER.loanId`. Every payment below goes through the
+ * real UI, and a payment permanently reduces the balance, so each run drew the
+ * shared seeded loan down and never gave it back -- about 1030 per full run
+ * against a seeded 12,200, so eleven or twelve runs exhausted it and these
+ * specs then failed on D14 correctly refusing an overpayment. That is RF-30,
+ * and it is the same deterministic exhaustion RF-27 had.
+ *
+ * `createBorrowerLoan` creates the APPLICATION as well as the loan, because a
+ * borrower's access is `loans.app_id -> applications.applicant_id`, not a
+ * property of the loan.
+ */
+const FIXTURE_LABEL = "payment-allocation";
+
+let LOAN_ID = 0;
+
+/** The synthetic borrower this file signs in as. Created with its own applicant,
+ * user, application and loan, so nothing here touches the seeded borrower. */
+let BORROWER = "";
+
+test.beforeAll(async () => {
+  const who = await withDb((c) => createBorrowerIdentity(c, FIXTURE_LABEL));
+  LOAN_ID = who.loanId;
+  BORROWER = who.username;
+});
+
+test.afterAll(async () => {
+  await withDb((c) => retireBorrowerIdentity(c, FIXTURE_LABEL));
+});
 
 let _seq = 0;
 /** A distinctive dollar amount, unique within and across runs. */
@@ -123,7 +158,7 @@ function deletePayment(paymentId: number): Promise<void> {
 
 /** The borrower's own route to the account screen: My loan, then the account. */
 async function openAccountAsBorrower(page: Page): Promise<void> {
-  await signInAsBorrower(page);
+  await signInAsBorrower(page, BORROWER);
   await page.goto("/my-loan");
   await expect(page.getByRole("heading", { name: /My loan/i })).toBeVisible();
   await page.goto(`/servicing/${LOAN_ID}`);
