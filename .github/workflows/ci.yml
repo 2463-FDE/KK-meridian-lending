@@ -372,10 +372,16 @@ jobs:
           npm ci || npm install
           npm audit --omit=dev --audit-level=high
 
-  # GAP: dependency-audit/dependency-audit-frontend above are still continue-on-error --
-  # this repo has never had a dependency scan before, so findings need a first triage
-  # pass (upgrade vs. accept-risk vs. false positive) before it's safe to gate on. No
-  # SAST tool yet either.
+  # GAP: dependency-audit/dependency-audit-frontend above are still continue-on-error.
+  # The REASON is the one stated on those jobs, not the original one: the findings WERE
+  # triaged on 2026-09-01 (docs/DEBT.md SEC-11), and what is missing is a
+  # machine-readable advisory allowlist for the step to consult. Until that exists,
+  # gating would fail the build on findings SEC-11 has already dispositioned.
+  # *This comment used to say the repo had never been scanned and the findings "need a
+  # first triage pass". That was true when written and stopped being true with SEC-11's
+  # triage -- it is corrected here rather than left, because a reader hitting this GAP
+  # first would otherwise get the retired premise.*
+  # No SAST tool yet either.
   # FIXED: the backend-known-flaky split (disclosure-service, then servicing-service)
   # is gone -- both services' float-money bugs (D12/D6) got a real Decimal migration
   # (apr.py/offer.py/schedule.py; balance.py/delinquency.py/schedule.py), both known-
