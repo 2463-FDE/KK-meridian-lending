@@ -178,8 +178,11 @@ test("a rejected proposal moves out of Pending and into Recently resolved", asyn
 test("an approved movement links to the ledger entry it produced", async ({ page }) => {
   // This one APPROVES, and so writes a real ledger entry. Every other approvals
   // spec rejects on purpose -- the ledger is append-only and an approval cannot
-  // be given back -- so this runs against a reserved, untouched loan and pays
-  // the RF-27 cost knowingly.
+  // be given back -- so this runs against a loan created for it.
+  //
+  // It used to draw that loan from a finite reserved band and pay the RF-27
+  // cost knowingly. It does not any more: `createFixtureLoan` makes one, so
+  // there is no supply to exhaust and no cost to pay.
   //
   // It has to approve. The link under test is not decoration: a database
   // trigger refuses a `ledger_entry_id` on a movement the entry does not name
