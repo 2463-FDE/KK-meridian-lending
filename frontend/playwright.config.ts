@@ -37,7 +37,17 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./e2e",
-  timeout: 30_000,
+  // 120s because assertions in this suite already ask for longer than the outer
+  // timeout used to allow. Fifteen `expect` calls across five specs pass
+  // `timeout: 60_000`, and an assertion cannot outlast the test that contains
+  // it: at 30_000 every one of them died on "Test timeout of 30000ms exceeded"
+  // before its own wait could finish, so the longer waits those specs asked for
+  // were never actually granted. Measured rather than guessed -- two full
+  // consecutive runs at `--timeout=120000` were 234/234, where the same code at
+  // 30_000 failed a different spec each run. This is the envelope that was
+  // proven; it is not a licence to wait, because an assertion still resolves as
+  // soon as its element appears.
+  timeout: 120_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
   workers: 1,
