@@ -216,10 +216,17 @@ def suppressed_tracing():
         return
 
     if tracing_is_requested():
-        # Categorical only, and worth saying out loud: someone enabled tracing
-        # and is about to see no traces for this path.
-        log.warning("agent tracing suppressed stage=privacy_interim reason="
-                    "no_privacy_safe_emitter_yet")
+        # Worth saying out loud, because someone has enabled tracing and will
+        # not see the framework's usual spans for this path.
+        #
+        # This used to say `reason=no_privacy_safe_emitter_yet`, which stopped
+        # being true when `app/trace.py` landed and was wired into the summary
+        # route. Anyone reading it would conclude the summary emits nothing at
+        # all, and it emits a privacy-safe run -- so the message contradicted
+        # the code (TRC-01).
+        log.info("agent framework tracing suppressed stage=privacy_safe "
+                 "reason=custom_privacy_safe_emitter_in_use "
+                 "emitter=app.trace.summary_trace")
     with tracing_context(enabled=False):
         yield
 
