@@ -1,5 +1,12 @@
 import { test, expect } from "@playwright/test";
 import { HandleStore, sourceHandleFor, tokenizeCard } from "../lib/tokenize";
+import {
+  createBorrowerIdentity,
+  dbClient,
+  retireBorrowerIdentity,
+  signInAsBorrower,
+} from "./fixtures";
+import type { Client } from "pg";
 
 /**
  * The mock tokenizer's funding-source handle: stable, unique, and not the card.
@@ -130,15 +137,60 @@ test("tokenizing returns a handle alongside the token, and they differ", () => {
   expect(token.source_ref).not.toContain(VISA);
 });
 
+/**
+ * A loan this file owns, because the browser case below really pays (RF-31).
+ *
+ * It used to sign in as the seeded borrower inline and navigate to a hardcoded
+ * `/servicing/4471`, then pay 59.00 with `route.continue()` -- so the payment
+ * actually posted and permanently reduced that loan's balance. Measured: one
+ * run took `4471` from `11487.01` to `11453.01`.
+ *
+ * That is the RF-30 defect a third time. RF-30 closed the two specs its sweep
+ * found, and the sweep looked for `SEEDED_BORROWER`; this file names the loan id
+ * as a bare literal and signs in with its own inline form-filling, so neither
+ * pattern matched it. Recorded as RF-31 rather than folded silently into RF-30,
+ * because RF-30's row claimed the borrower-payment drains were closed and that
+ * claim was wrong.
+ *
+ * What this case actually needs is a borrower who owns a loan with a payment
+ * form -- it asserts the OUTGOING REQUEST BODY, never the resulting balance --
+ * so a synthetic identity serves it exactly as well as the seeded one, and
+ * consumes nothing.
+ *
+ * Switching to `signInAsBorrower` is part of the fix rather than tidying: the
+ * inline sign-in skipped `signInAndProveIt`, so this case also never got the
+ * session proof every other spec has.
+ */
+const FIXTURE_LABEL = "payment-source-handle";
+
+let BORROWER = "";
+let LOAN = 0;
+
+async function withDb<T>(fn: (c: Client) => Promise<T>): Promise<T> {
+  const client = dbClient();
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
+test.beforeAll(async () => {
+  const who = await withDb((c) => createBorrowerIdentity(c, FIXTURE_LABEL));
+  BORROWER = who.username;
+  LOAN = who.loanId;
+});
+
+test.afterAll(async () => {
+  await withDb((c) => retireBorrowerIdentity(c, FIXTURE_LABEL));
+});
+
 test("the payment form sends the handle it was given", async ({ page }) => {
   /** The wiring, asserted on the outgoing request rather than on the source. */
-  await page.goto("/login");
-  await page.locator("#username").fill("maria");
-  await page.locator("#password").fill("password");
-  await page.getByRole("button", { name: /Sign in/ }).click();
-  await expect(page).not.toHaveURL(/\/login$/, { timeout: 15_000 });
+  await signInAsBorrower(page, BORROWER);
 
-  await page.goto("/servicing/4471");
+  await page.goto(`/servicing/${LOAN}`);
   await expect(page.getByRole("heading", { name: /Payment history/i })).toBeVisible({
     timeout: 15_000,
   });
