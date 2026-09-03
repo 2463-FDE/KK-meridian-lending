@@ -535,6 +535,14 @@ def emit(trace: SummaryTrace) -> None:
         root = RunTree(id=run_id, **common)
     else:
         root = parent.create_child(run_id=run_id, **common)
+        # `create_child` SILENTLY IGNORES `start_time` when the parent was
+        # rebuilt by `RunTree.from_headers` -- the child inherits the parent's
+        # start instead. Verified against the installed SDK (langsmith 0.10.5):
+        # a locally-constructed parent honours the argument, a from_headers
+        # parent does not. The gateway path is always the from_headers one, so
+        # in production the argument above never took effect and this run
+        # reported a duration of about 0.001s.
+        root.start_time = _dt(started)
     root.post()
 
     for span in payload["spans"]:
@@ -571,6 +579,11 @@ def emit(trace: SummaryTrace) -> None:
             extra={"metadata": span["metadata"]},
             start_time=_dt(span_started),
         )
+        # Assigned as well as passed, for the reason given above: with a
+        # from_headers ancestor the kwarg is dropped and the child inherits the
+        # root's start, which put every stage's start AFTER its end and is what
+        # LangSmith rendered as a negative duration.
+        child.start_time = _dt(span_started)
         child.post()
         child.end(outputs=span["metadata"], end_time=_dt(span_ended))
         child.patch()

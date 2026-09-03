@@ -88,6 +88,14 @@ class _RecordedRun:
     def start_time(self):
         return self.kwargs.get("start_time")
 
+    @start_time.setter
+    def start_time(self, value):
+        # The real SDK allows assignment, and the emitter now uses it: passing
+        # `start_time` to `create_child` is dropped when the parent came from
+        # headers, so the value has to be assigned as well. Recording the
+        # assignment keeps this stand-in faithful to the object it replaces.
+        self.kwargs["start_time"] = value
+
     @property
     def end_time(self):
         return (self.ended_with or {}).get("end_time")
@@ -248,3 +256,96 @@ def test_privacy_is_unchanged_by_the_timing_fix(emitted):
             assert key in trace_mod.ALLOWED_FIELDS, (
                 "%s emitted a field outside the allow-list: %s"
                 % (child.name, key))
+
+
+# ---------------------------------------------------------------------------
+# The same invariant, against the REAL SDK and a REAL distributed parent.
+#
+# The cases above use a recorder, and a recorder cannot catch what actually
+# shipped TRC-02 twice: `RunTree.create_child` SILENTLY IGNORES `start_time`
+# when the parent was rebuilt by `RunTree.from_headers`. The child inherits the
+# parent's start instead. Verified against langsmith 0.10.5 -- a
+# locally-constructed parent honours the argument, a from_headers parent does
+# not.
+#
+# The gateway path is ALWAYS the from_headers one, so the first fix passed every
+# recorder-based case and every non-parented live check, and still emitted
+# negative durations in production. These cases exercise the real objects so the
+# assertion sits at the boundary where the defect lives.
+# ---------------------------------------------------------------------------
+
+def _real_tree_emission(monkeypatch, base):
+    """Emit through the real `RunTree`, with a from_headers parent, no network."""
+    from langsmith.run_trees import RunTree
+
+    posted = []
+    monkeypatch.setattr(RunTree, "post", lambda self, *a, **k: posted.append(self))
+    monkeypatch.setattr(RunTree, "patch", lambda self, *a, **k: None)
+    monkeypatch.setattr(trace_mod, "is_enabled", lambda: True)
+
+    import datetime
+    gw = RunTree(name="gateway_entry", run_type="chain", inputs={},
+                 start_time=datetime.datetime.now(datetime.timezone.utc))
+    headers = dict(gw.to_headers())
+
+    t = trace_mod.SummaryTrace(parent_headers=headers)
+    t.started_at = base
+    for stage, (s, e) in (("agent_run", (0.10, 5.40)),
+                          ("policy_retrieval", (5.45, 6.10)),
+                          ("model", (6.20, 12.80)),
+                          ("outcome", (12.85, 12.85))):
+        span = trace_mod._Span(stage, {"stage": stage})
+        span.id = str(uuid.uuid4())
+        span.started_at = base + s
+        span.ended_at = base + e
+        t.spans.append(span)
+
+    trace_mod.emit(t)
+    return [r for r in posted if r.name != "gateway_entry"]
+
+
+def test_no_real_runtree_child_ends_before_it_starts_under_a_header_parent(monkeypatch):
+    """The production shape. This is the case the recorder could not provide."""
+    base = 1_700_000_000.0
+    runs = _real_tree_emission(monkeypatch, base)
+
+    assert runs, "nothing was posted, so this case would pass by checking nothing"
+    for run in runs:
+        assert run.start_time is not None, "%s has no start_time" % run.name
+        end = run.end_time
+        if end is None:
+            continue
+        assert run.start_time <= end, (
+            "%s ends before it starts (%s > %s) under a from_headers parent -- "
+            "this is TRC-02, and it is what `create_child` dropping "
+            "`start_time` produces" % (run.name, run.start_time, end))
+
+
+def test_the_real_root_keeps_its_own_start_under_a_header_parent(monkeypatch):
+    """`underwriting_summary` reported ~0.001s in production for this reason.
+
+    Inheriting the gateway's start made the root's own span invisible, which is
+    the half of TRC-02 that survived the first fix.
+    """
+    base = 1_700_000_000.0
+    runs = _real_tree_emission(monkeypatch, base)
+    root = [r for r in runs if r.name == "underwriting_summary"]
+
+    assert root, "the summary root was never posted"
+    assert root[0].start_time.timestamp() == pytest.approx(base, abs=0.002), (
+        "the root inherited its parent's start instead of keeping its own")
+
+
+def test_each_real_child_keeps_its_own_window_under_a_header_parent(monkeypatch):
+    """Per-stage timing has to survive the distributed parent too."""
+    base = 1_700_000_000.0
+    runs = _real_tree_emission(monkeypatch, base)
+    by_name = {r.name: r for r in runs}
+
+    for stage, (s, _e) in (("agent_run", (0.10, 5.40)),
+                           ("policy_retrieval", (5.45, 6.10)),
+                           ("model", (6.20, 12.80))):
+        assert stage in by_name, "%s was not posted" % stage
+        assert by_name[stage].start_time.timestamp() == pytest.approx(
+            base + s, abs=0.002), (
+            "%s did not keep its own start under a from_headers parent" % stage)
