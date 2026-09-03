@@ -304,24 +304,50 @@ class SummaryTrace:
             "schema_version": SCHEMA_VERSION,
             "tracing_mode": "privacy_safe_categorical",
             "spans": [
-                {
-                    "id": span.id,
-                    "name": span.name,
-                    # Each span's OWN clock, carried through so `emit` does not
-                    # have to guess. Epoch seconds, not a formatted date: the
-                    # emitter needs arithmetic, and a timestamp is neither
-                    # applicant data nor free text -- it describes when the
-                    # system did something.
-                    "started_at": span.started_at,
-                    "ended_at": (span.ended_at
-                                 if span.ended_at is not None
-                                 else span.started_at),
-                    "duration_ms": int(((span.ended_at or span.started_at)
-                                        - span.started_at) * 1000),
-                    "metadata": _safe(span.fields),
-                }
+                self._span_payload(span)
                 for span in self.spans
             ],
+        }
+
+    @staticmethod
+    def _span_payload(span) -> dict:
+        """One span, with its window NORMALISED here rather than downstream.
+
+        `emit` used to clamp an inverted window when it built the child run,
+        and the ROOT still received `outputs=payload` carrying the original
+        `ended_at` and a negative `duration_ms`. So the emitted trace could
+        still contain a negative duration -- the exact defect this module was
+        being changed to remove -- and the root's outputs disagreed with the
+        child run times that had been clamped. Raised in review as
+        TRC-NEG-ROOT.
+
+        Normalising at the single point where the payload is built means the
+        children and the root cannot disagree, because they read the same
+        values. `emit` no longer clamps anything.
+
+        A stage with no recorded end takes its OWN start, never the root's: a
+        zero-length stage is zero, and falling back to the root's clock is what
+        put stages before themselves in the first place.
+        """
+        started = span.started_at
+        ended = span.ended_at if span.ended_at is not None else started
+        if ended < started:
+            # Categorical only, and never silent: a clock that ran backwards is
+            # worth knowing about, but a negative duration must not be emitted
+            # either way.
+            log.warning("trace span ends before it starts stage=trace_payload "
+                        "span=%s", span.name)
+            ended = started
+        return {
+            "id": span.id,
+            "name": span.name,
+            # Epoch seconds, not a formatted date: the emitter needs
+            # arithmetic, and a timestamp is neither applicant data nor free
+            # text -- it describes when the system did something.
+            "started_at": started,
+            "ended_at": ended,
+            "duration_ms": int((ended - started) * 1000),
+            "metadata": _safe(span.fields),
         }
 
 
@@ -561,15 +587,12 @@ def emit(trace: SummaryTrace) -> None:
         # A duration cannot be negative, so a trace showing one is not a slow
         # trace, it is a wrong one -- and the whole point of this module is that
         # what it emits can be trusted.
+        # Already normalised by `payload`, which is the only place that does it
+        # now. Clamping here as well is what let the root and the children
+        # disagree (TRC-NEG-ROOT): the child was corrected and the payload the
+        # root carries was not.
         span_started = span["started_at"]
         span_ended = span["ended_at"]
-        # Ordering asserted rather than assumed: a stage recorded with no end
-        # falls back to its own start in `payload`, so the two are equal at
-        # worst. If that ever inverts, the emitter must not launder it.
-        if span_ended < span_started:
-            log.warning("trace span ends before it starts stage=trace_emit "
-                        "span=%s", span["name"])
-            span_ended = span_started
         child = root.create_child(
             name=span["name"],
             run_type="chain",

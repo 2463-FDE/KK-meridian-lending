@@ -349,3 +349,86 @@ def test_each_real_child_keeps_its_own_window_under_a_header_parent(monkeypatch)
         assert by_name[stage].start_time.timestamp() == pytest.approx(
             base + s, abs=0.002), (
             "%s did not keep its own start under a from_headers parent" % stage)
+
+
+# ---------------------------------------------------------------------------
+# TRC-NEG-ROOT: the ROOT's outputs must not carry a negative duration either.
+#
+# `emit` used to clamp an inverted window when building the CHILD run, while
+# `root.end(outputs=payload, ...)` still shipped the original `ended_at` and a
+# negative `duration_ms`. So a negative duration could still reach LangSmith --
+# in the root's outputs rather than in a child's times -- and the two disagreed
+# about the same span.
+#
+# Normalisation now happens once, in `payload()`, so the children and the root
+# read the same values and cannot diverge. These cases pin that.
+# ---------------------------------------------------------------------------
+
+def _trace_with_an_inverted_span(started=100.0, ended=99.5):
+    t = trace_mod.SummaryTrace()
+    t.started_at = started
+    span = trace_mod._Span("request", {"stage": "request"})
+    span.id = str(uuid.uuid4())
+    span.started_at = started
+    span.ended_at = ended
+    t.spans.append(span)
+    return t
+
+
+def test_payload_never_carries_an_inverted_window():
+    """The exact reproduction from review: 100.0 -> 99.5 gave duration_ms -500."""
+    spans = _trace_with_an_inverted_span().payload()["spans"]
+
+    assert spans, "no span in the payload, so this case checked nothing"
+    for s in spans:
+        assert s["ended_at"] >= s["started_at"], (
+            "%s: payload carries ended_at %s before started_at %s"
+            % (s["name"], s["ended_at"], s["started_at"]))
+        assert s["duration_ms"] >= 0, (
+            "%s: payload carries a negative duration_ms (%d) -- the root ships "
+            "this dict as its outputs" % (s["name"], s["duration_ms"]))
+
+
+def test_no_span_in_a_normal_payload_is_negative_either(emitted):
+    """The same assertion on the ordinary path, so it is not only about
+    inverted input."""
+    _root, t, _base, _w = emitted
+    for s in t.payload()["spans"]:
+        assert s["ended_at"] >= s["started_at"]
+        assert s["duration_ms"] >= 0
+
+
+def test_the_root_outputs_agree_with_the_child_run_times(monkeypatch):
+    """The disagreement TRC-NEG-ROOT described, asserted directly.
+
+    Whatever the root ships as `outputs` has to describe the same windows the
+    children were given -- otherwise one of the two is lying about the same
+    span.
+    """
+    monkeypatch.setattr(trace_mod, "is_enabled", lambda: True)
+    captured = {}
+
+    class _Factory:
+        def __call__(self, **kwargs):
+            root = _RecordedRun(**kwargs)
+            captured["root"] = root
+            return root
+
+    import langsmith.run_trees as rt
+    monkeypatch.setattr(rt, "RunTree", _Factory())
+
+    t = _trace_with_an_inverted_span()
+    trace_mod.emit(t)
+    root = captured["root"]
+
+    shipped = {s["name"]: s for s in (root.ended_with or {}).get("outputs", {}).get("spans", [])}
+    assert shipped, "the root shipped no spans in its outputs"
+    for child in root.children:
+        s = shipped[child.name]
+        assert s["started_at"] == pytest.approx(child.start_time.timestamp(), abs=0.002), (
+            "%s: the root's outputs and the child's run time disagree about the "
+            "start" % child.name)
+        assert s["ended_at"] == pytest.approx(child.end_time.timestamp(), abs=0.002), (
+            "%s: the root's outputs and the child's run time disagree about the "
+            "end" % child.name)
+        assert s["duration_ms"] >= 0
