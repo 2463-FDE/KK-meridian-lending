@@ -212,20 +212,37 @@ def test_suppression_is_a_no_op_when_tracing_is_off(monkeypatch, caplog):
             pass
 
     logged = "\n".join(r.getMessage() for r in caplog.records)
-    assert "privacy_interim" not in logged
+    assert "framework tracing suppressed" not in logged
 
 
 def test_enabling_tracing_says_so_in_the_log(monkeypatch, caplog):
-    """Someone who enabled tracing and sees no traces must be able to find out
-    why without reading this file."""
+    """Someone who enabled tracing and sees no FRAMEWORK spans must be able to
+    find out why without reading this file.
+
+    The marker moved with the message (TRC-01). It used to read
+    `stage=privacy_interim reason=no_privacy_safe_emitter_yet`, which stopped
+    being true once `app/trace.py` existed and was wired into the summary route
+    -- the summary DOES emit a privacy-safe run, so a reader following that
+    message would have concluded nothing was emitted at all.
+    """
     import logging
 
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
 
-    with caplog.at_level(logging.WARNING):
+    # INFO, not WARNING: suppressing the framework while emitting a custom
+    # privacy-safe trace is the intended arrangement, not a degradation. What
+    # this case pins is that the log SAYS SO -- silence is the failure, because
+    # then the only way to learn why LangSmith shows no framework spans is to
+    # read the source (TRC-01).
+    with caplog.at_level(logging.INFO):
         with agent.suppressed_tracing():
             pass
 
     logged = "\n".join(r.getMessage() for r in caplog.records)
-    assert "privacy_interim" in logged
+    assert "framework tracing suppressed" in logged
+    # The reason has to name the emitter, or the message explains nothing.
+    assert "custom_privacy_safe_emitter_in_use" in logged
+    assert "app.trace.summary_trace" in logged
+    # And the old, now-false reason must not come back (TRC-01).
+    assert "no_privacy_safe_emitter_yet" not in logged
     assert APPLICANT not in logged

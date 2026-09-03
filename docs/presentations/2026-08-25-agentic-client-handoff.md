@@ -160,7 +160,7 @@ Bedrock. Application **7289** (seeded synthetic data — not a real person).
 | **Runtime tool calls** | **2**, both `search_underwriting_policy` |
 | Policy evidence | `status=hit`, 3 chunks retrieved per call |
 | Tool gate | `agent accepted stage=tool_gate tool_calls=2 policy_evidence=hit` |
-| Framework tracing | suppressed (`agent tracing suppressed stage=privacy_interim`) |
+| Framework tracing | suppressed (`agent framework tracing suppressed stage=privacy_safe reason=custom_privacy_safe_emitter_in_use`) — the custom privacy-safe emitter runs instead. *This quoted the earlier `stage=privacy_interim` wording, which implied no trace was emitted at all.* |
 | Result | HTTP 200, 7 response fields, `flags: []` |
 | Macro signal | live `GET https://api.bls.gov/.../LNS14000000` → `HTTP 200`; value 4.1%, period July 2026. The provider caches and fails open — see the macro row in [§4](#4-real--fixture--fallback) |
 

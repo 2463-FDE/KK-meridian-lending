@@ -307,6 +307,15 @@ class SummaryTrace:
                 {
                     "id": span.id,
                     "name": span.name,
+                    # Each span's OWN clock, carried through so `emit` does not
+                    # have to guess. Epoch seconds, not a formatted date: the
+                    # emitter needs arithmetic, and a timestamp is neither
+                    # applicant data nor free text -- it describes when the
+                    # system did something.
+                    "started_at": span.started_at,
+                    "ended_at": (span.ended_at
+                                 if span.ended_at is not None
+                                 else span.started_at),
                     "duration_ms": int(((span.ended_at or span.started_at)
                                         - span.started_at) * 1000),
                     "metadata": _safe(span.fields),
@@ -529,6 +538,30 @@ def emit(trace: SummaryTrace) -> None:
     root.post()
 
     for span in payload["spans"]:
+        # EACH SPAN'S OWN start and end, not the root's (TRC-02).
+        #
+        # This used to pass `start_time=_dt(started)` -- the underwriting_summary
+        # start -- for every child, and then end each one at
+        # `started + duration_ms`. Two things went wrong with that. The children
+        # all claimed to begin at the same instant, so per-stage timing was
+        # unreadable; and because the SDK stamps a child's start when it is
+        # created, the explicit end computed from the ROOT's clock landed BEFORE
+        # it. Observed in LangSmith: every child of one summary showed
+        # -14.73s -- a uniform negative equal to the request's own elapsed time,
+        # on a request that took ~13.9s.
+        #
+        # A duration cannot be negative, so a trace showing one is not a slow
+        # trace, it is a wrong one -- and the whole point of this module is that
+        # what it emits can be trusted.
+        span_started = span["started_at"]
+        span_ended = span["ended_at"]
+        # Ordering asserted rather than assumed: a stage recorded with no end
+        # falls back to its own start in `payload`, so the two are equal at
+        # worst. If that ever inverts, the emitter must not launder it.
+        if span_ended < span_started:
+            log.warning("trace span ends before it starts stage=trace_emit "
+                        "span=%s", span["name"])
+            span_ended = span_started
         child = root.create_child(
             name=span["name"],
             run_type="chain",
@@ -536,11 +569,10 @@ def emit(trace: SummaryTrace) -> None:
             inputs={},
             outputs=span["metadata"],
             extra={"metadata": span["metadata"]},
-            start_time=_dt(started),
+            start_time=_dt(span_started),
         )
         child.post()
-        child.end(outputs=span["metadata"],
-                  end_time=_dt(started + span["duration_ms"] / 1000))
+        child.end(outputs=span["metadata"], end_time=_dt(span_ended))
         child.patch()
 
     root.end(outputs=payload, end_time=_dt(time.time()))
