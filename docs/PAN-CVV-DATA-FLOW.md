@@ -231,3 +231,39 @@ operations task with an operations owner, and it is open.
 
 **B6 — this is not a PCI assessment.** No SAQ, no ASV scan, no network
 segmentation evidence. The claims here are about code paths in this repository.
+
+## Appendix: history of the README's card-data statements
+
+This history used to sit in the root README. It is kept here as evidence of how the
+claim was checked and corrected; the README now carries only the current-state summary.
+
+- **Plaintext storage, now closed.** `payment-service` used to store the full PAN and CVV
+  in plaintext (`payments.pan`, `payments.cvv`, unencrypted `TEXT`) and log both at INFO.
+  Storing CVV/SAD after authorization is a flat PCI-DSS prohibition regardless of
+  encryption. Capture is now tokenized in the browser (`adr/0008`, which supersedes
+  `adr/0003`): the service receives a processor token plus `last4`/`brand` and never a raw
+  PAN, CVV or SSN. `db/migrations/0031` dropped both columns from existing databases and
+  `db/init/001_schema.sql` no longer creates them (`docs/DEBT.md` D5b/D13, both Fixed).
+- **Why this is not compliance.** A PCI-DSS position needs a QSA assessment, a real
+  processor and a scoped cardholder-data environment. This build has a mocked processor
+  and no assessment, so the specific violation is fixed and compliance is unevaluated.
+- **The README drifted twice, and the second time was caught by a test.** It first
+  described the columns as "still there ... waiting to be dropped" after `0031` had
+  dropped them on 2026-08-10. `db/tests/test_readme_schema_claims.py` now checks the
+  README's schema claims against the real schema, in both directions, so the next drift
+  fails a test instead of waiting for a reader to notice.
+- **Logging claims, verified against the code.** An earlier README said `payment-service`
+  logs card data at INFO and persists the PAN and CVV itself. Both statements were false
+  against the current code: `PaymentIn` sets `extra="forbid"` and accepts only a processor
+  token plus `last4`/`brand` (ADR 0008), so a field *named* `pan`, `cvv` or `ssn` is
+  rejected with a 422 rather than dropped silently; the INSERT writes `last4`/`brand` and
+  never the card number; and `charge()` builds its log line through `redact_dict`, which
+  masks sensitive keys and runs the PAN/SSN/CVV patterns over every other string value, so
+  card data pushed through an allowed field (a PAN in `processor_token`, say) is redacted
+  before it is logged. See `docs/DEBT.md` D5a for the per-call-site logging verification.
+- **Decision audit.** Credit decisions are audited: every `/decisions` call persists an
+  append-only `decision_events` row (inputs, model score and version, reason codes)
+  alongside the legacy outcome-only `decisions` table. ECOA/Reg B adverse-action reasons
+  come from the scorer itself (`services/decision-service/app/decision.py`). SOX-controls
+  and ECOA/Reg B process claims beyond the decision audit trail are unverified and must not
+  be represented as confirmed without a real compliance review.
