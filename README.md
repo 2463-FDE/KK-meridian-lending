@@ -19,7 +19,8 @@ The codebase started as a vendor-delivered monolith (a loan origination system a
 
 ```
  Next.js portal ─────► gateway (BFF)  :8000   session auth, roles, rate limiting
-                           │
+                           │  /auth · /los · /lss · /kyc · /assistant
+                           │  /decision · /disclosure · /payments
         ┌──────────────────┼────────────────────────────────┐
         ▼                                                    ▼
  origination-service :8001                          servicing-service :8002
@@ -34,7 +35,7 @@ The codebase started as a vendor-delivered monolith (a loan origination system a
  Postgres :5432 (shared by seven services) · Redis :6379 (sessions)
 ```
 
-Seven services share one PostgreSQL schema under an explicit decision ([ADR 0002](adr/0002-single-database-shared-schema.md)). `loan-assistant` is the exception: it holds no database connection and reads application data from origination-service over HTTP. The `reconciliation` container in `docker-compose.yml` is the servicing image running a scheduled job, not a ninth service. The decomposition is partial; remaining debt is tracked in [`docs/DEBT.md`](docs/DEBT.md).
+The platform now runs **eight** backend services, including the gateway. Seven of them share one PostgreSQL schema under an explicit decision ([ADR 0002](adr/0002-single-database-shared-schema.md)). `loan-assistant` is the exception: it holds no database connection and reads application data from origination-service over HTTP. The `reconciliation` container in `docker-compose.yml` is the servicing image running a scheduled job, not a ninth service. The decomposition is partial; remaining debt is tracked in [`docs/DEBT.md`](docs/DEBT.md).
 
 | Path | Service | Port | Responsibility |
 |------|---------|------|----------------|
@@ -53,7 +54,7 @@ Seven services share one PostgreSQL schema under an explicit decision ([ADR 0002
 These are two separate things, and only one of them makes decisions.
 
 1. **Credit decision** (`decision-service`): pulls a credit report and calls an external AI scoring model, with thresholds mapped to approve, refer or decline and reason codes for adverse action. It **fails closed** when the scorer or bureau is unavailable. A deterministic stub is available only in non-production environments, and its output is labelled as such. Origination writes the decision and its evidence record; decision-service itself stores nothing. See [`docs/model_card.md`](docs/model_card.md).
-2. **RAG policy assistant** (`loan-assistant`): **staff-only and advisory**. It answers lending-policy questions and summarizes an application for staff, using one bounded read-only tool over an approved policy corpus. It refuses to answer when retrieval returns no policy evidence, never writes to any system, and its summaries are labelled "not a decision". Corpus hygiene is covered by [ADR 0005](adr/0005-rag-corpus-hygiene.md).
+2. **RAG policy assistant** (`loan-assistant`): **staff-only and advisory**. Both routes, `/assistant/policy-chat` and `/assistant/applications/{id}/summary`, are staff-only (lending, compliance and underwriting staff). It answers lending-policy questions and summarizes an application for staff, using one bounded read-only tool over an approved policy corpus. It refuses to answer when retrieval returns no policy evidence, never writes to any system, and its summaries are labelled "not a decision". Corpus hygiene is covered by [ADR 0005](adr/0005-rag-corpus-hygiene.md).
 3. **System of record**: origination-service and the Postgres decision tables. The assistant's output never changes them.
 
 ## Security and card data
