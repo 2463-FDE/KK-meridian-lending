@@ -31,11 +31,6 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 DOCS = [
     REPO / "README.md",
     REPO / "ARCHITECTURE.md",
-    # The working agreement is documentation too, and it went stale the same way:
-    # it carried a merge-order instruction justified by `DEBT.md` D5c "existing only
-    # on PR #16's branch" for hours after #16 merged. Review of PR #17 found that,
-    # not this test, because the file was not in the corpus. It is now.
-    REPO / "CLAUDE.md",
     REPO / "docs" / "ROADMAP.md",
     REPO / "docs" / "DEBT.md",
     REPO / "docs" / "runbook.md",
@@ -71,10 +66,8 @@ _FORWARD_LOOKING = re.compile(
     # client decision, is cited in four documents that explain why it went.
     r"|deleted, not on `main`|deleted -- not on `main`|since deleted"
     r"|will be added|on that PR's branch"
-    # A path may also be cited as an example of one that does NOT resolve --
-    # CLAUDE.md does exactly that with `kal_docs/10_WEEK_PLAN.md`, which never
-    # existed and is quoted to show the rule failing on the page that states it.
-    # Forbidding that would delete the most useful example in the file.
+    # A path may also be cited as an example of one that does NOT resolve, quoted
+    # to show the rule failing on the page that states it.
     r"|never existed|did not resolve|does not resolve|no such file",
     re.IGNORECASE,
 )

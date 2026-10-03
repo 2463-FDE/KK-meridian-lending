@@ -105,7 +105,7 @@ test("the staff offer prompt names the server's note rate, never an APR", async 
 // browser-covered here. Reaching step 3 without submitting needs the
 // `stopAtReview` fixture option, which lives on PR #14's branch; adding it here
 // too would land the same change on two branches, which is the cross-branch
-// duplication CLAUDE.md exists to prevent. Covered by typecheck and build only
+// duplication the team avoids. Covered by typecheck and build only
 // until #14 merges, at which point this file should gain the assertion.
 
 // --- 2. both rates, distinctly ----------------------------------------------
