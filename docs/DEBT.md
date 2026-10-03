@@ -189,3 +189,15 @@ coverage:
   done. An unranked list is more honest than an invented ordering.
 - **No target dates.** This is a local training build with no production
   deployment and no on-call, so a due date here would be decoration.
+
+## Appendix: the original vendor handoff note
+
+The platform was handed over by Halcyon Software Group (now dissolved), who delivered it
+as three backend services: `gateway`, `origination-service` and `servicing-service`. The
+handoff note read:
+
+> "Platform is secure and compliant. A few TODOs left in servicing but nothing
+> blocking. — Halcyon"
+
+That statement is the vendor's unverified claim, not a verified status. The defects and
+review findings above are the evidence against it, and the root README no longer repeats it.

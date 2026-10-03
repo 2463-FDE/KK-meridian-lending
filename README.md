@@ -1,197 +1,109 @@
 # Meridian Lending Platform
 
-> **No card data is stored. Still NOT PCI-DSS compliant.**
-> `payment-service` used to store the full PAN and CVV in plaintext
-> (`payments.pan`/`payments.cvv`, unencrypted `TEXT`) and log both at INFO — CVV/SAD
-> storage is an absolute PCI-DSS prohibition regardless of encryption. Capture is
-> tokenized in the browser (`adr/0008`, supersedes `adr/0003`): the service receives a
-> processor token plus `last4`/`brand` and never a raw PAN, CVV or SSN. **The columns are
-> gone** — `db/migrations/0031` dropped them from existing databases and
-> `db/init/001_schema.sql` no longer creates them, so neither a migrated nor a freshly
-> initialised database has a `payments.pan` or a `payments.cvv` at all
-> (`docs/DEBT.md` D5b/D13).
->
-> **That closes the defect and is not a compliance position.** A PCI-DSS claim needs a
-> QSA assessment, a real processor and a scoped cardholder-data environment. This build
-> has a *mocked* processor and no assessment of any kind, so the honest status is: the
-> specific violation is fixed, compliance is unevaluated. Credit decisions are audited
-> (Week 3's append-only `decision_events`); the rest of the compliance banner below is
-> the original vendor's unverified claim, not a verified status.
+A consumer-lending platform covering loan origination, credit decisioning, disclosures, servicing, payments and reconciliation, built as a **Forward Deployed Engineering** brownfield project.
 
-The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
-Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,
-`origination-service` (LOS), `servicing-service` (LSS); maintained in-house since 2024-Q4.
+The codebase started as a vendor-delivered monolith (a loan origination system and a loan servicing system behind one gateway). The in-house team hardened it and decomposed it into **eight FastAPI backend services, including the gateway**, behind a Next.js borrower and staff portal, and added a staff-only RAG policy assistant.
 
-> **Local training/demo build.** Everything here runs against `docker compose up` with
-> seeded fictional data — no production environment, no real applicants, no real bureau or
-> card rails. Capability claims in this README and in `ARCHITECTURE.md` use the status
-> labels defined in [ARCHITECTURE.md § Status legend](ARCHITECTURE.md#status-legend)
-> (Implemented and tested / Local/training-only / Deferred / Not production-ready / Fixed
-> in PR #6 / Closed by PR #8). Naming a regulation identifies the rule a control is
-> modelled on, not a compliance status.
+> **Local training/demo platform.** It runs with `docker compose` against seeded fictional data and mocked external services. There is no production environment, no real applicant data, no real credit bureau and no real card rails. No production, regulatory, PCI-DSS or other compliance certification is claimed. Naming a regulation (TILA, ECOA/Reg B, PCI-DSS) identifies the rule a control is modelled on, not a compliance status. The status labels used across the docs are defined in [ARCHITECTURE.md](ARCHITECTURE.md#status-legend).
 
-This is a brownfield monorepo: a **Loan Origination System (LOS)** and a **Loan Servicing
-System (LSS)** bolted together behind a single API gateway, with a Next.js borrower +
-servicing portal. (Lending Ops asked for an "AI underwriting assistant"; it now exists as
-`loan-assistant` — a LangChain agent that reaches the lending-policy corpus through one
-bounded read-only tool and refuses to summarise when that tool returns no policy evidence.
-Both routes are **staff-only**, for different reasons:
-`/assistant/applications/{id}/summary` because it returns per-applicant financials, and
-`/assistant/policy-chat` because the client's decision makes the existing Policy Chat an
-INTERNAL tool for lending, compliance and underwriting staff. Policy Q&A does not carry
-applicant data — the route was anonymous-allowed on that reasoning, and the browser page
-disagreed the whole time — but who the feature is FOR was a product question, and it has
-been answered. A borrower-facing chat would be a separate surface with its own corpus. See
-[ARCHITECTURE.md](ARCHITECTURE.md).)
+## What it demonstrates
 
-Since the handoff the in-house team has begun **extracting the LOS monolith into focused
-services**, partly to match the platform's intended target architecture. The platform now
-runs **eight** backend services: the original three, four extracted ones —
-`kyc-service`, `decision-service`, `disclosure-service`, `payment-service` — and
-`loan-assistant`, which was added rather than extracted. (`reconciliation` in
-`docker-compose.yml` is the servicing image running a scheduled job, not a ninth service.)
-Origination is now an intake + boarding **orchestrator** that calls the new KYC, decision,
-and disclosure services over synchronous HTTP; the old in-process `apr.py` / `fees.py` /
-`offer.py` / `decision.py` / `kyc.py` modules moved out with them. This modernization is
-**partial** — the data layer and most of the money-handling debt moved with the code
-rather than being fixed.
+- **Brownfield modernization**: tracing an inherited system, extracting services from the origination monolith, and recording each decision as an ADR ([`adr/`](adr/), twelve of them)
+- **Money-handling controls**: idempotent payment capture, an append-only servicing ledger, maker-checker approval of balance adjustments and fee waivers, and scheduled payment reconciliation with a human review queue
+- **Auditable credit decisions**: every decision writes an append-only evidence record (inputs, model version, score, reason codes), and manual-review outcomes are stored separately so history is never overwritten
+- **TILA / APR disclosures** checked against independent golden payment-schedule vectors ([`db/golden/`](db/golden/))
+- **Security and observability**: gateway authentication and rate limiting, a fail-closed internal service token, card-data redaction, secret scanning in CI, and Prometheus alert rules
+- **A bounded, advisory AI assistant** that cannot make or change a lending decision
 
 ## Architecture
 
 ```
-                          ┌──────────────────────┐
-  Next.js portal  ───────►│   gateway (BFF)      │  :8000
-  (apply + servicing)     │   session auth/roles │
-                          └─────────┬────────────┘
-                                    │  /auth · /los · /lss · /kyc · /assistant
-                                    │  /decision · /disclosure · /payments
-        ┌───────────────────────────┼───────────────────────────┐
-        ▼                                                       ▼
- origination-service                                    servicing-service
-   :8001  (LOS)                                           :8002  (LSS)
-   intake + boarding orchestrator                         balances / delinquency /
-        │  (sync HTTP, app/clients.py)                    reconciliation / loan reads
-        ├──────────────┬──────────────┐                          ▲
-        ▼              ▼              ▼                           │ apply-payment
-   kyc-service   decision-service  disclosure-service             │
-     :8003          :8004             :8005                  payment-service
-   CIP identity   credit pull +     TILA/Reg-Z offer            :8006
-                  scorecard         APR + amortization       card/ACH charge ─┘
-        │              │              │                           │
-        └──────────────┴──────────────┴───────────┬───────────────┘
-                                                   ▼
-                      Postgres :5432 (shared)  +   Redis :6379 (sessions)
+ Next.js portal ─────► gateway (BFF)  :8000   session auth, roles, rate limiting
+                           │
+        ┌──────────────────┼────────────────────────────────┐
+        ▼                                                    ▼
+ origination-service :8001                          servicing-service :8002
+ intake + boarding orchestrator                     balances, ledger, maker-checker,
+        │  synchronous HTTP                         delinquency, reconciliation
+        ├─► kyc-service         :8003                          ▲
+        ├─► decision-service    :8004                          │ apply-payment
+        └─► disclosure-service  :8005                 payment-service :8006
 
-  loan-assistant :8007
-    ◄── /assistant/applications/{id}/summary   staff only (csr/underwriter/admin)
-    ◄── /assistant/policy-chat                 staff-only (internal policy tool)
-    LangChain agent · one bounded read-only policy tool over the policy corpus
-    reads applications from origination-service over HTTP
-    NO line to Postgres above, deliberately: it holds no database connection
+ loan-assistant :8007   staff-only RAG policy assistant, read-only, no database connection
+
+ Postgres :5432 (shared by seven services) · Redis :6379 (sessions)
 ```
 
-Seven of the eight share **one** Postgres database and the same `db/init` schema + seed —
-the data layer is unchanged by the decomposition. `loan-assistant` is the exception and
-holds no database connection at all: it reads application data from origination-service over
-HTTP, which is why no applicant row is reachable from the agent's process. The LOS↔LSS **seam** is still thin and
-undocumented — a loan "boards" from origination to servicing by a direct insert into the
-servicing schema. After a charge is captured, `payment-service` calls servicing's
-`apply-payment` to post it. See `docs/architecture.md`.
+Seven services share one PostgreSQL schema under an explicit decision ([ADR 0002](adr/0002-single-database-shared-schema.md)). `loan-assistant` is the exception: it holds no database connection and reads application data from origination-service over HTTP. The `reconciliation` container in `docker-compose.yml` is the servicing image running a scheduled job, not a ninth service. The decomposition is partial; remaining debt is tracked in [`docs/DEBT.md`](docs/DEBT.md).
 
-## Quick start
+| Path | Service | Port | Responsibility |
+|------|---------|------|----------------|
+| `frontend/` | Next.js 15 portal | 3000 | application wizard, servicing dashboard, staff views |
+| `services/gateway/` | FastAPI BFF | 8000 | session auth and roles, rate limiting, routing |
+| `services/origination-service/` | FastAPI | 8001 | intake and loan boarding; orchestrates KYC, decision and disclosure |
+| `services/servicing-service/` | FastAPI | 8002 | balances, schedule, ledger, maker-checker, delinquency, reconciliation |
+| `services/kyc-service/` | FastAPI | 8003 | identity verification |
+| `services/decision-service/` | FastAPI | 8004 | credit pull and scoring; compute-only, persists nothing |
+| `services/disclosure-service/` | FastAPI | 8005 | TILA offer, APR and amortization |
+| `services/payment-service/` | FastAPI | 8006 | tokenized card/ACH charge; posts to servicing |
+| `services/loan-assistant/` | FastAPI + LangChain | 8007 | advisory RAG policy assistant |
+
+## Credit decisions and the AI assistant
+
+These are two separate things, and only one of them makes decisions.
+
+1. **Credit decision** (`decision-service`): pulls a credit report and calls an external AI scoring model, with thresholds mapped to approve, refer or decline and reason codes for adverse action. It **fails closed** when the scorer or bureau is unavailable. A deterministic stub is available only in non-production environments, and its output is labelled as such. Origination writes the decision and its evidence record; decision-service itself stores nothing. See [`docs/model_card.md`](docs/model_card.md).
+2. **RAG policy assistant** (`loan-assistant`): **staff-only and advisory**. It answers lending-policy questions and summarizes an application for staff, using one bounded read-only tool over an approved policy corpus. It refuses to answer when retrieval returns no policy evidence, never writes to any system, and its summaries are labelled "not a decision". Corpus hygiene is covered by [ADR 0005](adr/0005-rag-corpus-hygiene.md).
+3. **System of record**: origination-service and the Postgres decision tables. The assistant's output never changes them.
+
+## Security and card data
+
+- Session authentication and role checks at the gateway; services accept calls only with an internal service token, and in non-development environments a weak or missing token is rejected rather than defaulted
+- **No card data is stored.** Capture is tokenized in the browser ([ADR 0008](adr/0008-tokenize-card-data-stop-storing-pan-cvv.md)); the payment service receives a processor token plus `last4` and brand, rejects raw PAN, CVV or SSN fields, and redacts sensitive patterns before logging. The earlier plaintext `payments.pan` and `payments.cvv` columns were dropped by migration `0031`. This closes a specific defect; it is **not** a PCI-DSS position, since this build has a mocked processor and no assessment. The full trace is in [`docs/PAN-CVV-DATA-FLOW.md`](docs/PAN-CVV-DATA-FLOW.md)
+- Secret scanning (gitleaks) on every CI run, and dependency audits
+- The loan assistant has no database connection, so no applicant row is reachable from the agent's process
+
+## Reliability and observability
+
+- Idempotency keys on payment capture and a settlement-comparison reconciliation job that flags breaks for human review
+- Append-only ledger for servicing balances ([ADR 0010](adr/0010-append-only-ledger-for-servicing-balances.md)) and maker-checker approval for adjustments ([ADR 0011](adr/0011-maker-checker-for-servicing-adjustments.md))
+- Structured logging with correlation IDs, request tracing across the decision chain, and Prometheus alert rules ([`monitoring/`](monitoring/))
+
+## Testing and CI
+
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`:
+
+- **Secret scan** with gitleaks
+- **Backend**: a Pytest job for each of the eight services, with PostgreSQL where tests need it
+- **Database migrations** tested against a real Postgres, including a test that checks the README's card-data claims against the actual schema
+- **Frontend** build, and a **Playwright end-to-end** run of the borrower workflow against the full Docker Compose stack
+- **Quick-start and Docker build checks** that prove a clean checkout refuses to start without a generated token and that every image builds
+- Dependency audits (non-blocking; triaged in [`docs/DEBT.md`](docs/DEBT.md))
+
+Run the service suites locally with `make test`.
+
+## Run locally
 
 ```bash
-make bootstrap            # creates .env and generates INTERNAL_SERVICE_TOKEN.
-                         # docker-compose.yml supplies no default for it or for
-                         # ENVIRONMENT: a token committed here is not a secret,
-                         # and defaulting ENVIRONMENT to development would skip
-                         # the token-strength checks on the money-moving routes.
-                         # The generated token is local only -- never commit it.
-make up                  # docker compose up -d (postgres, redis, all services, frontend)
-make logs                # tail everything
-make seed                # load db/init seed data (loans, payments, decisions)
+make bootstrap    # creates .env and generates a local INTERNAL_SERVICE_TOKEN (never commit it)
+make up           # postgres, redis, all services and the frontend
+make seed         # load the seed data
+make logs         # tail everything
 make down
 ```
 
-Portal: http://localhost:3000  ·  Gateway: http://localhost:8000/docs
+Portal: http://localhost:3000 · Gateway API docs: http://localhost:8000/docs
 
-Demo logins (all seeded with password `password`): `admin`, `underwriter`, `csr`,
-and a borrower login `maria`.
+Synthetic staff and borrower accounts are seeded for local testing; the demo access details are in [`docs/runbook.md`](docs/runbook.md#demo-logins), which also covers health checks and resetting the database.
 
-## Services
+## Documentation
 
-| Path | Service | Port | Notes |
-|------|---------|------|-------|
-| `frontend/` | Next.js 15 portal | 3000 | application wizard + servicing dashboard |
-| `services/gateway/` | FastAPI BFF | 8000 | session auth/roles; routes to LOS/LSS + KYC/decision/disclosure/payments |
-| `services/origination-service/` | FastAPI (LOS) | 8001 | intake + LOS→LSS boarding orchestrator; calls KYC/decision/disclosure over HTTP |
-| `services/servicing-service/` | FastAPI (LSS) | 8002 | balances, schedule, delinquency, reconciliation, `apply-payment` |
-| `services/kyc-service/` | FastAPI | 8003 | CIP identity check; persists `kyc_checks` |
-| `services/decision-service/` | FastAPI | 8004 | async credit pull + AI scorecard; **compute-only — persists nothing** (origination writes `decisions` and `decision_events`) |
-| `services/disclosure-service/` | FastAPI | 8005 | TILA/Reg-Z offer + APR + amortization |
-| `services/payment-service/` | FastAPI | 8006 | card/ACH charge; posts to servicing via `apply-payment` |
-| `services/loan-assistant/` | FastAPI + LangChain agent | 8007 | `applications/{id}/summary` **staff-only** (per-applicant financials); `policy-chat` **staff-only** (internal policy tool; client decision, see `docs/DEBT.md` RF-28); one bounded read-only policy tool; **holds no database connection** — reads applications from origination over HTTP |
-| `db/` | Postgres init + seed | 5432 | schema, migrations, seed data (shared by the seven services that use it) |
-
-## Compliance
-
-**Not PCI-DSS compliant, and no card data is stored.** Those are two separate statements
-and this section has been wrong about the second one, so both are made explicit.
-
-**What is stored:** the processor's opaque token is used transiently and never persisted;
-the `payments` row keeps `last4` and `brand` for display, and nothing else about the
-instrument. **What is not stored:** there is no `payments.pan` and no `payments.cvv`.
-`db/migrations/0031` dropped both from existing databases and `db/init/001_schema.sql`
-never creates them, so a migrated database and a fresh one agree
-(`docs/DEBT.md` D5b/D13, both recorded Fixed). Storing CVV/SAD post-authorization is a
-flat PCI-DSS violation independent of encryption; it predated the current engagement
-(vendor debt, `adr/0003`) and it is closed.
-
-**Why that is still not compliance.** A PCI-DSS position requires a QSA assessment, a
-real acquirer or processor, and a defined cardholder-data environment with the scoping
-that follows. This build has a *mocked* processor and no assessment of any kind. Removing
-stored card data closes a specific, serious violation; it evaluates nothing else, and
-nothing in this repository should be read as a compliance claim.
-
-*This section previously said the columns were "still there ... waiting to be dropped".
-`0031` dropped them on 2026-08-10 and the sentence outlived it — the same defect the
-paragraph below describes, one release later. `db/tests/test_readme_schema_claims.py`
-now checks the schema claims here against the real schema, so the next drift fails a test
-instead of waiting for a reader to notice.*
-
-This section previously said that `payment-service` logs them at INFO and persists the PAN
-and CVV itself. Both claims are false against the current code, and were verified against
-it: `PaymentIn` sets `extra="forbid"` and accepts only a processor token plus
-`last4`/`brand` (ADR 0008), so a field *named* `pan`, `cvv` or `ssn` is rejected with a 422
-rather than dropped silently; its INSERT writes `last4`/`brand` and never the card number;
-and `charge()` builds its log line through `redact_dict`, which masks sensitive keys and
-runs the PAN/SSN/CVV patterns over every other string value — so card data pushed through
-an *allowed* field (a PAN in `processor_token`, say) is redacted before it is logged, which
-the schema alone would not prevent.
-Neither the schema nor the seed data is an exposure any more: the columns are dropped and
-the seeds insert `last4`/`brand` only — see `docs/DEBT.md` D5a for the per-call-site
-logging verification.
-
-Treat any prior claim of PCI-DSS compliance for this codebase as false.
-
-Credit decisions ARE audited: every `/decisions` call persists an append-only
-`decision_events` row (inputs, model score/version, reason codes — Week 3) alongside the
-legacy outcome-only `decisions` table. ECOA/Reg B adverse-action reasons come from the
-scorer itself, not a fixed string (see `services/decision-service/app/decision.py`).
-SOX-controls and ECOA/Reg B process claims beyond the decision audit trail above are
-unverified — do not represent them as confirmed without a real compliance review.
-
-Compliance contact: Dana (VP Lending Ops). For SOX/reconciliation questions: Sam
-(Controller). For fair-lending/BSA: Priya (Compliance Officer).
-
-## Planning and debt
-
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — the ten-week plan the ADRs and code comments cite.
-- [`docs/DEBT.md`](docs/DEBT.md) — the `D`/`RF` register. Every `(debt D7)`-style
-  citation in the source resolves here; it was being cited for weeks before it
-  was written down anywhere.
-
-## Known follow-ups (from the Halcyon handoff note)
-
-> "Platform is secure and compliant. A few TODOs left in servicing but nothing
-> blocking. — Halcyon"
+| Document | What it covers |
+|----------|----------------|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/architecture.md`](docs/architecture.md) | System shape, auth and roles, data model, the origination/servicing seam |
+| [`adr/`](adr/) | The twelve architecture decision records |
+| [`docs/DEBT.md`](docs/DEBT.md) | Known defects and technical debt, with status and history |
+| [`docs/model_card.md`](docs/model_card.md) | The scoring model and its limits |
+| [`docs/PAN-CVV-DATA-FLOW.md`](docs/PAN-CVV-DATA-FLOW.md) | Where card data goes, and what stops it being stored |
+| [`docs/runbook.md`](docs/runbook.md) | Operating and local-development guide |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | The plan the ADRs and code comments refer to |
