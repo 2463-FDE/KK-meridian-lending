@@ -1038,8 +1038,8 @@ def run_decision(
     # same _STAFF_ROLES gate as get_application_financials above -- since
     # otherwise anyone who guesses an app_id could rerun decisioning on a
     # stranger's already-decided application, triggering a real bureau pull
-    # and overwriting their decision row via decision-service's own
-    # ON CONFLICT (app_id) DO UPDATE (graph.py).
+    # and attempting to overwrite their authoritative decision state (which
+    # this service persists, not decision-service).
     #
     # Security fix (review): the rerun guard above used to be the ONLY check
     # -- the very FIRST decision call was wide open, so anyone who guessed an
@@ -1062,8 +1062,9 @@ def run_decision(
     if existing:
         if not is_staff:
             raise HTTPException(status_code=403, detail="staff only to rerun a decision")
-        # Bug fix: reruns had no guard beyond staff-only -- since scoring is
-        # deterministic (same SSN/income -> same score), rerunning after the
+        # Bug fix: reruns had no guard beyond staff-only -- a rerun must never
+        # overwrite authoritative outcome/audit state once an application is
+        # final, whatever the scorer returns. Rerunning after the
         # application was already funded silently reset its recorded decision
         # back to the automated outcome (e.g. "refer") while the loan sat
         # funded on top of it -- a real data-integrity break. Rerunning after

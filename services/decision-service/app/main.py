@@ -1,9 +1,12 @@
 """Decision service — FastAPI.
 
 Standalone credit-decisioning service, extracted from the origination service (LOS).
-Exposes the synchronous decisioning chain (bureau pull + rules scorecard) and persists
-the bare outcome to the shared `decisions` table. The decisioning write path uses raw
-psycopg2 — the same partial, unfinished ORM migration seam as origination.
+Exposes an async credit-decisioning endpoint: it loads the authoritative application
+inputs, pulls bureau data, calls the configured scoring model and returns a proposed
+decision/result. It persists no authoritative decision records -- origination-service is
+the sole writer of `decisions` and `decision_events`. Its own database access is
+read-only and uses raw psycopg2, the same partial, unfinished ORM migration seam as
+origination.
 """
 import logging
 import os
@@ -54,15 +57,18 @@ async def unhandled(request: Request, exc: Exception):
 
 
 def _decision_events_ready() -> bool:
-    """Live check that the decision_events table actually exists.
+    """Live check that the shared decision_events table actually exists.
 
-    db/init/004_decision_events.sql only runs automatically on a FRESH Postgres
-    volume's first boot -- an existing deployment with a persistent volume created
-    before Week 3 never gets it (review finding). decide() now requires that insert
-    to succeed (app/db.py::transaction()), so a missing table must fail readiness
-    up front rather than surface as a 500 on the first real POST /decisions. A
-    dedicated, monkeypatchable function (rather than an inline query in health())
-    so tests can assert both branches without needing a live Postgres.
+    decision-service neither reads nor writes this table: it is compute-only, and
+    origination-service is the sole writer of `decisions` and `decision_events`. The
+    check is kept on purpose as a shared-system readiness dependency. The decisioning
+    path only works end to end if origination can persist the audit row after this
+    service returns a result, and db/init/004_decision_events.sql only runs
+    automatically on a FRESH Postgres volume's first boot -- an existing deployment
+    with a persistent volume created before Week 3 never gets it. Failing readiness
+    here surfaces the missing migration up front rather than as a 500 on the first
+    accepted decision. A dedicated, monkeypatchable function (rather than an inline
+    query in health()) so tests can assert both branches without a live Postgres.
     """
     try:
         rows = db.query("SELECT to_regclass('public.decision_events') IS NOT NULL AS exists")

@@ -4,11 +4,17 @@ This logic was lifted verbatim out of the origination service into its own
 decision-service — the behaviour (and the debt) is unchanged by the split.
 
 Week 3: the AI scorer call now has the same fail-closed contract as the bureau call
-(ModelUnavailableError), adverse-action reasons are mapped to whichever input actually
-drove the score down instead of a fixed nearest-checkbox string, and every decision
-persists an append-only `decision_events` row (inputs, model score/version, top
-features, reason codes) — the dispute-proof record Reg B requires and the legacy
-outcome-only `decisions` table never had.
+(ModelUnavailableError), and adverse-action reasons are mapped to whichever input
+actually drove the score down instead of a fixed nearest-checkbox string. The result
+carries what the dispute-proof record Reg B requires (inputs, model score/version, top
+features, reason codes), but this service only computes and returns it: it persists
+nothing. origination-service writes the accepted `decisions` and append-only
+`decision_events` rows, atomically, after its own attempt/finality checks (see
+`decide()`).
+
+The licensed external scoring model is used whenever it is configured. The local
+deterministic scorer in this module is a dev/test stub, available only where
+ALLOW_MODEL_STUB permits it.
 
 Async rework (adr/0006): the credit pull, the bureau call, and the model run used to
 be a synchronous chain executed inline on the request thread -- decision-service's
@@ -18,10 +24,10 @@ of two blocking, up-to-30s vendor HTTP calls. Both outbound calls now use
 httpx.AsyncClient and the whole chain (`_pull_credit` -> `_run_model` -> `decide`)
 is async, so a request waiting on Experian or the AI scorer frees the thread pool
 entirely -- the event loop's own async I/O handles many more concurrent in-flight
-vendor calls than a fixed-size thread pool ever could. The DB write in `decide()`
-stays a synchronous psycopg2 call (a fast local Postgres INSERT, not the external-
-vendor bottleneck this rework targets) -- a fully async DB layer (asyncpg) is a
-separate, larger change, not done here. Scope note: this fixes decision-service's
+vendor calls than a fixed-size thread pool ever could. `decide()` makes no database
+call; the router's read of the application inputs stays a synchronous psycopg2 query
+(a fast local Postgres read, not the external-vendor bottleneck this rework targets)
+-- a fully async DB layer (asyncpg) is a separate, larger change, not done here. Scope note: this fixes decision-service's
 OWN internal chain only; origination-service's own call INTO decision-service
 (services/origination-service/app/clients.py) is still synchronous -- that's a
 different service's own thread-pool budget, out of scope for this fix.
