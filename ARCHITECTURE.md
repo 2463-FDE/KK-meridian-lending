@@ -186,8 +186,8 @@ Read paths (loan/application listing, detail, schedule, payment history) use **S
 (`intake.py`, decisioning, payments, `balance.py`) still use **raw psycopg2** (`db.py`).
 The migration to the ORM was never finished — this seam is intentional and is where most
 of the money-handling debt lives. The service decomposition (ADR 0004) did **not** clean
-this up: the write-path code moved into `decision-service` / `disclosure-service` /
-`payment-service` carrying the same raw-psycopg2 pattern (though money itself is no longer
+this up: the code that moved into `disclosure-service` / `payment-service` (and
+`decision-service`'s read of application inputs) carried the same raw-psycopg2 pattern (though money itself is no longer
 float — see Data model below), and every service still talks to the one shared schema
 directly.
 
@@ -197,10 +197,10 @@ Origination no longer decides, discloses, or KYCs in-process. It now calls `kyc-
 `decision-service`, and `disclosure-service` over **synchronous HTTP** (`app/clients.py`),
 and `payment-service` calls servicing's `apply-payment` to post a captured charge. This
 re-creates the original synchronous-chain debt at a worse altitude: a downstream
-`decision-service` stall (its credit pull blocks the thread) now blocks the
-**applicant-facing** origination request that is waiting on the HTTP call — the same
-"synchronous decisioning chain" flaw, now spanning a network hop with no timeout/retry
-contract. Every server-to-server call into decision/disclosure/payment now also carries a
+`decision-service` stall (a slow bureau or scoring-model call; decision-service itself is
+async) now blocks the **applicant-facing** origination request that is waiting on the
+HTTP call — the same "synchronous decisioning chain" flaw, now spanning a network hop
+bounded only by a 30-second client timeout, with no retry contract. Every server-to-server call into decision/disclosure/payment now also carries a
 shared `X-Internal-Token` header (see Auth & roles).
 
 ## Auth & roles

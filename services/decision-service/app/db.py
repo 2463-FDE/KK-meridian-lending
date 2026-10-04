@@ -28,10 +28,14 @@ def transaction(statements):
     """Run a list of (sql, params) statements as one all-or-nothing transaction.
 
     Commits only if every statement succeeds; rolls back and re-raises otherwise,
-    so a partial failure never leaves some statements applied and others not. Used
-    for decision.py's `decisions` + `decision_events` writes, which must land or
-    fail together (review finding: writing them separately let a decision commit
-    with no matching audit row when the second insert failed silently).
+    so a partial failure never leaves some statements applied and others not.
+
+    Retained helper, not currently called by this service's runtime code: it was
+    written for decision.py's `decisions` + `decision_events` writes, which must land
+    or fail together (review finding: writing them separately let a decision commit
+    with no matching audit row when the second insert failed silently). Those writes
+    now live in origination-service, the sole writer, so this service only reads.
+    tests/test_db.py still covers the commit/rollback behaviour.
 
     Opens its own dedicated connection rather than reusing get_conn()'s shared,
     process-global connection -- review finding: toggling autocommit on that
