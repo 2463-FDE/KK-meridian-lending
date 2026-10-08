@@ -1,4 +1,10 @@
-# Meridian Lending — Architecture Notes
+# Inherited Architecture Baseline
+
+> **Historical snapshot.** These are the architecture notes the team reconstructed when it
+> inherited the vendor codebase, kept as a baseline for comparison. Several statements here are
+> no longer true (service count, authorization gaps, missing timeouts, hardcoded keys). The current
+> architecture is described in [`ARCHITECTURE.md`](../../ARCHITECTURE.md) and the
+> [README](../../README.md#architecture).
 
 *(Reconstructed by the in-house team after Halcyon dissolved. Incomplete.)*
 
