@@ -1,10 +1,11 @@
-# Governance acceptance evaluations (client outcomes)
+# Governance acceptance evaluations
 
-**Version:** CCUS-SYN-2026.08.24
-**Effective date:** 2026-08-24
-**Count:** 28 client acceptance cases in `governance-acceptance-evaluations.jsonl`.
+**Version:** SYN-GOV-2.0
+**Count:** 28 acceptance cases in `governance-acceptance-evaluations.jsonl`.
 
-These cases record required **inputs, outcomes, refusals, escalations, and pass criteria**. They are not an implementation design and contain no implementation strategy field.
+Each case records required **inputs, outcomes, refusals, escalations and pass
+criteria**. `db/tools/governance_acceptance.py` executes every case; none is
+delegated or skipped.
 
 ## Coverage
 
@@ -28,6 +29,8 @@ These cases record required **inputs, outcomes, refusals, escalations, and pass 
 
 ## Negative fixtures
 
-Files under `evaluations/fixtures/` are **never approved inputs**. They exist so an acceptance review can prove refusal. Do not copy them into vendor/, fixtures/ (other than the isolated fairness file), or runtime.
+Files under `evaluations/fixtures/` are **never approved inputs**. They exist so
+the acceptance run can prove refusal. They must not be copied into `vendor/`,
+into the fairness fixture, or into runtime code.
 
-Each evaluation that names a `negative_fixture` path must resolve to a file in that folder.
+Every case that names a `negative_fixture` path resolves to a file in that folder.

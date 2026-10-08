@@ -36,7 +36,7 @@ def card() -> str:
 
 
 # --------------------------------------------------------------------------
-# It covers both halves the client asked for.
+# It covers both halves of the requirement.
 # --------------------------------------------------------------------------
 
 def test_the_spec_covers_denial_reason_accuracy(spec):
@@ -285,7 +285,7 @@ def test_every_repository_path_the_spec_cites_resolves(spec):
 
     # A path may be unresolved when the line saying so is on the same line --
     # the same rule `test_docs_citations_resolve.py` uses. Spec 0003 now records
-    # the retirement of the ZIP3 screen (client decision 2026-08-24), and a
+    # the retirement of the ZIP3 screen, and a
     # document that may not name a deleted module cannot explain why it went.
     absent_by_design = re.compile(
         r"does not exist on `main`|deleted, not on `main`|deleted -- not on `main`"

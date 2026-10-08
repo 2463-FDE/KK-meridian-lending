@@ -112,8 +112,8 @@ def test_the_smoke_does_not_print_what_it_is_checking():
         if re.match(r"\s*(echo|ok|bad|step|cannot)\b", line)
     )
 
-    # Interpolation and credentials, NOT English words. The first version of
-    # this guard forbade the substring "answer", which flagged the status line
+    # Interpolation and credentials, NOT English words. Forbidding the
+    # substring "answer" would flag the status line
     # "policy chat answered but without grounding evidence" -- prose describing
     # a result is not a leak of it, and a guard that cannot tell the difference
     # gets weakened or deleted rather than obeyed.

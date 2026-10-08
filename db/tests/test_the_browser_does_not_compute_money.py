@@ -62,8 +62,9 @@ def _label(path: pathlib.Path) -> str:
     """A repo-relative path when it is in the repo, the name otherwise.
 
     The two self-checks below plant files under `tmp_path`, which
-    `relative_to(REPO)` refuses -- so the first version of this helper raised
-    ValueError inside the test that proves the pattern works.
+    `relative_to(REPO)` refuses -- so the helper must not call it
+    unconditionally, or it would raise ValueError inside the test that proves
+    the pattern works.
     """
     try:
         return path.relative_to(REPO).as_posix()

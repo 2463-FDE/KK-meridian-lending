@@ -161,11 +161,9 @@ def _svg_labels(path: pathlib.Path) -> str:
 def test_the_services_table_lists_every_service():
     """The count in prose is not where a reader looks. The table is.
 
-    This is the finding that came back on the first version of this PR: the
-    prose was corrected to eight and the Services table still listed seven,
-    with no `loan-assistant` row. The drift moved rather than closing, and the
-    guard did not catch it because it only asked whether the name appeared
-    *anywhere* -- and it now appeared, in the sentence I had just written.
+    Prose can say eight while the Services table still lists seven, with no
+    `loan-assistant` row. Asking only whether the name appears *anywhere* would
+    not catch that, because the prose itself names it.
 
     Asserting on the table is what makes the number checkable by a human, who
     counts rows rather than trusting an adjective.
@@ -301,7 +299,7 @@ def _gateway_source() -> str:
 
 
 def test_the_readme_describes_both_assistant_routes_as_the_gateway_gates_them():
-    """The claim this file was written for, now inverted by a client decision.
+    """Both assistant routes are staff-only, and the README says so.
 
     ORIGINAL DEFECT: correcting "the assistant has not been started" produced a
     NEW false sentence -- `/assistant` described as staff-only when it was two
@@ -309,9 +307,8 @@ def test_the_readme_describes_both_assistant_routes_as_the_gateway_gates_them():
     with a false one is worse than what it removed, because it arrives carrying
     fresh credibility.
 
-    WHAT CHANGED: the client decided the existing Policy Chat is an internal
-    tool for lending, compliance and underwriting staff, so both routes are now
-    staff-only and the README saying so is correct rather than false.
+    Policy Chat is an internal tool for lending, compliance and underwriting
+    staff, so both routes are staff-only and the README says so.
 
     THE HOLE THIS CLOSES. This test used to `pytest.skip` the moment
     `_require_user` appeared in the policy-chat handler -- "README may say
@@ -335,7 +332,7 @@ def test_the_readme_describes_both_assistant_routes_as_the_gateway_gates_them():
     chat_is_staff_only = "_require_user" in chat_body and "is_staff" in chat_body
     assert chat_is_staff_only, (
         "policy-chat no longer requires a staff session. If that is deliberate "
-        "the client decision recorded in docs/DEBT.md RF-28 has changed, and "
+        "the decision recorded in docs/DEBT.md RF-28 has changed, and "
         "the README, ARCHITECTURE and ROADMAP wording all have to move with it.")
 
     text = README.read_text(encoding="utf-8")

@@ -1,11 +1,10 @@
 """What the review-item schema guarantees on its own, against real PostgreSQL.
 
-`db/migrations/0045` exists because the client's decision of 2026-08-24 replaced
-D22's deferral with a review-only contract. The properties below are the ones a
+`db/migrations/0045` implements a review-only contract for D22. The properties below are the ones a
 mock cannot check: a UNIQUE that does not dedupe, a CHECK that admits a fourth
 disposition, and a trigger that silently allows a rewritten answer are all
 invisible to a fake database, and each of them is one of the guarantees the
-client's wording depends on.
+contract depends on.
 
 **The table records an ASK, not an answer about money.** Nothing here moves a
 balance, writes a ledger entry, or gives anything permission to. The tests assert
@@ -103,7 +102,7 @@ def _flag(conn, payments, *, signal="heuristic_30_minute_candidate",
 
 
 # --------------------------------------------------------------------------
-# The signal vocabulary is exactly the client's three.
+# The signal vocabulary is exactly three signals.
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("signal", [
@@ -118,7 +117,7 @@ def test_the_three_authorised_signal_types_are_accepted(db, payments, signal):
 
 def test_a_signal_type_nobody_authorised_is_refused(db, payments):
     """Including a name that presumes the answer. "duplicate_confirmed" is a
-    conclusion, and the client was explicit that a flag is not one."""
+    conclusion, and a flag is not one."""
     for invented in ("duplicate_confirmed", "probable_duplicate", "fraud"):
         with pytest.raises(psycopg2.errors.CheckViolation):
             _flag(db, payments, signal=invented)
@@ -126,7 +125,7 @@ def test_a_signal_type_nobody_authorised_is_refused(db, payments):
 
 
 # --------------------------------------------------------------------------
-# One item per observation. The client's "do not flood the queue" concern.
+# One item per observation, so the queue is not flooded.
 # --------------------------------------------------------------------------
 
 def test_the_same_signal_on_the_same_payment_cannot_be_recorded_twice(db, payments):
@@ -321,7 +320,7 @@ def test_flagging_and_dispositioning_write_no_ledger_entry_and_move_no_balance(d
 def test_the_table_carries_no_money_or_instrument_columns():
     """Privacy by construction, checked against the DDL rather than the docs.
 
-    The client permitted a review item to say that one exists, which queue owns
+    A review item may say that one exists, which queue owns
     it, and a non-identifying reference. A reviewer reads the amount and the
     instrument from the payment inside an authenticated surface -- a review queue
     is exactly the kind of table that gets exported to a spreadsheet.

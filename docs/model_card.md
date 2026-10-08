@@ -97,9 +97,7 @@ origination — see above):
     substitution. `db/tests/test_no_runtime_protected_class_proxy.py` fails if
     the module, the route, or a replacement proxy reappears.
   - What is PERMITTED instead: evaluation against a single isolated **offline,
-    synthetic** fixture supplied by the client
-    (`fixtures/offline_fairness_training/client_package_2026-08-24/`), received
-    2026-08-24 — see `docs/DEBT.md` **D24**. Its labels may never reach a model
+    synthetic** fixture (`fixtures/governance/`). Its labels may never reach a model
     input, an application record, a decision, a database row, a trace, telemetry
     or consumer output. The evaluation it permits is
     `db/tools/offline_fairness_eval.py`, which reports aggregate counts only and

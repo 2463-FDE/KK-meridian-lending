@@ -43,12 +43,11 @@ class AgentError(RuntimeError):
     """Base for every way the agent path can refuse.
 
     Exists so the summary route can have a controlled fallback for an agent
-    failure nobody has enumerated yet. Reviewed on PR #63: the first four
-    subclasses below all reached the API as a generic 500 `{"detail": "internal
-    error"}`, because the route enumerated the `LLM*Error` classes and these are
-    not among them. A designed refusal that presents as an internal server error
-    is not a refusal contract -- it is the absence of one, and it hides exactly
-    the failures this PR added on purpose.
+    failure nobody has enumerated yet. Without a common base, the subclasses
+    below would reach the API as a generic 500 `{"detail": "internal error"}`,
+    because the route enumerates the `LLM*Error` classes and these are not among
+    them. A designed refusal that presents as an internal server error is not a
+    refusal contract -- it is the absence of one.
 
     `test_agent_failures_reach_the_route.py` asserts that every exception this
     module defines inherits from here, so adding a fifth cannot silently
@@ -105,8 +104,7 @@ class AgentTimeout(AgentError):
     connect and one read on one HTTP attempt -- not an attempt sequence, not a
     model invocation, not the run. `call_api`'s own "20s" was never a wall
     either: its `@retry(stop_after_attempt(3))` decorator meant three such calls
-    plus backoff. Reviewed on PR #63; the wording here says what the code does
-    rather than repeating the inherited claim.
+    plus backoff.
     """
 
 
@@ -131,14 +129,12 @@ class RequiredToolNotCalled(AgentError):
 #: The agent's contract = the EXISTING summary safety contract, plus the tool
 #: requirement. Composed rather than rewritten, and that is the point.
 #:
-#: The first version of this file wrote a short prompt of its own and silently
-#: dropped rules `_SYSTEM` had carried for months -- "use only the data
-#: provided, do not invent", no risk tier, no DTI reasoning, no invented numeric
-#: threshold. Three of those have deterministic post-validators
+#: A separate, shorter agent prompt would drop rules `_SYSTEM` carries -- "use
+#: only the data provided, do not invent", no risk tier, no DTI reasoning, no
+#: invented numeric threshold. Three of those have deterministic post-validators
 #: (`_strip_risk_classifications`, `_strip_dti_claims`,
-#: `_strip_contradicting_macro_claims`) so the guarantee survived; "do not
-#: invent" has NO deterministic replacement, and dropping it weakened a live
-#: safety boundary while adding a feature. Reviewed on PR #63.
+#: `_strip_contradicting_macro_claims`); "do not invent" has NO deterministic
+#: replacement, so losing it would weaken a live safety boundary.
 #:
 #: Composing means the two cannot drift again: editing the summary rules edits
 #: what the agent is told, in one place.
@@ -219,11 +215,8 @@ def suppressed_tracing():
         # Worth saying out loud, because someone has enabled tracing and will
         # not see the framework's usual spans for this path.
         #
-        # This used to say `reason=no_privacy_safe_emitter_yet`, which stopped
-        # being true when `app/trace.py` landed and was wired into the summary
-        # route. Anyone reading it would conclude the summary emits nothing at
-        # all, and it emits a privacy-safe run -- so the message contradicted
-        # the code (TRC-01).
+        # The summary still emits a privacy-safe run through `app/trace.py`;
+        # only the framework's own spans are suppressed (TRC-01).
         log.info("agent framework tracing suppressed stage=privacy_safe "
                  "reason=custom_privacy_safe_emitter_in_use "
                  "emitter=app.trace.summary_trace")
@@ -262,17 +255,14 @@ def build_agent(tools: list | None = None):
     # does not go through `call_api` and inherited neither of the ones that
     # function carried. Left implicit, botocore's own defaults applied: 60s
     # connect, 60s read, and its default attempt count -- per model invocation.
-    # Reviewed on PR #63.
     #
     # **These are PER-ATTEMPT transport timeouts, not a deadline for the run.**
     # Measured on botocore 1.43.77: there is no total-deadline knob on Config at
     # all. What 20 seconds bounds is one connect and one read on one HTTP
     # attempt. It does not bound an attempt sequence, a model invocation, or the
-    # agent run -- and the first version of this comment claimed it did, having
-    # copied the framing from `call_api`, where it was not true either: that
-    # function wrapped its 20-second call in
+    # agent run. The same is true of `call_api`: it wraps its 20-second call in
     # `@retry(stop_after_attempt(3), wait_exponential(...))`, so its worst case
-    # was three 20-second calls plus backoff, never a 20-second wall.
+    # is three 20-second calls plus backoff, never a 20-second wall.
     #
     # The honest worst case here, stated rather than left to be discovered:
     # AGENT_MAX_STEPS=12 permits 6 model invocations (measured, not derived),
@@ -364,11 +354,10 @@ def required_tool_was_called(state: Any, tool_name: str = TOOL_NAME) -> bool:
 def policy_evidence_status(state: Any, tool_name: str = TOOL_NAME) -> str:
     """What the policy retrieval actually produced: "hit", "miss" or "absent".
 
-    Reviewed on PR #63 (finding 3). The gate above answers "did a tool run",
-    and a tool CAN run and return nothing -- an empty or irrelevant query yields
-    `status=miss, hit_count=0`. Treating that as consultation would let an
-    ungrounded summary be indistinguishable from a grounded one, which is
-    exactly the claim the PR title makes and must therefore hold.
+    The gate above answers "did a tool run", and a tool CAN run and return
+    nothing -- an empty or irrelevant query yields `status=miss, hit_count=0`.
+    Treating that as consultation would make an ungrounded summary
+    indistinguishable from a grounded one.
 
     Returns the strongest status across all calls: a model that misses once and
     then retrieves successfully HAS consulted policy. Categorical by design --
@@ -481,10 +470,10 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
     """
     # Construction is inside the boundary, not before it. A configuration
     # refusal already raises AgentUnavailable and passes through untouched, but
-    # an UNEXPECTED failure from the provider SDK's constructor did not: it
-    # escaped to the FastAPI catch-all as a generic 500, and that handler logs
-    # the raw exception -- so a constructor error quoting the config was
-    # retained verbatim. Reviewed on PR #63 (finding F10).
+    # an UNEXPECTED failure from the provider SDK's constructor would otherwise
+    # escape to the FastAPI catch-all as a generic 500, and that handler logs
+    # the raw exception -- so a constructor error quoting the config would be
+    # retained verbatim (F10).
     if agent is not None:
         runtime = agent
     else:
@@ -496,7 +485,7 @@ def run_underwriting_agent(prompt: str, agent=None) -> tuple[str, Any]:
     # An explicit, finite budget. LangGraph enforces `recursion_limit` and
     # raises GraphRecursionError, but its default (25) is the framework's
     # choice, not ours, and 25 steps is roughly a dozen model calls for a
-    # one-paragraph summary. Reviewed on PR #63 (finding 4).
+    # one-paragraph summary.
     #
     # The number is derived, not picked: one model turn to decide, one tool
     # execution, one model turn to answer is 3 steps. The real Bedrock run made

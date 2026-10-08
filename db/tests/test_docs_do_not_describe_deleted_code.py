@@ -19,11 +19,11 @@ live paragraph and a fenced one -- `specs/0003` does by design, since its sectio
 2 is superseded while sections 1 and 4-7 stand. Judging the whole file would let
 one fence launder every claim in it.
 
-**Two lessons from the first version of this guard, both kept because they are
+**Two design rules, both kept because they are
 the difference between a guard people trust and one they delete.**
 
-  * It listed `four-fifths` and `min_group_size` alongside the identifiers, and
-    both produced false failures on honest text: the superseded blocks quote the
+  * Concepts such as `four-fifths` and `min_group_size` are not listed
+    alongside the identifiers, because they produce false failures on honest text: the superseded blocks quote the
     rule they described, and `Disparity thresholds beyond four-fifths --
     CLIENT-BLOCKED` is a true live statement about a decision nobody has made.
     A concept can be discussed after its implementation is gone; an identifier
@@ -55,7 +55,7 @@ LIVE_DOCS = (
 #: Identifiers that no longer exist, with the code fact that proves it. Each is
 #: matched as a whole token -- see the module docstring for why.
 DELETED = {
-    "fair_lending.py": "deleted with the ZIP3 screen (PR #78, client decision 2026-08-24)",
+    "fair_lending.py": "deleted with the retired ZIP3 screen",
     "zip-analysis": "the route is not registered at all, not merely gated",
     "NOTE_RATE_PCT": "deleted from disclosure-service/app/fees.py (PR #80); the configured rate is DEMO_NOTE_RATE_PCT",
     "OFFER_RATE_PCT": "deleted from both frontend pages (PR #80)",
@@ -209,7 +209,7 @@ def test_the_deleted_identifiers_really_are_deleted():
 
 
 def test_a_quoted_superseded_block_is_not_flagged():
-    """The false failure the first version produced, as a test.
+    """A quoted superseded block must not produce a false failure.
 
     The fence sits on the heading above the quoted lines, which is exactly how
     this repository preserves superseded text.

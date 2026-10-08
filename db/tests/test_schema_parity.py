@@ -420,7 +420,7 @@ def test_every_seeded_loan_carries_its_contractual_schedule():
     -- and rendered its schedule as a reconstruction, on a database whose offers
     contain an exact B1 contract. Migrations are not replayed over fresh init,
     so 003_seed_bulk.sql copies each loan's schedule from its own offer.
-    Reviewed on PR #10.
+   
     """
     if not DATABASE_URL:
         pytest.skip("DATABASE_URL not set")

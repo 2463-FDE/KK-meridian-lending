@@ -1,6 +1,6 @@
 """db/migrations/0047 -- manual DTI as evidence, and only as evidence (RF-25).
 
-The client answered RF-25 on 2026-08-29: staff may apply DTI manually, but only
+RF-25: staff may apply DTI manually, but only
 on a REFERRED application, only as an underwriter or admin, and only from approved
 SYNTHETIC source documents -- with gross monthly income, monthly debt obligations,
 source-document references, the calculation, staff identity, role, timestamp and
@@ -9,7 +9,7 @@ reason all required, and a bare percentage explicitly insufficient.
 And the rule that governs the design: **a manual DTI is human-review EVIDENCE and
 must not approve, deny, override, mutate a decision or trigger model output.**
 
-What the database guarantees on its own -- which after Codex round 2 is more than
+What the database guarantees on its own -- which after Round two is more than
 this file first claimed. Referred-only and underwriter/admin-only were described
 here as route concerns tested with the API; both are now enforced by
 `manual_dti_permitted` and covered below (MDTI-M01). The schema holds: the
@@ -156,7 +156,7 @@ def test_the_migration_is_re_runnable(db):
 
 def test_the_registry_ships_approved_and_unapproved_rows(cur):
     """The unapproved row is deliberate: a registry where everything is approved
-    cannot demonstrate the refusal the client's rule requires."""
+    cannot demonstrate the refusal the rule requires."""
     cur.execute("SELECT count(*) AS n FROM manual_dti_source_documents WHERE approved")
     assert cur.fetchone()["n"] >= 5
     cur.execute(
@@ -316,12 +316,11 @@ def _an_application_in_state(c, *, status, outcome):
     ("funded", "approve", "not referred"),
 ])
 def test_only_a_referred_application_may_be_assessed(cur, status, outcome, expected):
-    """Codex review BDTI-01.
+    """BDTI-01.
 
-    The client's rule is manual DTI on a REFERRED application only. The first
-    version of this migration left that entirely to the route -- while
-    `decisions.outcome` sat right here, which made it a choice not to enforce
-    something the database could. Every fixture in this file built a referred
+    The rule is manual DTI on a REFERRED application only. Leaving that
+    entirely to the route, while `decisions.outcome` sits right here, would be
+    a choice not to enforce something the database can. Every fixture in this file built a referred
     application, so no test would have noticed.
 
     A submitted application with no decision at all is refused separately from one
@@ -342,7 +341,7 @@ def test_only_a_referred_application_may_be_assessed(cur, status, outcome, expec
 # --------------------------------------------------------------------------
 
 def test_a_csr_cannot_be_recorded_as_an_underwriter(cur):
-    """Codex review BDTI-02, and it falsified a claim in the PR body.
+    """BDTI-02, and it falsified a claim in the PR body.
 
     The CHECK constrained the assessed_role STRING to underwriter/admin and tied
     it to nobody, so a CSR's user id stored with `assessed_role = 'underwriter'`
@@ -406,7 +405,7 @@ def test_both_authorised_roles_are_accepted_when_they_match(cur, role):
 # --------------------------------------------------------------------------
 
 def test_a_cited_document_cannot_be_updated(cur):
-    """Codex review BDTI-03.
+    """BDTI-03.
 
     Assessments and link rows were append-only; the REGISTRY was not, so
     `doc_ref`, `kind`, `label` and `approved` could all be changed after an
@@ -551,7 +550,7 @@ def test_a_correction_is_a_second_row_not_an_edit(cur):
 
 
 # --------------------------------------------------------------------------
-# THE CLIENT'S CENTRAL RULE: evidence only.
+# THE CENTRAL RULE: evidence only.
 # --------------------------------------------------------------------------
 
 def test_recording_dti_evidence_changes_no_decision_surface(cur, db):
@@ -598,7 +597,7 @@ def test_recording_dti_evidence_changes_no_decision_surface(cur, db):
 # --------------------------------------------------------------------------
 # MDTI-01: the checks must HOLD the rows they rely on.
 #
-# Codex round 2. Each trigger read committed state and held no lock, so under
+# Round two. Each trigger read committed state and held no lock, so under
 # READ COMMITTED a concurrent writer could invalidate the premise between the
 # check and the commit. Three sites, three races -- and each needs TWO
 # connections that genuinely overlap. A sequential "write, commit, write" proves
@@ -780,7 +779,7 @@ def test_two_assessments_on_one_application_do_not_block_each_other(db):
     row". A shared lock blocks the writers (proved by the three cases above) while
     letting two legitimate assessments on the same application and the same
     assessor proceed together. FOR UPDATE would have serialised them for no
-    reason, and nothing in the client's rule asks for that.
+    reason, and nothing in the rule asks for that.
 
     Also the deadlock check: both transactions acquire applications -> decisions
     -> users -> document in the same order, so no cycle is possible between them.

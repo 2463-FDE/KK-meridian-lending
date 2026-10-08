@@ -132,9 +132,9 @@ def test_the_migration_backfills_nothing():
     """0046 must not write a period onto any row that predates it.
 
     Asserted against the MIGRATION rather than against live data, deliberately.
-    An earlier version of this test counted non-null rows in the database, which
-    was wrong twice over: any case in this suite that writes an installment made
-    it fail, and a real backfill on a fresh volume would have made it pass. What
+    Counting non-null rows in the database would be wrong twice over: any case
+    in this suite that writes an installment would make it fail, and a real
+    backfill on a fresh volume would make it pass. What
     "history stays unknown" actually constrains is the migration, so that is what
     is read.
 
@@ -223,7 +223,7 @@ def _a_scheduleless_loan(c):
 
 @pytest.mark.parametrize("n", [1, 12, 24])
 def test_a_loan_with_no_stored_schedule_cannot_have_an_installment_fee(cur, n):
-    """Codex review SCHEDULELESS-INSTALLMENT-002.
+    """SCHEDULELESS-INSTALLMENT-002.
 
     Checking `term_months` alone was not enough. A legacy loan can carry a term
     and no schedule, so the database would have accepted
@@ -312,7 +312,7 @@ def test_the_database_and_the_servicing_layer_agree_on_derivability(cur):
 
 @pytest.mark.parametrize("beyond", [37, 48, 999])
 def test_an_installment_past_the_end_of_the_term_is_refused(cur, beyond):
-    """Codex review FEE-INSTALLMENT-BOUNDS-001.
+    """FEE-INSTALLMENT-BOUNDS-001.
 
     With only `installment_no >= 1`, a 36-month loan accepted `installment_no =
     37` or 999, and the unique index then guaranteed "one fee per installment
@@ -402,7 +402,7 @@ def test_a_second_fee_for_the_same_installment_is_refused(cur):
 
 def test_a_later_installment_may_take_its_own_fee(cur):
     """"A later scheduled installment that separately becomes overdue may receive
-    one fee of its own" -- the client's rule, 2026-08-29."""
+    one fee of its own" -- the late-fee rule."""
     loan_id = _a_loan(cur)
     _assess(cur, loan_id, 3)
     _assess(cur, loan_id, 4)
@@ -445,13 +445,13 @@ def test_fees_with_no_installment_do_not_collide(cur):
 def test_two_concurrent_assessors_cannot_both_write_one_installment(db):
     """Two sessions genuinely overlapping, one fee.
 
-    Codex review TEST-CONC-001: the first version of this case committed session A
-    *before* session B inserted, which made it a sequential unique-violation test
-    wearing a concurrency name. It would have passed against an application-level
-    "have we already?" check -- the exact defect the index exists to rule out --
-    because B's read would have happened after A's commit.
+    TEST-CONC-001: committing session A *before* session B inserts would make
+    this a sequential unique-violation test wearing a concurrency name. It would
+    pass against an application-level "have we already?" check -- the exact
+    defect the index exists to rule out -- because B's read would happen after
+    A's commit.
 
-    So B now inserts while A is still UNCOMMITTED, from a worker thread. Postgres
+    So B inserts while A is still UNCOMMITTED, from a worker thread. Postgres
     makes B's insert block on the uncommitted unique-index entry rather than fail;
     the test asserts that it is still blocked (the thread has not finished) before
     A commits, and only then does B resolve into a `UniqueViolation`. That ordering

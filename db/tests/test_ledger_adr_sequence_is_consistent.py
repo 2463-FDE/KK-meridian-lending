@@ -170,8 +170,8 @@ def test_no_pr_label_names_the_waterfall_outside_a_table_row():
     The non-goals table said the waterfall is PR-6 while the paragraph under it
     said "the algorithm is PR 5". A reader can still end up assigning PR-5 to
     both the write-guard step and the waterfall -- the exact drift these tests
-    exist to stop, surviving in prose because the first version of this check
-    only looked at `| **PR-n** |` table cells.
+    exist to stop, surviving in prose if the check only looked at
+    `| **PR-n** |` table cells.
     """
     text = _text(A10)
     for line in text.splitlines():

@@ -59,7 +59,7 @@ def _seed_legacy_schema_with_duplicate_offers(conn):
     decision_id/fee_pct_used columns, no app_id uniqueness) and seeds two
     duplicate legacy offers for the same application -- the exact shape 0011
     is meant to repair. Every legacy offer predates decision_id entirely, so
-    it's NULL on every row, same as a real pre-W4 database."""
+    it's NULL on every row, same as a database created before decision_id existed."""
     with conn.cursor() as cur:
         cur.execute(f"""
             SET search_path TO {SCHEMA};

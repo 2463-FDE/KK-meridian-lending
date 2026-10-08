@@ -429,9 +429,8 @@ def summary_trace(role: str | None = None, parent_headers: dict | None = None):
 
     `parent_headers` is the gateway's server-minted context, when the request
     came through the gateway. With it, this service's spans attach beneath the
-    `gateway_entry` run and the trace covers the authenticated entry point --
-    which is what the client asked to see and what the module docstring used to
-    name as a remaining gap. Without it, the trace stands alone.
+    `gateway_entry` run and the trace covers the authenticated entry point.
+    Without it, the trace stands alone.
     """
     trace = SummaryTrace(parent_headers=parent_headers)
     token = _current.set(trace)
@@ -461,19 +460,15 @@ _SDK_DEFAULT_PROJECT = "default"
 def _own_project() -> str:
     """The project THIS process files runs under. Never the sender's.
 
-    Review finding (LS-PROJECT-SCRUB). This used to read
-    `config.LANGSMITH_PROJECT or parent.session_name`, and the `or` was the bug:
-    `LANGSMITH_PROJECT` is unset in the shipped `.env.example`, so on a default
-    deployment the fallback handed the choice straight back to the caller --
-    the precise attack the scrub exists to close, live in the configuration most
-    likely to be running.
+    LS-PROJECT-SCRUB. Falling back to `parent.session_name` when
+    `LANGSMITH_PROJECT` is unset would hand the choice of project straight back
+    to the caller -- and `LANGSMITH_PROJECT` is unset in the shipped
+    `.env.example`, so that is the configuration most likely to be running. A
+    test for this must leave `LANGSMITH_PROJECT` unset, or it only exercises the
+    guarded branch.
 
-    Worse, my own test for it passed anyway, because the fixture set
-    `LANGSMITH_PROJECT`. The test was asserting the guarded branch and calling it
-    proof of the unguarded one.
-
-    So there is no inbound fallback now: a configured project, or the SDK's
-    default, and nothing else. Read at call time so an operator's value applies
+    So there is no inbound fallback: a configured project, or the SDK's default,
+    and nothing else. Read at call time so an operator's value applies
     without a restart.
     """
     for name in ("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"):

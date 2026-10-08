@@ -24,11 +24,11 @@ that is this repository's own responsibility:
   4. CI runs the exact frontend audit command the row quotes its counts from.
 
 A WARNING THIS FILE EARNED. Point 2 is only worth having when the acceptance
-really does rest on the argument. An earlier version of this guard asserted
-three Next.js surfaces -- no middleware, no `"use server"`, no `next/image` --
-and was cited as proof that `next@15.1.3`'s two criticals were unreachable. One
-of them, GHSA-9qr9-h5gf-34mp, needs none of those three; its surface is App
-Router RSC handling, which this frontend is. The guard passed, and its passing
+really does rest on the argument. Asserting three Next.js surfaces -- no
+middleware, no `"use server"`, no `next/image` -- does not prove
+`next@15.1.3`'s two criticals unreachable: GHSA-9qr9-h5gf-34mp needs none of
+those three; its surface is App Router RSC handling, which this frontend is. A
+guard like that passes, and its passing
 was read as evidence for a claim it had never tested. A green check on the wrong
 surface is more dangerous than no check, because it ends the conversation. The
 Next acceptance is now withdrawn and replaced by a version pin, which is a claim

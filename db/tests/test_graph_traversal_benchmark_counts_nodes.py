@@ -224,8 +224,7 @@ def test_the_unbounded_walk_terminates_and_returns_the_whole_component(cur):
     The depth-bounded candidates key their union on (id, depth), so dropping the
     bound would not terminate: the root is rediscovered at depth 2 and every
     (same_id, new_depth) pair is a new row forever. That is fine for "within d
-    hops" and wrong for "who else is in this ring" -- reviewed on PR #12, while
-    the roadmap was claiming the unbounded question answered.
+    hops" and wrong for "who else is in this ring".
 
     Dropping `depth` from the row deduplicates by applicant globally, so the
     recursive term dries up when the component is exhausted. All four applicants

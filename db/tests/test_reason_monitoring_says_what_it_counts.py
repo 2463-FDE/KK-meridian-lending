@@ -102,7 +102,7 @@ def test_the_scope_sentence_from_pr_141_survives():
 def test_the_panel_still_refuses_fairness_language():
     """PR #134's rule, re-asserted here because this PR rewrote nearby copy.
 
-    The client prohibited runtime protected-class data and inferred proxies, and
+    Runtime protected-class data and inferred proxies are prohibited, and
     a panel that drifted into fairness language would undo that decision in copy
     while the code stayed correct.
     """

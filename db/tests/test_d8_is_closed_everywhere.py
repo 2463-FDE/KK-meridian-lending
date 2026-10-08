@@ -42,13 +42,12 @@ ARCHITECTURE = REPO / "ARCHITECTURE.md"
 
 #: Documents and source files that describe the servicing money path to a reader.
 #:
-#: Derived from one list rather than assembled per check, because review of PR #77
-#: found the two ways this set goes wrong. `principal.py` was referenced by the
-#: guard and left out of the scan -- and it is the module that *implements* the
-#: verified human, so a reader landing there took away the exact false conclusion
-#: the guard exists to prevent. `login/page.tsx` was corrected by the same PR and
-#: had no protection at all, so restoring its old wording would have passed
-#: clean. Anything corrected for D8 belongs here; if a file describes the money
+#: Derived from one list rather than assembled per check, because a per-check
+#: set drifts in two ways: a file referenced by the guard but left out of the
+#: scan (`principal.py` *implements* the verified human, so a reader landing
+#: there would take away the exact false conclusion the guard exists to
+#: prevent), and a corrected file with no protection at all (`login/page.tsx`),
+#: where restoring the old wording would pass clean. Anything corrected for D8 belongs here; if a file describes the money
 #: path and is missing, that is the defect.
 LIVE_SURFACES = [
     ARCHITECTURE,
@@ -75,7 +74,7 @@ _HISTORICAL = re.compile(
     r"the difference is the work|as of \d{4}-\d{2}-\d{2}|kept because|"
     # Each week's "What client handed over" block is a handover inventory: it
     # records the state the engagement started from, and is past by
-    # construction. Same allowance as the Week 8 status guard.
+    # construction. Same allowance as the roadmap status guards.
     r"what client handed over|"
     # Naming the defect an artefact closes is not asserting it. "Closes: D8 --
     # fee waiver / balance adjust is available to any authenticated user, with
@@ -144,7 +143,7 @@ _CLOSURE = re.compile(
 def _scopes(text: str, markdown: bool = True):
     """Claim scopes: a table row or list item alone, other prose by paragraph.
 
-    Same rule as the Week 7/8/9 status guards. A marker three rows away is not a
+    Same rule as the roadmap status guards. A marker three rows away is not a
     marker on this row, and these documents put a 2026 finding in one cell and
     its correction in the next.
 
@@ -306,7 +305,7 @@ def test_the_servicing_docstring_states_the_controls_positively():
 
     A file that legitimately quotes its own superseded wording carries a
     historical marker, and that marker then shelters anything else in the same
-    scope -- the mutation lesson from the Week 8 guard. So the docstring must
+    scope. So the docstring must
     also say, positively, that the human and the second approver exist.
     """
     doc = _flat(_read(SERVICING_MAIN)[:4000])
