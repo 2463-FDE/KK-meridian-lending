@@ -12,8 +12,8 @@ export default function Home() {
             README.md: "Treat any prior claim of PCI-DSS compliance for this
             codebase as false", and SOX/ECOA process claims beyond the decision
             audit trail are unverified. ARCHITECTURE.md: nothing here asserts
-            regulatory compliance. docs/presentations/2026-08-25-agentic-client-
-            handoff.md lists 'PCI compliant' under "Claims we must NOT make".
+            regulatory compliance. db/tests/test_forbidden_claims_stay_off_live_surfaces.py
+            lists 'PCI compliant' among the claims no live screen may make bare.
 
             The invariant, pinned by frontend/e2e/inherited-compliance-claims.spec.ts:
             if the claims are shown, the qualifier is shown with them. Removing

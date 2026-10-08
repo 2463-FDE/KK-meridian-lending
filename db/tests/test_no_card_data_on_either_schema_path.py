@@ -1,10 +1,9 @@
 """Neither a fresh database nor a fully migrated one has a PAN or CVV column.
 
-Slide 2 of `docs/presentations/2026-08-12-three-slides.md` claims the removal was
-verified on both. Two earlier attempts at that evidence were not good enough, and
-the second one is the instructive failure:
+The project claims the removal was verified on both. Two earlier attempts at
+that evidence were not good enough, and the second one is the instructive failure:
 
-  - the deck first cited the migration, the init schema and a legacy-path test.
+  - the first evidence was the migration, the init schema and a legacy-path test.
     None of them compared the two paths, and the comparison *was* the claim;
   - the test written to fix that built the migrated schema from a hand-written
     `payments` table and wrapped the migration chain in `except psycopg2.Error:
