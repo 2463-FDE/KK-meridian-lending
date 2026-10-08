@@ -1,10 +1,9 @@
 """The agent runtime for the underwriting summary.
 
-The client rejected the previous shape explicitly: application code retrieves,
-stuffs the text into a prompt, makes one model call. That is preloaded
-retrieval wearing an agent label. What has to be true instead is that **the
-model decides to call the tool and the runtime executes it**, and that the
-accepted summary is refused if that never happened.
+Application code that retrieves, stuffs the text into a prompt and makes one
+model call is preloaded retrieval wearing an agent label. What has to be true
+instead is that **the model decides to call the tool and the runtime executes
+it**, and that the accepted summary is refused if that never happened.
 
 So this module owns two things and no more:
 
@@ -20,9 +19,9 @@ in the message history can only exist because the runtime executed a tool call
 the model emitted.
 
 The existing application, financial and macro boundaries are NOT tools. The
-client asked for one policy/document tool; turning working server-side
-retrieval into extra tool calls would inflate the demo and weaken the
-guarantees those boundaries already carry (macro fails open, financials are
+agent gets one bounded policy/document tool; turning working server-side
+retrieval into extra tool calls would widen what the model can reach and weaken
+the guarantees those boundaries already carry (macro fails open, financials are
 authenticated server-side). They stay where they are.
 """
 from __future__ import annotations
@@ -59,8 +58,8 @@ class AgentUnavailable(AgentError):
     """The agent runtime could not be constructed.
 
     Raised rather than falling back to a direct model call. A silent fallback
-    would turn the demonstration into the prompt-to-text architecture the client
-    rejected, and nothing downstream would show that it had happened.
+    would turn the agent into a plain prompt-to-text call, and nothing
+    downstream would show that it had happened.
     """
 
 
@@ -68,8 +67,7 @@ class AgentStepBudgetExceeded(AgentError):
     """The agent looped past its step budget.
 
     Refused rather than retried or allowed to continue: an autonomous loop with
-    no ceiling is an open line to a paid API, and the client named usage limits
-    explicitly.
+    no ceiling is an open line to a paid API, so usage is bounded explicitly.
     """
 
 
@@ -111,9 +109,9 @@ class AgentTimeout(AgentError):
 class AgentProviderError(AgentError):
     """The provider rejected the call or failed in a way we do not retry.
 
-    Carries the exception CLASS and nothing else. Provider error bodies are on
-    the client's prohibited-retention list and can quote the request, so the raw
-    text is never put in the message, the log or the HTTP response.
+    Carries the exception CLASS and nothing else. Raw provider error bodies are
+    prohibited from retention and can quote the request, so the raw text is
+    never put in the message, the log or the HTTP response.
     """
 
 
@@ -178,24 +176,21 @@ def tracing_is_requested() -> bool:
 def suppressed_tracing():
     """Run the agent with LangSmith tracing off, whatever the environment says.
 
-    **Interim measure, and deliberately blunt.** Measured on this branch: with
-    `LANGSMITH_TRACING=true` and nothing else changed, one agent run posts ~31KB
-    to the LangSmith endpoint containing the user prompt, the system prompt, the
-    tool query and the retrieved policy text -- four of the categories the client
-    put on the prohibited-retention list. That is the default behaviour of the
+    **Deliberately blunt.** With `LANGSMITH_TRACING=true` and nothing else
+    changed, one agent run posts ~31KB to the LangSmith endpoint containing the
+    user prompt, the system prompt, the tool query and the retrieved policy text
+    -- four categories that must never be retained. That is the default behaviour of the
     framework, not a bug in this code, and no amount of documentation prevents
     someone from setting the variable.
 
-    `LANGSMITH_HIDE_INPUTS`/`HIDE_OUTPUTS` were measured too and do suppress
-    those four, leaving ~17KB of structural metadata. They are NOT used here,
-    because "the remaining 17KB is safe" is a claim about payloads this branch
-    has not enumerated -- provider error bodies in particular are on the
-    prohibited list and do not appear on a happy path. Designing and proving a
-    redacting emitter is PR B's entire job.
+    `LANGSMITH_HIDE_INPUTS`/`HIDE_OUTPUTS` do suppress those four, leaving
+    ~17KB of structural metadata. They are NOT used here, because "the remaining
+    17KB is safe" is a claim about payloads nobody has enumerated -- provider
+    error bodies in particular are prohibited and do not appear on a happy path.
 
-    So the interim guarantee is the one that needs no such claim: the agent path
-    transmits nothing. Measured at 0 bytes. PR B replaces this with the
-    privacy-safe trace rather than loosening it.
+    So the guarantee here is the one that needs no such claim: the framework
+    transmits nothing from the agent path (0 bytes). The trace that does reach
+    LangSmith is built separately by `app/trace.py` from allowlisted metadata.
     """
     try:
         from langsmith.run_helpers import tracing_context
@@ -361,7 +356,7 @@ def policy_evidence_status(state: Any, tool_name: str = TOOL_NAME) -> str:
 
     Returns the strongest status across all calls: a model that misses once and
     then retrieves successfully HAS consulted policy. Categorical by design --
-    this is the value the trace records (PR B).
+    this is the value the trace records.
     """
     best = "absent"
     for message in tool_messages(state):
@@ -429,8 +424,8 @@ def _as_agent_error(exc: BaseException, stage: str = "invoke") -> AgentError:
 
     **The message is built from the exception's class name only.** Provider
     error bodies can quote the request that caused them -- which on this path is
-    the application prompt -- and raw provider errors are on the client's
-    prohibited-retention list. `str(exc)` therefore never appears in the
+    the application prompt -- and raw provider errors are prohibited from
+    retention. `str(exc)` therefore never appears in the
     message, the log line or the HTTP response.
     """
     if isinstance(exc, AgentError):
