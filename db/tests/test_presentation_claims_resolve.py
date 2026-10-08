@@ -5,10 +5,17 @@ So the rule is stricter than for prose: a cited file either exists on this branc
 or the slide says explicitly that it is a draft on an open PR.
 
 The failure this prevents is specific and was live in the first version: slide 1
-cited `specs/0002` as though the specification were part of the system. It is a
-draft on PR #28. Presenting proposed work as landed is the same defect as a policy
-publishing a rule nothing implements -- an audience cannot tell the difference,
-and here the audience is the client.
+cited `specs/0002` as though the specification were part of the system. At the
+time it was a draft on PR #28 (merged the next day, 2026-08-13). Presenting
+proposed work as landed is the same defect as a policy publishing a rule nothing
+implements -- an audience cannot tell the difference, and here the audience is
+the client.
+
+Dated decks are historical snapshots. The manifest therefore records two
+statuses per PR -- what it was when presented, and what it is now -- and the
+checks below use each for what it can prove: the presentation-time status keeps
+the slide honest about what it said, the current status decides what durable
+artifact must exist today.
 """
 import pathlib
 import re
@@ -129,13 +136,16 @@ MANIFEST = PRESENTATIONS / "evidence-manifest.md"
 
 
 def _manifest_rows():
+    """`status` is the CURRENT repository status; `presented` is the status on
+    the date of the deck that cited the PR."""
     rows = {}
     for line in MANIFEST.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"\|\s*#(\d+)\s*\|\s*(\w+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$", line)
+        m = re.match(r"\|\s*#(\d+)\s*\|\s*(\w+)\s*\|\s*(\w+)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*$", line)
         if m:
-            number, status, artifact, commit = m.groups()
+            number, presented, status, artifact, commit = m.groups()
             path = re.search(r"`([^`]+)`", artifact)
             rows[int(number)] = {
+                "presented": presented.lower(),
                 "status": status.lower(),
                 "artifact": path.group(1) if path else None,
                 "commit": (re.search(r"`([0-9a-f]{7,40})`", commit) or [None, None])[1],
@@ -212,16 +222,21 @@ def test_a_merged_pr_names_an_artifact_that_exists(pr):
 @pytest.mark.parametrize("deck,pr", _deck_prs(),
                          ids=lambda v: v.name if hasattr(v, "name") else v)
 def test_an_open_pr_is_labelled_open_in_the_deck(deck, pr):
-    """An open PR has no landed artifact, so the deck citing it must say so.
+    """A PR that was open when presented must still be labelled open on the slide.
+
+    Keyed on the PRESENTATION-TIME status, not the current one: a dated deck is a
+    snapshot, and once the PR merges the slide must not be retro-edited to read
+    as though it had always landed. The current status is reported in the
+    manifest and in the deck's historical banner instead.
 
     Per deck, not per PR number: a marker in one deck says nothing about what a
     reader of another deck can see.
     """
     row = _manifest_rows().get(pr) or {}
-    assert row.get("status") in MANIFEST_STATUSES, (
-        f"PR #{pr} has an unrecognised status {row.get('status')!r}"
+    assert row.get("presented") in MANIFEST_STATUSES, (
+        f"PR #{pr} has an unrecognised presentation-time status {row.get('presented')!r}"
     )
-    if row["status"] != "open":
+    if row["presented"] != "open":
         return
     context = " ".join(_line_context(deck, f"PR #{pr}"))
     assert any(m in context for m in OPEN_MARKERS), (
@@ -310,6 +325,14 @@ def test_every_manifest_status_is_recognised(pr):
     assert problem is None, problem
 
 
+@pytest.mark.parametrize("pr", sorted(_manifest_rows()))
+def test_every_presentation_time_status_is_recognised(pr):
+    presented = _manifest_rows()[pr].get("presented")
+    assert presented in MANIFEST_STATUSES, (
+        f"PR #{pr} has presentation-time status {presented!r}, which is not one "
+        f"of {list(MANIFEST_STATUSES)}")
+
+
 @pytest.mark.parametrize("status", ["landed", "merge", "closed", "verified",
                                     "specified", "draft", "", "MERGED?"])
 def test_an_unsupported_status_is_rejected(status):
@@ -343,14 +366,49 @@ def test_a_well_formed_row_is_accepted():
 def test_the_manifest_actually_uses_both_statuses():
     """Both branches of the vocabulary are exercised by real rows.
 
-    If every row were `merged`, the open-label check would never run against
-    anything and would be dead code reported as coverage.
+    Asserted on the presentation-time column, which is what the open-label check
+    reads: if every row there were `merged`, that check would never run against
+    anything and would be dead code reported as coverage. The current column may
+    legitimately be all `merged` once every cited PR has landed -- the open-row
+    rules for it are proved on synthetic rows above.
     """
-    statuses = {r["status"] for r in _manifest_rows().values()}
-    assert statuses == set(MANIFEST_STATUSES), (
-        f"the manifest uses {sorted(statuses)}; both {list(MANIFEST_STATUSES)} "
-        f"should appear or one of the checks is never exercised"
+    presented = {r["presented"] for r in _manifest_rows().values()}
+    assert presented == set(MANIFEST_STATUSES), (
+        f"the manifest's presentation-time column uses {sorted(presented)}; both "
+        f"{list(MANIFEST_STATUSES)} should appear or one of the checks is never "
+        f"exercised"
     )
+
+
+def test_a_pr_that_merged_after_its_deck_is_reported_as_merged_now():
+    """The stale-status finding: PR #28 merged on 2026-08-13, and the manifest
+    still listed it as open in its only status column. A reader of the manifest
+    was told the maker-checker specification had not landed when it had.
+
+    Pinned to #28 because that is the row that was wrong; the general rule is
+    the artifact check, which a currently merged row cannot skip."""
+    row = _manifest_rows().get(28)
+    assert row, "PR #28 is no longer in the manifest"
+    assert row["presented"] == "open", (
+        "the 2026-08-12 deck presented PR #28 as open; the manifest must keep "
+        "recording what the deck said")
+    assert row["status"] == "merged", "PR #28 is merged; the manifest must say so"
+    assert row["artifact"] and (REPO / row["artifact"]).exists()
+
+
+#: Dated decks, i.e. every presentation except the manifest itself.
+DATED_DECKS = sorted(PRESENTATIONS.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md"))
+
+
+@pytest.mark.parametrize("deck", DATED_DECKS, ids=lambda d: d.name)
+def test_every_dated_deck_says_it_is_a_historical_snapshot(deck):
+    """A deck's statuses are true as of its date and go stale afterwards. The
+    banner tells a reader that before they trust any status on the page."""
+    head = "\n".join(deck.read_text(encoding="utf-8").splitlines()[:8])
+    assert "Historical snapshot" in head, (
+        f"{deck.name} does not open with the historical-snapshot banner")
+    assert deck.name[:10] in head, (
+        f"{deck.name}'s banner does not name the presentation date")
 
 
 def test_an_open_row_may_not_name_an_artifact():

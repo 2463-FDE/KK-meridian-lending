@@ -1,5 +1,11 @@
 # Meridian Lending — Roadmap
 
+> **Historical training-engagement record.** This roadmap tracked the weekly
+> training engagement this project grew out of. Its CLIENT-/VENDOR-/OPS-BLOCKED
+> labels and week references reflect that engagement's client and vendor roles;
+> it is not the current project status. For current status, see the
+> [README](../README.md), [ARCHITECTURE.md](../ARCHITECTURE.md) and the source.
+
 What the client asked for, what was actually found, what got fixed, why it
 mattered. One row per finding.
 
@@ -537,7 +543,8 @@ past decisions. Handed over `kb_dump/` "for context." One officer asked "why
 was app #6012 denied?" and got nothing back. Keep cost low (Pro-plan budget).
 
 **What client handed over:** `policies/` (clean, embeddable). `kb_dump/
-applications.jsonl` — raw `ssn`, `pan`, `dob` on every record, unredacted. A
+applications.jsonl` (now the synthetic fixture
+`fixtures/synthetic/pii-redaction/applications.jsonl`) — raw `ssn`, `pan`, `dob` on every record, unredacted. A
 `decisions` table that's `(app_id, outcome)` only.
 
 | # | Domain | What needed fixing | Fixed? | Why it mattered |

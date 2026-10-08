@@ -1,5 +1,9 @@
 # Agentic underwriting — client handoff
 
+> **Historical snapshot** — status reflects the presentation date (2026-08-25).
+> For current implementation status, see the [README](../../README.md),
+> [ARCHITECTURE.md](../../ARCHITECTURE.md) and the current source.
+
 **Sections 1-3 recorded at main:** `aa9fc34212bc29c361513d088a2752cb6812ee35`
 (which was `main` on 2026-08-25)
 **Section 3a re-recorded at main:** `21a8a139eb6c04b70d5c5264db25ba545ea3edfb`

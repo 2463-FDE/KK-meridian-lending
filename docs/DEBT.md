@@ -1,5 +1,12 @@
 # Debt register
 
+> **Historical training-engagement record.** This register was kept during the
+> training engagement this project grew out of. Its CLIENT-/VENDOR-/OPS-BLOCKED
+> labels and week references reflect that engagement's client and vendor roles;
+> it is not the current project status. For current status, see the
+> [README](../README.md), [ARCHITECTURE.md](../ARCHITECTURE.md) and the source.
+> Entry IDs (`D<n>`, `RF-<n>`, `SEC-<n>`) remain the lookup for citations in code.
+
 The `D`- and `RF`- numbers cited throughout this repository's code comments,
 ADRs and runbook. They were being cited before they were written down anywhere,
 so a reader hitting "(debt D7)" in a source file had no way to find out what D7

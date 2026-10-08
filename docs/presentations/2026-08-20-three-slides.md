@@ -1,5 +1,9 @@
 # Meridian Lending — Four Statuses, Said Separately
 
+> **Historical snapshot** — status reflects the presentation date (2026-08-20).
+> For current implementation status, see the [README](../../README.md),
+> [ARCHITECTURE.md](../../ARCHITECTURE.md) and the current source.
+
 Three slides, regenerated from the repository. Bullets are what goes on screen.
 Notes are what I say.
 

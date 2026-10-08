@@ -1,7 +1,8 @@
 """Tests for the Week 2 RAG retrieval eval harness.
 
 Covers the two things the deliverable has to prove:
-  (a) kb_dump/applications.jsonl is unsafe to embed raw (PII check)
+  (a) a raw application export is unsafe to embed raw (PII check), proved on the
+      synthetic fixture fixtures/synthetic/pii-redaction/applications.jsonl
   (b) retrieval against the policy corpus is accurate, including on the two cases
       where the correct answer is "no answer" -- classified by classify_answerable()
       against what retrieve() actually returns, not by checking corpus-wide ground

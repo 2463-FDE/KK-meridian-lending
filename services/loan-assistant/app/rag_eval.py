@@ -20,8 +20,11 @@ results:
       version passed it in directly, which meant the gate could only ever prove
       itself against a fact it already knew -- see the "review found this" note
       on classify_answerable).
-  (b) kb_dump/applications.jsonl carries raw PII and must never enter this corpus,
-      confirmed by an offline regex check (never an LLM call, per the quota note)
+  (b) a raw application export ("KB dump") carries PII and must never enter this
+      corpus, confirmed by an offline regex check (never an LLM call, per the quota
+      note). The export is represented by the synthetic negative fixture
+      fixtures/synthetic/pii-redaction/applications.jsonl (fictional identities,
+      reserved-range SSNs, published test card numbers).
 
 See adr/0005-rag-corpus-hygiene.md for the corpus hygiene decision this enforces.
 """
@@ -33,7 +36,8 @@ from .embeddings import LocalTfidfEmbedder, apply_idf, build_idf, cosine_similar
 from .redactor import redact_dict
 
 KB_DUMP_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "kb_dump", "applications.jsonl"
+    os.path.dirname(__file__), "..", "..", "..",
+    "fixtures", "synthetic", "pii-redaction", "applications.jsonl",
 )
 
 # Fixed eval query set. grounding_term documents the specific fact that *should*
@@ -184,7 +188,7 @@ def run_eval() -> dict:
     pii_finding = None
     if kb_pii.get("checked") and not kb_pii.get("safe_to_embed_raw"):
         pii_finding = (
-            f"kb_dump/applications.jsonl contains unredacted PII in fields: "
+            f"The raw application export (KB dump) contains unredacted PII in fields: "
             f"{kb_pii['pii_fields_found']}. This file must never be embedded raw."
         )
 

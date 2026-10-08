@@ -6,7 +6,7 @@
 ## Local / dev bring-up
 
 ```bash
-cp .env.example .env     # NOTE: a populated .env is already committed, so this is optional
+make bootstrap           # creates .env from .env.example and generates the local secrets (.env is gitignored)
 make up                  # docker compose up -d --build (postgres, redis, services, frontend)
 make logs                # tail all services
 make ps                  # container status
@@ -27,6 +27,48 @@ To wipe and re-seed from scratch:
 ```bash
 docker compose down -v && make up
 ```
+
+## LangSmith tracing (optional)
+
+Off unless `LANGSMITH_TRACING` and `LANGSMITH_API_KEY` are set. When on, the only
+thing sent is the underwriting agent's privacy-safe trace: stage names, tool name,
+retrieval hit/miss and counts, policy document names and content-hash versions,
+citation ids, provider and model family, which validators ran and fired, refusal
+class, HTTP status and durations. Its allow-list is structural -- an unreviewed key
+or value is dropped, not sanitised. No path sends prompts, completions, queries,
+retrieved text, application data or identifiers.
+
+Why it is built this way: the gates on what a summary *returns* do not cover what a
+tracer serialises, which is the whole run. Measured before the fixes, one agent run
+posted ~31KB including the prompts and retrieved policy text, a wrapped policy-chat
+client posted the question even when the call failed, and the decision graph posted
+the SSN, bureau score and income. So:
+
+- the agent suppresses framework tracing (`suppressed_tracing()` in
+  `services/loan-assistant/app/agent.py`) and emits its own metadata-only trace
+  (`services/loan-assistant/app/trace.py`), asserted on the wire by
+  `services/loan-assistant/tests/test_trace_is_privacy_safe.py`;
+- the trace starts at the gateway after authentication, and the propagation
+  headers are stripped inbound so a caller cannot choose the context
+  (`services/gateway/app/agent_trace.py`);
+- policy chat no longer wraps its client for tracing
+  (`services/loan-assistant/tests/test_policy_chat_retains_nothing.py`);
+- decision-service and origination-service suppress ambient LangGraph tracing
+  (`services/decision-service/tests/test_the_decision_graph_transmits_nothing.py`,
+  `services/origination-service/tests/test_the_auto_offer_graph_transmits_nothing.py`).
+
+**If you add a LangChain or LangGraph call site, it traces its full state by
+default.** Both earlier exposures happened in code that never named LangSmith.
+Suppress it or emit a categorical trace deliberately.
+
+## TLS-inspecting proxies
+
+A proxy that re-signs HTTPS makes outbound LLM calls fail with
+`CERTIFICATE_VERIFY_FAILED`. Run `python scripts/make_ca_bundle.py`, which writes a
+combined bundle into `./certs/` (gitignored), then set both `SSL_CERT_FILE` (read by
+httpx) and `REQUESTS_CA_BUNDLE` (read by langsmith) in `.env.loan-assistant.local`.
+Not in `.env`: only loan-assistant mounts `./certs`, so the shared file would break
+every other service's outbound calls.
 
 ## Demo logins
 

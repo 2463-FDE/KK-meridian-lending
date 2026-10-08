@@ -1,7 +1,8 @@
 """Corpus loading + chunking for the policy RAG index.
 
-Only `policies/*.md` is eligible for the corpus. `kb_dump/applications.jsonl` must
-never be embedded raw -- it carries unredacted SSN/PAN. See adr/0005 for the corpus
+Only `policies/*.md` is eligible for the corpus. A raw application export ("KB
+dump"; synthetic fixture at `fixtures/synthetic/pii-redaction/applications.jsonl`)
+must never be embedded raw -- it carries unredacted SSN/PAN. See adr/0005 for the corpus
 hygiene decision and rag_eval.check_kb_dump_pii() for the offline check that proves it.
 
 Every chunk is redaction-checked before being added -- if the redactor ever flags a
