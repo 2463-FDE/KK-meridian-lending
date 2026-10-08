@@ -2,7 +2,7 @@
 
 A funded loan is boarded to servicing by a DIRECT INSERT into the servicing tables
 (`loans`, `balances`) from this origination code path. No boarding API, no event,
-no contract. (brownfield seam #1 — see docs/architecture.md, ADR 0002)
+no contract. (brownfield seam #1 — see docs/history/inherited-architecture.md, ADR 0002)
 """
 import hashlib
 
