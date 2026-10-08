@@ -1,5 +1,13 @@
 # Meridian Lending — From Findings to Verifiable Controls
 
+> **Historical snapshot** — status reflects the presentation date (2026-08-12).
+> For current implementation status, see the [README](../../README.md),
+> [ARCHITECTURE.md](../../ARCHITECTURE.md) and the current source.
+>
+> Since this date: PR #28 (spec 0002, maker-checker), shown below as open, was
+> merged on 2026-08-13 as `bdac3f69c`. The slides are left as presented; see
+> [evidence-manifest.md](evidence-manifest.md) for both statuses.
+
 Three slides. The bullets are what goes on screen; the notes are what I say.
 
 **Opening statement**

@@ -1,5 +1,11 @@
 # Meridian Lending — Roadmap
 
+> **Historical training-engagement record.** This roadmap tracked the weekly
+> training engagement this project grew out of. Its CLIENT-/VENDOR-/OPS-BLOCKED
+> labels and week references reflect that engagement's client and vendor roles;
+> it is not the current project status. For current status, see the
+> [README](../README.md), [ARCHITECTURE.md](../ARCHITECTURE.md) and the source.
+
 What the client asked for, what was actually found, what got fixed, why it
 mattered. One row per finding.
 
