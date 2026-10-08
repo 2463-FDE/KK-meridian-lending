@@ -26,6 +26,16 @@ Built and maintained by a team of Forward Deployed Engineers working as the in-h
 
 ## Architecture
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/meridian-architecture-dark.svg">
+    <img src="docs/meridian-architecture.svg" alt="Meridian Lending architecture: the Next.js portal calls the gateway BFF on port 8000, which routes /los to origination-service, /assistant to the loan-assistant and /lss to servicing-service. Origination calls kyc, decision and disclosure services over synchronous HTTP. payment-service applies payments to servicing. The loan-assistant is staff-only and read-only, has no database connection and reads application data from origination over HTTP. PostgreSQL is shared by seven services; Redis holds gateway sessions and rate limits." width="1000">
+  </picture>
+</p>
+
+<details>
+<summary>Text version</summary>
+
 ```
  Next.js portal ─────► gateway (BFF)  :8000   session auth, roles, rate limiting
                            │  /auth · /los · /lss · /kyc · /assistant
@@ -43,6 +53,8 @@ Built and maintained by a team of Forward Deployed Engineers working as the in-h
 
  Postgres :5432 (shared by seven services) · Redis :6379 (sessions)
 ```
+
+</details>
 
 The platform now runs **eight** backend services, including the gateway. Seven of them share one PostgreSQL schema under an explicit decision ([ADR 0002](adr/0002-single-database-shared-schema.md)). `loan-assistant` is the exception: it holds no database connection and reads application data from origination-service over HTTP. The `reconciliation` container in `docker-compose.yml` is the servicing image running a scheduled job, not a ninth service. The decomposition is partial; remaining debt is tracked in [`docs/DEBT.md`](docs/DEBT.md).
 

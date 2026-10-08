@@ -133,9 +133,29 @@ def _services_table_rows(text: str) -> set:
 
 
 def _architecture_diagram(text: str) -> str:
-    """The fenced block under `## Architecture`."""
-    m = re.search(r"^## Architecture\s*\n+```(.*?)```", text, re.S | re.M)
+    """The fenced text diagram in the `## Architecture` section.
+
+    The section leads with the rendered SVG and keeps this text version in a
+    collapsible block, so look anywhere in the section, not only directly
+    under the heading.
+    """
+    section = re.search(r"^## Architecture\s*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    if not section:
+        return ""
+    m = re.search(r"```(.*?)```", section.group(1), re.S)
     return m.group(1) if m else ""
+
+
+#: The rendered diagrams README shows (light and dark GitHub themes).
+ARCHITECTURE_SVGS = (REPO / "docs" / "meridian-architecture.svg",
+                     REPO / "docs" / "meridian-architecture-dark.svg")
+
+
+def _svg_labels(path: pathlib.Path) -> str:
+    """The visible text of an SVG diagram, entities decoded, lower-cased."""
+    import html
+    texts = re.findall(r"<text[^>]*>(.*?)</text>", path.read_text(encoding="utf-8"), re.S)
+    return html.unescape(" ".join(texts)).lower()
 
 
 def test_the_services_table_lists_every_service():
@@ -186,6 +206,23 @@ def test_the_gateway_routes_in_the_diagram_match_the_gateway():
     assert missing == [], (
         f"the gateway proxies {missing} but the diagram's route list does not "
         f"show them")
+
+
+@pytest.mark.parametrize("svg", ARCHITECTURE_SVGS, ids=lambda p: p.name)
+def test_the_rendered_architecture_diagram_matches_the_repository(svg):
+    """The SVG is what most readers actually see, so it makes the same two
+    claims as the text version and is held to both: every backend service is
+    drawn, and the gateway box lists every route prefix the gateway proxies."""
+    assert svg.is_file(), f"README shows {svg.name}, which is missing"
+    labels = _svg_labels(svg)
+
+    gateway = (REPO / "services" / "gateway" / "app" / "main.py").read_text(encoding="utf-8")
+    prefixes = set(re.findall(r'@app\.api_route\("/([a-z-]+)/\{path:path\}"', gateway))
+
+    missing_services = sorted(s for s in backend_services() if s not in labels)
+    missing_routes = sorted(p for p in prefixes if f"/{p}" not in labels)
+    assert missing_services == [], f"{svg.name} omits {missing_services}"
+    assert missing_routes == [], f"{svg.name}'s gateway box omits {missing_routes}"
 
 
 def test_the_roadmap_does_not_call_maker_checker_unstarted():
