@@ -18,8 +18,14 @@ else.
 `kb_dump/applications.jsonl` (6 records) carries raw `ssn` and `pan` fields,
 unredacted, on every record. `decisions` (`db/init/001_schema.sql`) is `(app_id,
 outcome)` — no reason, no score, no timestamp, for any application, ever (RF-18).
-Application `#6012` (Travis Booker, `deny`) exists in the JSONL with no explanation
+Application `#6012` (`deny`) exists in the JSONL with no explanation
 field anywhere in the system.
+
+> **Fixture note (2026-10-07).** The handed-over dump is kept only as the negative
+> fixture for the PII gate, now at `fixtures/synthetic/pii-redaction/applications.jsonl`,
+> with its identities replaced by obviously fictional values (placeholder names,
+> SSNs in the never-issued `900` area, published test card numbers). Record count,
+> app ids and the `ssn`/`pan` fields are unchanged, so the gate still fires.
 
 ## Decision
 
