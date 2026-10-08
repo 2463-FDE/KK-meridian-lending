@@ -123,21 +123,9 @@ Run the service suites locally with `make test`.
 | Operations | Docker Compose, Prometheus, Grafana, structured logging |
 | Quality | pytest, Playwright, GitHub Actions, gitleaks, pip-audit, npm audit |
 
-## Production Deployment Considerations
-
-This section describes a **reference production topology and deployment hardening path**. It is not deployed, and this repository contains no infrastructure for it.
-
-- HTTPS ingress terminated at a load balancer or reverse proxy in front of the portal and gateway
-- Backend services kept on a private network with no public addresses, as the Compose network does today
-- Managed PostgreSQL and Redis in place of the Compose containers
-- A secrets manager for the internal service token, principal signing key and model credentials
-- Workload identity or per-service credentials for service-to-service authentication, in place of one shared token
-- Encrypted service-to-service traffic where the environment requires it
-- Centralized logs, metrics and traces collected from every service
-
 ## Project scope
 
-A team Forward Deployed Engineering engagement on an inherited codebase; ADRs record who decided what. It runs locally with synthetic data and mocked external services: no real applicant data, no real credit bureau, no card rails, and no production, regulatory, PCI-DSS or other compliance claim. Naming a regulation (TILA, ECOA/Reg B, PCI-DSS) identifies the rule a control is modelled on. Status labels used across the docs are defined in [ARCHITECTURE.md](ARCHITECTURE.md#status-legend).
+A brownfield Forward Deployed Engineering engagement on an inherited consumer-lending platform; it runs locally with synthetic lending data and simulated integrations (no real applicant data, credit bureau or card rails), and no production, regulatory, PCI-DSS or other compliance certification is claimed. Naming a regulation (TILA, ECOA/Reg B, PCI-DSS) identifies the rule a control is modelled on. The repository models the application architecture and local service boundaries; the controls a production deployment would add are listed in [ARCHITECTURE.md](ARCHITECTURE.md#deployment-considerations). Status labels used across the docs are defined in [ARCHITECTURE.md](ARCHITECTURE.md#status-legend).
 
 ## Run locally
 
@@ -165,4 +153,4 @@ Synthetic staff and borrower accounts are seeded for local testing; the demo acc
 | [`docs/runbook.md`](docs/runbook.md) | Operating and local-development guide |
 | [`docs/diagrams/generate_diagrams.py`](docs/diagrams/generate_diagrams.py) | Generator for the architecture diagram |
 
-**History.** [`docs/history/inherited-architecture.md`](docs/history/inherited-architecture.md) is the architecture baseline reconstructed when the codebase was inherited. [`docs/DEBT.md`](docs/DEBT.md) (the debt register that `D`/`RF`/`SEC` IDs in code comments point to), [`docs/ROADMAP.md`](docs/ROADMAP.md) and the dated decks in [`docs/presentations/`](docs/presentations/) are engagement records; their status labels reflect that engagement.
+**History.** [`docs/history/inherited-architecture.md`](docs/history/inherited-architecture.md) is the architecture baseline reconstructed when the codebase was inherited, and [`docs/history/architecture-changelog.md`](docs/history/architecture-changelog.md) records the corrections and superseded designs behind the current architecture. [`docs/DEBT.md`](docs/DEBT.md) (the debt register that `D`/`RF`/`SEC` IDs in code comments point to), [`docs/ROADMAP.md`](docs/ROADMAP.md) and the dated decks in [`docs/presentations/`](docs/presentations/) are engagement records; their status labels reflect that engagement.
