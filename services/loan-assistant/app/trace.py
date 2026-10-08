@@ -1,15 +1,14 @@
 """A privacy-safe trace of the underwriting agent, and nothing else.
 
-The client's requirement has two halves and the second is the hard one: a trace
-that runs from the authenticated request through the agent's decisions, the
+The requirement has two halves and the second is the hard one: a trace that runs
+from the authenticated request through the agent's decisions, the
 retrieval outcome, the model call, deterministic validation and the final
 outcome -- carrying **categorical and provenance metadata only**. Prompts, model
 responses, queries, retrieved text, application data, identifiers, credentials,
 raw provider errors and raw tool payloads must never be retained.
 
 **Why this emits its own runs instead of letting the framework trace.**
-Measured on PR #63: with `LANGSMITH_TRACING=true` and nothing else changed, one
-agent run posts ~31KB containing the user prompt, the system prompt, the tool
+With `LANGSMITH_TRACING=true` and nothing else changed, one agent run posts ~31KB containing the user prompt, the system prompt, the tool
 query and the retrieved policy text. That is what the framework does by default,
 and `agent.suppressed_tracing()` exists to stop it. Turning it back on and then
 filtering would mean the safe path depends on a redactor keeping up with
@@ -27,20 +26,15 @@ scrubber removes what it recognises; this admits only what it recognises, so a
 field added carelessly does not travel -- it raises in tests and is dropped in
 production.
 
-**Where the trace actually starts, stated precisely.** The client asked for
-"UI/gateway entry through ... final outcome", and this used to fall one hop
-short: the trace opened in loan-assistant's summary route, while the gateway --
-where the session is resolved and the staff check happens -- was outside it. That
-gap is now closed from the other end. `gateway/app/agent_trace.py` opens a
-`gateway_entry` run after it authorises the caller and forwards the context on
-LangSmith's two propagation headers; `_inbound_parent` below joins it, so these
-spans attach beneath the authenticated entry point.
+**Where the trace starts, stated precisely.** The trace covers gateway entry
+through the final outcome. `gateway/app/agent_trace.py` opens a `gateway_entry`
+run after it authorises the caller -- where the session is resolved and the
+staff check happens -- and forwards the context on LangSmith's two propagation
+headers; `_inbound_parent` below joins it, so these spans attach beneath the
+authenticated entry point.
 
-The stage names did not change and `request` still means what it said: this
-service's own ingress. It is now the second stage rather than the first, which is
-the honest shape -- the gateway's run is the one that describes the entry, and
-renaming this span `gateway_entry` would have relabelled the gap instead of
-closing it.
+`request` means this service's own ingress, and it is the second stage rather
+than the first: the gateway's run is the one that describes the entry.
 
 **The parent context is server-minted, never caller-chosen.** The gateway strips
 inbound copies of both propagation headers before proxying, and `_inbound_parent`
@@ -52,19 +46,15 @@ put text into these spans from outside the allow-list. See `_inbound_parent`.
 **On identifiers.** The prohibited list includes identifiers, and every run here
 carries a `trace_id` and per-span UUIDs. Those are generated in this process for
 this request and refer to nothing outside it -- they are not the applicant, the
-application, the user or the session. What the list forbids is client and
+application, the user or the session. What the list forbids is customer and
 application identifiers, and none of those travel: the application id is not
 recorded anywhere, and the caller appears only as a role. A trace with no id is
 not a trace, so the distinction is drawn deliberately rather than by omission.
 
 **What this module deliberately does NOT do.** It does not trace the policy-chat
-path, and it never did. This paragraph used to record that as an open exposure --
-policy chat and decision-service both traced their content in full when
-`LANGSMITH_TRACING` was set -- and both are now closed, elsewhere and by
-different means: policy chat by removing the client wrapper that recorded its
-prompts (`llm_client.make_client`), and the LangGraph services by suppressing
-ambient tracing around the graph run. Neither is this module's job, which is why
-they were fixed where they live rather than absorbed into here.
+path or the LangGraph services. Those are made safe where they live: policy chat
+has no wrapper that records its prompts (`llm_client.make_client`), and the
+LangGraph services suppress ambient tracing around the graph run.
 
 The distinction still matters for anyone extending this: a path is not safe
 because this module exists. It is safe because it emits nothing, or because
@@ -85,9 +75,9 @@ from . import config
 
 log = logging.getLogger("loan-assistant.trace")
 
-#: The stages the client named, in order. A stage outside this set is a
-#: programming error rather than something to pass through -- the trace's shape
-#: is part of what was agreed, not an emergent property of where calls happen.
+#: The trace's stages, in order. A stage outside this set is a programming error
+#: rather than something to pass through -- the trace's shape is part of the
+#: contract, not an emergent property of where calls happen.
 STAGES = (
     "request",            # authenticated entry at the API boundary
     "agent_run",          # the LangChain runtime as a whole
@@ -136,11 +126,11 @@ VOCABULARIES = {
     "validators_triggered": {"macro_contradiction", "risk_classification", "dti_claim"},
 }
 
-#: `region` is AWS infrastructure, not client data, but it is still matched
+#: `region` is AWS infrastructure, not customer data, but it is still matched
 #: rather than trusted so a hostname or an ARN cannot arrive in its place.
 _REGION_RE = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
 
-#: Policy-corpus provenance. These identify a document in the client's OWN
+#: Policy-corpus provenance. These identify a document in the lender's OWN
 #: published policy, never an applicant: a filename from the tool's allowlist,
 #: a content hash, or `chunk_id (sha256:...)`. Constrained by shape so a
 #: retrieved excerpt cannot be posted as a "citation".
@@ -313,17 +303,12 @@ class SummaryTrace:
     def _span_payload(span) -> dict:
         """One span, with its window NORMALISED here rather than downstream.
 
-        `emit` used to clamp an inverted window when it built the child run,
-        and the ROOT still received `outputs=payload` carrying the original
-        `ended_at` and a negative `duration_ms`. So the emitted trace could
-        still contain a negative duration -- the exact defect this module was
-        being changed to remove -- and the root's outputs disagreed with the
-        child run times that had been clamped. Raised in review as
-        TRC-NEG-ROOT.
-
-        Normalising at the single point where the payload is built means the
-        children and the root cannot disagree, because they read the same
-        values. `emit` no longer clamps anything.
+        Clamping an inverted window only when building the child run would leave
+        the ROOT's `outputs=payload` carrying the original `ended_at` and a
+        negative `duration_ms`, so the root would disagree with its children
+        (TRC-NEG-ROOT). Normalising at the single point where the payload is
+        built means the children and the root read the same values. `emit`
+        clamps nothing.
 
         A stage with no recorded end takes its OWN start, never the root's: a
         zero-length stage is zero, and falling back to the root's clock is what
@@ -542,7 +527,7 @@ def emit(trace: SummaryTrace) -> None:
                      "tracing_mode": "privacy_safe_categorical"}
 
     # `RunTree` rather than hand-built `create_run` calls, because the parenting
-    # is no longer local. A distributed child needs its trace id and its
+    # is not local. A distributed child needs its trace id and its
     # dotted_order derived from the parent's, and those are the SDK's to compute
     # -- deriving them here would be inventing a wire contract the SDK already
     # documents (`from_headers` / `create_child`).
@@ -569,23 +554,19 @@ def emit(trace: SummaryTrace) -> None:
     for span in payload["spans"]:
         # EACH SPAN'S OWN start and end, not the root's (TRC-02).
         #
-        # This used to pass `start_time=_dt(started)` -- the underwriting_summary
-        # start -- for every child, and then end each one at
-        # `started + duration_ms`. Two things went wrong with that. The children
-        # all claimed to begin at the same instant, so per-stage timing was
-        # unreadable; and because the SDK stamps a child's start when it is
-        # created, the explicit end computed from the ROOT's clock landed BEFORE
-        # it. Observed in LangSmith: every child of one summary showed
-        # -14.73s -- a uniform negative equal to the request's own elapsed time,
-        # on a request that took ~13.9s.
+        # Passing the root's start (`start_time=_dt(started)`) for every child
+        # and ending each at `started + duration_ms` would make every child
+        # claim the same start, so per-stage timing would be unreadable; and
+        # because the SDK stamps a child's start when it is created, an end
+        # computed from the ROOT's clock would land BEFORE it, producing a
+        # negative duration equal to the request's own elapsed time.
         #
         # A duration cannot be negative, so a trace showing one is not a slow
         # trace, it is a wrong one -- and the whole point of this module is that
         # what it emits can be trusted.
-        # Already normalised by `payload`, which is the only place that does it
-        # now. Clamping here as well is what let the root and the children
-        # disagree (TRC-NEG-ROOT): the child was corrected and the payload the
-        # root carries was not.
+        # Already normalised by `payload`, the only place that does it. Clamping
+        # here as well would let the root and the children disagree
+        # (TRC-NEG-ROOT).
         span_started = span["started_at"]
         span_ended = span["ended_at"]
         child = root.create_child(
