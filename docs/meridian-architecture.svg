@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1010" width="1400" height="1010" role="img" aria-label="Meridian Lending architecture: a Next.js portal calls the gateway BFF, which routes to origination, servicing, the loan assistant and payments. Origination calls KYC, decision and disclosure services over synchronous HTTP; payment applies payments to servicing; the loan assistant is staff-only, read-only and has no database connection. PostgreSQL is shared by seven services; Redis holds sessions.">
+<style>text{font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}</style>
+<rect width="1400" height="1010" fill="#ffffff"/>
+<rect x="60" y="40" width="300" height="110" rx="12" fill="#fafbff" stroke="#3f4ab8" stroke-width="2"/>
+<text x="210.0" y="90.0" font-size="18" font-weight="700" fill="#14213d" text-anchor="middle">Next.js portal</text>
+<text x="210.0" y="114.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">borrower and staff screens</text>
+<rect x="500" y="30" width="840" height="130" rx="12" fill="#fafbff" stroke="#3f4ab8" stroke-width="2"/>
+<text x="920.0" y="79.0" font-size="18" font-weight="700" fill="#3f4ab8" text-anchor="middle">Gateway (BFF)  :8000</text>
+<text x="920.0" y="103.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">session auth · roles · rate limiting</text>
+<text x="920.0" y="124.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">/auth · /los · /lss · /kyc · /assistant · /decision · /disclosure · /payments</text>
+<path d="M360.0,95.0 L487.0,95.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M500.0,95.0 L487.0,88.0 L487.0,102.0 z" fill="#3f4ab8"/>
+<text x="428" y="84" font-size="13.5" font-weight="600" fill="#3f4ab8" text-anchor="middle">HTTPS</text>
+<rect x="60" y="250" width="380" height="120" rx="12" fill="#f3f5fb" stroke="#3f4ab8" stroke-width="2"/>
+<text x="250.0" y="294.0" font-size="18" font-weight="700" fill="#14213d" text-anchor="middle">origination-service  :8001</text>
+<text x="250.0" y="318.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">intake + boarding orchestrator</text>
+<text x="250.0" y="339.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">system of record for decisions</text>
+<rect x="530" y="250" width="340" height="120" rx="12" fill="#eef7f1" stroke="#2e7d4f" stroke-width="2"/>
+<text x="700.0" y="294.0" font-size="18" font-weight="700" fill="#2e7d4f" text-anchor="middle">loan-assistant  :8007</text>
+<text x="700.0" y="318.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">staff-only RAG policy assistant</text>
+<text x="700.0" y="339.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">read-only · no database connection</text>
+<rect x="960" y="250" width="380" height="120" rx="12" fill="#f3f5fb" stroke="#3f4ab8" stroke-width="2"/>
+<text x="1150.0" y="294.0" font-size="18" font-weight="700" fill="#14213d" text-anchor="middle">servicing-service  :8002</text>
+<text x="1150.0" y="318.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">balances · ledger · maker-checker</text>
+<text x="1150.0" y="339.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">delinquency · reconciliation</text>
+<path d="M560.0,162.0 L560.0,205.0 L250.0,205.0 L250.0,237.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M250.0,250.0 L257.0,237.0 L243.0,237.0 z" fill="#3f4ab8"/>
+<text x="262" y="234" font-size="13.5" font-weight="600" fill="#3f4ab8" text-anchor="start">/los</text>
+<path d="M700.0,162.0 L700.0,237.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M700.0,250.0 L707.0,237.0 L693.0,237.0 z" fill="#3f4ab8"/>
+<text x="712" y="212" font-size="13.5" font-weight="600" fill="#3f4ab8" text-anchor="start">/assistant</text>
+<path d="M1150.0,162.0 L1150.0,237.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M1150.0,250.0 L1157.0,237.0 L1143.0,237.0 z" fill="#3f4ab8"/>
+<text x="1162" y="212" font-size="13.5" font-weight="600" fill="#3f4ab8" text-anchor="start">/lss</text>
+<path d="M528.0,312.0 L455.0,312.0" fill="none" stroke="#2e7d4f" stroke-width="2.5" stroke-dasharray="7 6"/>
+<path d="M442.0,312.0 L455.0,319.0 L455.0,305.0 z" fill="#2e7d4f"/>
+<text x="485" y="300" font-size="13" font-weight="600" fill="#2e7d4f" text-anchor="middle">reads</text>
+<text x="485" y="338" font-size="13" font-weight="600" fill="#2e7d4f" text-anchor="middle">HTTP</text>
+<rect x="60" y="430" width="380" height="330" rx="16" fill="#fafbff" stroke="#9aa3d9" stroke-width="2" stroke-dasharray="7 6"/>
+<text x="124" y="458" font-size="14.5" font-weight="700" fill="#3f4ab8" text-anchor="start">synchronous HTTP</text>
+<path d="M100,370 L100,695" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M100.0,517.0 L137.0,517.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M150.0,517.0 L137.0,510.0 L137.0,524.0 z" fill="#3f4ab8"/>
+<rect x="150" y="480" width="270" height="74" rx="12" fill="#f3f5fb" stroke="#3f4ab8" stroke-width="2"/>
+<text x="285.0" y="512.0" font-size="18" font-weight="700" fill="#14213d" text-anchor="middle">kyc-service  :8003</text>
+<text x="285.0" y="536.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">identity checks (CIP)</text>
+<path d="M100.0,607.0 L137.0,607.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M150.0,607.0 L137.0,600.0 L137.0,614.0 z" fill="#3f4ab8"/>
+<rect x="150" y="570" width="270" height="74" rx="12" fill="#f3f5fb" stroke="#3f4ab8" stroke-width="2"/>
+<text x="285.0" y="602.0" font-size="18" font-weight="700" fill="#14213d" text-anchor="middle">decision-service  :8004</text>
+<text x="285.0" y="626.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">credit scoring, compute only</text>
+<path d="M100.0,697.0 L137.0,697.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M150.0,697.0 L137.0,690.0 L137.0,704.0 z" fill="#3f4ab8"/>
+<rect x="150" y="660" width="270" height="74" rx="12" fill="#f3f5fb" stroke="#3f4ab8" stroke-width="2"/>
+<text x="285.0" y="692.0" font-size="18" font-weight="700" fill="#14213d" text-anchor="middle">disclosure-service  :8005</text>
+<text x="285.0" y="716.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">TILA offer · APR · schedule</text>
+<rect x="960" y="480" width="380" height="110" rx="12" fill="#f3f5fb" stroke="#3f4ab8" stroke-width="2"/>
+<text x="1150.0" y="519.0" font-size="18" font-weight="700" fill="#14213d" text-anchor="middle">payment-service  :8006</text>
+<text x="1150.0" y="543.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">tokenized capture · idempotency key</text>
+<text x="1150.0" y="564.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">via gateway /payments</text>
+<path d="M1150.0,480.0 L1150.0,383.0" fill="none" stroke="#3f4ab8" stroke-width="2.5"/>
+<path d="M1150.0,370.0 L1143.0,383.0 L1157.0,383.0 z" fill="#3f4ab8"/>
+<text x="1162" y="432" font-size="13.5" font-weight="600" fill="#3f4ab8" text-anchor="start">apply-payment</text>
+<rect x="60" y="820" width="1280" height="160" rx="16" fill="#eef6fb" stroke="#0b6f8a" stroke-width="2"/>
+<text x="84" y="850" font-size="15" font-weight="700" fill="#0b6f8a" text-anchor="start">Data</text>
+<rect x="110" y="868" width="620" height="92" rx="12" fill="#ffffff" stroke="#0b6f8a" stroke-width="2"/>
+<text x="420.0" y="909.0" font-size="18" font-weight="700" fill="#0b6f8a" text-anchor="middle">PostgreSQL 16  :5432</text>
+<text x="420.0" y="933.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">shared by seven services (ADR 0002)</text>
+<rect x="780" y="868" width="510" height="92" rx="12" fill="#ffffff" stroke="#0b6f8a" stroke-width="2"/>
+<text x="1035.0" y="909.0" font-size="18" font-weight="700" fill="#0b6f8a" text-anchor="middle">Redis  :6379</text>
+<text x="1035.0" y="933.0" font-size="14.5" font-weight="400" fill="#4b587c" text-anchor="middle">gateway sessions · rate limits</text>
+</svg>
