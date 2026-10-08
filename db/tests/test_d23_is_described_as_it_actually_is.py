@@ -291,7 +291,7 @@ def test_d23_names_both_client_blockers_and_neither_is_invented():
 #: Codex review of PR #157 called this out as the actual defect: the first sweep
 #: matched on wording, so each round of review found another site -- the
 #: function docstring, then `policies/fee_schedule.md`, then the module
-#: docstring and the client handoff deck, then the servicing tests a cutover
+#: docstring and the client handoff document, then the servicing tests a cutover
 #: engineer reads first. Sites of one claim were discovered one at a time
 #: because the search was for a sentence rather than for the places that can
 #: carry it.
@@ -299,7 +299,7 @@ def test_d23_names_both_client_blockers_and_neither_is_invented():
 #: Globs, so a new document or a new module cannot join the set silently.
 def _d23_read_paths():
     seen = []
-    for pattern in ("docs/*.md", "docs/presentations/*.md", "policies/*.md",
+    for pattern in ("docs/*.md", "policies/*.md",
                     "services/servicing-service/app/delinquency.py",
                     "services/servicing-service/app/installments.py",
                     "services/servicing-service/tests/test_late_fee*.py"):
@@ -310,12 +310,11 @@ def _d23_read_paths():
 def test_no_read_path_denies_the_installment_primitive():
     """The set, not the sentence.
 
-    Any file that describes D23 -- register, roadmap, policy corpus, client deck,
-    the modules themselves, or the late-fee tests a cutover engineer reads --
-    may quote the retired claim in order to retract it, and may not assert it.
-    `policies/fee_schedule.md` is served to Policy Chat and the handoff deck is
-    client-facing, so these are not documentation hygiene: they are answers
-    given to people.
+    Any file that describes D23 -- register, roadmap, policy corpus, the
+    modules themselves, or the late-fee tests a cutover engineer reads -- may
+    quote the retired claim in order to retract it, and may not assert it.
+    `policies/fee_schedule.md` is served to Policy Chat, so this is not
+    documentation hygiene: it is an answer given to people.
     """
     if not _primitive_exists():                            # pragma: no cover
         pytest.skip("the installment primitive is genuinely absent")

@@ -151,6 +151,5 @@ Synthetic staff and borrower accounts are seeded for local testing; the demo acc
 | [`docs/model_card.md`](docs/model_card.md) | The scoring model and its limits |
 | [`docs/PAN-CVV-DATA-FLOW.md`](docs/PAN-CVV-DATA-FLOW.md) | Where card data goes, and what stops it being stored |
 | [`docs/runbook.md`](docs/runbook.md) | Operating and local-development guide |
-| [`docs/diagrams/generate_diagrams.py`](docs/diagrams/generate_diagrams.py) | Generator for the architecture diagram |
 
-**History.** [`docs/history/inherited-architecture.md`](docs/history/inherited-architecture.md) is the architecture baseline reconstructed when the codebase was inherited, and [`docs/history/architecture-changelog.md`](docs/history/architecture-changelog.md) records the corrections and superseded designs behind the current architecture. [`docs/DEBT.md`](docs/DEBT.md) (the debt register that `D`/`RF`/`SEC` IDs in code comments point to), [`docs/ROADMAP.md`](docs/ROADMAP.md) and the dated decks in [`docs/presentations/`](docs/presentations/) are engagement records; their status labels reflect that engagement.
+**History.** [`docs/history/inherited-architecture.md`](docs/history/inherited-architecture.md) is the architecture baseline reconstructed when the codebase was inherited. [`docs/DEBT.md`](docs/DEBT.md) (the debt register that `D`/`RF`/`SEC` IDs in code comments point to) and [`docs/ROADMAP.md`](docs/ROADMAP.md) are engagement records; their status labels reflect that engagement.

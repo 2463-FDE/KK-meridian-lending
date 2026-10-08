@@ -2,9 +2,7 @@
 
 > Brownfield system. The platform was originally delivered by Halcyon Software Group
 > (dissolved) and has been extended in place since. This document describes the current
-> system; the corrections and superseded designs behind it are kept in
-> [`docs/history/architecture-changelog.md`](docs/history/architecture-changelog.md), and the
-> architecture as first reconstructed at handover is in
+> system; the architecture as first reconstructed at handover is in
 > [`docs/history/inherited-architecture.md`](docs/history/inherited-architecture.md).
 
 ## Status legend

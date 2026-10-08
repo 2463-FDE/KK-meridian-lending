@@ -17,9 +17,8 @@ import { test, expect } from "@playwright/test";
  *     decision audit trail are unverified.
  *   - `ARCHITECTURE.md` -- nothing in the repository asserts regulatory
  *     compliance, and several controls are explicitly non-compliant.
- *   - `docs/presentations/2026-08-25-agentic-client-handoff.md` -- "Claims we
- *     must NOT make" lists "PCI compliant" by name. That is the newest
- *     client-facing direction, and it is the one the landing page contradicted.
+ *   - `db/tests/test_forbidden_claims_stay_off_live_surfaces.py` lists
+ *     "PCI compliant" by name among the claims no live screen may make bare.
  *
  * **This spec does not exist to preserve the claims.** It preserves the
  * relationship between a claim and its qualifier. Two properties, and they pull

@@ -7,7 +7,7 @@ enforced any of that: change `AI_MODEL_VERSION` and the governance artefact
 becomes false, silently, with every test still green.
 
 Every comparable document here is guarded -- README, ARCHITECTURE, ROADMAP,
-DEBT, both runbooks, both decks. This one was not, which is the same defect as a
+DEBT and both runbooks. This one was not, which is the same defect as a
 policy publishing a rule no code applies: a claim with no mechanism behind it.
 
 **What these tests pin, and what they deliberately do not.** They pin FACTS the

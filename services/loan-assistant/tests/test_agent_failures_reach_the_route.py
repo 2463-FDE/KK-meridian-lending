@@ -670,9 +670,8 @@ def test_f10_construction_and_invocation_stay_distinguishable():
 #
 # The parametrised test above covers the seven `agent.*` refusals. The route
 # also maps four `LLM*Error` classes, and until now this file asserted none of
-# them -- while `docs/presentations/2026-08-25-agentic-client-handoff.md` §3a
-# told a reader that "the mapping ... is asserted by
-# test_agent_failures_reach_the_route.py".
+# them -- while the handoff documentation told a reader that "the mapping ...
+# is asserted by test_agent_failures_reach_the_route.py".
 #
 # Two of the four were asserted elsewhere but against `/policy-chat`
 # (`test_main.py::test_policy_chat_maps_*`), which is a different route with its
