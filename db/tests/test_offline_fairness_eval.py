@@ -3,17 +3,16 @@
 Three separate promises, and each fails in a different direction:
 
   * **Offline** — an evaluator that acquires a database handle or an HTTP client
-    has become a runtime path, and the labels it reads are the ones the client
-    said may never reach runtime.
+    has become a runtime path, and the labels it reads may never reach runtime.
   * **Aggregate** — a per-row output carries a synthetic protected-class label
     attached to an identifier, which is what "audit-only" exists to prevent.
-  * **Verdict-free** — the client's EVAL-16 rejects the claim "the model is fair
+  * **Verdict-free** — EVAL-16 rejects the claim "the model is fair
     based on the 32-row fixture" by name. A tool that emits a four-fifths pass
     would be making exactly that claim on the repository's behalf, and it would
     be the most quotable line in its own output.
 
 The third is the one that would survive review most easily, because a fairness
-number looks like diligence. It is the one the client wrote a case about.
+number looks like diligence. It is the one an acceptance case exists for.
 """
 import ast
 import io
@@ -29,7 +28,7 @@ TOOLS = REPO / "db" / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import offline_fairness_eval as evaluator  # noqa: E402
-from client_governance_package import (  # noqa: E402
+from governance_fixture import (  # noqa: E402
     PROTECTED_CLASS_COLUMNS,
     TRAINING_BANNER,
     load_fairness_fixture,
@@ -48,8 +47,8 @@ def rendered(result):
 
 def test_it_reads_the_thirty_two_synthetic_rows(result):
     assert result["total_rows"] == 32, (
-        "the fixture no longer holds the 32 rows the client shipped; the "
-        "checksum test should have caught that first")
+        "the fixture no longer holds its 32 rows; the checksum test should "
+        "have caught that first")
 
 
 def test_it_groups_by_every_protected_class_column(result):
@@ -60,7 +59,7 @@ def test_it_groups_by_every_protected_class_column(result):
 
 
 def test_it_computes_no_verdict(result):
-    """The client's EVAL-16, enforced against our own tool."""
+    """EVAL-16, enforced against our own tool."""
     assert result["verdict"] is None
     assert "EVAL-16" in result["verdict_withheld_because"]
 
@@ -70,7 +69,7 @@ def test_it_computes_no_verdict(result):
     for phrase in banned:
         assert phrase not in blob, (
             f"the aggregate contains {phrase!r}, which reads as a fairness "
-            f"verdict the package does not authorise")
+            f"verdict the fixture does not authorise")
 
 
 def test_the_output_carries_no_individual_row(result, rendered):
@@ -111,7 +110,7 @@ def test_the_cli_json_form_is_parseable_and_verdict_free():
     payload = json.loads(buf.getvalue())
 
     assert payload["verdict"] is None
-    assert payload["checksums_verified"] == 34
+    assert payload["checksums_verified"] == 25
 
 
 def test_the_evaluator_opens_no_database_and_no_socket():
@@ -126,7 +125,7 @@ def test_the_evaluator_opens_no_database_and_no_socket():
     offenders = []
 
     for path in (TOOLS / "offline_fairness_eval.py",
-                 TOOLS / "client_governance_package.py"):
+                 TOOLS / "governance_fixture.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             names = []
@@ -138,13 +137,13 @@ def test_the_evaluator_opens_no_database_and_no_socket():
 
     assert offenders == [], (
         "the offline evaluator can reach a database, a network client or a "
-        f"model: {offenders}. It reads the client package and nothing else.")
+        f"model: {offenders}. It reads the governance fixture and nothing else.")
 
 
 def test_the_evaluator_names_no_runtime_table():
     """It must not query applicants, applications, decisions or decision_events."""
     for path in (TOOLS / "offline_fairness_eval.py",
-                 TOOLS / "client_governance_package.py"):
+                 TOOLS / "governance_fixture.py"):
         body = path.read_text(encoding="utf-8")
         for table in ("applicants", "applications", "decisions", "decision_events"):
             # The docstrings name these tables to say they are never queried,
@@ -156,8 +155,8 @@ def test_the_evaluator_names_no_runtime_table():
 def test_the_fixture_labels_reach_no_runtime_service():
     """The values, not just the column names.
 
-    A column name could be renamed; the label values are what the client cares
-    about. `SYN-Black` appearing in a service file would mean a synthetic label
+    A column name could be renamed; the label values are what must stay
+    contained. `SYN-Black` appearing in a service file would mean a synthetic label
     had been copied into runtime code.
     """
     values = set()

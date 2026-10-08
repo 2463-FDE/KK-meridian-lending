@@ -65,7 +65,7 @@ The platform runs **eight** backend services, including the gateway. Seven of th
 
 - **Credit authority stays deterministic.** `decision-service` runs a LangGraph state graph (pull credit, score, finalize) with threshold-mapped outcomes and reason codes, and **fails closed** when the scorer or bureau is unavailable. Origination writes the decision and its evidence record after a finality recheck. No language model touches the decision or the regulated money math. See [`docs/model_card.md`](docs/model_card.md).
 - **AI is advisory and staff-only.** `loan-assistant` serves `/assistant/policy-chat` and `/assistant/applications/{id}/summary`, both staff-only at the gateway. It answers from an approved policy corpus, refuses when retrieval finds no policy evidence, and labels summaries "not a decision". The disclosure workflow in origination is a two-agent LangGraph (`kg_reader`, then `assemble_disclosure`) built from deterministic orchestration nodes, not model calls.
-- **One shared schema, deliberately.** Seven services share PostgreSQL rather than splitting databases mid-modernization ([ADR 0002](adr/0002-single-database-shared-schema.md), [ADR 0004](adr/0004-decompose-origination-into-services.md)). The trade-off is coupling at the schema; remaining decomposition debt is tracked in [`docs/DEBT.md`](docs/DEBT.md).
+- **One shared schema, deliberately.** Seven services share PostgreSQL rather than splitting databases mid-modernization ([ADR 0002](adr/0002-single-database-shared-schema.md), [ADR 0004](adr/0004-decompose-origination-into-services.md)). The trade-off is coupling at the schema.
 - **Accounting correctness over availability.** Card capture preflights servicing with a real, rolled-back write and refuses the charge if servicing cannot accept it, so a captured payment is never left without a credit.
 
 ## Engineering highlights
@@ -108,7 +108,7 @@ Auth tiers and the reasoning behind each control are in [`ARCHITECTURE.md`](ARCH
 - **Frontend** build, and a **Playwright end-to-end** run of the borrower workflow against the full Docker Compose stack
 - **Quick-start and Docker build checks** proving a clean checkout refuses to start without a generated token and that every image builds
 - **Documentation guard tests** that fail when a document claims something the code does not do, including this README's service table and diagrams
-- Dependency audits (non-blocking; triaged in [`docs/DEBT.md`](docs/DEBT.md))
+- Dependency audits (non-blocking)
 
 Run the service suites locally with `make test`.
 
@@ -151,5 +151,6 @@ Synthetic staff and borrower accounts are seeded for local testing; the demo acc
 | [`docs/model_card.md`](docs/model_card.md) | The scoring model and its limits |
 | [`docs/PAN-CVV-DATA-FLOW.md`](docs/PAN-CVV-DATA-FLOW.md) | Where card data goes, and what stops it being stored |
 | [`docs/runbook.md`](docs/runbook.md) | Operating and local-development guide |
+| [`docs/history/inherited-architecture.md`](docs/history/inherited-architecture.md) | The architecture baseline reconstructed when the codebase was inherited |
 
-**History.** [`docs/history/inherited-architecture.md`](docs/history/inherited-architecture.md) is the architecture baseline reconstructed when the codebase was inherited. [`docs/DEBT.md`](docs/DEBT.md) (the debt register that `D`/`RF`/`SEC` IDs in code comments point to) and [`docs/ROADMAP.md`](docs/ROADMAP.md) are engagement records; their status labels reflect that engagement.
+

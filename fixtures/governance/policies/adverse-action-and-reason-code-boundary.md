@@ -1,7 +1,6 @@
-# Adverse-action and reason-code boundary (client)
+# Adverse-action and reason-code boundary
 
-**Version:** CCUS-SYN-2026.08.24  
-**Effective date:** 2026-08-24  
+**Version:** SYN-GOV-2.0  
 **Not legal advice. Not a consumer notice.**
 
 ## Exact and specific reasons

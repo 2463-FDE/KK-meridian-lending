@@ -293,7 +293,7 @@ def _functions(conn, schema):
     same name, same arguments, and a caller reading the result gets a different
     type depending on how its database was built. That function hands back a
     ledger entry id, so the divergence would be real rather than cosmetic.
-    (Review of PR #39, FUNC-001.)
+    (FUNC-001.)
 
     Bodies are deliberately NOT compared. `db/init` and `db/migrations` are
     independent copies of the same definitions -- 007 says so about itself -- and
@@ -410,7 +410,7 @@ def _assert_same_tables(conn, left, right):
     the per-table loops never visit it and every aspect passes. The extra table
     is invisible in exactly the way `_CONVERGENCE_TABLES` made `balances` and
     `ledger_entries` invisible -- a list that reads complete while missing one,
-    written as a derivation instead of a literal. (Review of PR #39, TBL-001.)
+    written as a derivation instead of a literal. (TBL-001.)
 
     Reported by name and in both directions, so a failure says which side has
     what rather than only that the counts differ.

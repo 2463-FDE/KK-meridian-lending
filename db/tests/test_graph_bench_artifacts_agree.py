@@ -1,11 +1,8 @@
 """Every published benchmark number must come from the committed artifact.
 
-Review of PR #12 found the two evidence files were from different runs:
-`results.json` reported build times of 0.139/1.210 s and included a path
-benchmark, while `run-output.txt` reported 0.238/2.317 s, different traversal
-timings, and no path section at all -- even though its own footer said it had
-written that JSON. Two files from two runs provide provenance for neither, and
-the ADR's numbers could not be traced to either one.
+`results.json` and `run-output.txt` must come from the same run. Two files
+from two runs provide provenance for neither, and the ADR's numbers could not
+be traced to either one.
 
 Three things are asserted here, and they are deliberately mechanical rather than
 a reviewer's diff:
@@ -222,7 +219,7 @@ def test_the_plan_parser_reads_measured_rows_not_the_planner_estimate():
     ESTIMATE -- so results.json, the transcript and the ADR published 609,883 as a
     measured figure while the plan beside it said 553,928. Publishing an estimate
     as a measurement is the failure this whole benchmark exists to stop, and it
-    was doing it inside the note about honesty. Reviewed on PR #12.
+    was doing it inside the note about honesty.
 
     Also asserts the pattern is anchored to `edge_rel`: unanchored, it attached a
     MATERIALIZED rescan note to the ordinary `walk` CTE in the other two
@@ -278,10 +275,10 @@ def test_the_published_rescan_figure_is_the_one_in_the_committed_plan(results):
 
 # --- prose, not just table cells ---------------------------------------------
 #
-# Reviewed on PR #12: the tables were transcribed from the regenerated run while
-# the surrounding NARRATIVE still quoted the previous one, and
-# `services/origination-service/app/kg.py` repeated the old figures in its module
-# docstring. A reader got contradictory evidence from the same page. Table-cell
+# Tables transcribed from a regenerated run can sit beside NARRATIVE that still
+# quotes the previous one, and `services/origination-service/app/kg.py` can
+# repeat old figures in its module docstring. A reader would get contradictory
+# evidence from the same page. Table-cell
 # checking could not see any of it, so the scan is widened to every second-shaped
 # figure in the documents that cite this benchmark.
 

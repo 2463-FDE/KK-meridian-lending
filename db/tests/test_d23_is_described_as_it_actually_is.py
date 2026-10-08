@@ -24,7 +24,7 @@ THE TWO LIES THIS PINS
   and re-plans work that is merged.
 
   LIE B -- "D23 is done", while a borrower is still charged under the arrears
-  rule the client replaced. That one is worse: it closes a row over live
+  rule that was replaced. That one is worse: it closes a row over live
   incorrect behaviour.
 
 WHAT IT DELIBERATELY DOES NOT DO. It does not freeze a paragraph. Wording that
@@ -224,8 +224,7 @@ def test_d23_is_not_marked_done_while_the_runtime_still_prices_off_arrears():
     """LIE B, and the more expensive of the two.
 
     `assess_late_fee` still reads `balances.past_due` and prices with
-    `late_fee_for()`. A borrower is charged under the rule the client replaced
-    on 2026-08-29. Marking the row Fixed would close a register entry over live
+    `late_fee_for()`. A borrower is charged under the rule that was replaced. Marking the row Fixed would close a register entry over live
     incorrect behaviour, which is the one thing a debt register must never do.
     """
     if not _runtime_still_uses_arrears():                  # pragma: no cover
@@ -288,13 +287,10 @@ def test_d23_names_both_client_blockers_and_neither_is_invented():
 
 #: EVERY place D23 is described, enumerated as a SET rather than as filenames.
 #:
-#: Codex review of PR #157 called this out as the actual defect: the first sweep
-#: matched on wording, so each round of review found another site -- the
-#: function docstring, then `policies/fee_schedule.md`, then the module
-#: docstring and the client handoff document, then the servicing tests a cutover
-#: engineer reads first. Sites of one claim were discovered one at a time
-#: because the search was for a sentence rather than for the places that can
-#: carry it.
+#: A sweep that matches on wording finds the sites of one claim one at a time --
+#: the function docstring, then `policies/fee_schedule.md`, then the module
+#: docstring, then the servicing tests a cutover engineer reads first -- because
+#: it searches for a sentence rather than for the places that can carry it.
 #:
 #: Globs, so a new document or a new module cannot join the set silently.
 def _d23_read_paths():
@@ -348,7 +344,7 @@ def test_the_read_path_set_is_not_empty_or_trivially_small():
 def test_the_policy_file_does_not_deny_the_primitive_either():
     """The read path my own inventory missed, and the one that reaches users.
 
-    Codex review of PR #157, D23-FEE-SCHEDULE-STALE. `policies/fee_schedule.md`
+    D23-FEE-SCHEDULE-STALE. `policies/fee_schedule.md`
     is served to Policy Chat -- `loan-assistant` retrieves it -- so a stale
     sentence there is not a documentation defect, it is an answer given to
     somebody. It still read "nothing records which installment a fee belongs to"

@@ -2,7 +2,7 @@
 
 `policies/fee_schedule.md` publishes a late-fee rule the code does not
 implement, and that is a decided, recorded position rather than an oversight:
-the client settled the rule on 2026-08-29, and implementing it needs
+the rule is settled, and implementing it needs
 installment-level facts this schema does not persist (`docs/DEBT.md` D23). The
 file discloses the gap in the same table row as the rule, and again in a section
 of its own.
@@ -151,8 +151,8 @@ def test_no_document_claims_the_decided_rule_is_implemented():
     # the register names the reasons, and neither reason is something this
     # repository may answer for itself.
     assert "GRACE PERIOD" in row, (
-        "D23 no longer names the missing grace period. If the client has since "
-        "supplied one, the runtime cutover -- not just this row -- is what "
+        "D23 no longer names the missing grace period. If one has since "
+        "been supplied, the runtime cutover -- not just this row -- is what "
         "should change, and this guard and the divergence section go with it.")
     assert "ALLOCATION ORDER" in row or "ATTRIBUTION" in row, (
         "D23 no longer names payment-to-installment attribution as outstanding.")

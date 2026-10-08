@@ -1,8 +1,7 @@
-# Fairness-data policy (client) — demonstration only
+# Fairness-data policy — demonstration only
 
-**Version:** CCUS-SYN-2026.08.24  
-**Effective date:** 2026-08-24  
-**Scope:** Meridian Lending training demonstration. Not a production collection program. Not legal advice.
+**Version:** SYN-GOV-2.0  
+**Scope:** Meridian Lending synthetic governance fixture. Not a production collection program. Not legal advice.
 
 ## Rules
 
@@ -12,12 +11,12 @@
    - model inputs;
    - runtime application decisions;
    - production-like records;
-   - learner or client operational data;
+   - operational data;
    - traces and operational telemetry;
    - final consumer output.
 4. **Do not manufacture, infer, or synthesize** protected-class attributes to “close a gap” in scoring or notices.
-5. **No production or real-world fairness claim** may be made from this packet, the ZIP3 outcome screen, or the 32-row fixture.
-6. **Retention and access:** the fairness fixture is retained only with this training packet. Access is staff review for audit of isolation. Borrowers must not receive it. It is discarded with the packet when a real vendor packet replaces this one, unless a later client record says otherwise.
+5. **No production or real-world fairness claim** may be made from this fixture, the ZIP3 outcome screen, or the 32-row fixture.
+6. **Retention and access:** the fairness fixture is retained only with this training packet. Access is staff review for audit of isolation. Borrowers must not receive it. It is discarded when a real vendor packet replaces this one.
 7. Outcome monitoring that uses geography is **not** model fairness evidence and is **not** a protected-class analysis.
 
 ## Human review

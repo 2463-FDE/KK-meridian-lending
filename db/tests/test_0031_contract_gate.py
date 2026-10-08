@@ -198,7 +198,7 @@ def test_a_projection_split_across_lines_is_detected(tmp_path):
     Adjacent string literals put the keyword and the column on different lines,
     so a same-line check saw neither -- and the checker printed OK over a live
     reader. That green result is the runbook's prerequisite for acknowledging a
-    destructive migration. Reviewed on PR #15.
+    destructive migration.
     """
     hits = _run_checker_over(tmp_path, (
         "def read(conn):\n"
@@ -253,7 +253,7 @@ def test_the_gate_holds_when_an_earlier_schema_lacks_the_table(conn):
     empty schema, found no `pan`, and returned satisfied -- while the ALTER went
     on to resolve the real table and drop its columns with neither the back-fill
     check nor the acknowledgement run. Data destroyed by a migration that
-    reported it had nothing to do. Reviewed on PR #15.
+    reported it had nothing to do.
 
     The empty schema is placed FIRST here, exactly as a per-user schema sits
     ahead of public.
@@ -307,7 +307,7 @@ def test_a_triple_quoted_query_is_scanned_not_skipped(tmp_path):
     Tracking triple-quote fences treated `conn.query(\"\"\"SELECT ... pan ...\"\"\")`
     as a docstring and skipped every line of it, so the checker returned exit 0
     over a live reader -- and that green result is the runbook's prerequisite
-    for acknowledging the drop. Reviewed on PR #15.
+    for acknowledging the drop.
     """
     hits = _run_checker_over(tmp_path, (
         "def read(conn):\n"
@@ -382,7 +382,7 @@ def test_a_leftover_cvv_still_requires_the_acknowledgement(conn):
     Both gates tested `pan` alone, so this state reported "nothing to do" and
     returned -- and the ALTER below then dropped `cvv` with no acknowledgement
     and no operator sign-off. A partially cleaned database is exactly where a
-    destructive migration needs its brakes most. Reviewed on PR #15.
+    destructive migration needs its brakes most.
     """
     with conn.cursor() as cur:
         cur.execute(f"SET search_path TO {SCHEMA}")
@@ -443,7 +443,7 @@ def test_a_column_far_down_a_long_projection_is_detected(tmp_path):
 
     A fixed six-line window still missed a projection with seven fields before
     `pan`. A string literal has a real beginning and end, so there is nothing
-    left to guess. Reviewed on PR #15.
+    left to guess.
     """
     hits = _run_checker_over(tmp_path, (
         "def read(conn):\n"
@@ -487,7 +487,7 @@ def test_a_mapping_read_of_a_legacy_column_is_detected(tmp_path, read):
 
     `row["pan"]` carries no SQL keyword of its own -- the SELECT that produced
     the row is elsewhere, often in another function -- and the dotted-attribute
-    patterns did not match it either, so it passed clean. Reviewed on PR #15.
+    patterns did not match it either, so it passed clean.
     """
     hits = _run_checker_over(tmp_path, (
         "def display(row):\n"
@@ -507,7 +507,7 @@ def test_a_mapping_read_of_an_allowed_column_is_not_flagged(tmp_path):
 
 # --- SQL that is assembled rather than written out ----------------------------
 #
-# Reviewed on PR #15: a checker that only reads bare literals misses every
+# A checker that only reads bare literals misses every
 # common way a query gets built. Each of these is statically resolvable, so the
 # checker can prove the read without running anything.
 
@@ -614,7 +614,7 @@ def test_a_statically_known_fstring_substitution_is_resolved(tmp_path):
     Leaving the substitution as a hole hid it: the standalone `"pan"` carries no
     SQL context of its own, so nothing else would catch it, and the checker
     returned clean. Only names already resolved statically are substituted --
-    anything genuinely runtime stays a hole. Reviewed on PR #15.
+    anything genuinely runtime stays a hole.
     """
     hits = _run_checker_over(tmp_path, (
         'COL = "pan"\n'
@@ -626,12 +626,11 @@ def test_a_statically_known_fstring_substitution_is_resolved(tmp_path):
 
 
 def test_a_runtime_substitution_in_the_projection_fails_closed(tmp_path):
-    """Superseded expectation, corrected.
+    """A hole in the projection is unresolved, not clean.
 
-    This used to assert that `execute(f"SELECT {column} FROM payments")` was
-    clean, on the grounds that the hole was not a known column. Review on PR #15
-    called that out: the runtime query can select anything, so a hole in the
-    PROJECTION is an unresolved statement, not a clean one. A hole in a value
+    `execute(f"SELECT {column} FROM payments")` is not clean just because the
+    hole is not a known column: the runtime query can select anything, so a hole
+    in the PROJECTION is an unresolved statement. A hole in a value
     position -- `WHERE id = {loan_id}` -- is still fine and is covered
     separately.
     """
@@ -673,7 +672,7 @@ def test_a_local_binding_does_not_vouch_for_another_function(tmp_path):
     Bindings were collected in one pass over the whole file, so a clean
     `COL = "last4"` in one function could be the value used when folding a
     different function's `f"SELECT {COL} FROM payments"` -- masking a live read,
-    or inventing one. Reviewed on PR #15.
+    or inventing one.
     """
     hits = _run_checker_over(tmp_path, (
         "def clean(conn):\n"
@@ -789,7 +788,7 @@ def test_an_unresolved_fstring_field_fails_closed(tmp_path):
 
     `f"SELECT {column} FROM payments"` folded to `SELECT ? FROM payments` --
     a string with no column name, which read as clean while the runtime query
-    could select anything. Consistent with `.format()`. Reviewed on PR #15.
+    could select anything. Consistent with `.format()`.
     """
     hits = _run_checker_over(tmp_path, (
         "def read(conn, column):\n"
@@ -806,7 +805,7 @@ def test_a_conditional_rebinding_is_not_assumed_to_have_run(tmp_path):
     the branch does not run, and walking the body as though it always did
     cleared it. Rather than model both branches -- the control-flow analysis
     this tool does not do -- the name becomes uncertain and the query fails
-    closed. Reviewed on PR #15.
+    closed.
     """
     hits = _run_checker_over(tmp_path, (
         "def read(conn, migrated):\n"
@@ -872,7 +871,7 @@ def test_unresolved_sql_reaching_db_query_fails_closed(tmp_path):
     """`db.query` is the raw-SQL entry point in this repository.
 
     Fail-closed covered `execute` only, so the path most queries here actually
-    take was exempt. Reviewed on PR #15.
+    take was exempt.
     """
     hits = _run_checker_over(tmp_path, (
         "def read(db, column):\n"
@@ -923,7 +922,7 @@ def test_an_expression_inside_a_branch_is_judged_with_that_branch_state(tmp_path
 
     Walking a statement's own expressions used to descend into its `if` body,
     so those expressions were judged twice -- once against the bindings from
-    BEFORE the branch. Reviewed on PR #15.
+    BEFORE the branch.
     """
     hits = _run_checker_over(tmp_path, (
         "def read(conn, flag):\n"
@@ -953,7 +952,7 @@ def test_a_nested_function_does_not_rely_on_a_later_rebinding(tmp_path):
 
 # --- annotated assignments bind like unannotated ones -------------------------
 #
-# Reviewed on PR #15. `sql: str = ...` is the same statement as `sql = ...` with a
+# `sql: str = ...` is the same statement as `sql = ...` with a
 # type annotation on it, and the checker handled only `ast.Assign` at three of its
 # four binding sites. So an annotated assignment bound nothing: the name stayed
 # unknown, no unresolved state was recorded for it, and `db.query(sql)` carried no

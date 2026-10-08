@@ -78,10 +78,9 @@ RETIRED = [
 #: is what someone greps for after meeting the old claim in a stale checkout or
 #: an old review comment.
 #:
-#: The first version of this check looked for nearby words like "said" or
-#: "previously" instead. It did not bite: mutating ARCHITECTURE.md back to
-#: `balances` "is still a single mutable column (no ledger)" left the test
-#: passing, because that paragraph already contains "used to be" two clauses
+#: Looking for nearby words like "said" or "previously" instead does not bite:
+#: ARCHITECTURE.md saying `balances` "is still a single mutable column (no
+#: ledger)" would pass if the paragraph contains "used to be" two clauses
 #: earlier, about something else entirely. A proximity heuristic in a document
 #: full of historical narration approves everything. Quote marks are structural,
 #: so this asks for those.
@@ -337,9 +336,8 @@ def test_the_roadmap_planning_surface_agrees_with_start_next():
 def test_the_landed_weeks_claim_agrees_with_the_matrix():
     """The summary may only call a week landed if every row for it is Done.
 
-    This replaces a snapshot assertion that Week 5 must NOT be described as
-    landed -- true while servicing's duplicate `POST /payments` was open, and
-    wrong the moment it was retired. A test that pins today's answer has to be
+    A snapshot assertion about one week's status is true until the answer
+    changes and wrong afterwards. A test that pins today's answer has to be
     edited every time the answer changes, and the edit is exactly where someone
     stops thinking. So it derives the claim from the matrix instead: whichever
     weeks the summary says are landed, no row in those weeks may be Partial or
@@ -386,10 +384,9 @@ def test_the_servicing_token_gap_row_matches_the_routes_that_exist():
     """
     import ast
 
-    # Read the decorators, do not import the app. An earlier version inserted
-    # servicing-service on sys.path and imported `app.main` here; that left
-    # `app` in sys.modules pointing at another service and broke two unrelated
-    # fixtures in this same file. A doc test has no business mutating the
+    # Read the decorators, do not import the app. Importing `app.main` here
+    # would leave `app` in sys.modules pointing at another service and break
+    # unrelated fixtures in this same file. A doc test has no business mutating the
     # importer for the rest of the suite.
     main_src = (REPO / "services" / "servicing-service" / "app" / "main.py")
     tree = ast.parse(main_src.read_text(encoding="utf-8"))
@@ -406,10 +403,9 @@ def test_the_servicing_token_gap_row_matches_the_routes_that_exist():
                 live.add(dec.args[0].value)
     assert live, "no POST routes parsed from servicing main.py -- the check found nothing"
 
-    # BOTH rows that enumerate guarded routes, not just one. The first version of
-    # this check covered the closed-gap row only, and the Week 6 matrix row went
-    # on claiming five guarded routes through a whole review round because
-    # nothing looked at it. Two places stating one fact is the condition every
+    # BOTH rows that enumerate guarded routes, not just one: checking the
+    # closed-gap row only would let the matrix row go on claiming a stale count
+    # of guarded routes because nothing looked at it. Two places stating one fact is the condition every
     # stale claim in this repository has been found in; checking one of them is
     # how the second survives.
     roadmap = ROADMAP.read_text(encoding="utf-8").splitlines()

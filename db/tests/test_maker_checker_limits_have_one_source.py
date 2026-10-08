@@ -9,9 +9,8 @@ that they still say the same number. Five copies of a money limit is four
 chances to drift, and the drift is invisible: every one of them looks
 authoritative on its own page.
 
-`ci.yml` was missed in the first version of this file, and review (PR #53,
-MC-LIMIT-CI-COPIES) was right that leaving it out was the worst possible
-omission. It sets the three limits in three separate jobs, and it is the copy
+`ci.yml` is covered too (MC-LIMIT-CI-COPIES), and leaving it out would be the
+worst possible omission. It sets the three limits in three separate jobs, and it is the copy
 that decides whether a change ships: with it uncovered, an ADR figure could move
 and this guard would pass green while every backend, docker-build and e2e suite
 ran against the stale limit. A single-source test that exempts the environment

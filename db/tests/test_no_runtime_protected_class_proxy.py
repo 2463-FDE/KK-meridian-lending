@@ -1,17 +1,16 @@
 """No runtime path may infer, group by, or carry protected-class data.
 
-**Authority.** Client decision, 2026-08-24: there is no permission to
-collect real protected-class data for this demonstration, there is **no approved
-proxy**, and one may not be created "including from ZIP, ZIP3 or similar fields".
-Synthetic protected-class labels are permitted **only** inside an isolated
-offline evaluation fixture, and must never enter model inputs, runtime
+**The rule.** Real protected-class data is not collected, there is **no
+approved proxy**, and one may not be created -- including from ZIP, ZIP3 or
+similar fields. Synthetic protected-class labels exist **only** inside the
+isolated offline governance fixture, and never enter model inputs, runtime
 application inputs, decisions, operational records, runtime database records,
 traces, telemetry or consumer output.
 
-That superseded Week 8's own design. `services/origination-service/app/fair_lending.py`
-grouped recorded decisions by ZIP3 and applied the four-fifths rule at
-`GET /applications/fair-lending/zip-analysis`; both are retired. This guard is
-what stops them -- or a replacement proxy -- coming back.
+A ZIP3 outcome screen (`services/origination-service/app/fair_lending.py`,
+grouping recorded decisions by ZIP3 under the four-fifths rule at
+`GET /applications/fair-lending/zip-analysis`) is retired under that rule. This
+guard is what stops it -- or a replacement proxy -- coming back.
 
 **What this deliberately permits.** Documentation must be able to name the thing
 it prohibits, so `.md` files, ADRs and specs are not scanned for the words. A
@@ -33,9 +32,9 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SERVICES = REPO / "services"
 
-#: The single isolated location the client's synthetic labels may occupy. Nothing
-#: under it is a runtime path, and nothing outside it may carry a label.
-OFFLINE_FIXTURE_DIR = REPO / "fixtures" / "offline_fairness_training"
+#: The single isolated location synthetic labels may occupy. Nothing under it is
+#: a runtime path, and nothing outside it may carry a label.
+OFFLINE_FIXTURE_DIR = REPO / "fixtures" / "governance"
 
 #: Protected-class vocabulary, matched as a FIELD rather than as a word.
 #:
@@ -64,8 +63,8 @@ PROXY_MACHINERY = re.compile(
 #: 1. A ZIP-derived grouping key anywhere near a four-fifths threshold. The
 #:    window spans newlines deliberately: a renamed module that sliced
 #:    `zip_code[:3]` on one line and compared against `0.8` four lines later
-#:    survived a single-line version of this check, which is exactly the
-#:    "rename it and carry on" case the client's decision forbids.
+#:    would survive a single-line version of this check, which is exactly the
+#:    "rename it and carry on" case the rule forbids.
 #: 2. Truncating a ZIP at all. Nothing in this system has a legitimate reason to
 #:    take the first three characters of a postal code -- that operation exists
 #:    to build a geographic grouping key, which is the proxy itself.
@@ -81,9 +80,8 @@ FOUR_FIFTHS_ON_ZIP = re.compile(
 ZIP_TRUNCATION = re.compile(
     r"""zip(?:_code)?["'\]\)\s]{0,6}\[\s*0?\s*:\s*3\s*\]"""
     # SQL forms too. `substring(ap.zip_code from 1 for 3)` is the same
-    # truncation with a different dialect, and the first version of this pattern
-    # required the digit within 40 characters of the opening paren *and* an
-    # unqualified column name -- both of which a real query breaks.
+    # truncation with a different dialect. The pattern allows a qualified column
+    # name and a gap before the digit, because a real query has both.
     r"""|substring\s*\(\s*[\w.]*zip[\w.]*[\s\S]{0,60}?\b3\b"""
     r"""|left\s*\(\s*[\w.]*zip[\w.]*[\s\S]{0,30}?\b3\b"""
     r"""|zip[\w.]*\s*~\s*'\^\\\\d\{3\}'""", re.I)
@@ -123,9 +121,9 @@ def _frontend_sources():
 def test_the_zip3_fairness_module_is_gone():
     module = SERVICES / "origination-service" / "app" / "fair_lending.py"
     assert not module.exists(), (
-        "the ZIP3 fair-lending module is back. The client prohibited ZIP and "
-        "ZIP3 as a protected-class proxy on 2026-08-24; a runtime screen built "
-        "on it cannot be reinstated by re-adding the file")
+        "the ZIP3 fair-lending module is back. ZIP and ZIP3 are prohibited as "
+        "a protected-class proxy; a runtime screen built on them cannot be "
+        "reinstated by re-adding the file")
 
 
 def test_the_zip_analysis_route_is_not_registered():
@@ -156,7 +154,7 @@ def test_no_runtime_source_groups_decisions_by_a_zip_derived_key():
 
 def test_no_runtime_source_truncates_a_zip_into_a_grouping_key():
     """The narrower, sharper check: taking the first three characters of a
-    postal code has one purpose, and it is the one the client prohibited.
+    postal code has one purpose, and it is the one that is prohibited.
 
     Kept separate from the four-fifths check because a proxy does not need a
     threshold to be a proxy -- grouping decisions by ZIP3 and eyeballing the
@@ -189,8 +187,7 @@ def test_no_runtime_source_builds_a_protected_class_proxy(kind):
 
     assert not offenders, (
         "a runtime path names proxy machinery for protected-class inference. "
-        "The client's 2026-08-24 decision forbids creating one, from ZIP or "
-        "anything else:\n" + "\n".join(offenders))
+        "Creating one is forbidden, from ZIP or anything else:\n" + "\n".join(offenders))
 
 
 # --------------------------------------------------------------------------
@@ -261,7 +258,7 @@ def test_no_zip_is_sent_to_the_model_or_the_bureau():
     assert "zip" not in decision.lower(), (
         "decision-service's scoring path mentions ZIP; the model is told the "
         "applicant's amount, term, income and bureau score, and adding a "
-        "geographic field would build the proxy the client prohibited")
+        "geographic field would build the prohibited proxy")
 
 
 # --------------------------------------------------------------------------
@@ -269,15 +266,13 @@ def test_no_zip_is_sent_to_the_model_or_the_bureau():
 # --------------------------------------------------------------------------
 
 def test_no_source_or_migration_says_zip_exists_for_fairness():
-    """A comment is where the retired screen came back first.
+    """A comment is where a retired screen comes back first.
 
-    Review of PR #78 found `schemas.py`'s ZIP validator still explaining itself
-    as "W8: fair-lending ZIP-level check needs a real, consistent ZIP", and
-    `db/migrations/0014` still introducing the column as "the one structured
-    field a fairness check actually needs". The code did nothing of the kind --
-    but a reader arriving at the validator learns the field is a fairness
-    variable, and the next person to need a disparity screen has been told where
-    to start.
+    A ZIP validator explaining itself as "fair-lending ZIP-level check needs a
+    real, consistent ZIP", or a migration introducing the column as "the one
+    structured field a fairness check actually needs", tells the next reader the
+    field is a fairness variable and the next person to need a disparity screen
+    where to start -- even when the code does nothing of the kind.
 
     Naming the retired screen is allowed, and necessary: the reversal is worth
     recording. What is not allowed is a present-tense sentence saying ZIP is
@@ -304,12 +299,10 @@ def test_no_source_or_migration_says_zip_exists_for_fairness():
             line_no = body.count("\n", 0, match.start()) + 1
 
             # Scope: the claim's own line plus the three above it. Comments are
-            # line-based, and sentence-scoping got this wrong in both
-            # directions -- a SQL comment line ending in "needs." has no ". "
-            # after it, so the scope ran on into the next paragraph and borrowed
-            # the word "retired" from a fence that had nothing to do with it.
-            # Mutation testing found that: a reintroduced "a fairness check
-            # actually needs" survived by inheriting an unrelated fence.
+            # line-based, and sentence scoping fails in both directions -- a SQL
+            # comment line ending in "needs." has no ". " after it, so the scope
+            # would run into the next paragraph and borrow the word "retired"
+            # from an unrelated fence.
             window = _flatten("\n".join(lines[max(0, line_no - 4):line_no]))
             if historical.search(window):
                 continue
@@ -318,52 +311,26 @@ def test_no_source_or_migration_says_zip_exists_for_fairness():
 
     assert not offenders, (
         "a source file or migration says ZIP exists for a fairness check, "
-        "which the client prohibited on 2026-08-24:\n" + "\n".join(offenders))
+        "which is prohibited:\n" + "\n".join(offenders))
 
 
 def test_the_offline_fixture_location_is_isolated_and_labelled():
-    """The client's package arrived on 2026-08-24 and lives here.
+    """The fixture says what it is, on its face.
 
-    This test used to assert the opposite -- that the location held its rules
-    and nothing else -- because the package had not been supplied. It has been,
-    so the assertion moves from "nothing is here" to "what is here is labelled",
-    which is the change the previous version of this file asked for by name.
-
-    The labels are not decoration. The client's own README says the packet is
-    not vendor-issued and not production evidence, and their EVAL-15 and EVAL-16
-    refuse a vendor claiming production validation or fairness. A wrapper that
-    dropped those words would be this repository quietly upgrading the package's
-    standing.
+    The labels are not decoration: EVAL-15 and EVAL-16 refuse a vendor claiming
+    production validation or fairness, and a README that dropped these words
+    would quietly upgrade the fixture's standing.
     """
     readme = OFFLINE_FIXTURE_DIR / "README.md"
     assert readme.is_file(), (
         f"{readme.relative_to(REPO)} is missing: the isolated location for the "
-        f"client's synthetic fixture, and the statement of what may live there")
+        f"synthetic fixture, and the statement of what may live there")
 
     text = readme.read_text(encoding="utf-8")
     for required in ("SYNTHETIC", "TRAINING ONLY", "NOT VENDOR ISSUED",
                      "NOT PRODUCTION EVIDENCE"):
         assert required in text, (
-            f"the fixture location's README does not carry the {required!r} "
-            f"label the client required")
-
-    # Asserted on the STATUS line, not on the whole file. The roadmap's house
-    # style keeps superseded wording as a dated history note, and this README
-    # does exactly that -- so a document-wide ban on the old token would fire on
-    # the note recording its own replacement. That is the trap the Week 9 guard
-    # fell into (PR #107); the fix there and here is to scope the assertion to
-    # the claim rather than to the vocabulary.
-    status = next((line for line in text.splitlines()
-                   if line.startswith("**Status:")), "")
-    assert "CLIENT-PACKAGE-RECEIVED-2026-08-24" in status, (
-        f"the README's status line does not record the supplied package: "
-        f"{status!r}. It arrived on 2026-08-24 -- a status that outlives its "
-        f"truth is the defect this file exists to catch")
-    assert "CLIENT-PROVIDED-FIXTURE-NOT-PRESENT" not in status, (
-        "the status line still says the package has not been supplied")
-
-    assert "client_package_2026-08-24" in text, (
-        "the README does not say where the supplied package actually is")
+            f"the fixture README does not carry the {required!r} label")
 
 
 def test_no_runtime_code_reads_the_offline_fixture_location():
@@ -372,7 +339,7 @@ def test_no_runtime_code_reads_the_offline_fixture_location():
     offenders = []
     for path in _runtime_sources():
         body = path.read_text(encoding="utf-8", errors="replace")
-        if "offline_fairness_training" in body:
+        if "fixtures/governance" in body or "fixtures\\governance" in body:
             offenders.append(str(path.relative_to(REPO)))
 
     assert not offenders, (
@@ -380,38 +347,21 @@ def test_no_runtime_code_reads_the_offline_fixture_location():
         "directory:\n" + "\n".join(offenders))
 
 
-def test_the_offline_location_holds_no_fabricated_data():
-    """The client supplies the package. This repository must not invent it --
-    a fabricated fixture would be exactly the "synthetic package masquerading
-    as vendor material" the client warned against, one step earlier.
+def test_the_offline_location_holds_one_verified_fixture():
+    """One fixture, one manifest. A second version beside it would be the
+    version conflict EVAL-13 refuses; the precedence policy says a later packet
+    replaces this one entirely.
 
-    Now that the package is here, the rule is narrower and stronger: exactly one
-    supplied package directory, plus this repository's own README beside it. A
-    second directory would mean a second version with no precedence rule applied
-    -- the client's `vendor-document-precedence-and-versioning.md` says a later
-    packet replaces this one entirely rather than sitting alongside it.
-
-    Whether the package's *contents* are still the client's bytes is a different
-    question, answered by
-    `db/tests/test_client_package_is_byte_preserved.py`.
+    Whether the contents still match the manifest is answered by
+    `db/tests/test_governance_fixture_integrity.py`.
     """
-    if not OFFLINE_FIXTURE_DIR.is_dir():
-        pytest.skip("the fixture location does not exist yet")
-
-    allowed = {"README.md", "client_package_2026-08-24"}
-    unexpected = [p.name for p in OFFLINE_FIXTURE_DIR.iterdir()
-                  if p.name not in allowed]
+    expected = {"README.md", "SHA256SUMS.txt", "evaluations", "fixtures",
+                "policies", "vendor"}
+    unexpected = sorted(p.name for p in OFFLINE_FIXTURE_DIR.iterdir()
+                        if p.name not in expected)
 
     assert unexpected == [], (
-        f"unexpected entries in the offline fixture location: {unexpected}. "
-        "Only the client's supplied package and this repository's README belong "
-        "here. If a newer client packet has arrived, it replaces the existing "
-        "one under its own dated directory and the precedence policy is applied "
-        "-- two packages side by side is the version conflict their EVAL-13 "
-        "refuses. If it was generated here, delete it: this repository does not "
-        "author the fixture.")
-
-    package = OFFLINE_FIXTURE_DIR / "client_package_2026-08-24"
-    assert (package / "SHA256SUMS.txt").is_file(), (
-        "the supplied package has no checksum manifest, so nothing can prove it "
-        "is still what the client sent")
+        f"unexpected entries in the governance fixture: {unexpected}. A newer "
+        "packet replaces this one; two side by side is a version conflict.")
+    assert (OFFLINE_FIXTURE_DIR / "SHA256SUMS.txt").is_file(), (
+        "the fixture has no checksum manifest, so nothing proves it is unchanged")

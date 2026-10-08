@@ -107,9 +107,9 @@ def _model_fairness_evidence():
 
     Matched on the repository's own fairness vocabulary across app modules and
     tests, then the known ZIP outcome-monitor files are removed BY EXACT PATH.
-    Reviewed on PR #62 (MC-002): the first version matched only `*fairness*` in
-    test filenames, so `test_model_disparate_impact.py` was invisible and the
-    stale claim would have survived real work landing.
+    MC-002: matching only `*fairness*` in test filenames would miss
+    `test_model_disparate_impact.py`, and the stale claim would survive real
+    work landing.
     """
     found = set()
     for pattern in ("services/*/app/*.py", "services/*/tests/*.py"):
@@ -214,7 +214,7 @@ def test_the_card_keeps_a_governance_status_surface():
 
     Asserted structurally, not by wording: a card can be rewritten freely, but
     deleting the place where open gaps are disclosed turns the artefact into
-    marketing -- the exact failure the Week 8 brief was about.
+    marketing.
     """
     headings = re.findall(r"^##+ (.+)$", _card(), re.MULTILINE)
 
@@ -271,11 +271,10 @@ def test_the_card_claims_no_more_fairness_validation_than_exists():
 
 
 def test_the_zip_screen_is_named_only_as_retired_and_prohibited():
-    """The card used to have to say the ZIP screen was an outcome monitor and
-    not model validation. The client removed the screen instead.
+    """The ZIP screen is retired, not relabelled.
 
-    Client decision, 2026-08-24: no protected-class collection, no approved
-    proxy, and none may be created from ZIP or ZIP3. So the card may still name
+    There is no protected-class collection and no approved proxy, and none may
+    be created from ZIP or ZIP3. So the card may still name
     the screen -- the record of a reversal is worth keeping -- but only as
     something retired, never as a control that exists. A card that reintroduced
     it as present-tense fairness evidence would be advertising a control the
@@ -287,7 +286,7 @@ def test_the_zip_screen_is_named_only_as_retired_and_prohibited():
 
     assert re.search(r"retired|deleted|no longer registered|prohibit", body, re.I), (
         "the card names the ZIP screen without saying it is retired; it was "
-        "removed on 2026-08-24 by client decision")
+        "retired")
 
     # And it must not present any runtime fairness analysis as existing.
     for match in re.finditer(r"fair_lending|zip-analysis|ZIP3", body):
@@ -342,10 +341,9 @@ def test_the_cards_monitoring_claim_matches_what_exists():
 def _decision_tracing_is_suppressed() -> bool:
     """Whether the decision graph suppresses LangSmith tracing.
 
-    Detected by the IMPORT rather than by the call site. An earlier version
-    looked for the literal `suppressed_tracing()`, and mutating the call to
-    `_st()` made both guards below skip or take the wrong branch -- a guard with
-    a rename-shaped disarm. A module that has stopped suppressing stops
+    Detected by the IMPORT rather than by the call site. Looking for the literal
+    `suppressed_tracing()` would let a call renamed to `_st()` make both guards
+    below skip or take the wrong branch -- a guard with a rename-shaped disarm. A module that has stopped suppressing stops
     importing from `.tracing` at all, which is the thing that actually changes.
     """
     graph = (REPO / "services" / "decision-service" / "app"
@@ -419,10 +417,8 @@ def _paragraphs(text: str) -> list:
     paragraph, which is what makes a row's claim and its qualification count as
     being in the same place."""
     # Whitespace-normalised, because prose WRAPS: a phrase split across a line
-    # break is the same claim, and the first version of
-    # this guard matched neither -- a mutation that put the unqualified claim
-    # back into a wrapped docstring passed, because the phrase happened to
-    # straddle a line break.
+    # break is the same claim, and a literal match would miss an unqualified
+    # claim put back into a wrapped docstring.
     blocks = []
     for block in re.split(_BLANK_LINE, text):
         if not block.strip():
@@ -477,10 +473,9 @@ _RETRACTION = re.compile(
 def test_no_file_claims_the_decision_path_is_traced_without_saying_it_is_not():
     """The scope gap that let three sites through, closed as a rule.
 
-    The first version of this correction swept `docs/`, `README.md`, `adr/` and
-    `specs/` -- and missed `graph.py`'s module docstring, `decide()`'s docstring
-    and a second ROADMAP row, all of which still told a reader that each
-    decision step is individually traceable in LangSmith. A sweep is a thing
+    A sweep of `docs/`, `README.md`, `adr/` and `specs/` alone misses source
+    docstrings such as `graph.py`'s and `decide()`'s, which can tell a reader
+    that each decision step is individually traceable in LangSmith. A sweep is a thing
     somebody did once; this is the thing that keeps being true.
 
     IT DOES NOT BAN THE PHRASE, which is the point. Every corrected passage here
@@ -512,9 +507,9 @@ def test_no_file_claims_the_decision_path_is_traced_without_saying_it_is_not():
 def test_the_card_names_an_owner_and_an_update_trigger():
     """Scoped to the ownership section, with no whole-document fallback.
 
-    Reviewed on PR #62 (MC-003): the old version fell back to the entire card
-    when the heading was not matched exactly, so `AI_MODEL_VERSION` in the
-    Vendor/version section satisfied a test about the owner's commitment. The
+    MC-003: falling back to the entire card when the heading is not matched
+    exactly would let `AI_MODEL_VERSION` in the Vendor/version section satisfy a
+    test about the owner's commitment. The
     commitment could disappear and the guard it underwrites would not notice.
 
     Heading matching is deliberately permissive (Owner / Ownership / Maintainer

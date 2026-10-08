@@ -1,11 +1,7 @@
-"""Multi-agent disclosure assembly (Week 4).
+"""Multi-agent disclosure assembly.
 
-Two-node LangGraph replacing the old direct auto-generate call: one node reads
-the knowledge graph (kg.py) for an approved decision's inputs, a second
-assembles the disclosure from them -- the exact two-agent shape Week 4's own
-prototype design called for (docs/ROADMAP.md: "one agent traverses the KG for an
-approved app's decision/offer inputs, a second assembles the disclosure from
-them").
+A two-node LangGraph workflow: one node reads the knowledge graph (kg.py) for an
+approved decision's inputs, a second assembles the disclosure from them.
 
 Deliberately NOT an LLM doing the math: TILA APR/finance-charge computation
 stays the existing deterministic Decimal engine in disclosure-service

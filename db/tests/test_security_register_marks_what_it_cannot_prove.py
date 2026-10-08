@@ -75,8 +75,8 @@ def _sec_rows(section: str) -> dict:
     return rows
 
 
-#: A closed history note inside one status cell. Same narrow shape as the Week 9
-#: guard (PR #107): no `re.S`, cannot cross an emphasis marker or a cell
+#: A closed history note inside one status cell. Same narrow shape as the
+#: roadmap status guards: no `re.S`, cannot cross an emphasis marker or a cell
 #: boundary, and the closing `*` has to actually close something.
 _HISTORY_NOTE = re.compile(r"\*This row read[^*|]*\*(?=\s|$)")
 

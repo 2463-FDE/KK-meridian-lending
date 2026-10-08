@@ -43,13 +43,12 @@ BEGIN;
 -- The approved synthetic document registry.
 -- ---------------------------------------------------------------------------
 --
--- Built here rather than reused from `fixtures/offline_fairness_training/` on
--- purpose. That package is a vendor-governance / adverse-action artifact -- its
--- `sources/source-ledger.csv` is a bibliography of eCFR and CFPB citations, not
--- applicant income documents -- and its own README says it stands in for reason
--- taxonomies and fairness summaries. Pressing it into service as a DTI document
--- registry would misappropriate a client artifact scoped to something else, which
--- is worse than a small purpose-built registry that says what it is.
+-- Built here rather than reused from `fixtures/governance/` on purpose. That
+-- fixture is a vendor-governance / adverse-action artifact -- reason codes,
+-- approved wording and fairness labels, not applicant income documents.
+-- Pressing it into service as a DTI document registry would misuse a fixture
+-- scoped to something else, which is worse than a small purpose-built registry
+-- that says what it is.
 CREATE TABLE IF NOT EXISTS manual_dti_source_documents (
     id          SERIAL PRIMARY KEY,
 

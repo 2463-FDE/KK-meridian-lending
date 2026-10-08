@@ -2,8 +2,8 @@
 
 The checker folds SQL out of the syntax tree to decide whether anything still
 reads `payments.pan` / `payments.cvv`, and migration 0031 refuses to drop those
-columns without an acknowledgement that it passed. Review of PR #15 kept finding
-the same family of holes in that folding: a runtime-selected column
+columns without an acknowledgement that it passed. The folding has one family
+of holes: a runtime-selected column
 (`f"SELECT {column} FROM payments"`), a `%` template with an unknown operand, a
 module constant rebound after a function is defined, a tuple of columns
 overwritten by a same-named local. Each is a real way to defeat a static folder,
@@ -155,7 +155,7 @@ def _composed_payments_sql(pattern):
             # same statement with a type annotation on it, and handling only the
             # unannotated form left the annotated one invisible to this test AND
             # to the checker -- `db.query(sql)` carries no table literal of its
-            # own, so nothing downstream noticed either. Reviewed on PR #15.
+            # own, so nothing downstream noticed either.
             elif (isinstance(node, (ast.Assign, ast.AnnAssign))
                   and node.value is not None
                   and _is_string_expression(node.value)
@@ -212,10 +212,10 @@ def test_the_walk_actually_reaches_the_payments_readers(table_pattern):
 
 
 def test_the_walk_treats_an_annotated_assignment_like_a_plain_one(table_pattern):
-    """Reviewed on PR #15: `sql: str = f"..."` was invisible to this walk.
+    """`sql: str = f"..."` must be as visible to this walk as `sql = f"..."`.
 
-    It handled `ast.Assign` only, so an annotated assignment of composed payments
-    SQL passed -- and the `db.query(sql)` that followed carries no table literal
+    Handling `ast.Assign` only would let an annotated assignment of composed
+    payments SQL pass -- and the `db.query(sql)` that followed carries no table literal
     of its own, so nothing else caught it either. Annotating a line is not a
     semantic change and must not be a way through.
 
@@ -275,11 +275,10 @@ def test_the_walk_treats_an_annotated_assignment_like_a_plain_one(table_pattern)
 # be a style rule; it is a ban on wildcard reads of the ONE table whose dropped
 # columns the checker exists to police.
 
-# Three shapes, because one regex was not enough and a reviewer proved it
-# (D20-WILDCARD-QUALIFIED). The first version matched only the bare
-# `SELECT * FROM payments`, so `SELECT p.* FROM payments p` -- which
-# `check_no_pan_readers.py` also reports clean on -- would have walked straight
-# through the guard that exists to catch exactly that.
+# Three shapes, because one regex is not enough (D20-WILDCARD-QUALIFIED).
+# Matching only the bare `SELECT * FROM payments` would let
+# `SELECT p.* FROM payments p` -- which `check_no_pan_readers.py` also reports
+# clean on -- walk straight through the guard that exists to catch it.
 #
 #   1. bare       SELECT * FROM payments
 #   2. qualified  SELECT payments.* / public.payments.*

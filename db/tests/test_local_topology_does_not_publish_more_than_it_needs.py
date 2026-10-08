@@ -198,11 +198,10 @@ def test_the_e2e_overlay_does_not_republish_them(service):
     Compose MERGES `ports` across files rather than replacing them, so an entry
     added here is added to whatever the base file publishes. The overlay is
     therefore held to the SAME rule as the base file, service by service, through
-    the same `_publication_is_allowed` function -- an earlier version of this test
-    checked both stores for a loopback prefix, which would have let a future
-    overlay publish `127.0.0.1:6379:6379` and put the unauthenticated session
-    store back on the host while the base test still passed. Two rules for one
-    invariant is how that gap opened; there is now one.
+    the same `_publication_is_allowed` function. Checking both stores for a
+    loopback prefix alone would let a future overlay publish
+    `127.0.0.1:6379:6379` and put the unauthenticated session store back on the
+    host while the base test still passed. One invariant, one rule.
     """
     if not COMPOSE_E2E.exists():                          # pragma: no cover
         pytest.skip("no e2e overlay in this checkout")

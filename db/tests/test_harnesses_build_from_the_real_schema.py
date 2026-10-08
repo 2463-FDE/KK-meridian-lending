@@ -32,11 +32,9 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 
 #: Production tables, PARSED from `db/init` rather than typed here.
 #:
-#: Codex review of PR #159, RF26-GUARD-PARTIAL: the first version was a
-#: hand-maintained literal and it was already incomplete -- `users`,
-#: `ledger_control`, `reconciliation_runs` and
-#: `manual_dti_assessment_documents` were all missing, so a new test could
-#: hand-write `CREATE TABLE users` and the suite would pass. A guard whose
+#: RF26-GUARD-PARTIAL: a hand-maintained literal goes incomplete -- missing
+#: `users` or `ledger_control`, a new test could hand-write `CREATE TABLE users`
+#: and the suite would pass. A guard whose
 #: RULE is "no hand-maintained copy of production" cannot itself rest on a
 #: hand-maintained copy of production. The inventory is now derived from the
 #: same files the tables are defined in.

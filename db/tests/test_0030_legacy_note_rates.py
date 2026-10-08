@@ -75,7 +75,7 @@ def _legacy_database(conn):
             -- pre-0011 offer's decision_id by joining to this table, which it
             -- must do BEFORE installing the NOT VALID check -- afterwards
             -- PostgreSQL rejects any UPDATE of a violating row, even of one
-            -- unrelated column. Reviewed on PR #10.
+            -- unrelated column.
             CREATE TABLE decisions (
                 app_id INTEGER PRIMARY KEY,
                 outcome TEXT NOT NULL
@@ -258,7 +258,7 @@ def test_a_small_dollar_loan_does_not_falsely_certify_its_apr(conn):
     would have been certified as the contractual note rate and shown to the
     borrower as one. A genuine note rate reproduces its own stored payment to
     the cent, so half a cent admits every true case and excludes this one.
-    Reviewed on PR #10.
+   
     """
     _legacy_database(conn)
     with conn.cursor() as cur:
@@ -289,7 +289,7 @@ def test_a_tiny_long_term_loan_is_left_null_because_its_cent_proves_nothing(conn
 
     0030 therefore also requires SEPARABILITY: moving the rate by 0.125pp must
     move the computed payment by more than half a cent. On this row it moves it
-    by $0.0003, so the row stays NULL. Reviewed on PR #10.
+    by $0.0003, so the row stays NULL.
     """
     _legacy_database(conn)
     with conn.cursor() as cur:
@@ -333,7 +333,7 @@ def test_separability_does_not_cost_ordinary_loans_their_recovered_rate(conn):
 def test_a_pre_0011_offer_gets_its_decision_id_before_the_constraint_exists(conn):
     """The interaction the accepted-orphan test could not see.
 
-    Review of PR #10: this migration's own back-fill certifies `note_rate_pct` on
+    This migration's own back-fill certifies `note_rate_pct` on
     a legacy row while deliberately leaving the other contract fields NULL, so an
     ACCEPTED row of that shape is a partial contract. It can be neither demoted
     (an accepted disclosure is immutable) nor completed (that would invent

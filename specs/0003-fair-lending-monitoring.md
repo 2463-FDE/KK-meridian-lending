@@ -52,13 +52,11 @@ permitted, so the guard checks the shape as well as the name.
 per-`model_version` reason distribution. None of them touches a protected class
 or a proxy; the reason distribution groups by model version.
 
-**The client's confirmation request, answered in the repository:** protected-class
-labels are confined to `fixtures/offline_fairness_training/` — supplied
-2026-08-24 and ingested under `client_package_2026-08-24/`, `docs/DEBT.md`
-**D24** — and real, currently approved vendor material must replace the synthetic
-package before any non-training use. Arrival changes where the labels live, not
-what may be claimed from them: the package is the lowest tier in the client's own
-precedence policy, and no vendor-issued approved document is identified.
+**Where the labels live:** protected-class labels are confined to the synthetic
+governance fixture at `fixtures/governance/`, and real, currently approved vendor
+material must replace it before any non-training use. The fixture is the lowest
+tier in its own precedence policy, and no vendor-issued approved document is
+identified.
 
 ## Context — what exists on `main` today
 
@@ -221,7 +219,7 @@ against fixtures.
   which this demonstration may not collect, and not with an inferred proxy, which
   it may not create — expressly including ZIP and ZIP3.
 - **Offline synthetic evaluation: PERMITTED**, and only against the single
-  isolated fixture at `fixtures/offline_fairness_training/`. Offline means a CLI
+  isolated fixture at `fixtures/governance/`. Offline means a CLI
   or test package: it reads that directory, never the runtime tables, writes no
   label anywhere, calls no model, and emits aggregate output that says SYNTHETIC
   / TRAINING ONLY on its face.

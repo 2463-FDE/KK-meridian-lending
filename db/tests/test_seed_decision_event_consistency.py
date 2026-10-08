@@ -332,11 +332,10 @@ def test_the_events_table_is_still_append_only():
 
 # --- the event must describe the application it points at ---------------------
 #
-# Codex found application 6013 recording `requested_amount = 7500` while
-# `applications.amount` says 8000. One row, one typo, and it existed because the
-# generator RESTATED the six anchor applications in a literal table instead of
-# reading them out of the seed. The tool now parses them; these cases are the
-# check that would have caught it either way.
+# A generator that RESTATES the anchor applications in a literal table instead
+# of reading them out of the seed can record a `requested_amount` that no
+# application has. The tool parses the seed; these cases catch the mismatch
+# either way.
 #
 # Deliberately three fields, not one. `requested_amount`, `term_months` and
 # `annual_income` are the whole of what the event claims the model was given, and

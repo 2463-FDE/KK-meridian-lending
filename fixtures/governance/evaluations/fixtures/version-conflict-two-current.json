@@ -2,11 +2,11 @@
   "status": "never_approved_input",
   "documents": [
     {
-      "version": "CCUS-SYN-2026.08.24",
+      "version": "SYN-GOV-2.0",
       "marked_current": true
     },
     {
-      "version": "CCUS-SYN-2026.07.01",
+      "version": "SYN-GOV-1.9",
       "marked_current": true
     }
   ]

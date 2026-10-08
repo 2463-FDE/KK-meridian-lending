@@ -50,12 +50,9 @@ schedule = pytest.importorskip(
 
 #: Where a hand-written loan contract can appear. DISCOVERED, not listed.
 #:
-#: A literal list of three filenames was the first version of this, and it
-#: failed its own guard-the-guard immediately: two of the three fixtures live on
-#: sibling branches, so on this branch the list found one contract and demanded
-#: three. That is the hand-maintained-list defect this repository has produced
-#: five times -- a list that reads complete while missing an entry -- and the
-#: repo's own rule is to derive the set from the source instead. Any test or
+#: A literal list of filenames is the hand-maintained-list defect -- a list that
+#: reads complete while missing an entry -- so the set is derived from the
+#: source instead. Any test or
 #: fixture that writes a `loans` contract group is found by the pattern below,
 #: including ones added after this file.
 FIXTURE_GLOBS = (

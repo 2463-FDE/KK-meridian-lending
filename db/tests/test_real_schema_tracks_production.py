@@ -95,10 +95,9 @@ def test_dependencies_match_the_references_in_the_file():
     """
     for table, declared in real_schema.DEPENDENCIES.items():
         # COMMENTS STRIPPED, and the table name must be followed by the column
-        # list a real foreign key carries. The first version matched
-        # `REFERENCES\s+(\w+)` anywhere in the definition, and `ledger_entries`
-        # has a comment containing the word "REFERENCES here" -- so the guard
-        # demanded a dependency on a table called `here`. A constraint parser
+        # list a real foreign key carries. Matching `REFERENCES\s+(\w+)` anywhere
+        # in the definition would read a comment containing "REFERENCES here" in
+        # `ledger_entries` as a dependency on a table called `here`. A constraint parser
         # that reads prose reports defects that do not exist and, worse, would
         # miss a real FK written in a shape it does not expect.
         body = re.sub(r"--.*", "", real_schema.definition_of(table))
@@ -113,7 +112,7 @@ def test_dependencies_match_the_references_in_the_file():
             "-- creating it would fail with UndefinedTable"
             % (table, sorted(missing)))
 
-        # BOTH DIRECTIONS. Codex review of PR #159, RF26-DEPS-EXTRA-UNCHECKED:
+        # BOTH DIRECTIONS. RF26-DEPS-EXTRA-UNCHECKED:
         # checking only `referenced - declared` accepts an EXTRA declared parent,
         # and my own first draft had one -- `loans -> offers`, guessed from the
         # name, when `loans` has no foreign keys at all in production. An extra

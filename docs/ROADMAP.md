@@ -1050,14 +1050,10 @@ than unblocking one:
 `applicants.zip_code` stays as a postal-address component and is no longer
 fairness evidence. `db/tests/test_no_runtime_protected_class_proxy.py` fails if
 the screen, the route, or a substitute proxy reappears — including a renamed one,
-because it checks the shape as well as the name. The client's synthetic package
-arrived on 2026-08-24 and is ingested byte-for-byte at
-`fixtures/offline_fairness_training/client_package_2026-08-24/`, all 34 checksums
-verifying; the offline evaluation it authorises now runs as a CLI and reports
-aggregate counts with **no fairness verdict**, which is what the package permits
-and no more. See `docs/DEBT.md` **D24**. *This paragraph read "The client's
-synthetic package has not been supplied" until 2026-08-27, which was true when
-written.*
+because it checks the shape as well as the name. Synthetic labels live only in
+the governance fixture at `fixtures/governance/`; the offline evaluation runs as
+a CLI and reports aggregate counts with **no fairness verdict**. See
+`docs/DEBT.md` **D24**.
 
 What did **not** change: §1's denial-reason contract, the mapping seam, the
 fail-closed unmapped-code behaviour, and the per-`model_version` reason

@@ -24,7 +24,7 @@ WHY THIS EXISTS
 
     The UI was right. `decisions.outcome` is the final answer; `decision_events`
     is the audit trail of the run that produced it, and the seed created the
-    first without the second. So the screen the client is shown to demonstrate
+    first without the second. So the screen meant to demonstrate
     Reg B / ECOA evidence had none to show.
 
 WHY IT COULD NOT SIMPLY BE FILLED IN
@@ -116,12 +116,10 @@ END = "-- END GENERATED DECISION EVENT ROWS"
 #: generated, so their inputs are PARSED OUT OF THE SEED rather than restated
 #: here.
 #:
-#: They were restated here, in a literal table, and it was wrong within an hour:
-#: application 6013's amount was typed as 7500 while the seed says 8000, so its
-#: generated event recorded a requested amount no application had. Codex caught
-#: it. The guard that was supposed to prevent exactly that --
-#: `_assert_anchors_match_the_seed` -- only checked the SSN and the decisions
-#: row, so it passed over the amount, the term and the income.
+#: A literal table restating them drifts: one typed amount that disagrees with
+#: the seed produces an event recording a requested amount no application had,
+#: and `_assert_anchors_match_the_seed` checks the SSN and the decisions row, not
+#: the amount, the term or the income.
 #:
 #: Restating a value the file next to you already holds is the defect, not the
 #: typo. Parsing removes the class: a hand edit to any anchor's amount, term or

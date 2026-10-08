@@ -23,12 +23,9 @@ clean". Both are required before the drop. Treating the first as the second is
 the mistake this file exists to make hard rather than easy.
 
 Matching is case-INSENSITIVE, because PostgreSQL folds an unquoted identifier:
-`SELECT PAN` reads the very column being dropped. An early version matched only
-lowercase on the argument that real references here are lowercase while the
-prose is capitalised -- which was true of the prose and not of SQL, and it meant
-an uppercase reader passed. Prose is excluded by WHERE it sits (see below)
-rather than by how it is capitalised, which is the distinction that actually
-holds. Reviewed on PR #15.
+`SELECT PAN` reads the very column being dropped. Prose is excluded by WHERE
+it sits (see below) rather than by how it is capitalised, because uppercase SQL
+is as live as lowercase.
 
 What it resolves, and where it stops. SQL reaching a database execution call is
 folded from the syntax tree: literals, adjacent literals, concatenation,
@@ -44,7 +41,7 @@ static folder can always be defeated by a program that is dynamic enough: a
 column name read from a config file, fetched from the database, or reached
 through `getattr` is not knowable from the syntax tree, and extending this tool
 until it were would turn a purpose-built check into a worse Python interpreter.
-Review of PR #15 raised five concrete evasion shapes (a runtime-selected
+Five concrete evasion shapes are known (a runtime-selected
 f-string column, a `%` template with an unknown operand, SQL assigned before it
 is executed, a joined tuple of columns, a module constant rebound after the
 function that uses it). Rather than chase them here, the PREMISE they all need is
@@ -73,7 +70,7 @@ Excluded from the search, each for a reason:
                          the syntax tree. NOT triple-quoted strings in general:
                          `conn.query(\"\"\"SELECT pan ...\"\"\")` is a live reader that
                          happens to be quoted the same way, and skipping it
-                         returned a false all-clear (PR #15).
+                         would return a false all-clear.
 """
 from __future__ import annotations
 
@@ -92,8 +89,7 @@ PATTERNS = [
     (re.compile(r"""getattr\(\s*[^,]+,\s*["'](pan|cvv)["']"""), "dynamic attribute read"),
     # A raw query consumed as a mapping. `row["pan"]` is as live a read as
     # `payment.pan`, and it carries no SQL keyword of its own -- the SELECT that
-    # produced the row is elsewhere, often in another function. Reviewed on
-    # PR #15.
+    # produced the row is elsewhere, often in another function.
     (re.compile(r"""\[\s*["'](pan|cvv)["']\s*\]"""), "mapping key read"),
     (re.compile(r"""\.get\(\s*["'](pan|cvv)["']"""), "mapping get read"),
 ]
@@ -102,16 +98,14 @@ PATTERNS = [
 # also doing SQL. Without that qualifier the word appears in ordinary prose.
 _SQL_CONTEXT = re.compile(r"\b(select|insert|update|delete|set|where|values)\b", re.IGNORECASE)
 # Case-insensitive: PostgreSQL folds an unquoted identifier to lower case, so
-# `SELECT PAN` reads the very column being dropped. This was case-sensitive and
-# missed it. Reviewed on PR #15.
+# `SELECT PAN` reads the very column being dropped.
 _BARE_COLUMN = re.compile(r"\b(pan|cvv)\b", re.IGNORECASE)
 
 # SQL is scanned as whole STRING LITERALS, taken from the syntax tree, not as
 # lines within a sliding window. A window is a guess about how far a projection
-# can run: the first version required the keyword and the column on one line and
-# missed every multiline query; widening it to six lines still missed a
-# projection with seven fields before `pan`. A literal has an actual beginning
-# and end, so there is nothing left to guess. Reviewed on PR #15.
+# can run: a one-line window misses every multiline query, and a six-line one
+# still misses a projection with seven fields before `pan`. A literal has an
+# actual beginning and end, so there is nothing left to guess.
 
 # Methods that hand a statement to the database. Used only to report a
 # variable-carried query at the point it is EXECUTED -- the assignment may be
@@ -148,7 +142,7 @@ def _docstring_lines(source: str) -> set[int]:
 
     -- as documentation and skips every line of it, so the checker returned exit
     0 over a live reader and could authorise dropping a column deployed code
-    still selects. Reviewed on PR #15.
+    still selects.
 
     A docstring is a position in the syntax tree, not a quoting style, so it is
     identified as one: the first statement of a module, class or function when
@@ -196,7 +190,7 @@ def _single_binding(node):
     followed by `db.query(sql)` resolved to nothing, and since the execute
     argument carries no table literal of its own, nothing downstream noticed
     either -- the checker reported clean on a live dynamic read. `AnnAssign`
-    without a value (`x: str`) binds nothing and is skipped. Reviewed on PR #15.
+    without a value (`x: str`) binds nothing and is skipped.
     """
     if isinstance(node, ast.Assign):
         if len(node.targets) != 1:
@@ -260,7 +254,7 @@ def _fold(node: ast.AST, names: dict[str, str], depth: int = 0) -> str | None:
     Anything else returns None and is simply not analysed. A checker that
     guesses at runtime values would be a Python interpreter with a false
     confidence attached; this one reports what it can prove and the runbook
-    carries the rest. Reviewed on PR #15.
+    carries the rest.
     """
     if depth > 8:            # a self-referential assignment chain
         return None
@@ -277,7 +271,7 @@ def _fold(node: ast.AST, names: dict[str, str], depth: int = 0) -> str | None:
             # of pan, and leaving a hole there hid it -- the standalone "pan"
             # carries no SQL context of its own, so nothing else would catch
             # it. Only names this file already resolved; anything else stays a
-            # hole. Reviewed on PR #15.
+            # hole.
             inner = _fold(value.value, names, depth + 1) if isinstance(value, ast.FormattedValue) else None
             parts.append(inner if inner is not None else _RUNTIME_HOLE)
         return "".join(parts)
@@ -368,7 +362,7 @@ def _nodes_in_scope(scope: ast.AST):
 
     A nested function is its own scope with its own bindings; walking into it
     from here would let one function's `COL = "last4"` mask another's
-    `COL = "pan"`. Reviewed on PR #15.
+    `COL = "pan"`.
     """
     for child in ast.iter_child_nodes(scope):
         if isinstance(child, _SCOPES):
@@ -422,7 +416,7 @@ def _expressions_of(stmt):
     either: an `if` body is walked separately, in order, with the bindings that
     hold there. Walking it from here evaluated its expressions against the
     bindings from BEFORE the branch -- so the same expression was judged twice,
-    once against the wrong state. Reviewed on PR #15.
+    once against the wrong state.
     """
     stack = [stmt]
     while stack:
@@ -456,7 +450,7 @@ def _has_unresolved_field(node, names) -> bool:
     `f"SELECT {column} FROM payments"` folds to `SELECT ? FROM payments` --
     a string with no column name in it, which read as clean. Consistent with
     `.format()`, a hole in SQL that actually reaches the database is an
-    unresolved statement, not a clean one. Reviewed on PR #15.
+    unresolved statement, not a clean one.
     """
     if not isinstance(node, ast.JoinedStr):
         return False
@@ -589,7 +583,7 @@ def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), u
         COL = "last4"                                      # ...and this hid it
 
     A name is now whatever it was bound to at the point the statement runs, and
-    a later assignment cannot reach backwards. Reviewed on PR #15.
+    a later assignment cannot reach backwards.
     """
     if unresolved is None:
         unresolved = set()
@@ -599,7 +593,6 @@ def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), u
             # defined, so a rebinding later in the enclosing scope is what the
             # body may actually see. Names the parent rebinds after this point
             # are therefore withheld rather than frozen at their current value.
-            # Reviewed on PR #15.
             snapshot = dict(names)
             for later in _names_assigned_in(body[index + 1:]):
                 snapshot.pop(later, None)
@@ -632,7 +625,7 @@ def _walk_statements(body, names, doc_nodes, hits, nested, params=frozenset(), u
         # this tool deliberately does not do -- a name a conditional body
         # rebinds becomes UNCERTAIN afterwards: dropped from the bindings and
         # marked unresolved, so a query built from it fails closed instead of
-        # being cleared by one branch. Reviewed on PR #15.
+        # being cleared by one branch.
         conditional = isinstance(stmt, (ast.If, ast.For, ast.While, ast.Try, ast.AsyncFor))
         for field in ("body", "orelse", "finalbody"):
             inner = getattr(stmt, field, None)

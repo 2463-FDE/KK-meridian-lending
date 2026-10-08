@@ -112,7 +112,7 @@ def _reads_retired_loan_apr(sql: str) -> bool:
     likely to be written by someone reaching for the offer's APR. A qualified
     read passes by SAYING which table it means; a bare one is reported even if
     it turns out to be the offer's, because a reader cannot tell either and the
-    fix is one word. (Review of PR #37.)
+    fix is one word.
     """
     if not re.search(r"\bloans\b", sql, re.IGNORECASE):
         return False
@@ -236,10 +236,10 @@ def test_the_scanner_catches_the_shapes_it_is_meant_to():
 
     Every other test here passes when the codebase is clean, which is also what
     a broken scanner does. These cases pin the rule itself, and the third is the
-    hole review of PR #37 found: a statement naming BOTH tables used to be
-    skipped entirely, so `SELECT apr FROM loans JOIN offers ...` -- the one
-    query most likely to be written by someone reaching for the offer's APR and
-    getting the loan's -- sailed through.
+    statement naming BOTH tables: skipping it would let
+    `SELECT apr FROM loans JOIN offers ...` -- the one query most likely to be
+    written by someone reaching for the offer's APR and getting the loan's --
+    through.
     """
     flagged = _reads_retired_loan_apr
 
@@ -258,8 +258,8 @@ def test_the_scanner_catches_the_shapes_it_is_meant_to():
         # A write to `offers` whose SET column CANNOT be qualified -- Postgres
         # rejects `SET offers.apr = ...` outright, so 'qualify it' is not advice
         # that can be followed. This is the real statement in
-        # `disclosure-service/app/routers/offers.py`, which the first version of
-        # the tightened rule reported as a retired-column read.
+        # `disclosure-service/app/routers/offers.py`, which a tighter rule could
+        # misreport as a retired-column read.
         "WITH repaired AS (UPDATE offers o SET note_rate_pct = %s, apr = %s "
         "WHERE app_id = %s RETURNING o.id) SELECT id FROM repaired "
         "JOIN loans ON loans.app_id = %s",

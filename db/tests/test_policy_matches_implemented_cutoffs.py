@@ -70,8 +70,8 @@ RETIREMENT_MARKERS = ("retired", "used to publish", "used to say", "adr/0007",
 def _api_facing_files():
     """Every surface that PUBLISHES the rule to a human or an API consumer.
 
-    The first version of this scan covered routers and schemas, and the retired
-    cutoff was still live in three places it did not look: the underwriting UI's
+    Routers and schemas are not enough; a retired cutoff can stay live in three
+    other places: the underwriting UI's
     reason placeholder -- labelled "shown to the applicant if denied", so it
     suggested a DTI justification for an adverse-action notice -- two DDL
     comments, and the loan-assistant system prompt, which regenerates the claim
@@ -114,11 +114,11 @@ def _offending_lines(path):
 
 @pytest.mark.parametrize("path", _api_facing_files(), ids=lambda p: f"{p.parent.parent.parent.name}/{p.name}")
 def test_no_api_facing_doc_publishes_a_retired_cutoff(path):
-    """The gap the first version of this test left open.
+    """API-facing docstrings publish the rule too.
 
-    It scanned the policy document only. The same retired band was still in
-    `review_application`'s FastAPI docstring and in `ReviewIn`'s schema comment --
-    so the policy said one thing and /docs said another, and a staff member
+    Scanning the policy document only would miss a retired band in
+    `review_application`'s FastAPI docstring or `ReviewIn`'s schema comment --
+    so the policy would say one thing and /docs another, and a staff member
     resolving a referral could read that it was raised on a criterion nothing ever
     evaluated.
     """

@@ -65,12 +65,10 @@ def _frontend_surfaces():
 
 #: The backend modules that DOCUMENT the duplicate-review workflow.
 #:
-#: Codex review of this PR (REV-COPY-01) caught the reason this list exists: the
-#: page copy was corrected while `review_queue.py` still told the next reader that
-#: a `confirmed_duplicate` "has to go through the maker-checker to reverse
-#: anything". The screen and the service behind it then disagreed, and the guard
-#: as first written could not see it -- so the defect survived one file behind the
-#: thing it was written to fix.
+#: REV-COPY-01: page copy can be corrected while `review_queue.py` still tells
+#: the next reader that a `confirmed_duplicate` "has to go through the
+#: maker-checker to reverse anything". The screen and the service behind it then
+#: disagree, and a guard over the page alone cannot see it.
 #:
 #: Scoped to the modules that describe what a reviewer does next, rather than to
 #: all of `services/`, because `reconciliation.py` legitimately discusses refund
@@ -80,10 +78,9 @@ def _frontend_surfaces():
 _REVIEW_WORKFLOW_MODULES = (
     SERVICES / "servicing-service" / "app" / "review_queue.py",
     SERVICES / "servicing-service" / "app" / "maker_checker.py",
-    # The maintained TESTS that describe the same workflow. Codex review
-    # REV-COPY-02: both of these still taught that "a reversal goes through the
-    # maker-checker" after the page copy and the service docstring had been
-    # corrected. A test docstring is documentation the next implementer reads --
+    # The maintained TESTS that describe the same workflow (REV-COPY-02): a
+    # test can keep teaching that "a reversal goes through the maker-checker"
+    # after the page copy and the service docstring are corrected. A test docstring is documentation the next implementer reads --
     # arguably the documentation they trust most, because it sits beside an
     # assertion that passes.
     SERVICES / "servicing-service" / "tests" / "test_review_queue_api.py",
@@ -99,17 +96,15 @@ _MECHANISM = re.compile(r"maker[- ]?checker|approvals\b", re.IGNORECASE)
 
 #: What makes a CLAUSE a denial or a historical note rather than an instruction.
 #:
-#: Codex review REV-GUARD-03. The first version of this evaluated whole SENTENCES
-#: and treated any negation anywhere in one as a denial -- so the original toast,
+#: REV-GUARD-03. Evaluating whole SENTENCES and treating any negation anywhere
+#: in one as a denial would pass a toast such as
 #:
 #:     "No money moved -- a reversal goes through Approvals."
 #:
-#: passed clean: the leading "No" negates the MONEY MOVEMENT, not the reversal, and
-#: the second clause still promised one. The guard that justifies this whole PR did
-#: not hold against the defect the PR was written for. Reproduced before fixing:
-#: `_teaches_a_reversal` returned `[]` on that exact string.
+#: clean: the leading "No" negates the MONEY MOVEMENT, not the reversal, and the
+#: second clause still promises one.
 #:
-#: So negation now has to be LOCAL to the clause that names the reversal. A denial
+#: So negation has to be LOCAL to the clause that names the reversal. A denial
 #: is a denial of the reversal, not of something else in the same sentence.
 _NEGATED_OR_HISTORICAL = re.compile(
     r"\bno\s+(?:card\s+)?(?:refund|revers\w+|chargeback|void\w*)"
@@ -168,7 +163,7 @@ def _teaches_a_reversal(text: str) -> list[str]:
 # --------------------------------------------------------------------------
 # The guard's own behaviour, pinned against the sentences it exists to catch.
 #
-# Codex review REV-GUARD-03: the first semantic version of this guard did NOT
+# REV-GUARD-03: the first semantic version of this guard did NOT
 # flag the original toast, because it evaluated whole sentences and read the
 # leading "No money moved" as a denial of the reversal. A guard that misses the
 # defect its own PR removed is worse than no guard, so the shapes are now test
@@ -317,7 +312,7 @@ def test_no_surface_promises_a_reversal_that_does_not_exist():
 def test_no_review_workflow_module_documents_a_reversal_either():
     """The same rule, one layer down, and stated semantically.
 
-    Codex review REV-COPY-01 then REV-COPY-02: the false workflow survived first
+    REV-COPY-01 then REV-COPY-02: the false workflow survived first
     in `review_queue.py` and then in two maintained test files, each time because
     the guard was scanning a narrower set than the claim lived in.
 
