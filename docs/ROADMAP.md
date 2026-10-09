@@ -481,14 +481,14 @@ are in `db/init/002_seed.sql` and on the login page — not repeated here.
 
 ---
 
-## Quick test — the 3 agents (fast sanity check)
+## Quick test — the two graphs and the assistant agent (fast sanity check)
 
 Stack must be up (`docker compose up -d`). All 3 confirmed live-working this session.
 
-| Agent | Week built | Where | Steps | Expect |
+| Component | Week built | Where | Steps | Expect |
 |---|---|---|---|---|
 | **Decision Graph** (LangGraph, 3 nodes: pull credit → score → finalize; `finalize` returns the proposed outcome, it does not persist) | Week 3 | `/apply` (public, no login) or staff `/underwriting/[appId]` → "Run decision" | Submit an application, income + amount matter (score ≈ `bureau_score*0.9 + income/1000`) | Weak profile → `refer`/`deny` with a real reason code. Strong profile (income ≥100k, modest amount) → `approve` |
-| **Disclosure Graph** (2-agent hand-off: read record → build offer) | Week 4 | Same app, `/underwriting/[appId]` "Offer" card | Nothing to click — fires automatically the instant Decision Graph returns `approve` | Real APR/finance-charge/monthly-payment numbers appear with no manual step, `decision_id` links back to the exact decision |
+| **Disclosure Graph** (LangGraph, 2 deterministic nodes, no model call: read record → build offer) | Week 4 | Same app, `/underwriting/[appId]` "Offer" card | Nothing to click — fires automatically the instant Decision Graph returns `approve` | Real APR/finance-charge/monthly-payment numbers appear with no manual step, `decision_id` links back to the exact decision |
 | **Assistant Agent** (retrieval + Bedrock LLM) | Week 2 (retrieval) / Week 3 (agent wrap) | Log in `csr`/`underwriter`/`admin` → `/policy-chat` | Ask a policy question | See catch-fast questions below |
 
 **Policy questions to catch fast (assistant agent):**
@@ -497,7 +497,7 @@ Stack must be up (`docker compose up -d`). All 3 confirmed live-working this ses
   **Careful with the answer it gives about DTI.** The policy document also names a DTI ≤43% cutoff and fraud-flag rules, and the assistant will quote them — but **the code implements neither** (`monthly_debt` is hardcoded to `0` by origination before decision-service ever sees it, and no fraud check exists anywhere). The assistant is correctly quoting policy; the policy describes a system that was never built. See `adr/0007-underwriting-policy-dti-fraud-gap.md`.
 - *Should decline, not guess* — anything not in `policies/` (e.g. "what's the CEO's favorite color?") → must return `answerable:false` with the honest-decline message. If it answers this instead of declining, it's hallucinating — treat as a broken guardrail, not a feature.
 
-Login page (`/login`) lists all seeded demo creds. Full curl-only script (no browser): `test_agents.sh` (see this session's scratch dir) — hits all 3 in one run, no manual placeholder-swapping.
+Login page (`/login`) lists all seeded demo creds.
 
 ---
 
@@ -625,7 +625,7 @@ quality.
 
 ---
 
-## Week 4 — Multi-Agent + Knowledge Graphs
+## Week 4 — LangGraph Orchestration + Knowledge Graphs
 ### Feature: auto-disclosure on approval + loan-history traversal
 
 **Domains touched:** Disclosures · Decisioning · Finance
@@ -659,8 +659,8 @@ trusting the docstring's own claimed numbers.
 
 **This week's real deliverable, stated honestly:** a KG schema doc
 (borrower→application→decision→offer→disclosure, including the currently-
-missing decision→offer edge), a multi-agent disclosure-assembly prototype
-design (one agent traverses the KG for an approved app's decision/offer
+missing decision→offer edge), a two-node disclosure-orchestration prototype
+design (one node traverses the KG for an approved app's decision/offer
 inputs, a second assembles the disclosure from them), the corrected
 TILA-tolerance finding above, and an ADR (Decimal/minor-units + one
 externalized rule-config source + TILA test vectors — full rules engine
@@ -674,7 +674,7 @@ explicitly deferred to the roadmap, not this week).
   `decision_events` audit row) → every linked offer in one call — the concrete
   "trace this loan's whole history" answer, exposed staff-only at
   `GET /applications/{app_id}/history`.
-- `app/disclosure_graph.py` — the two-agent hand-off, as a real LangGraph:
+- `app/disclosure_graph.py` — the two-node hand-off, as a real LangGraph:
   `kg_reader` walks decision→application for the approved inputs,
   `assemble_disclosure` hands them to disclosure-service's existing
   deterministic Decimal engine. Deliberately **not** an LLM computing TILA

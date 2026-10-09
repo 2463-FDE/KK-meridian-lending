@@ -1,4 +1,4 @@
-"""Multi-agent disclosure assembly.
+"""Two-node LangGraph disclosure orchestration.
 
 A two-node LangGraph workflow: one node reads the knowledge graph (kg.py) for an
 approved decision's inputs, a second assembles the disclosure from them.
@@ -6,8 +6,8 @@ approved decision's inputs, a second assembles the disclosure from them.
 Deliberately NOT an LLM doing the math: TILA APR/finance-charge computation
 stays the existing deterministic Decimal engine in disclosure-service
 (apr.py/schedule.py) -- an LLM approximating regulated dollar math is not an
-acceptable trade for "agentic," it's a compliance risk. "Agent" here means a
-LangGraph orchestration node with one clear responsibility and a traceable
+acceptable trade for "agentic," it's a compliance risk. Each node is a
+LangGraph orchestration step with one clear responsibility and a traceable
 boundary, not an LLM call; nothing in this file talks to a model.
 """
 from typing import TypedDict
@@ -29,7 +29,7 @@ class DisclosureState(TypedDict, total=False):
 
 
 def _node_kg_reader(state: DisclosureState) -> dict:
-    """Agent 1: walk decision -> application for this app_id's approved inputs."""
+    """Node 1 (kg_reader): walk decision -> application for this app_id's approved inputs."""
     inputs = kg.get_approved_decision_inputs(state["app_id"])
     if inputs is None:
         return {"skipped": f"no approve decision on record for app_id={state['app_id']}"}
@@ -37,7 +37,7 @@ def _node_kg_reader(state: DisclosureState) -> dict:
 
 
 def _node_assemble_disclosure(state: DisclosureState) -> dict:
-    """Agent 2: hand the KG-derived inputs to disclosure-service's real,
+    """Node 2 (assemble_disclosure): hand the KG-derived inputs to disclosure-service's real,
     deterministic offer/TILA engine. This node only orchestrates the call and
     the decision_id link -- it does not compute any of the money math itself."""
     if state.get("skipped"):
@@ -70,7 +70,7 @@ _graph = (
 
 
 def auto_generate_offer(app_id: int) -> dict | None:
-    """Run the two-agent graph for this app_id. Best-effort at the call site
+    """Run the two-node graph for this app_id. Best-effort at the call site
     (see routers/applications.py) -- a disclosure-service hiccup must not fail
     the decision that already happened; the loan officer can still build the
     offer manually via POST /los/offer if this is skipped or fails.

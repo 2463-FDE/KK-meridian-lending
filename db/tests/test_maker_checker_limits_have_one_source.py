@@ -15,6 +15,8 @@ that decides whether a change ships: with it uncovered, an ADR figure could move
 and this guard would pass green while every backend, docker-build and e2e suite
 ran against the stale limit. A single-source test that exempts the environment
 the tests actually run in is a green light for the drift it exists to catch.
+The `Makefile`'s `test` target runs the same suites locally with its own copy,
+so it is covered the same way.
 
 ADR 0011 is the source. It is where the approval is recorded -- who approved the
 values, on what date, and the standing caveat that they are cohort/demo
@@ -45,6 +47,7 @@ BOOTSTRAP = REPO / "scripts" / "bootstrap_env.py"
 COMPOSE = REPO / "docker-compose.yml"
 CONFIG = REPO / "services" / "servicing-service" / "app" / "config.py"
 CI = REPO / ".github" / "workflows" / "ci.yml"
+MAKEFILE = REPO / "Makefile"
 
 #: How many jobs in `ci.yml` set the limits today. Asserted rather than merely
 #: iterated: a job added with its own hardcoded figures is a new copy, and the
@@ -222,6 +225,27 @@ def test_the_ci_workflow_points_at_the_source():
     assert "adr/0011" in block.lower(), (
         "ci.yml's maker-checker block does not cite ADR 0011, so a reader "
         "editing the figure that gates every merge cannot tell it is a copy")
+
+
+def test_make_test_uses_the_approved_limits():
+    """`make test` runs every backend suite locally with its own copy.
+
+    One copy each, set on the `test` target, and citing the ADR it came from.
+    """
+    text = _text(MAKEFILE)
+    limits = _approved_money_limits()
+
+    for name, approved in limits.items():
+        values = re.findall(rf"^test: export {name} := (\S+)\s*$", text, re.MULTILINE)
+        assert values == [approved], (
+            f"Makefile's test target sets {name} to {values}; ADR 0011 approved "
+            f"{approved}")
+    statuses = re.findall(
+        r"^test: export MAKER_CHECKER_PERMITTED_LOAN_STATUSES := (\S+)\s*$",
+        text, re.MULTILINE)
+    assert statuses == [_approved_statuses()]
+    assert "adr 0011" in text[:text.index("MAKER_CHECKER_ADMIN_THRESHOLD")].lower(), (
+        "the Makefile's maker-checker copy does not cite ADR 0011")
 
 
 def test_the_spec_matches_the_adr():
