@@ -1,6 +1,6 @@
 """What the auto-offer graph puts on the wire, measured rather than reasoned about.
 
-`app/disclosure_graph.py` runs the two-agent auto-offer flow as a LangGraph
+`app/disclosure_graph.py` runs the two-node auto-offer flow as a LangGraph
 `StateGraph`, and LangGraph brings `langchain-core`, which instruments every
 `invoke` the moment `LANGSMITH_TRACING` and `LANGSMITH_API_KEY` are set. Both are
 set in every deployed environment here, from the shared `.env`, pointed at a real

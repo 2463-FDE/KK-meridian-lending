@@ -4,11 +4,11 @@
 
 ## What it demonstrates
 
-- **Brownfield modernization**: an inherited origination/servicing monolith traced, hardened and decomposed into services, with each decision recorded as an ADR ([`adr/`](adr/))
+- **Brownfield modernization**: an inherited origination/servicing monolith traced, hardened and decomposed into services, with key architecture and modernization decisions recorded as ADRs ([`adr/`](adr/))
 - **Distributed FastAPI services** behind a gateway/BFF that owns sessions, RBAC and rate limits, with a fail-closed internal service token and correlation IDs across calls
 - **Money-movement controls**: idempotent payment capture, an append-only servicing ledger, maker-checker approval and a scheduled reconciliation job with a human review queue
 - **Auditable credit decisions**: decision finality and an append-only `decision_events` evidence record (inputs, model version, score, reason codes)
-- **Applied AI with a hard boundary**: LangGraph orchestration for decisioning and disclosure assembly, plus a staff-only RAG policy assistant and LangChain agent on AWS Bedrock that is advisory only and cannot write to any system
+- **Applied AI with a hard boundary**: deterministic LangGraph orchestration for credit decisioning and a two-node LangGraph disclosure orchestration, plus a staff-only RAG policy assistant and a LangChain/Bedrock underwriting-summary agent with one bounded policy tool, both advisory only and unable to write to any system
 - **Security and observability**: tokenized cards with no stored PAN/CVV, PII redaction before logs and LLM prompts, Prometheus and Grafana metrics, privacy-safe LangSmith tracing
 - **Tested claims**: per-service pytest suites, migration tests against real PostgreSQL, a Playwright end-to-end run against the full Compose stack, and documentation guard tests
 
@@ -17,7 +17,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/meridian-architecture-dark.svg">
-    <img src="docs/meridian-architecture.svg" alt="Meridian Lending logical architecture. Borrowers and staff use the Next.js portal, which sends web/API requests to the gateway BFF (session auth, RBAC, rate limits; routes /auth, /los, /lss, /kyc, /decision, /disclosure, /payments, /assistant). Inside the private Compose network, origination-service is the system of record and makes internal calls to kyc-service, decision-service (a LangGraph state graph) and disclosure-service (driven by a two-agent LangGraph workflow); servicing-service holds the append-only ledger, maker-checker and reconciliation, and payment-service applies captured payments to it. Seven services share one PostgreSQL schema; Redis holds gateway sessions and rate limits. A staff-only advisory AI lane holds loan-assistant (RAG policy chat and a LangChain agent on AWS Bedrock with one bounded read-only policy tool), which reads origination read-only and has no database connection. Operations: Prometheus, Grafana, LangSmith tracing and CI." width="1000">
+    <img src="docs/meridian-architecture.svg" alt="Meridian Lending logical architecture. Borrowers and staff use the Next.js portal, which sends web/API requests to the gateway BFF (session auth, RBAC, rate limits; routes /auth, /los, /lss, /kyc, /decision, /disclosure, /payments, /assistant). Inside the private Compose network, origination-service is the system of record and makes internal calls to kyc-service, decision-service (a LangGraph state graph) and disclosure-service (driven by a two-node LangGraph disclosure orchestration); servicing-service holds the append-only ledger, maker-checker and reconciliation, and payment-service applies captured payments to it. Seven services share one PostgreSQL schema; Redis holds gateway sessions and rate limits. A staff-only advisory AI lane holds loan-assistant (RAG policy chat and a LangChain agent on AWS Bedrock with one bounded read-only policy tool), which reads origination read-only and has no database connection. Operations: Prometheus, Grafana, LangSmith tracing and CI." width="1000">
   </picture>
 </p>
 
@@ -34,8 +34,8 @@ The repository runs locally on Docker Compose. Application services communicate 
         ▼                                  ▼                              ▼  staff-only
  origination-service                servicing-service              loan-assistant  (advisory)
  system of record, intake,          append-only ledger,            RAG policy chat + LangChain
- boarding, two-agent LangGraph      maker-checker, delinquency,    agent on AWS Bedrock, one
- disclosure workflow                reconciliation                 bounded read-only policy tool
+ boarding, two-node LangGraph       maker-checker, delinquency,    agent on AWS Bedrock, one
+ disclosure orchestration           reconciliation                 bounded read-only policy tool
         │  internal call                   ▲ apply-payment                │ read-only (HTTP)
         ├─► kyc-service                    │                              └──► origination-service
         ├─► decision-service (LangGraph)   payment-service
@@ -64,7 +64,7 @@ The platform runs **eight** backend services, including the gateway. Seven of th
 ### Key design decisions
 
 - **Credit authority stays deterministic.** `decision-service` runs a LangGraph state graph (pull credit, score, finalize) with threshold-mapped outcomes and reason codes, and **fails closed** when the scorer or bureau is unavailable. Origination writes the decision and its evidence record after a finality recheck. No language model touches the decision or the regulated money math. See [`docs/model_card.md`](docs/model_card.md).
-- **AI is advisory and staff-only.** `loan-assistant` serves `/assistant/policy-chat` and `/assistant/applications/{id}/summary`, both staff-only at the gateway. It answers from an approved policy corpus, refuses when retrieval finds no policy evidence, and labels summaries "not a decision". The disclosure workflow in origination is a two-agent LangGraph (`kg_reader`, then `assemble_disclosure`) built from deterministic orchestration nodes, not model calls.
+- **AI is advisory and staff-only.** `loan-assistant` serves `/assistant/policy-chat` and `/assistant/applications/{id}/summary`, both staff-only at the gateway. It answers from an approved policy corpus, refuses when retrieval finds no policy evidence, and labels summaries "not a decision". The disclosure workflow in origination is a two-node LangGraph orchestration (`kg_reader`, then `assemble_disclosure`); both nodes are deterministic, and neither calls a model.
 - **One shared schema, deliberately.** Seven services share PostgreSQL rather than splitting databases mid-modernization ([ADR 0002](adr/0002-single-database-shared-schema.md), [ADR 0004](adr/0004-decompose-origination-into-services.md)). The trade-off is coupling at the schema.
 - **Accounting correctness over availability.** Card capture preflights servicing with a real, rolled-back write and refuses the charge if servicing cannot accept it, so a captured payment is never left without a credit.
 
@@ -76,7 +76,7 @@ The platform runs **eight** backend services, including the gateway. Seven of th
 - **Reconciliation**: a scheduled job compares the settlement file with captured payments, exits non-zero on breaks, and routes them to a human review queue
 - **Disclosures**: TILA offer, APR and amortization checked against golden payment-schedule vectors ([`db/golden/`](db/golden/))
 - **RAG**: a local retriever over the approved policy corpus, with corpus hygiene ([ADR 0005](adr/0005-rag-corpus-hygiene.md)) and a retrieval evaluation harness (`services/loan-assistant/app/rag_eval.py`)
-- **Agent**: LangChain `create_agent` over `ChatBedrockConverse` (AWS Bedrock) with one bounded, read-only policy tool, a cost guard on input tokens, and fail-closed behaviour when the model is unavailable
+- **Agent**: the underwriting-summary agent is LangChain `create_agent` over `ChatBedrockConverse` (AWS Bedrock) with one bounded, read-only policy tool, a check that the model actually called that tool, a cost guard on input tokens, and fail-closed behaviour when the model is unavailable
 
 ## Security & Trust Boundaries
 

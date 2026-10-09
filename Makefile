@@ -37,13 +37,31 @@ ps:
 seed:
 	docker compose exec -T postgres psql -U $${POSTGRES_USER:-meridian} -d $${POSTGRES_DB:-meridian} < db/init/002_seed.sql
 
+# Every backend service suite, the same eight the CI `backend` matrix runs.
+# Each suite runs even if an earlier one fails, and the target exits non-zero
+# naming every suite that failed.
+BACKEND_SERVICES := gateway origination-service servicing-service kyc-service 	decision-service disclosure-service payment-service loan-assistant
+
+# Interpreter used to create each suite's virtualenv (Python 3.12, as in CI).
+PYTHON ?= python
+
+# The CI backend job's test environment (.github/workflows/ci.yml). The
+# maker-checker values are copies of ADR 0011's "Configured limits" table, like
+# every other copy; db/tests/test_maker_checker_limits_have_one_source.py
+# checks them. Export DATABASE_URL first to run the real-Postgres tests too;
+# without it they skip.
+#
+# The services pin different, incompatible dependency versions, and CI installs
+# each in its own job. So each suite runs in its own gitignored
+# services/<service>/.venv, created on first use and kept in sync with that
+# service's requirements files.
+test: export ENVIRONMENT := test
+test: export INTERNAL_SERVICE_TOKEN := test-internal-token
+test: export MAKER_CHECKER_ADMIN_THRESHOLD := 500.00
+test: export MAKER_CHECKER_MAX_DELTA := 5000.00
+test: export MAKER_CHECKER_PERMITTED_LOAN_STATUSES := current
 test:
-	cd services/origination-service && python -m pytest -q || true
-	cd services/servicing-service && python -m pytest -q || true
-	cd services/kyc-service && python -m pytest -q || true
-	cd services/decision-service && python -m pytest -q || true
-	cd services/disclosure-service && python -m pytest -q || true
-	cd services/payment-service && python -m pytest -q || true
+	@failed=""; 	for svc in $(BACKEND_SERVICES); do 		echo "==> $$svc"; 		( cd services/$$svc && 		  { [ -d .venv ] || $(PYTHON) -m venv .venv; } && 		  py=.venv/bin/python && { [ -x "$$py" ] || py=.venv/Scripts/python.exe; } && 		  "$$py" -m pip install -q -r requirements.txt -r requirements-dev.txt && 		  "$$py" -m pytest -q ) || failed="$$failed $$svc"; 	done; 	if [ -n "$$failed" ]; then echo "FAILED:$$failed"; exit 1; fi; 	echo "All 8 backend service suites passed."
 
 # Is the AI provider reachable RIGHT NOW? Deliberately not part of `make test`
 # or CI. The browser suite stubs the model on purpose -- CI has no provider

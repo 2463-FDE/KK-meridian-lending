@@ -1,6 +1,6 @@
 """Ambient LangSmith tracing, switched off for the auto-offer path.
 
-`app/disclosure_graph.py` runs the two-agent auto-offer flow as a LangGraph
+`app/disclosure_graph.py` runs the two-node auto-offer flow as a LangGraph
 `StateGraph`. LangGraph pulls in `langchain-core`, which instruments every
 `invoke` automatically when `LANGSMITH_TRACING` and `LANGSMITH_API_KEY` are set
 -- and both are set in every deployed environment here, from the shared `.env`,

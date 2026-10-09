@@ -35,7 +35,7 @@ ALT = ("Meridian Lending logical architecture. Borrowers and staff use the Next.
        "web/API requests to the gateway BFF (session auth, RBAC, rate limits; routes /auth, /los, /lss, /kyc, "
        "/decision, /disclosure, /payments, /assistant). Inside the private Compose network, origination-service "
        "is the system of record and makes internal calls to kyc-service, decision-service (a LangGraph state "
-       "graph) and disclosure-service (driven by a two-agent LangGraph workflow); servicing-service holds the "
+       "graph) and disclosure-service (driven by a two-node LangGraph disclosure orchestration); servicing-service holds the "
        "append-only ledger, maker-checker and reconciliation, and payment-service applies captured payments to "
        "it. Seven services share one PostgreSQL schema; Redis holds gateway sessions and rate limits. A "
        "staff-only advisory AI lane holds loan-assistant (RAG policy chat and a LangChain agent on AWS Bedrock "
@@ -141,7 +141,7 @@ def meridian(t):
     s.text(620, 418, "Origination", 15, 700, t["accent"], "start")
     s.box(640, 440, 510, 120, "origination-service",
           ["system of record · intake · loan boarding", "decision finality · append-only decision_events",
-           "two-agent LangGraph disclosure workflow"])
+           "two-node LangGraph disclosure orchestration"])
     s.arrow([(780, 318), (780, 440)], label="/los", lx=792, ly=420, anchor="start")
     trunk = 662
     s.line([(trunk, 560), (trunk, 763)], t["accent"])

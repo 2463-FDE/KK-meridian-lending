@@ -1318,7 +1318,7 @@ def run_decision(
     # "not ready" there would read like a failure rather than "not applicable".
     offer_ready = None
     if outcome == "approve":
-        # W4: two-agent LangGraph (kg_reader -> assemble_disclosure), not a direct
+        # W4: two-node LangGraph (kg_reader -> assemble_disclosure), not a direct
         # call -- see disclosure_graph.py. Best-effort: a disclosure-service hiccup
         # must not fail the decision that already happened. Outside the
         # transaction on purpose -- an external call here must never hold

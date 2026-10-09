@@ -625,7 +625,7 @@ quality.
 
 ---
 
-## Week 4 — Multi-Agent + Knowledge Graphs
+## Week 4 — Multi-Agent Orchestration + Knowledge Graphs
 ### Feature: auto-disclosure on approval + loan-history traversal
 
 **Domains touched:** Disclosures · Decisioning · Finance
@@ -659,8 +659,8 @@ trusting the docstring's own claimed numbers.
 
 **This week's real deliverable, stated honestly:** a KG schema doc
 (borrower→application→decision→offer→disclosure, including the currently-
-missing decision→offer edge), a multi-agent disclosure-assembly prototype
-design (one agent traverses the KG for an approved app's decision/offer
+missing decision→offer edge), a two-node disclosure-orchestration prototype
+design (one node traverses the KG for an approved app's decision/offer
 inputs, a second assembles the disclosure from them), the corrected
 TILA-tolerance finding above, and an ADR (Decimal/minor-units + one
 externalized rule-config source + TILA test vectors — full rules engine
@@ -674,7 +674,7 @@ explicitly deferred to the roadmap, not this week).
   `decision_events` audit row) → every linked offer in one call — the concrete
   "trace this loan's whole history" answer, exposed staff-only at
   `GET /applications/{app_id}/history`.
-- `app/disclosure_graph.py` — the two-agent hand-off, as a real LangGraph:
+- `app/disclosure_graph.py` — the two-node hand-off, as a real LangGraph:
   `kg_reader` walks decision→application for the approved inputs,
   `assemble_disclosure` hands them to disclosure-service's existing
   deterministic Decimal engine. Deliberately **not** an LLM computing TILA

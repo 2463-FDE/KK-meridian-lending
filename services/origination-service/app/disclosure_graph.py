@@ -1,4 +1,4 @@
-"""Multi-agent disclosure assembly.
+"""Two-node LangGraph disclosure orchestration.
 
 A two-node LangGraph workflow: one node reads the knowledge graph (kg.py) for an
 approved decision's inputs, a second assembles the disclosure from them.
@@ -6,8 +6,8 @@ approved decision's inputs, a second assembles the disclosure from them.
 Deliberately NOT an LLM doing the math: TILA APR/finance-charge computation
 stays the existing deterministic Decimal engine in disclosure-service
 (apr.py/schedule.py) -- an LLM approximating regulated dollar math is not an
-acceptable trade for "agentic," it's a compliance risk. "Agent" here means a
-LangGraph orchestration node with one clear responsibility and a traceable
+acceptable trade for "agentic," it's a compliance risk. Each node is a
+LangGraph orchestration step with one clear responsibility and a traceable
 boundary, not an LLM call; nothing in this file talks to a model.
 """
 from typing import TypedDict
@@ -70,7 +70,7 @@ _graph = (
 
 
 def auto_generate_offer(app_id: int) -> dict | None:
-    """Run the two-agent graph for this app_id. Best-effort at the call site
+    """Run the two-node graph for this app_id. Best-effort at the call site
     (see routers/applications.py) -- a disclosure-service hiccup must not fail
     the decision that already happened; the loan officer can still build the
     offer manually via POST /los/offer if this is skipped or fails.

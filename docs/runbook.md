@@ -605,8 +605,14 @@ the length of a code change.
 ## Tests
 
 ```bash
-make test    # runs pytest in both backend services (non-blocking)
+make test    # runs pytest in all eight backend services; exits non-zero if any suite fails
 ```
+
+Each suite runs in its own `services/<service>/.venv` with that service's own
+requirements, as CI's per-service jobs do, because the services pin different
+dependency versions. Every suite runs even after a failure; the target then
+exits non-zero and names the suites that failed. Export `DATABASE_URL` first to
+include the real-Postgres tests, which otherwise skip.
 
 `test_apr.py` (disclosure-service) and `test_money.py` (servicing-service) used to
 FAIL by design, encoding float-rounding defects (D12/D6). Both are fixed now — a
