@@ -114,7 +114,7 @@ def get_loan_history(app_id: int) -> dict | None:
 
 
 def get_approved_decision_inputs(app_id: int) -> dict | None:
-    """What the disclosure-assembly agent needs: the approved decision's own
+    """What the disclosure-assembly node needs: the approved decision's own
     linked application inputs (principal/term), found by actually walking the
     decision -> application edge rather than trusting the caller already has
     both rows in hand. Returns None if there is no approve decision on record

@@ -481,14 +481,14 @@ are in `db/init/002_seed.sql` and on the login page — not repeated here.
 
 ---
 
-## Quick test — the 3 agents (fast sanity check)
+## Quick test — the two graphs and the assistant agent (fast sanity check)
 
 Stack must be up (`docker compose up -d`). All 3 confirmed live-working this session.
 
-| Agent | Week built | Where | Steps | Expect |
+| Component | Week built | Where | Steps | Expect |
 |---|---|---|---|---|
 | **Decision Graph** (LangGraph, 3 nodes: pull credit → score → finalize; `finalize` returns the proposed outcome, it does not persist) | Week 3 | `/apply` (public, no login) or staff `/underwriting/[appId]` → "Run decision" | Submit an application, income + amount matter (score ≈ `bureau_score*0.9 + income/1000`) | Weak profile → `refer`/`deny` with a real reason code. Strong profile (income ≥100k, modest amount) → `approve` |
-| **Disclosure Graph** (2-agent hand-off: read record → build offer) | Week 4 | Same app, `/underwriting/[appId]` "Offer" card | Nothing to click — fires automatically the instant Decision Graph returns `approve` | Real APR/finance-charge/monthly-payment numbers appear with no manual step, `decision_id` links back to the exact decision |
+| **Disclosure Graph** (LangGraph, 2 deterministic nodes, no model call: read record → build offer) | Week 4 | Same app, `/underwriting/[appId]` "Offer" card | Nothing to click — fires automatically the instant Decision Graph returns `approve` | Real APR/finance-charge/monthly-payment numbers appear with no manual step, `decision_id` links back to the exact decision |
 | **Assistant Agent** (retrieval + Bedrock LLM) | Week 2 (retrieval) / Week 3 (agent wrap) | Log in `csr`/`underwriter`/`admin` → `/policy-chat` | Ask a policy question | See catch-fast questions below |
 
 **Policy questions to catch fast (assistant agent):**
@@ -625,7 +625,7 @@ quality.
 
 ---
 
-## Week 4 — Multi-Agent Orchestration + Knowledge Graphs
+## Week 4 — LangGraph Orchestration + Knowledge Graphs
 ### Feature: auto-disclosure on approval + loan-history traversal
 
 **Domains touched:** Disclosures · Decisioning · Finance

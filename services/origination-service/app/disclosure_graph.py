@@ -29,7 +29,7 @@ class DisclosureState(TypedDict, total=False):
 
 
 def _node_kg_reader(state: DisclosureState) -> dict:
-    """Agent 1: walk decision -> application for this app_id's approved inputs."""
+    """Node 1 (kg_reader): walk decision -> application for this app_id's approved inputs."""
     inputs = kg.get_approved_decision_inputs(state["app_id"])
     if inputs is None:
         return {"skipped": f"no approve decision on record for app_id={state['app_id']}"}
@@ -37,7 +37,7 @@ def _node_kg_reader(state: DisclosureState) -> dict:
 
 
 def _node_assemble_disclosure(state: DisclosureState) -> dict:
-    """Agent 2: hand the KG-derived inputs to disclosure-service's real,
+    """Node 2 (assemble_disclosure): hand the KG-derived inputs to disclosure-service's real,
     deterministic offer/TILA engine. This node only orchestrates the call and
     the decision_id link -- it does not compute any of the money math itself."""
     if state.get("skipped"):
